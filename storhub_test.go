@@ -18,8 +18,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 const (
@@ -1429,6 +1432,1028 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 	after := len(repo.commitsByPath[metadataFilePath])
 	if after != before {
 		t.Fatalf("expected cleanup noop commit count to stay %d, got %d", before, after)
+	}
+}
+
+func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+
+	if err := hub.MkdirContext(ctx, "project-posix", "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	input := writeTempFile(t, t.TempDir(), "base.txt", []byte("hello world"))
+	base, err := hub.UploadFileContext(ctx, "project-posix", "docs/base.txt", input)
+	if err != nil {
+		t.Fatalf("upload base file: %v", err)
+	}
+	linked, err := hub.LinkContext(ctx, "project-posix", "docs/base.txt", "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+	if linked.Inode != base.Inode {
+		t.Fatalf("expected hard link to reuse inode, base=%d alias=%d", base.Inode, linked.Inode)
+	}
+	baseInfo, err := hub.StatPathContext(ctx, "project-posix", "docs/base.txt")
+	if err != nil {
+		t.Fatalf("stat base: %v", err)
+	}
+	aliasInfo, err := hub.StatPathContext(ctx, "project-posix", "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("stat alias: %v", err)
+	}
+	if baseInfo.Inode != aliasInfo.Inode || baseInfo.NLink != 2 || aliasInfo.NLink != 2 {
+		t.Fatalf("unexpected hard link stats: base=%+v alias=%+v", baseInfo, aliasInfo)
+	}
+	if err := hub.ChmodContext(ctx, "project-posix", "docs/base.txt", 0o600); err != nil {
+		t.Fatalf("chmod hardlink family: %v", err)
+	}
+	if err := hub.ChownContext(ctx, "project-posix", "docs/alias.txt", 123, 456); err != nil {
+		t.Fatalf("chown hardlink family: %v", err)
+	}
+	if err := hub.ChtimesContext(ctx, "project-posix", "docs/base.txt", time.Unix(10, 0), time.Unix(20, 0)); err != nil {
+		t.Fatalf("chtimes hardlink family: %v", err)
+	}
+	if err := hub.SetXAttrContext(ctx, "project-posix", "docs/alias.txt", "user.note", []byte("linked")); err != nil {
+		t.Fatalf("setxattr hardlink family: %v", err)
+	}
+	attrs, err := hub.ListXAttrContext(ctx, "project-posix", "docs/base.txt")
+	if err != nil {
+		t.Fatalf("listxattr base: %v", err)
+	}
+	if len(attrs) != 1 || attrs[0] != "user.note" {
+		t.Fatalf("unexpected xattrs: %v", attrs)
+	}
+	value, err := hub.GetXAttrContext(ctx, "project-posix", "docs/base.txt", "user.note")
+	if err != nil {
+		t.Fatalf("getxattr base: %v", err)
+	}
+	if string(value) != "linked" {
+		t.Fatalf("unexpected xattr value: %q", value)
+	}
+	updated, err := hub.WriteFileAtContext(ctx, "project-posix", "docs/base.txt", 6, []byte("storhub"))
+	if err != nil {
+		t.Fatalf("write through hardlink family: %v", err)
+	}
+	if updated.Inode != base.Inode {
+		t.Fatalf("expected inode preservation after write, got %d want %d", updated.Inode, base.Inode)
+	}
+	aliasDownload := filepath.Join(t.TempDir(), "alias.txt")
+	if err := hub.DownloadFileContext(ctx, "project-posix", "docs/alias.txt", aliasDownload); err != nil {
+		t.Fatalf("download alias: %v", err)
+	}
+	assertFileContent(t, aliasDownload, []byte("hello storhub"))
+	aliasInfo, err = hub.StatPathContext(ctx, "project-posix", "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("restat alias: %v", err)
+	}
+	if aliasInfo.Mode != 0o600 || aliasInfo.UID != 123 || aliasInfo.GID != 456 {
+		t.Fatalf("hardlink family metadata did not propagate: %+v", aliasInfo)
+	}
+	if !aliasInfo.ModifiedAt.After(time.Unix(20, 0).UTC()) {
+		t.Fatalf("expected modified time to advance after write, got %v", aliasInfo.ModifiedAt)
+	}
+	if err := hub.RemoveXAttrContext(ctx, "project-posix", "docs/base.txt", "user.note"); err != nil {
+		t.Fatalf("removexattr family: %v", err)
+	}
+	attrs, err = hub.ListXAttrContext(ctx, "project-posix", "docs/base.txt")
+	if err != nil {
+		t.Fatalf("listxattr after remove: %v", err)
+	}
+	if len(attrs) != 0 {
+		t.Fatalf("expected xattrs to be removed, got %v", attrs)
+	}
+	if err := hub.UnlinkContext(ctx, "project-posix", "docs/base.txt"); err != nil {
+		t.Fatalf("unlink one hardlink: %v", err)
+	}
+	aliasInfo, err = hub.StatPathContext(ctx, "project-posix", "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("stat alias after unlink: %v", err)
+	}
+	if aliasInfo.NLink != 1 {
+		t.Fatalf("expected remaining hardlink count 1, got %+v", aliasInfo)
+	}
+	symlink, err := hub.SymlinkContext(ctx, "project-posix", "docs/alias.txt", "docs/alias-link")
+	if err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	if symlink.Kind != NodeKindSymlink || symlink.SymlinkTarget != "docs/alias.txt" {
+		t.Fatalf("unexpected symlink metadata: %+v", symlink)
+	}
+	target, err := hub.ReadlinkContext(ctx, "project-posix", "docs/alias-link")
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != "docs/alias.txt" {
+		t.Fatalf("unexpected symlink target: %q", target)
+	}
+	linkInfo, err := hub.StatPathContext(ctx, "project-posix", "docs/alias-link")
+	if err != nil {
+		t.Fatalf("stat symlink: %v", err)
+	}
+	if !linkInfo.IsSymlink || linkInfo.SymlinkTarget != "docs/alias.txt" {
+		t.Fatalf("unexpected symlink stat: %+v", linkInfo)
+	}
+	if _, err := hub.ReadFileAtContext(ctx, "project-posix", "docs/alias-link", 0, 4); err == nil {
+		t.Fatal("expected reading symlink as file to fail")
+	}
+	if err := hub.SetXAttrContext(ctx, "project-posix", "", "user.root", []byte("rooted")); err != nil {
+		t.Fatalf("set root xattr: %v", err)
+	}
+	rootAttrs, err := hub.ListXAttrContext(ctx, "project-posix", "")
+	if err != nil {
+		t.Fatalf("list root xattrs: %v", err)
+	}
+	if len(rootAttrs) != 1 || rootAttrs[0] != "user.root" {
+		t.Fatalf("unexpected root xattrs: %v", rootAttrs)
+	}
+}
+
+func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+
+	if err := hub.MkdirContext(ctx, "project-fuse", "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	input := writeTempFile(t, t.TempDir(), "fuse.txt", []byte("hello world"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse", "docs/file.txt", input); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+
+	var rootOut fuse.EntryOut
+	_, errno := fsys.root.Lookup(ctx, "docs", &rootOut)
+	if errno != 0 {
+		t.Fatalf("lookup docs failed: %v", errno)
+	}
+	docsEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs")
+	if err != nil {
+		t.Fatalf("stat docs: %v", err)
+	}
+	docsNode := fsys.ensureNode(ctx, docsEntry)
+	if docsNode == nil {
+		t.Fatal("expected docs node")
+	}
+	dirStream, errno := docsNode.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("readdir docs failed: %v", errno)
+	}
+	entry, errno := dirStream.Next()
+	if errno != 0 {
+		t.Fatalf("readdir next failed: %v", errno)
+	}
+	if entry.Name != "file.txt" {
+		t.Fatalf("unexpected directory entry: %+v", entry)
+	}
+	var fileOut fuse.EntryOut
+	_, errno = docsNode.Lookup(ctx, "file.txt", &fileOut)
+	if errno != 0 {
+		t.Fatalf("lookup file failed: %v", errno)
+	}
+	fileEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs/file.txt")
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	fileNode := fsys.ensureNode(ctx, fileEntry)
+	if fileNode == nil {
+		t.Fatal("expected file node")
+	}
+	handleAny, _, errno := fileNode.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open file failed: %v", errno)
+	}
+	handle, ok := handleAny.(*storhubHandle)
+	if !ok {
+		t.Fatalf("unexpected handle type: %T", handleAny)
+	}
+	if written, errno := handle.Write(ctx, []byte("FUSE"), 6); errno != 0 || written != 4 {
+		t.Fatalf("write failed: written=%d errno=%v", written, errno)
+	}
+	if errno := handle.Flush(ctx); errno != 0 {
+		t.Fatalf("flush failed: %v", errno)
+	}
+	preCommit := filepath.Join(t.TempDir(), "fuse-precommit.out")
+	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", preCommit); err != nil {
+		t.Fatalf("download before fsync: %v", err)
+	}
+	assertFileContent(t, preCommit, []byte("hello world"))
+	if errno := handle.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync failed: %v", errno)
+	}
+	output := filepath.Join(t.TempDir(), "fuse.out")
+	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", output); err != nil {
+		t.Fatalf("download after fuse write: %v", err)
+	}
+	assertFileContent(t, output, []byte("hello FUSEd"))
+	if errno := fileNode.Setxattr(ctx, "user.cache", []byte("warm"), 0); errno != 0 {
+		t.Fatalf("setxattr via node failed: %v", errno)
+	}
+	size, errno := fileNode.Listxattr(ctx, nil)
+	if errno != 0 {
+		t.Fatalf("listxattr size failed: %v", errno)
+	}
+	buf := make([]byte, size)
+	if _, errno := fileNode.Listxattr(ctx, buf); errno != 0 {
+		t.Fatalf("listxattr payload failed: %v", errno)
+	}
+	if string(bytes.TrimRight(buf, "\x00")) != "user.cache" {
+		t.Fatalf("unexpected xattr list payload: %q", buf)
+	}
+	getBuf := make([]byte, 16)
+	n, errno := fileNode.Getxattr(ctx, "user.cache", getBuf)
+	if errno != 0 {
+		t.Fatalf("getxattr failed: %v", errno)
+	}
+	if string(getBuf[:n]) != "warm" {
+		t.Fatalf("unexpected xattr data: %q", getBuf[:n])
+	}
+	lock := &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_WRLCK}
+	if errno := handle.Setlk(ctx, 1, lock, 0); errno != 0 {
+		t.Fatalf("setlk failed: %v", errno)
+	}
+	var outLock fuse.FileLock
+	if errno := handle.Getlk(ctx, 2, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_WRLCK}, 0, &outLock); errno != 0 {
+		t.Fatalf("getlk failed: %v", errno)
+	}
+	if outLock.Typ != syscall.F_WRLCK {
+		t.Fatalf("expected active write lock, got %+v", outLock)
+	}
+	if errno := handle.Setlk(ctx, 1, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_UNLCK}, 0); errno != 0 {
+		t.Fatalf("unlock failed: %v", errno)
+	}
+	if errno := fileNode.Removexattr(ctx, "user.cache"); errno != 0 {
+		t.Fatalf("removexattr failed: %v", errno)
+	}
+	var createOut fuse.EntryOut
+	createdInode, createHandleAny, _, errno := docsNode.Create(ctx, "created.txt", syscall.O_RDWR, 0o640, &createOut)
+	if errno != 0 {
+		t.Fatalf("create failed: %v", errno)
+	}
+	_ = createdInode
+	createdHandle := createHandleAny.(*storhubHandle)
+	if written, errno := createdHandle.Write(ctx, []byte("created"), 0); errno != 0 || written != 7 {
+		t.Fatalf("write created file failed: written=%d errno=%v", written, errno)
+	}
+	if errno := createdHandle.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync created file failed: %v", errno)
+	}
+	if errno := createdHandle.Release(ctx); errno != 0 {
+		t.Fatalf("release created file failed: %v", errno)
+	}
+	if _, errno := docsNode.Symlink(ctx, "docs/file.txt", "link.txt", &createOut); errno != 0 {
+		t.Fatalf("node symlink failed: %v", errno)
+	}
+	_, errno = docsNode.Lookup(ctx, "link.txt", &createOut)
+	if errno != 0 {
+		t.Fatalf("lookup symlink failed: %v", errno)
+	}
+	linkEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs/link.txt")
+	if err != nil {
+		t.Fatalf("stat link: %v", err)
+	}
+	linkNode := fsys.ensureNode(ctx, linkEntry)
+	target, errno := linkNode.Readlink(ctx)
+	if errno != 0 || string(target) != "docs/file.txt" {
+		t.Fatalf("unexpected readlink result: target=%q errno=%v", target, errno)
+	}
+	if _, errno := docsNode.Link(ctx, fileNode, "hard.txt", &createOut); errno != 0 {
+		t.Fatalf("node hard link failed: %v", errno)
+	}
+	if errno := docsNode.Rename(ctx, "created.txt", docsNode, "file.txt", 0); errno != 0 {
+		t.Fatalf("rename with replace failed: %v", errno)
+	}
+	replaced := filepath.Join(t.TempDir(), "replaced.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", replaced); err != nil {
+		t.Fatalf("download replaced file: %v", err)
+	}
+	assertFileContent(t, replaced, []byte("created"))
+	if errno := docsNode.Unlink(ctx, "hard.txt"); errno != 0 {
+		t.Fatalf("unlink hard link failed: %v", errno)
+	}
+	var attrOut fuse.AttrOut
+	if errno := docsNode.Getattr(ctx, nil, &attrOut); errno != 0 {
+		t.Fatalf("getattr docs failed: %v", errno)
+	}
+	if attrOut.Ino == 0 || attrOut.Mode&syscall.S_IFDIR == 0 {
+		t.Fatalf("unexpected directory attr: %+v", attrOut.Attr)
+	}
+	var statfs fuse.StatfsOut
+	if errno := fsys.root.Statfs(ctx, &statfs); errno != 0 {
+		t.Fatalf("statfs failed: %v", errno)
+	}
+	if statfs.Files == 0 || statfs.Bsize == 0 {
+		t.Fatalf("unexpected statfs result: %+v", statfs)
+	}
+	if _, errno := docsNode.Mkdir(ctx, "subdir", 0o755, &createOut); errno != 0 {
+		t.Fatalf("mkdir via node failed: %v", errno)
+	}
+	if errno := docsNode.Rmdir(ctx, "subdir"); errno != 0 {
+		t.Fatalf("rmdir via node failed: %v", errno)
+	}
+	if errno := handle.Release(ctx); errno != 0 {
+		t.Fatalf("release handle failed: %v", errno)
+	}
+}
+
+func TestFUSEOptionalMountLifecycle(t *testing.T) {
+	if os.Getenv("STORHUB_RUN_FUSE") != "1" {
+		t.Skip("set STORHUB_RUN_FUSE=1 to run mount integration test")
+	}
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		t.Skip("/dev/fuse unavailable")
+	}
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "mount.txt", []byte("mounted"))
+	if _, err := hub.UploadFile("project-fuse-mount", "mount.txt", input); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-mount", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	mountPoint := filepath.Join(t.TempDir(), "mnt")
+	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+		t.Fatalf("mkdir mountpoint: %v", err)
+	}
+	if err := fsys.Mount(mountPoint); err != nil {
+		t.Fatalf("mount fuse fs: %v", err)
+	}
+	mountedPath := filepath.Join(mountPoint, "mount.txt")
+	data, err := os.ReadFile(mountedPath)
+	if err != nil {
+		t.Fatalf("read mounted file: %v", err)
+	}
+	if string(data) != "mounted" {
+		t.Fatalf("unexpected mounted file content: %q", data)
+	}
+	newFile := filepath.Join(mountPoint, "created.txt")
+	createdHandle, err := os.OpenFile(newFile, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o640)
+	if err != nil {
+		t.Fatalf("open mounted file for write: %v", err)
+	}
+	if _, err := createdHandle.Write([]byte("created via mount")); err != nil {
+		t.Fatalf("write mounted file: %v", err)
+	}
+	if err := createdHandle.Sync(); err != nil {
+		t.Fatalf("sync mounted file: %v", err)
+	}
+	if err := createdHandle.Close(); err != nil {
+		t.Fatalf("close mounted file: %v", err)
+	}
+	if got, err := os.ReadFile(newFile); err != nil || string(got) != "created via mount" {
+		t.Fatalf("read created mounted file: got=%q err=%v", got, err)
+	}
+	hardPath := filepath.Join(mountPoint, "hard.txt")
+	if err := os.Link(newFile, hardPath); err != nil {
+		t.Fatalf("create hardlink on mount: %v", err)
+	}
+	linkPath := filepath.Join(mountPoint, "sym.txt")
+	if err := os.Symlink("created.txt", linkPath); err != nil {
+		t.Fatalf("create symlink on mount: %v", err)
+	}
+	if target, err := os.Readlink(linkPath); err != nil || target != "created.txt" {
+		t.Fatalf("read mounted symlink: target=%q err=%v", target, err)
+	}
+	renamedPath := filepath.Join(mountPoint, "renamed.txt")
+	if err := os.Rename(newFile, renamedPath); err != nil {
+		t.Fatalf("rename mounted file: %v", err)
+	}
+	if err := os.Chmod(renamedPath, 0o600); err != nil {
+		t.Fatalf("chmod mounted file: %v", err)
+	}
+	info, err := os.Lstat(renamedPath)
+	if err != nil {
+		t.Fatalf("lstat renamed file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected mounted mode: %o", info.Mode().Perm())
+	}
+	if value := []byte("warm"); syscall.Setxattr(renamedPath, "user.mount", value, 0) == nil {
+		buf := make([]byte, 16)
+		n, err := syscall.Getxattr(renamedPath, "user.mount", buf)
+		if err != nil {
+			t.Fatalf("get mounted xattr: %v", err)
+		}
+		if string(buf[:n]) != string(value) {
+			t.Fatalf("unexpected mounted xattr: %q", buf[:n])
+		}
+	}
+	if err := fsys.Unmount(); err != nil {
+		t.Fatalf("unmount fuse fs: %v", err)
+	}
+}
+
+func TestFUSECloseIdempotent(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	fsys, err := hub.NewFUSE("project-fuse-close", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	if err := fsys.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := fsys.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+}
+
+func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.MkdirContext(ctx, "project-fuse-semantics", "dir"); err != nil {
+		t.Fatalf("mkdir dir: %v", err)
+	}
+	if err := hub.MkdirContext(ctx, "project-fuse-semantics", "dir/sub"); err != nil {
+		t.Fatalf("mkdir dir/sub: %v", err)
+	}
+	input := writeTempFile(t, t.TempDir(), "semantics.txt", []byte("payload"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-semantics", "dir/sub/file.txt", input); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-semantics", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	dirEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir")
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	dirNode := fsys.ensureNode(ctx, dirEntry)
+	var out fuse.EntryOut
+	_, errno := dirNode.Lookup(ctx, "sub", &out)
+	if errno != 0 {
+		t.Fatalf("lookup sub: %v", errno)
+	}
+	fileEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir/sub/file.txt")
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	fileNode := fsys.ensureNode(ctx, fileEntry)
+	hAny, _, errno := fileNode.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open file: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if errno := fsys.root.Rename(ctx, "dir", fsys.root, "renamed", 0); errno != 0 {
+		t.Fatalf("rename dir: %v", errno)
+	}
+	if written, errno := h.Write(ctx, []byte("R"), 0); errno != 0 || written != 1 {
+		t.Fatalf("write after rename: written=%d errno=%v", written, errno)
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync after rename: %v", errno)
+	}
+	output := filepath.Join(t.TempDir(), "renamed-semantic.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt", output); err != nil {
+		t.Fatalf("download renamed path: %v", err)
+	}
+	assertFileContent(t, output, []byte("Rayload"))
+	if _, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir/sub/file.txt"); err == nil {
+		t.Fatal("expected old path to be gone after rename")
+	}
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release renamed handle: %v", errno)
+	}
+	unlinkEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt")
+	if err != nil {
+		t.Fatalf("stat unlink file: %v", err)
+	}
+	unlinkNode := fsys.ensureNode(ctx, unlinkEntry)
+	hAny, _, errno = unlinkNode.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open unlink file: %v", errno)
+	}
+	h = hAny.(*storhubHandle)
+	parentEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub")
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	parentNode := fsys.ensureNode(ctx, parentEntry)
+	if errno := parentNode.Unlink(ctx, "file.txt"); errno != 0 {
+		t.Fatalf("unlink open file: %v", errno)
+	}
+	if written, errno := h.Write(ctx, []byte("gone"), 0); errno != 0 || written != 4 {
+		t.Fatalf("write after unlink: written=%d errno=%v", written, errno)
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync after unlink: %v", errno)
+	}
+	readBuf := make([]byte, 4)
+	res, errno := h.Read(ctx, readBuf, 0)
+	if errno != 0 {
+		t.Fatalf("read after unlink: %v", errno)
+	}
+	readData, status := res.Bytes(readBuf)
+	if status != 0 {
+		t.Fatalf("read result bytes: %v", status)
+	}
+	if string(readData) != "gone" {
+		t.Fatalf("unexpected read after unlink: %q", readData)
+	}
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release unlinked handle: %v", errno)
+	}
+	if _, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt"); err == nil {
+		t.Fatal("expected unlinked file to remain absent after release")
+	}
+}
+
+func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.MkdirContext(ctx, "project-fuse-readonly-loss", "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	oldPath := writeTempFile(t, t.TempDir(), "old.txt", []byte("old-data"))
+	newPath := writeTempFile(t, t.TempDir(), "new.txt", []byte("new-data"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", oldPath); err != nil {
+		t.Fatalf("upload victim: %v", err)
+	}
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/replacement.txt", newPath); err != nil {
+		t.Fatalf("upload replacement: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-readonly-loss", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	victimEntry, err := hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt")
+	if err != nil {
+		t.Fatalf("stat victim: %v", err)
+	}
+	victimNode := fsys.ensureNode(ctx, victimEntry)
+	roAny, _, errno := victimNode.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("open readonly victim: %v", errno)
+	}
+	ro := roAny.(*storhubHandle)
+	docsEntry, err := hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs")
+	if err != nil {
+		t.Fatalf("stat docs: %v", err)
+	}
+	docsNode := fsys.ensureNode(ctx, docsEntry)
+	if errno := docsNode.Unlink(ctx, "victim.txt"); errno != 0 {
+		t.Fatalf("unlink victim: %v", errno)
+	}
+	buf := make([]byte, 16)
+	res, errno := ro.Read(ctx, buf, 0)
+	if errno != 0 {
+		t.Fatalf("read readonly unlinked handle: %v", errno)
+	}
+	got, status := res.Bytes(buf)
+	if status != 0 {
+		t.Fatalf("bytes readonly unlinked handle: %v", status)
+	}
+	if string(got) != "old-data" {
+		t.Fatalf("unexpected readonly unlinked data: %q", got)
+	}
+	if errno := ro.Release(ctx); errno != 0 {
+		t.Fatalf("release readonly unlinked handle: %v", errno)
+	}
+
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", oldPath); err != nil {
+		t.Fatalf("re-upload victim: %v", err)
+	}
+	victimEntry, err = hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt")
+	if err != nil {
+		t.Fatalf("restat victim: %v", err)
+	}
+	victimNode = fsys.ensureNode(ctx, victimEntry)
+	roAny, _, errno = victimNode.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("reopen readonly victim: %v", errno)
+	}
+	ro = roAny.(*storhubHandle)
+	if errno := docsNode.Rename(ctx, "replacement.txt", docsNode, "victim.txt", 0); errno != 0 {
+		t.Fatalf("rename replacement over victim: %v", errno)
+	}
+	res, errno = ro.Read(ctx, buf, 0)
+	if errno != 0 {
+		t.Fatalf("read readonly replaced handle: %v", errno)
+	}
+	got, status = res.Bytes(buf)
+	if status != 0 {
+		t.Fatalf("bytes readonly replaced handle: %v", status)
+	}
+	if string(got) != "old-data" {
+		t.Fatalf("unexpected readonly replaced data: %q", got)
+	}
+	if errno := ro.Release(ctx); errno != 0 {
+		t.Fatalf("release readonly replaced handle: %v", errno)
+	}
+	output := filepath.Join(t.TempDir(), "replaced-readonly.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", output); err != nil {
+		t.Fatalf("download replaced victim: %v", err)
+	}
+	assertFileContent(t, output, []byte("new-data"))
+}
+
+func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "shared.txt", []byte("abcdefghij"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-shared-writes", "shared.txt", input); err != nil {
+		t.Fatalf("upload shared file: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-shared-writes", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-shared-writes", "shared.txt")
+	if err != nil {
+		t.Fatalf("stat shared file: %v", err)
+	}
+	node := fsys.ensureNode(ctx, entry)
+	h1Any, _, errno := node.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open handle1: %v", errno)
+	}
+	h2Any, _, errno := node.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open handle2: %v", errno)
+	}
+	h1 := h1Any.(*storhubHandle)
+	h2 := h2Any.(*storhubHandle)
+	if written, errno := h1.Write(ctx, []byte("HELLO"), 0); errno != 0 || written != 5 {
+		t.Fatalf("write handle1: written=%d errno=%v", written, errno)
+	}
+	if written, errno := h2.Write(ctx, []byte("WORLD"), 5); errno != 0 || written != 5 {
+		t.Fatalf("write handle2: written=%d errno=%v", written, errno)
+	}
+	if errno := h1.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync handle1: %v", errno)
+	}
+	output := filepath.Join(t.TempDir(), "shared-writes.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-shared-writes", "shared.txt", output); err != nil {
+		t.Fatalf("download shared file: %v", err)
+	}
+	assertFileContent(t, output, []byte("HELLOWORLD"))
+	if errno := h1.Release(ctx); errno != 0 {
+		t.Fatalf("release handle1: %v", errno)
+	}
+	if errno := h2.Release(ctx); errno != 0 {
+		t.Fatalf("release handle2: %v", errno)
+	}
+}
+
+func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
+	backend := newMockGitHub(t)
+	var uploadCalls atomic.Int32
+	var assetDownloadCalls atomic.Int32
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			uploadCalls.Add(1)
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
+			assetDownloadCalls.Add(1)
+		}
+		return false
+	}
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "large.txt", []byte("abcdefghijklmnopqrstuvwx"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-partial-writeback", "large.txt", input); err != nil {
+		t.Fatalf("upload large file: %v", err)
+	}
+	baselineUploads := uploadCalls.Load()
+	fsys, err := hub.NewFUSE("project-fuse-partial-writeback", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-partial-writeback", "large.txt")
+	if err != nil {
+		t.Fatalf("stat large file: %v", err)
+	}
+	node := fsys.ensureNode(ctx, entry)
+	hAny, _, errno := node.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if written, errno := h.Write(ctx, []byte("Z"), 10); errno != 0 || written != 1 {
+		t.Fatalf("single-byte overwrite: written=%d errno=%v", written, errno)
+	}
+	if got := assetDownloadCalls.Load(); got != 0 {
+		t.Fatalf("expected no asset download during open/write, got %d", got)
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync partial overwrite: %v", errno)
+	}
+	if delta := uploadCalls.Load() - baselineUploads; delta != 1 {
+		t.Fatalf("expected one uploaded patch chunk, got %d", delta)
+	}
+	output := filepath.Join(t.TempDir(), "partial-writeback.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-partial-writeback", "large.txt", output); err != nil {
+		t.Fatalf("download partially updated file: %v", err)
+	}
+	assertFileContent(t, output, []byte("abcdefghijZlmnopqrstuvwx"))
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release handle: %v", errno)
+	}
+}
+
+func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
+	backend := newMockGitHub(t)
+	var uploadCalls atomic.Int32
+	var assetDownloadCalls atomic.Int32
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			uploadCalls.Add(1)
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
+			assetDownloadCalls.Add(1)
+		}
+		return false
+	}
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "append.txt", []byte("abcdefgh"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-append-writeback", "append.txt", input); err != nil {
+		t.Fatalf("upload append file: %v", err)
+	}
+	baselineUploads := uploadCalls.Load()
+	fsys, err := hub.NewFUSE("project-fuse-append-writeback", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-append-writeback", "append.txt")
+	if err != nil {
+		t.Fatalf("stat append file: %v", err)
+	}
+	node := fsys.ensureNode(ctx, entry)
+	hAny, _, errno := node.Open(ctx, syscall.O_RDWR|syscall.O_APPEND)
+	if errno != 0 {
+		t.Fatalf("open append handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if written, errno := h.Write(ctx, []byte("XYZ"), 0); errno != 0 || written != 3 {
+		t.Fatalf("append write: written=%d errno=%v", written, errno)
+	}
+	if got := assetDownloadCalls.Load(); got != 0 {
+		t.Fatalf("expected no asset download during append write, got %d", got)
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync append: %v", errno)
+	}
+	if delta := uploadCalls.Load() - baselineUploads; delta != 1 {
+		t.Fatalf("expected one uploaded append chunk, got %d", delta)
+	}
+	output := filepath.Join(t.TempDir(), "append-writeback.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-append-writeback", "append.txt", output); err != nil {
+		t.Fatalf("download appended file: %v", err)
+	}
+	assertFileContent(t, output, []byte("abcdefghXYZ"))
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release append handle: %v", errno)
+	}
+}
+
+func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
+	backend := newMockGitHub(t)
+	var uploadCalls atomic.Int32
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			uploadCalls.Add(1)
+		}
+		return false
+	}
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "truncate.txt", []byte("abcdefghijklmnop"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-truncate-writeback", "truncate.txt", input); err != nil {
+		t.Fatalf("upload truncate file: %v", err)
+	}
+	baselineUploads := uploadCalls.Load()
+	fsys, err := hub.NewFUSE("project-fuse-truncate-writeback", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-truncate-writeback", "truncate.txt")
+	if err != nil {
+		t.Fatalf("stat truncate file: %v", err)
+	}
+	node := fsys.ensureNode(ctx, entry)
+	hAny, _, errno := node.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open truncate handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	var attr fuse.SetAttrIn
+	attr.Valid = fuse.FATTR_SIZE
+	attr.Size = 5
+	var out fuse.AttrOut
+	if errno := node.Setattr(ctx, h, &attr, &out); errno != 0 {
+		t.Fatalf("setattr truncate: %v", errno)
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync truncate: %v", errno)
+	}
+	if delta := uploadCalls.Load() - baselineUploads; delta != 0 {
+		t.Fatalf("expected truncate to avoid uploads, got %d", delta)
+	}
+	output := filepath.Join(t.TempDir(), "truncate-writeback.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-truncate-writeback", "truncate.txt", output); err != nil {
+		t.Fatalf("download truncated file: %v", err)
+	}
+	assertFileContent(t, output, []byte("abcde"))
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release truncate handle: %v", errno)
+	}
+}
+
+func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
+	backend := newMockGitHub(t)
+	var uploadCalls atomic.Int32
+	var metadataWrites atomic.Int32
+	var assetDownloadCalls atomic.Int32
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			uploadCalls.Add(1)
+		}
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
+			metadataWrites.Add(1)
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
+			assetDownloadCalls.Add(1)
+		}
+		return false
+	}
+	hub := backend.newClient(t, Config{ChunkSize: 8, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "fragmented.txt", []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", input); err != nil {
+		t.Fatalf("upload fragmented file: %v", err)
+	}
+	baselineUploads := uploadCalls.Load()
+	baselineMetadataWrites := metadataWrites.Load()
+	fsys, err := hub.NewFUSE("project-fuse-fragmented-writeback", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt")
+	if err != nil {
+		t.Fatalf("stat fragmented file: %v", err)
+	}
+	node := fsys.ensureNode(ctx, entry)
+	hAny, _, errno := node.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open fragmented handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	for i, off := range []int64{0, 8, 16, 24, 32, 40} {
+		if written, errno := h.Write(ctx, []byte{byte('0' + i)}, off); errno != 0 || written != 1 {
+			t.Fatalf("fragmented write %d: written=%d errno=%v", i, written, errno)
+		}
+	}
+	if errno := h.Fsync(ctx, 0); errno != 0 {
+		t.Fatalf("fsync fragmented writes: %v", errno)
+	}
+	if delta := uploadCalls.Load() - baselineUploads; delta != 6 {
+		t.Fatalf("expected six uploaded touched chunks, got %d", delta)
+	}
+	if delta := metadataWrites.Load() - baselineMetadataWrites; delta != 1 {
+		t.Fatalf("expected one metadata write, got %d", delta)
+	}
+	if got := assetDownloadCalls.Load(); got > 8 {
+		t.Fatalf("expected bounded base reads during fragmented write commit, got %d", got)
+	}
+	output := filepath.Join(t.TempDir(), "fragmented-writeback.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", output); err != nil {
+		t.Fatalf("download fragmented file: %v", err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read fragmented output: %v", err)
+	}
+	for i, off := range []int64{0, 8, 16, 24, 32, 40} {
+		if data[off] != byte('0'+i) {
+			t.Fatalf("unexpected byte at %d: %q", off, data[off])
+		}
+	}
+	if errno := h.Release(ctx); errno != 0 {
+		t.Fatalf("release fragmented handle: %v", errno)
+	}
+}
+
+func TestFUSEFlagsAndLocks(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.MkdirContext(ctx, "project-fuse-flags", "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	first := writeTempFile(t, t.TempDir(), "first.txt", []byte("first"))
+	second := writeTempFile(t, t.TempDir(), "second.txt", []byte("second"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-flags", "docs/a.txt", first); err != nil {
+		t.Fatalf("upload a: %v", err)
+	}
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-flags", "docs/b.txt", second); err != nil {
+		t.Fatalf("upload b: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-flags", DefaultFUSEOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	docsEntry, err := hub.StatPathContext(ctx, "project-fuse-flags", "docs")
+	if err != nil {
+		t.Fatalf("stat docs: %v", err)
+	}
+	docsNode := fsys.ensureNode(ctx, docsEntry)
+	if errno := docsNode.Rename(ctx, "a.txt", docsNode, "b.txt", renameNoReplace); errno != syscall.EEXIST {
+		t.Fatalf("expected rename noreplace to fail with EEXIST, got %v", errno)
+	}
+	if errno := docsNode.Rename(ctx, "a.txt", docsNode, "b.txt", renameExchange); errno != syscall.EINVAL {
+		t.Fatalf("expected rename exchange to fail with EINVAL, got %v", errno)
+	}
+	aEntry, err := hub.StatPathContext(ctx, "project-fuse-flags", "docs/a.txt")
+	if err != nil {
+		t.Fatalf("stat a: %v", err)
+	}
+	aNode := fsys.ensureNode(ctx, aEntry)
+	if errno := aNode.Setxattr(ctx, "user.flag", []byte("one"), xattrCreate); errno != 0 {
+		t.Fatalf("setxattr create: %v", errno)
+	}
+	if errno := aNode.Setxattr(ctx, "user.flag", []byte("two"), xattrCreate); errno != syscall.EEXIST {
+		t.Fatalf("expected xattr create conflict, got %v", errno)
+	}
+	if errno := aNode.Setxattr(ctx, "user.other", []byte("two"), xattrReplace); errno != syscall.ENODATA {
+		t.Fatalf("expected xattr replace miss, got %v", errno)
+	}
+	if errno := aNode.Removexattr(ctx, "user.missing"); errno != syscall.ENODATA {
+		t.Fatalf("expected removexattr miss, got %v", errno)
+	}
+	h1Any, _, errno := aNode.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open handle1: %v", errno)
+	}
+	h2Any, _, errno := aNode.Open(ctx, syscall.O_RDWR)
+	if errno != 0 {
+		t.Fatalf("open handle2: %v", errno)
+	}
+	h1 := h1Any.(*storhubHandle)
+	h2 := h2Any.(*storhubHandle)
+	if errno := h1.Setlk(ctx, 1, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_RDLCK}, 0); errno != 0 {
+		t.Fatalf("set read lock owner1: %v", errno)
+	}
+	if errno := h2.Setlk(ctx, 2, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_RDLCK}, 0); errno != 0 {
+		t.Fatalf("set read lock owner2: %v", errno)
+	}
+	if errno := h2.Setlk(ctx, 2, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_WRLCK}, 0); errno != syscall.EAGAIN {
+		t.Fatalf("expected write lock conflict, got %v", errno)
+	}
+	if errno := h1.Release(ctx); errno != 0 {
+		t.Fatalf("release handle1: %v", errno)
+	}
+	if errno := h2.Setlk(ctx, 2, &fuse.FileLock{Start: 0, End: 4, Typ: syscall.F_WRLCK}, 0); errno != 0 {
+		t.Fatalf("upgrade own lock after release: %v", errno)
+	}
+	if errno := h2.Setlk(ctx, 2, &fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK}, 0); errno != 0 {
+		t.Fatalf("set broad write lock: %v", errno)
+	}
+	if errno := h2.Setlk(ctx, 2, &fuse.FileLock{Start: 3, End: 6, Typ: syscall.F_UNLCK}, 0); errno != 0 {
+		t.Fatalf("partial unlock: %v", errno)
+	}
+	var conflict fuse.FileLock
+	if errno := h2.Getlk(ctx, 3, &fuse.FileLock{Start: 4, End: 4, Typ: syscall.F_WRLCK}, 0, &conflict); errno != 0 {
+		t.Fatalf("getlk unlocked middle: %v", errno)
+	}
+	if conflict.Typ != syscall.F_UNLCK {
+		t.Fatalf("expected middle range to be unlocked, got %+v", conflict)
+	}
+	if errno := h2.Getlk(ctx, 3, &fuse.FileLock{Start: 2, End: 2, Typ: syscall.F_WRLCK}, 0, &conflict); errno != 0 {
+		t.Fatalf("getlk locked prefix: %v", errno)
+	}
+	if conflict.Typ != syscall.F_WRLCK {
+		t.Fatalf("expected prefix range to stay locked, got %+v", conflict)
+	}
+	if errno := h2.Getlk(ctx, 3, &fuse.FileLock{Start: 8, End: 8, Typ: syscall.F_WRLCK}, 0, &conflict); errno != 0 {
+		t.Fatalf("getlk locked suffix: %v", errno)
+	}
+	if conflict.Typ != syscall.F_WRLCK {
+		t.Fatalf("expected suffix range to stay locked, got %+v", conflict)
+	}
+	if errno := h2.Release(ctx); errno != 0 {
+		t.Fatalf("release handle2: %v", errno)
 	}
 }
 

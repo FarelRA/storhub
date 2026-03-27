@@ -12,23 +12,39 @@ import (
 )
 
 type EntryInfo struct {
-	Path       string    `json:"path"`
-	IsDir      bool      `json:"is_dir"`
-	Size       int64     `json:"size"`
-	ModifiedAt time.Time `json:"modified_at"`
-	CreatedAt  time.Time `json:"created_at"`
+	Path          string    `json:"path"`
+	Kind          NodeKind  `json:"kind,omitempty"`
+	IsDir         bool      `json:"is_dir"`
+	IsSymlink     bool      `json:"is_symlink,omitempty"`
+	Size          int64     `json:"size"`
+	Inode         uint64    `json:"inode,omitempty"`
+	Mode          uint32    `json:"mode,omitempty"`
+	UID           uint32    `json:"uid,omitempty"`
+	GID           uint32    `json:"gid,omitempty"`
+	NLink         uint32    `json:"nlink,omitempty"`
+	ModifiedAt    time.Time `json:"modified_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	AccessedAt    time.Time `json:"accessed_at,omitempty"`
+	ChangedAt     time.Time `json:"changed_at,omitempty"`
+	SymlinkTarget string    `json:"symlink_target,omitempty"`
 }
 
 type DirEntry struct {
-	Name  string `json:"name"`
-	Path  string `json:"path"`
-	IsDir bool   `json:"is_dir"`
-	Size  int64  `json:"size"`
+	Name      string   `json:"name"`
+	Path      string   `json:"path"`
+	Kind      NodeKind `json:"kind,omitempty"`
+	IsDir     bool     `json:"is_dir"`
+	IsSymlink bool     `json:"is_symlink,omitempty"`
+	Size      int64    `json:"size"`
+	Inode     uint64   `json:"inode,omitempty"`
+	Mode      uint32   `json:"mode,omitempty"`
+	NLink     uint32   `json:"nlink,omitempty"`
 }
 
 type FSStats struct {
 	Files       int   `json:"files"`
 	Directories int   `json:"directories"`
+	Inodes      int   `json:"inodes"`
 	Bytes       int64 `json:"bytes"`
 	Releases    int   `json:"releases"`
 	Assets      int   `json:"assets"`
@@ -67,7 +83,9 @@ func (h *StorHub) CreateFileContext(ctx context.Context, project, filePath strin
 	if err != nil {
 		return nil, err
 	}
-	fileMeta := FileMetadata{Name: cleanPath, Size: 0, Chunks: []ChunkInfo{}, Release: releaseTag, UploadedAt: h.config.Now().UTC()}
+	now := h.config.Now().UTC()
+	uid, gid := defaultOwnerIDs()
+	fileMeta := FileMetadata{Name: cleanPath, Kind: NodeKindFile, Size: 0, Chunks: []ChunkInfo{}, Release: releaseTag, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, Mode: defaultFileMode(NodeKindFile), UID: uid, GID: gid}
 	fileMeta.CRC32C, err = CombineChunkCRC32Cs(fileMeta.Chunks)
 	if err != nil {
 		return nil, err
@@ -79,7 +97,8 @@ func (h *StorHub) CreateFileContext(ctx context.Context, project, filePath strin
 		if meta.FindFile(cleanPath) != nil {
 			return fmt.Errorf("file already exists: %s", cleanPath)
 		}
-		meta.UpsertFile(fileMeta, h.config.Now().UTC())
+		fileMeta.Inode = meta.allocateInode()
+		meta.UpsertFile(fileMeta, now)
 		return nil
 	}, fmt.Sprintf("storhub: create %s", cleanPath)); err != nil {
 		return nil, err
@@ -142,6 +161,9 @@ func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string) err
 		return errors.New("cannot remove root directory")
 	}
 	_, err = h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		if meta.FindFile(cleanPath) != nil {
+			return fmt.Errorf("not a directory: %s", cleanPath)
+		}
 		if !meta.HasDirectory(cleanPath) {
 			return fmt.Errorf("directory not found: %s", cleanPath)
 		}
@@ -225,13 +247,16 @@ func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath str
 	if size < 0 {
 		return nil, errors.New("truncate size must be non-negative")
 	}
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	file := meta.FindFile(cleanPath)
 	if file == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if file.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot truncate symlink: %s", cleanPath)
 	}
 	if size == file.Size {
 		clone := file.Clone()
@@ -248,7 +273,7 @@ func (h *StorHub) AppendFile(project, filePath string, data []byte) (*FileMetada
 }
 
 func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*FileMetadata, error) {
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +284,9 @@ func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath strin
 	file := meta.FindFile(cleanPath)
 	if file == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if file.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot append to symlink: %s", cleanPath)
 	}
 	return h.patchFileWithMetadataContext(ctx, project, cleanPath, meta, file, file.Size, 0, data)
 }
@@ -272,13 +300,16 @@ func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath stri
 	if err != nil {
 		return nil, err
 	}
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	file := meta.FindFile(cleanPath)
 	if file == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if file.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot write symlink: %s", cleanPath)
 	}
 	if offset < 0 {
 		return nil, errors.New("write offset must be non-negative")
@@ -310,13 +341,16 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if offset < 0 || length < 0 {
 		return nil, errors.New("read offset and length must be non-negative")
 	}
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	file := meta.FindFile(cleanPath)
 	if file == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if file.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
 	}
 	if offset > file.Size {
 		return nil, io.EOF
@@ -329,9 +363,15 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 		end = file.Size
 	}
 	result := make([]byte, end-offset)
-	for _, chunk := range file.Chunks {
+	startIndex := sort.Search(len(file.Chunks), func(i int) bool {
+		return file.Chunks[i].Offset+file.Chunks[i].Size > offset
+	})
+	for _, chunk := range file.Chunks[startIndex:] {
 		chunkEnd := chunk.Offset + chunk.Size
-		if chunkEnd <= offset || chunk.Offset >= end || chunk.Size == 0 {
+		if chunk.Offset >= end {
+			break
+		}
+		if chunkEnd <= offset || chunk.Size == 0 {
 			continue
 		}
 		start := maxInt64(offset, chunk.Offset)
@@ -361,20 +401,18 @@ func (h *StorHub) StatPathContext(ctx context.Context, project, targetPath strin
 			return nil, err
 		}
 	}
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	if cleanPath == "" {
-		return &EntryInfo{Path: "", IsDir: true}, nil
+		return &EntryInfo{Path: "", IsDir: true, Inode: meta.Root.Inode, Mode: meta.Root.Mode, UID: meta.Root.UID, GID: meta.Root.GID, NLink: meta.Root.NLink, CreatedAt: meta.Root.CreatedAt, ModifiedAt: meta.Root.ModifiedAt, AccessedAt: meta.Root.AccessedAt, ChangedAt: meta.Root.ChangedAt}, nil
 	}
 	if file := meta.FindFile(cleanPath); file != nil {
-		return &EntryInfo{Path: file.Name, Size: file.Size, CreatedAt: file.UploadedAt, ModifiedAt: file.UploadedAt}, nil
+		return entryInfoFromFile(file), nil
 	}
-	for _, dir := range meta.Directories {
-		if dir.Path == cleanPath {
-			return &EntryInfo{Path: dir.Path, IsDir: true, CreatedAt: dir.CreatedAt, ModifiedAt: dir.ModifiedAt}, nil
-		}
+	if dir := meta.GetDirectory(cleanPath); dir != nil {
+		return entryInfoFromDirectory(dir), nil
 	}
 	return nil, fmt.Errorf("path not found: %s", cleanPath)
 }
@@ -388,11 +426,11 @@ func (h *StorHub) StatFS(project string) (*FSStats, error) {
 }
 
 func (h *StorHub) StatFSContext(ctx context.Context, project string) (*FSStats, error) {
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	stats := &FSStats{Files: meta.TotalFiles, Directories: len(meta.Directories), Bytes: meta.TotalSize, Releases: len(meta.Releases)}
+	stats := &FSStats{Files: meta.TotalFiles, Directories: len(meta.Directories), Inodes: countUniqueInodes(meta), Bytes: meta.TotalSize, Releases: len(meta.Releases)}
 	for _, release := range meta.Releases {
 		stats.Assets += release.AssetCount
 	}
@@ -408,9 +446,12 @@ func (h *StorHub) ReadDirContext(ctx context.Context, project, dirPath string) (
 			return nil, err
 		}
 	}
-	meta, _, err := h.loadRepoMetadata(ctx, project)
+	meta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
+	}
+	if cleanPath != "" && meta.FindFile(cleanPath) != nil {
+		return nil, fmt.Errorf("not a directory: %s", cleanPath)
 	}
 	if cleanPath != "" && !meta.HasDirectory(cleanPath) {
 		return nil, fmt.Errorf("directory not found: %s", cleanPath)
@@ -418,10 +459,10 @@ func (h *StorHub) ReadDirContext(ctx context.Context, project, dirPath string) (
 	dirs, files := meta.DirectoryChildren(cleanPath)
 	entries := make([]DirEntry, 0, len(dirs)+len(files))
 	for _, dir := range dirs {
-		entries = append(entries, DirEntry{Name: path.Base(dir.Path), Path: dir.Path, IsDir: true})
+		entries = append(entries, dirEntryFromDirectory(dir))
 	}
 	for _, file := range files {
-		entries = append(entries, DirEntry{Name: path.Base(file.Name), Path: file.Name, Size: file.Size})
+		entries = append(entries, dirEntryFromFile(file))
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	return entries, nil
@@ -453,4 +494,58 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func entryInfoFromFile(file *FileMetadata) *EntryInfo {
+	return &EntryInfo{
+		Path:          file.Name,
+		Kind:          file.Kind,
+		IsSymlink:     file.Kind == NodeKindSymlink,
+		Size:          file.Size,
+		Inode:         file.Inode,
+		Mode:          file.Mode,
+		UID:           file.UID,
+		GID:           file.GID,
+		NLink:         file.NLink,
+		CreatedAt:     file.UploadedAt,
+		ModifiedAt:    file.ModifiedAt,
+		AccessedAt:    file.AccessedAt,
+		ChangedAt:     file.ChangedAt,
+		SymlinkTarget: file.SymlinkTarget,
+	}
+}
+
+func entryInfoFromDirectory(dir *DirectoryMetadata) *EntryInfo {
+	return &EntryInfo{
+		Path:       dir.Path,
+		IsDir:      true,
+		Inode:      dir.Inode,
+		Mode:       dir.Mode,
+		UID:        dir.UID,
+		GID:        dir.GID,
+		NLink:      dir.NLink,
+		CreatedAt:  dir.CreatedAt,
+		ModifiedAt: dir.ModifiedAt,
+		AccessedAt: dir.AccessedAt,
+		ChangedAt:  dir.ChangedAt,
+	}
+}
+
+func dirEntryFromDirectory(dir DirectoryMetadata) DirEntry {
+	return DirEntry{Name: path.Base(dir.Path), Path: dir.Path, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: dir.NLink}
+}
+
+func dirEntryFromFile(file FileMetadata) DirEntry {
+	return DirEntry{Name: path.Base(file.Name), Path: file.Name, Kind: file.Kind, IsSymlink: file.Kind == NodeKindSymlink, Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: file.NLink}
+}
+
+func countUniqueInodes(meta *RepoMetadata) int {
+	seen := map[uint64]struct{}{meta.Root.Inode: {}}
+	for _, dir := range meta.Directories {
+		seen[dir.Inode] = struct{}{}
+	}
+	for _, file := range meta.AllFiles() {
+		seen[file.Inode] = struct{}{}
+	}
+	return len(seen)
 }

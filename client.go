@@ -140,7 +140,7 @@ type StorHub struct {
 	ownerMu    sync.Mutex
 	repoMu     sync.Mutex
 	repoState  map[string]bool
-	metaMu     sync.Mutex
+	metaMu     sync.RWMutex
 	metaCache  map[string]cachedMetadata
 }
 
@@ -236,13 +236,16 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 		return nil, errors.New("patch edit or delete size is required")
 	}
 
-	repoMeta, _, err := h.loadRepoMetadata(ctx, project)
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	fileMeta := repoMeta.FindFile(cleanName)
 	if fileMeta == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	if fileMeta.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
 	}
 	patchEnd := offset + deleteSize
 	if offset > fileMeta.Size || patchEnd > fileMeta.Size {
@@ -257,11 +260,14 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	if err != nil {
 		return nil, err
 	}
+	now := h.config.Now().UTC()
 	patched := fileMeta.Clone()
 	patched.Chunks = newChunks
 	patched.Release = targetRelease
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
-	patched.UploadedAt = h.config.Now().UTC()
+	patched.ModifiedAt = now
+	patched.ChangedAt = now
+	patched.AccessedAt = chooseNonZeroTime(fileMeta.AccessedAt, now)
 	patched.CRC32C, err = CombineChunkCRC32Cs(patched.Chunks)
 	if err != nil {
 		return nil, err
@@ -271,13 +277,44 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 		if current == nil {
 			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 		}
-		meta.RemoveFile(cleanName)
-		meta.UpsertFile(patched, h.config.Now().UTC())
+		applyUpdatedFileIdentity(&patched, current, now)
+		replaceInodeFamily(meta, current, patched, now)
 		return nil
 	}, fmt.Sprintf("storhub: patch %s at %d delete %d insert %d", cleanName, offset, deleteSize, len(edit))); err != nil {
 		return nil, err
 	}
 	return &patched, nil
+}
+
+func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *RepoMetadata, fileMeta *FileMetadata, finalSize int64, dirtyRanges []byteRange) (*FileMetadata, error) {
+	newChunks, targetRelease, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, snapshotPath, finalSize, dirtyRanges)
+	if err != nil {
+		return nil, err
+	}
+	now := h.config.Now().UTC()
+	rewritten := fileMeta.Clone()
+	rewritten.Chunks = newChunks
+	rewritten.Release = targetRelease
+	rewritten.Size = finalSize
+	rewritten.ModifiedAt = now
+	rewritten.ChangedAt = now
+	rewritten.AccessedAt = chooseNonZeroTime(fileMeta.AccessedAt, now)
+	rewritten.CRC32C, err = CombineChunkCRC32Cs(rewritten.Chunks)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		current := meta.FindFile(cleanName)
+		if current == nil {
+			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		}
+		applyUpdatedFileIdentity(&rewritten, current, now)
+		replaceInodeFamily(meta, current, rewritten, now)
+		return nil
+	}, fmt.Sprintf("storhub: rewrite chunks for %s", cleanName)); err != nil {
+		return nil, err
+	}
+	return &rewritten, nil
 }
 
 func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (*FileMetadata, error) {
@@ -304,18 +341,19 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, err
 	}
 
-	repoMeta, _, err := h.loadRepoMetadata(ctx, project)
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	if err := requireParentDirectory(repoMeta, cleanName); err != nil {
 		return nil, err
 	}
+	existing := repoMeta.FindFile(cleanName)
 	var preferredRelease string
-	if existing := repoMeta.FindFile(cleanName); existing != nil {
+	if existing != nil {
 		preferredRelease = existing.Release
 	}
-	if !replace && repoMeta.FindFile(cleanName) != nil {
+	if !replace && existing != nil {
 		return nil, fmt.Errorf("file already exists: %s", cleanName)
 	}
 
@@ -349,13 +387,14 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}
 
 	fileMeta := FileMetadata{
-		Name:       cleanName,
-		Size:       fileInfo.Size(),
-		Chunks:     results,
-		Release:    releaseTag,
-		UploadedAt: h.config.Now().UTC(),
-		CRC32C:     crc32cSum,
+		Name:    cleanName,
+		Kind:    NodeKindFile,
+		Size:    fileInfo.Size(),
+		Chunks:  results,
+		Release: releaseTag,
+		CRC32C:  crc32cSum,
 	}
+	applyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
 		if err := requireParentDirectory(meta, cleanName); err != nil {
 			return err
@@ -363,8 +402,14 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		if !replace && meta.FindFile(cleanName) != nil {
 			return fmt.Errorf("file already exists: %s", cleanName)
 		}
-		meta.RemoveFile(cleanName)
-		meta.UpsertFile(fileMeta, h.config.Now().UTC())
+		current := meta.FindFile(cleanName)
+		if current != nil {
+			applyUpdatedFileIdentity(&fileMeta, current, h.config.Now().UTC())
+			replaceInodeFamily(meta, current, fileMeta, h.config.Now().UTC())
+		} else {
+			initializeNewFileIdentity(meta, &fileMeta, h.config.Now().UTC())
+			meta.UpsertFile(fileMeta, h.config.Now().UTC())
+		}
 		return nil
 	}, metadataCommitMessage(cleanName, replace)); err != nil {
 		return nil, err
@@ -388,7 +433,7 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 		return errors.New("file name is required")
 	}
 
-	repoMeta, _, err := h.loadRepoMetadata(ctx, project)
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return err
 	}

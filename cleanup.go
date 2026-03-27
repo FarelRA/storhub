@@ -29,8 +29,18 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		return err
 	}
 	_, err = h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		if meta.HasDirectory(cleanName) {
+			return fmt.Errorf("is a directory: %s", cleanName)
+		}
+		existing := meta.FindFile(cleanName)
+		if existing == nil {
+			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		}
 		if !meta.RemoveFile(cleanName) {
 			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		}
+		if len(meta.FindFilesByInode(existing.Inode)) > 0 {
+			return touchInodeFamilyChangedAt(meta, existing.Inode, h.config.Now().UTC())
 		}
 		return nil
 	}, fmt.Sprintf("storhub: delete %s", cleanName))

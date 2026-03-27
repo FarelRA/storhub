@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"hash/crc32"
+	"io"
+	"os"
 	"sort"
 )
 
@@ -125,3 +127,121 @@ func normalizedChunkSize(chunkSize int64) int64 {
 }
 
 func sumCRC32C(data []byte) string { return formatCRC32C(crc32.Checksum(data, crc32cTable)) }
+
+func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMetadata, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
+	workingMeta := repoMeta.Clone()
+	workingMeta.RemoveFile(file.Name)
+	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	dirtySegments := make([]byteRange, 0, len(dirtyRanges))
+	for _, dirty := range dirtyRanges {
+		dirtySegments = mergeByteRange(dirtySegments, dirty)
+	}
+	requiredSlots := 0
+	for _, dirty := range dirtySegments {
+		requiredSlots += inlineChunkCount(dirty.end-dirty.start, chunkSize)
+	}
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, file.Release)
+	if err != nil {
+		return nil, "", err
+	}
+	snapshot, err := os.Open(snapshotPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("open snapshot: %w", err)
+	}
+	defer snapshot.Close()
+	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
+	for offset := int64(0); offset < finalSize; offset += chunkSize {
+		end := offset + chunkSize
+		if end > finalSize {
+			end = finalSize
+		}
+		segment := byteRange{start: offset, end: end}
+		if rangeOverlapsAny(segment, dirtySegments) {
+			uploaded, err := h.uploadFileRangeChunks(ctx, project, releaseTag, uploadURL, file.Name, snapshot, segment.start, segment.end)
+			if err != nil {
+				return nil, "", err
+			}
+			assembled = append(assembled, uploaded...)
+			continue
+		}
+		reused, err := h.referenceFileRangeChunks(ctx, project, file, segment.start, segment.end)
+		if err != nil {
+			return nil, "", err
+		}
+		assembled = append(assembled, reused...)
+	}
+	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
+	for i := range assembled {
+		assembled[i].Index = i
+		if assembled[i].Release == "" {
+			assembled[i].Release = releaseTag
+		}
+	}
+	return assembled, releaseTag, nil
+}
+
+func rangeOverlapsAny(target byteRange, ranges []byteRange) bool {
+	for _, current := range ranges {
+		if current.end <= target.start {
+			continue
+		}
+		if current.start >= target.end {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag, uploadURL, fileName string, snapshot *os.File, start, end int64) ([]ChunkInfo, error) {
+	if end <= start {
+		return nil, nil
+	}
+	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	count := inlineChunkCount(end-start, chunkSize)
+	results := make([]ChunkInfo, count)
+	uploadKey := uploadAssetKey(fmt.Sprintf("%s-%d", fileName, start), h.config.Now().UTC())
+	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
+		chunkStart := start + int64(i)*chunkSize
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > end {
+			chunkEnd = end
+		}
+		section := io.NewSectionReader(snapshot, chunkStart, chunkEnd-chunkStart)
+		assetName := fmt.Sprintf("%s.part%03d", uploadKey, i+1)
+		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
+		if err != nil {
+			return fmt.Errorf("upload rewritten chunk %d: %w", i, err)
+		}
+		results[i] = ChunkInfo{Name: assetName, Size: chunkEnd - chunkStart, Index: i, Offset: chunkStart, Release: releaseTag, AssetOffset: 0, AssetID: assetID, CRC32C: checksum}
+		return nil
+	})
+	return results, err
+}
+
+func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, file FileMetadata, start, end int64) ([]ChunkInfo, error) {
+	if end <= start {
+		return nil, nil
+	}
+	assembled := make([]ChunkInfo, 0, len(file.Chunks))
+	for _, chunk := range file.Chunks {
+		chunkEnd := chunk.Offset + chunk.Size
+		if chunkEnd <= start || chunk.Offset >= end {
+			continue
+		}
+		segStart := maxInt64(chunk.Offset, start)
+		segEnd := minInt64(chunkEnd, end)
+		if segStart == chunk.Offset && segEnd == chunkEnd {
+			segment := chunk
+			segment.Offset = segStart
+			assembled = append(assembled, segment)
+			continue
+		}
+		segment, err := h.sliceChunk(ctx, project, chunk, segStart, segEnd-segStart)
+		if err != nil {
+			return nil, err
+		}
+		assembled = append(assembled, segment)
+	}
+	return assembled, nil
+}

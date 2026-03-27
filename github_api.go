@@ -161,6 +161,13 @@ func (h *StorHub) loadRepoMetadata(ctx context.Context, project string) (*RepoMe
 	return h.loadRepoMetadataFresh(ctx, project)
 }
 
+func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) (*RepoMetadata, string, error) {
+	if meta, sha, ok := h.cachedRepoMetadataReadonly(project); ok {
+		return meta, sha, nil
+	}
+	return h.loadRepoMetadataFresh(ctx, project)
+}
+
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
 	data, sha, err := h.getFileContent(ctx, project, metadataFilePath, "")
 	if err != nil {
@@ -654,14 +661,25 @@ func (h *StorHub) setRepoState(project string, exists bool) {
 }
 
 func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, bool) {
-	h.metaMu.Lock()
-	defer h.metaMu.Unlock()
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
 	entry, ok := h.metaCache[project]
 	if !ok {
 		return nil, "", false
 	}
 	meta := entry.meta.Clone()
 	meta.rebuildIndexes()
+	return &meta, entry.sha, true
+}
+
+func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, string, bool) {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	entry, ok := h.metaCache[project]
+	if !ok {
+		return nil, "", false
+	}
+	meta := entry.meta
 	return &meta, entry.sha, true
 }
 

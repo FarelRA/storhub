@@ -250,6 +250,125 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 	}
 }
 
+func TestLiveGitHubPOSIXOps(t *testing.T) {
+	if os.Getenv("STORHUB_RUN_LIVE") != "1" {
+		t.Skip("set STORHUB_RUN_LIVE=1 to run live GitHub POSIX test")
+	}
+	if strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) == "" {
+		t.Fatal("GITHUB_TOKEN is required for live POSIX test")
+	}
+
+	hub := newLiveHub(t, os.Getenv("GITHUB_TOKEN"), liveSmokeConfig())
+	repoName := fmt.Sprintf("storhub-live-posix-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		if cleanupErr := hub.DeleteProject(repoName); cleanupErr != nil {
+			t.Logf("cleanup warning: %v", cleanupErr)
+		}
+	})
+
+	if err := hub.Mkdir(repoName, "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	input := filepath.Join(t.TempDir(), "base.txt")
+	if err := os.WriteFile(input, []byte("hello live posix"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	base, err := hub.UploadFile(repoName, "docs/base.txt", input)
+	if err != nil {
+		t.Fatalf("upload base: %v", err)
+	}
+	alias, err := hub.Link(repoName, "docs/base.txt", "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+	if alias.Inode != base.Inode {
+		t.Fatalf("expected hardlink inode reuse, got %d want %d", alias.Inode, base.Inode)
+	}
+	if err := hub.Chmod(repoName, "docs/base.txt", 0o600); err != nil {
+		t.Fatalf("chmod base: %v", err)
+	}
+	if err := hub.Chown(repoName, "docs/base.txt", 1001, 1002); err != nil {
+		t.Fatalf("chown base: %v", err)
+	}
+	wantTime := time.Unix(123, 0).UTC()
+	if err := hub.Chtimes(repoName, "docs/base.txt", wantTime, wantTime); err != nil {
+		t.Fatalf("chtimes base: %v", err)
+	}
+	if err := hub.SetXAttr(repoName, "docs/base.txt", "user.note", []byte("present")); err != nil {
+		t.Fatalf("setxattr base: %v", err)
+	}
+	symlink, err := hub.Symlink(repoName, "docs/alias.txt", "docs/link.txt")
+	if err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	if symlink.Kind != NodeKindSymlink {
+		t.Fatalf("unexpected symlink metadata: %+v", symlink)
+	}
+	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
+		info, err := hub.StatPath(repoName, "docs/alias.txt")
+		if err != nil {
+			return false, nil
+		}
+		return info.Inode == base.Inode && info.NLink == 2 && info.Mode == 0o600 && info.UID == 1001 && info.GID == 1002, nil
+	}); err != nil {
+		t.Fatalf("wait for hardlink metadata: %v", err)
+	}
+	aliasInfo, err := hub.StatPath(repoName, "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("stat alias: %v", err)
+	}
+	if !aliasInfo.ModifiedAt.Equal(wantTime) {
+		t.Fatalf("unexpected alias modified time: %v", aliasInfo.ModifiedAt)
+	}
+	attrs, err := hub.ListXAttr(repoName, "docs/alias.txt")
+	if err != nil {
+		t.Fatalf("listxattr alias: %v", err)
+	}
+	if len(attrs) != 1 || attrs[0] != "user.note" {
+		t.Fatalf("unexpected alias xattrs: %v", attrs)
+	}
+	value, err := hub.GetXAttr(repoName, "docs/alias.txt", "user.note")
+	if err != nil {
+		t.Fatalf("getxattr alias: %v", err)
+	}
+	if string(value) != "present" {
+		t.Fatalf("unexpected xattr value: %q", value)
+	}
+	target, err := hub.Readlink(repoName, "docs/link.txt")
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != "docs/alias.txt" {
+		t.Fatalf("unexpected symlink target: %q", target)
+	}
+	if _, err := hub.ReadFileAt(repoName, "docs/link.txt", 0, 4); err == nil {
+		t.Fatal("expected symlink readfileat to fail")
+	}
+	output := filepath.Join(t.TempDir(), "alias.txt")
+	if err := hub.DownloadFile(repoName, "docs/alias.txt", output); err != nil {
+		t.Fatalf("download alias: %v", err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read alias output: %v", err)
+	}
+	if !bytes.Equal(data, []byte("hello live posix")) {
+		t.Fatalf("unexpected alias content: %q", data)
+	}
+	if err := hub.Unlink(repoName, "docs/base.txt"); err != nil {
+		t.Fatalf("unlink base: %v", err)
+	}
+	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
+		info, err := hub.StatPath(repoName, "docs/alias.txt")
+		if err != nil {
+			return false, err
+		}
+		return info.NLink == 1, nil
+	}); err != nil {
+		t.Fatalf("wait for link count drop: %v", err)
+	}
+}
+
 func TestLiveGitHubSmoke2GB(t *testing.T) {
 	if os.Getenv("STORHUB_RUN_LIVE_LARGE") != "1" {
 		t.Skip("set STORHUB_RUN_LIVE_LARGE=1 to run 2GB live GitHub smoke test")
