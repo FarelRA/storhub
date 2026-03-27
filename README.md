@@ -105,6 +105,7 @@ Common commands:
 - inspection: `ls`, `stat`, `cat`, `revisions`
 - filesystem: `mkdir`, `mv`, `rm`
 - recovery and cleanup: `rollback`
+- web: `serve-rest`
 - mount: `mount`
 
 Typical workflow:
@@ -118,12 +119,22 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub revisions demo-project
 
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 
+REST serving from the CLI:
+
+```bash
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --auth-file ./rest-auth.json
+```
+
+Open `http://localhost:8080/ui` for the built-in Alpine.js web interface.
+
 ## API Guide
 
 Public packages:
 
 - `github.com/FarelRA/storhub/storhub`
 - `github.com/FarelRA/storhub/fuse`
+- `github.com/FarelRA/storhub/rest`
 
 Constructors:
 
@@ -165,6 +176,116 @@ FUSE APIs:
 - `fuse.DefaultOptions`
 - `fuse.New`
 
+REST APIs:
+
+- `github.com/FarelRA/storhub/rest`
+- `rest.DefaultOptions`
+- `rest.New`
+- `rest.HashPassword`
+
+Minimal REST server:
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+
+	shrest "github.com/FarelRA/storhub/rest"
+	"github.com/FarelRA/storhub/storhub"
+)
+
+func main() {
+	hub, err := storhub.NewStorHub(os.Getenv("GITHUB_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handler, err := shrest.New(hub, shrest.DefaultOptions())
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+```
+
+The handler also serves a browser UI at `/ui`.
+
+REST endpoint groups:
+
+- `GET /api/v1/projects/{project}` - project stats
+- `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...` - stat or remove files and empty directories
+- `GET /api/v1/projects/{project}/children?path=...` - directory listing
+- `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows
+- `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
+- `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
+- `GET /api/v1/projects/{project}/revisions` - metadata revision history
+
+Authenticated REST:
+
+- login is `POST /api/v1/auth/login` with `username` and `password`
+- successful login returns a bearer token with the resolved StorHub identity (`uid`, `primary_gid`, `groups`, `admin`)
+- authenticated requests send `Authorization: Bearer <token>`
+- authorization uses StorHub owner/group/mode metadata, so REST operations follow UNIX-style checks instead of a separate ACL model
+- directory traversal requires execute/search permission on each ancestor directory
+- create, unlink, rename, and rmdir operations are authorized from parent directory write+execute permission
+- `chown`, rollback, and project deletion are restricted to admin identities
+
+Minimal authenticated REST setup:
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+
+	shrest "github.com/FarelRA/storhub/rest"
+	"github.com/FarelRA/storhub/storhub"
+)
+
+func main() {
+	hub, err := storhub.NewStorHub(os.Getenv("GITHUB_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	adminHash, err := shrest.HashPassword("change-me")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	opts := shrest.DefaultOptions()
+	opts.Auth = &shrest.AuthOptions{
+		TokenSigningKey: []byte(os.Getenv("STORHUB_REST_SIGNING_KEY")),
+		Users: []shrest.User{{
+			Username:     "admin",
+			PasswordHash: adminHash,
+			UID:          0,
+			PrimaryGID:   0,
+			Admin:        true,
+		}},
+	}
+
+	handler, err := shrest.New(hub, opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+```
+
+The REST handler uses HTTP preconditions where they help UNIX-like workflows:
+
+- `ETag` is returned on node and content reads
+- `If-Match` guards writes, patches, and deletes against stale metadata
+- `If-None-Match: *` supports create-only full-file uploads
+- `Range: bytes=...` supports partial reads for large files
+
 ## Examples
 
 Full showcase:
@@ -178,6 +299,8 @@ Focused examples:
 ```bash
 GITHUB_TOKEN=your_token go run ./examples/files
 GITHUB_TOKEN=your_token ./examples/cli/demo.sh demo-project
+GITHUB_TOKEN=your_token go run ./examples/rest
+GITHUB_TOKEN=your_token STORHUB_REST_ADMIN_PASSWORD=change-me STORHUB_REST_SIGNING_KEY=signing-secret go run ./examples/rest-auth
 GITHUB_TOKEN=your_token go run ./examples/filesystem
 GITHUB_TOKEN=your_token go run ./examples/posix
 GITHUB_TOKEN=your_token go run ./examples/revisions
@@ -189,6 +312,8 @@ Example overview:
 - `examples/showcase` - broad end-to-end walkthrough across the public API surface
 - `examples/files` - storage upload/replace/patch/download flow
 - `examples/cli` - shell-based CLI workflow
+- `examples/rest` - unauthenticated REST server setup
+- `examples/rest-auth` - authenticated REST server setup with bearer login
 - `examples/filesystem` - filesystem-style API usage
 - `examples/posix` - POSIX-like metadata usage
 - `examples/revisions` - revision history, rollback, purge, and cleanup
@@ -213,6 +338,7 @@ Public surface:
 
 - `storhub/` - main library API
 - `fuse/` - public FUSE facade
+- `rest/` - public REST facade
 
 Internal layout:
 
@@ -224,6 +350,7 @@ Internal layout:
 - `internal/fs` - filesystem-style operations and path logic
 - `internal/posix` - POSIX-like metadata operations
 - `internal/fusefs` - concrete FUSE implementation
+- `internal/rest` - concrete REST handlers, auth, and UNIX-style authorization
 - `internal/cli` - CLI command parsing and rendering
 
 Storage model:
@@ -251,8 +378,8 @@ The test suite is grouped into three categories:
 Direct commands:
 
 ```bash
-go test ./storhub ./fuse ./cmd/storhub ./internal/config ./internal/chunking ./internal/fs ./internal/github ./internal/metadata ./internal/posix
-go test ./internal/storage ./internal/fusefs ./internal/cli ./examples/...
+go test ./storhub ./fuse ./rest ./cmd/storhub ./internal/config ./internal/chunking ./internal/fs ./internal/github ./internal/metadata ./internal/posix
+go test ./internal/storage ./internal/fusefs ./internal/rest ./internal/cli ./examples/...
 STORHUB_RUN_FUSE=1 go test ./internal/storage -run 'TestFUSEOptionalMountLifecycle$'
 GITHUB_TOKEN=ghp_xxx STORHUB_RUN_LIVE=1 go test ./internal/storage -run 'TestLiveGitHub'
 go test ./...

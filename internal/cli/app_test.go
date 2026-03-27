@@ -2,13 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	rest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -129,6 +132,7 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 		{name: "patch", args: []string{"patch", "project", "path", "0", "0", "text"}, want: "missing GitHub token"},
 		{name: "revisions", args: []string{"revisions", "project"}, want: "missing GitHub token"},
 		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "missing GitHub token"},
+		{name: "serve-rest", args: []string{"serve-rest"}, want: "missing GitHub token"},
 		{name: "mount", args: []string{"mount", "project", t.TempDir()}, want: "missing GitHub token"},
 	}
 	for _, check := range checks {
@@ -150,7 +154,15 @@ func TestPrintRootHelp(t *testing.T) {
 
 func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
+	oldRESTFactory := newRESTHubFromFlagsFn
+	oldRESTHandler := newRESTHandlerFn
+	oldRESTListen := restListenAndServeFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	t.Cleanup(func() {
+		newRESTHubFromFlagsFn = oldRESTFactory
+		newRESTHandlerFn = oldRESTHandler
+		restListenAndServeFn = oldRESTListen
+	})
 	app, stdout, _ := newTestApp(t)
 	localFile := filepath.Join(t.TempDir(), "upload.txt")
 	if err := os.WriteFile(localFile, []byte("hello world"), 0o644); err != nil {
@@ -160,6 +172,15 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	mountDir := t.TempDir()
 	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
 		return &fakeHub{t: t}, nil
+	}
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
+		return &storhub.StorHub{}, nil
+	}
+	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
+		return http.NewServeMux(), nil
+	}
+	restListenAndServeFn = func(addr string, handler http.Handler) error {
+		return nil
 	}
 	checks := [][]string{
 		{"upload", "--token", "x", "demo", "docs/readme.txt", localFile},
@@ -177,6 +198,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"patch", "--token", "x", "demo", "docs/readme.txt", "1", "2", "x"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
+		{"serve-rest", "--token", "x", "--listen", "127.0.0.1:0"},
 		{"mount", "--token", "x", "demo", mountDir},
 	}
 	for _, args := range checks {
@@ -185,7 +207,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		}
 	}
 	output := stdout()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "mounted demo at "} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at "} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected %q in output %q", want, output)
 		}
@@ -193,6 +215,44 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	data, err := os.ReadFile(downloadFile)
 	if err != nil || string(data) != "downloaded" {
 		t.Fatalf("download file contents: %q %v", data, err)
+	}
+}
+
+func TestServeRESTLoadsAuthFile(t *testing.T) {
+	oldHubFactory := newRESTHubFromFlagsFn
+	oldHandlerFactory := newRESTHandlerFn
+	oldListen := restListenAndServeFn
+	t.Cleanup(func() {
+		newRESTHubFromFlagsFn = oldHubFactory
+		newRESTHandlerFn = oldHandlerFactory
+		restListenAndServeFn = oldListen
+	})
+	app, stdout, _ := newTestApp(t)
+	authFile := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
+		return &storhub.StorHub{}, nil
+	}
+	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
+		if opts.Auth == nil || opts.Auth.Realm != "demo" || len(opts.Auth.Users) != 1 || opts.Auth.Users[0].Username != "admin" {
+			t.Fatalf("unexpected auth opts: %+v", opts.Auth)
+		}
+		return http.NewServeMux(), nil
+	}
+	restListenAndServeFn = func(addr string, handler http.Handler) error {
+		if addr != "127.0.0.1:9090" || handler == nil {
+			t.Fatalf("unexpected serve args: addr=%q handler=%v", addr, handler)
+		}
+		return errors.New("stop")
+	}
+	err := app.Run([]string{"serve-rest", "--token", "x", "--listen", "127.0.0.1:9090", "--auth-file", authFile})
+	if err == nil || err.Error() != "stop" {
+		t.Fatalf("expected stop error, got %v", err)
+	}
+	if !strings.Contains(stdout(), "with auth") {
+		t.Fatalf("unexpected stdout: %q", stdout())
 	}
 }
 

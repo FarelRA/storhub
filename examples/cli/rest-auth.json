@@ -1,0 +1,13 @@
+{
+  "realm": "storhub",
+  "token_signing_key": "replace-me",
+  "users": [
+    {
+      "username": "admin",
+      "password": "change-me",
+      "uid": 0,
+      "primary_gid": 0,
+      "admin": true
+    }
+  ]
+}

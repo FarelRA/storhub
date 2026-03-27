@@ -26,6 +26,7 @@ What it demonstrates:
 - `ls`, `stat`, `cat`
 - `mkdir`, `mv`, `rm`
 - `revisions`, `rollback`
+- `serve-rest`
 - optional `mount`
 
 Notes:
@@ -33,3 +34,4 @@ Notes:
 - the script expects one positional argument: the project name
 - if `STORHUB_MOUNT_POINT` is set, it will also show the mount command to run
 - the script uses `go run ./cmd/storhub` directly so it stays in sync with the current source tree
+- `examples/cli/rest-auth.json` is a starter auth file for `storhub serve-rest --auth-file`

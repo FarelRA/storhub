@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -63,6 +66,14 @@ var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency
 	return storhubClient{StorHub: hub}, nil
 }
 
+var newRESTHubFromFlagsFn = newHubFromFlags
+var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+	return shrest.New(hub, opts)
+}
+var restListenAndServeFn = func(addr string, handler http.Handler) error {
+	return http.ListenAndServe(addr, handler)
+}
+
 func New() *App {
 	return &App{stdout: os.Stdout, stderr: os.Stderr}
 }
@@ -108,9 +119,18 @@ func (a *App) Run(args []string) error {
 		return a.runRollback(rest)
 	case "mount":
 		return a.runMount(rest)
+	case "serve-rest":
+		return a.runServeREST(rest)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, rootHelp)
 	}
+}
+
+type restAuthFile struct {
+	Realm           string        `json:"realm"`
+	TokenSigningKey string        `json:"token_signing_key"`
+	TokenTTL        time.Duration `json:"token_ttl"`
+	Users           []shrest.User `json:"users"`
 }
 
 func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
@@ -538,6 +558,66 @@ func (a *App) runMount(args []string) error {
 	return nil
 }
 
+func (a *App) runServeREST(args []string) error {
+	fs := flag.NewFlagSet("serve-rest", flag.ContinueOnError)
+	fs.SetOutput(a.stderr)
+	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
+	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
+	listen := fs.String("listen", ":8080", "Listen address")
+	basePath := fs.String("base-path", "/api/v1", "REST API base path")
+	authFile := fs.String("auth-file", os.Getenv("STORHUB_REST_AUTH_FILE"), "Optional JSON auth config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: storhub serve-rest [flags]")
+	}
+	hub, err := newRESTHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+	if err != nil {
+		return err
+	}
+	opts := shrest.DefaultOptions()
+	opts.BasePath = *basePath
+	if strings.TrimSpace(*authFile) != "" {
+		auth, err := loadRESTAuthOptions(*authFile)
+		if err != nil {
+			return err
+		}
+		opts.Auth = auth
+	}
+	handler, err := newRESTHandlerFn(hub, opts)
+	if err != nil {
+		return err
+	}
+	mode := "without auth"
+	if opts.Auth != nil {
+		mode = "with auth"
+	}
+	fmt.Fprintf(a.stdout, "serving REST API on %s%s %s\n", *listen, opts.BasePath, mode)
+	return restListenAndServeFn(*listen, handler)
+}
+
+func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var file restAuthFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("decode rest auth file: %w", err)
+	}
+	key := []byte(strings.TrimSpace(file.TokenSigningKey))
+	if len(key) == 0 {
+		return nil, errors.New("rest auth file requires token_signing_key")
+	}
+	return &shrest.AuthOptions{
+		Realm:           file.Realm,
+		Users:           file.Users,
+		TokenSigningKey: key,
+		TokenTTL:        file.TokenTTL,
+	}, nil
+}
+
 func newHubFromFlags(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
@@ -565,7 +645,7 @@ func ternary[T any](cond bool, left, right T) T {
 
 const rootHelp = `StorHub CLI
 
-Friendly commands for GitHub-backed chunked storage and FUSE mounting.
+Friendly commands for GitHub-backed chunked storage, REST serving, and FUSE mounting.
 
 Common commands:
   storhub upload <project> <remote-path> <local-path>
@@ -580,6 +660,7 @@ Common commands:
   storhub patch <project> <path> <offset> <delete-size> <text>
   storhub revisions <project>
   storhub rollback <project> <commit-sha>
+  storhub serve-rest [flags]
   storhub mount <project> <mount-point>
 
 Authentication:
@@ -589,6 +670,7 @@ Examples:
   storhub upload docs-project docs/readme.txt ./README.md
   storhub ls docs-project docs
   storhub stat docs-project docs/readme.txt
+  storhub serve-rest --listen :8080
   storhub mount docs-project ./mnt
 `
 
