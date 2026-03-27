@@ -1,4 +1,4 @@
-module github.com/storhub/storhub
+module github.com/FarelRA/storhub
 
 go 1.21
 
