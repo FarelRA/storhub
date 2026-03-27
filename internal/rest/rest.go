@@ -2,7 +2,10 @@ package rest
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +28,7 @@ const (
 	defaultRESTBasePath      = "/api/v1"
 	defaultRESTStreamChunk   = 1 << 20
 	defaultRESTPatchBodySize = 8 << 20
+	defaultRESTShareTTL      = 7 * 24 * time.Hour
 	maxRequestBodyMemory     = 32 << 10
 )
 
@@ -32,6 +36,8 @@ type Options struct {
 	BasePath         string
 	StreamChunkSize  int64
 	MaxPatchBodySize int64
+	ShareTTL         time.Duration
+	ShareSigningKey  []byte
 	Auth             *AuthOptions
 }
 
@@ -86,6 +92,153 @@ type Client interface {
 type restHandler struct {
 	client Client
 	opts   Options
+}
+
+// restrictedClient wraps a Client and restricts access to a specific project and path
+type restrictedClient struct {
+	underlying     Client
+	allowedProject string
+	allowedPath    string
+}
+
+func newRestrictedClient(underlying Client, project, path string) *restrictedClient {
+	return &restrictedClient{
+		underlying:     underlying,
+		allowedProject: project,
+		allowedPath:    path,
+	}
+}
+
+func (c *restrictedClient) checkAccess(project, targetPath string) error {
+	if project != c.allowedProject {
+		return errForbidden("access denied: project not shared")
+	}
+	if hasPathPrefix(targetPath, c.allowedPath) {
+		return nil
+	}
+	return errForbidden("access denied: path not shared")
+}
+
+func (c *restrictedClient) CreateFile(project, filePath string) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Mkdir(project, dirPath string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) DeleteFile(project, filePath string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Rmdir(project, dirPath string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Rename(project, oldPath, newPath string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+	if err := c.checkAccess(project, filePath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ReadFileAt(project, filePath, offset, length)
+}
+
+func (c *restrictedClient) StatPath(project, targetPath string) (*shfs.EntryInfo, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.StatPath(project, targetPath)
+}
+
+func (c *restrictedClient) ReadDir(project, dirPath string) ([]shfs.DirEntry, error) {
+	if err := c.checkAccess(project, dirPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ReadDir(project, dirPath)
+}
+
+func (c *restrictedClient) StatFS(project string) (*shfs.FSStats, error) {
+	return nil, errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+func (c *restrictedClient) Symlink(project, target, linkPath string) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Readlink(project, linkPath string) (string, error) {
+	if err := c.checkAccess(project, linkPath); err != nil {
+		return "", err
+	}
+	return c.underlying.Readlink(project, linkPath)
+}
+
+func (c *restrictedClient) Link(project, existingPath, newPath string) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Chmod(project, targetPath string, mode uint32) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Chown(project, targetPath string, uid, gid uint32) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) SetXAttr(project, targetPath, attr string, data []byte) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) GetXAttr(project, targetPath, attr string) ([]byte, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.GetXAttr(project, targetPath, attr)
+}
+
+func (c *restrictedClient) ListXAttr(project, targetPath string) ([]string, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ListXAttr(project, targetPath)
+}
+
+func (c *restrictedClient) RemoveXAttr(project, targetPath, attr string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error) {
+	return nil, errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+func (c *restrictedClient) RollbackMetadata(project, commitSHA string) error {
+	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) DeleteProject(project string) error {
+	return errForbidden("access denied: read-only share")
 }
 
 type restError struct {
@@ -168,11 +321,35 @@ type rollbackRequest struct {
 	CommitSHA string `json:"commit_sha"`
 }
 
+type shareRequest struct {
+	Path      string        `json:"path"`
+	ExpiresIn time.Duration `json:"expires_in,omitempty"`
+	Download  *bool         `json:"download,omitempty"`
+}
+
+type shareResponse struct {
+	Project   string `json:"project"`
+	Path      string `json:"path"`
+	URL       string `json:"url"`
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
+	Download  bool   `json:"download"`
+}
+
+type shareClaims struct {
+	Kind     string `json:"kind"`
+	Project  string `json:"project"`
+	Path     string `json:"path"`
+	Download bool   `json:"download,omitempty"`
+	Expires  int64  `json:"exp"`
+}
+
 func DefaultOptions() Options {
 	return Options{
 		BasePath:         defaultRESTBasePath,
 		StreamChunkSize:  defaultRESTStreamChunk,
 		MaxPatchBodySize: defaultRESTPatchBodySize,
+		ShareTTL:         defaultRESTShareTTL,
 	}
 }
 
@@ -207,11 +384,18 @@ func (o Options) withDefaults() Options {
 	if o.MaxPatchBodySize <= 0 {
 		o.MaxPatchBodySize = defaultRESTPatchBodySize
 	}
+	if o.ShareTTL <= 0 {
+		o.ShareTTL = defaultRESTShareTTL
+	}
 	return o
 }
 
 func (h *restHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.serveUI(w, r) {
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/shares/") {
+		h.handleShareAccess(w, r)
 		return
 	}
 	if r.URL.Path == strings.TrimRight(h.opts.BasePath, "/") {
@@ -266,9 +450,24 @@ func (h *restHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUtimes(w, r, project)
 	case "ops/rollback":
 		h.handleRollback(w, r, project)
+	case "ops/share":
+		h.handleShare(w, r, project)
 	default:
 		h.writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *restHandler) shareKey() []byte {
+	if len(h.opts.ShareSigningKey) != 0 {
+		return h.opts.ShareSigningKey
+	}
+	if h.opts.Auth != nil && len(h.opts.Auth.TokenSigningKey) != 0 {
+		return h.opts.Auth.TokenSigningKey
+	}
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	h.opts.ShareSigningKey = key
+	return h.opts.ShareSigningKey
 }
 
 func (h *restHandler) serveUI(w http.ResponseWriter, r *http.Request) bool {
@@ -291,6 +490,7 @@ func (h *restHandler) serveUI(w http.ResponseWriter, r *http.Request) bool {
 		payload, err := json.Marshal(map[string]any{
 			"basePath":    h.opts.BasePath,
 			"authEnabled": h.opts.Auth != nil,
+			"sharePath":   "/shares/",
 		})
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -863,6 +1063,194 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
+}
+
+func (h *restHandler) handleShare(w http.ResponseWriter, r *http.Request, project string) {
+	if r.Method != http.MethodPost {
+		h.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req shareRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	_, err := h.client.StatPath(project, req.Path)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	expiresIn := req.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = h.opts.ShareTTL
+	}
+	download := true
+	if req.Download != nil {
+		download = *req.Download
+	}
+	claims := shareClaims{Kind: "share", Project: project, Path: req.Path, Download: download, Expires: time.Now().Add(expiresIn).Unix()}
+	token, err := h.signShareToken(claims)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	url := "/shares/" + token
+	h.writeJSON(w, http.StatusOK, shareResponse{Project: project, Path: req.Path, URL: url, Token: token, ExpiresAt: time.Unix(claims.Expires, 0).UTC().Format(time.RFC3339), Download: download})
+}
+
+func (h *restHandler) handleShareAccess(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		h.methodNotAllowed(w, http.MethodGet, http.MethodHead)
+		return
+	}
+
+	// Check if this is a download request
+	pathAfterShares := strings.TrimPrefix(r.URL.Path, "/shares/")
+	isDownload := strings.HasSuffix(pathAfterShares, "/download")
+
+	var token string
+	if isDownload {
+		token = strings.TrimSuffix(pathAfterShares, "/download")
+	} else {
+		token = pathAfterShares
+	}
+
+	claims, err := h.parseShareToken(token)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+
+	// If not a download request, redirect to UI
+	if !isDownload {
+		http.Redirect(w, r, "/ui?share="+token, http.StatusFound)
+		return
+	}
+	if !claims.Download {
+		h.writeError(w, http.StatusForbidden, "forbidden", "download is disabled for this share")
+		return
+	}
+
+	// Download request - serve the content
+	entry, err := h.client.StatPath(claims.Project, claims.Path)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+
+	// For directories, we could create a zip in the future, but for now return an error
+	if entry.IsDir {
+		h.writeError(w, http.StatusNotImplemented, "directory_download", "directory download not yet implemented")
+		return
+	}
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(claims.Path)))
+
+	if entry.IsSymlink {
+		target, readErr := h.client.Readlink(claims.Project, claims.Path)
+		if readErr != nil {
+			h.writeMappedError(w, readErr)
+			return
+		}
+		w.Header().Set("Content-Type", "application/symlink-target")
+		w.Header().Set("Content-Length", strconv.Itoa(len(target)))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = io.WriteString(w, target)
+		return
+	}
+
+	eTag := restEntryETag(entry)
+	w.Header().Set("ETag", eTag)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Type", detectContentType(claims.Path))
+	start, end, partial, rangeErr := parseByteRange(r.Header.Get("Range"), entry.Size)
+	if rangeErr != nil {
+		if strings.TrimSpace(r.Header.Get("Range")) != "" {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
+			h.writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable", rangeErr.Error())
+			return
+		}
+		start, end = 0, entry.Size
+	}
+	status := http.StatusOK
+	if partial {
+		status = http.StatusPartialContent
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, entry.Size))
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start, 10))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(status)
+		return
+	}
+	w.WriteHeader(status)
+	for offset := start; offset < end; offset += h.opts.StreamChunkSize {
+		readLen := h.opts.StreamChunkSize
+		if remaining := end - offset; remaining < readLen {
+			readLen = remaining
+		}
+		chunk, readErr := h.client.ReadFileAt(claims.Project, claims.Path, offset, readLen)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		if _, writeErr := w.Write(chunk); writeErr != nil {
+			return
+		}
+	}
+}
+
+func hasPathPrefix(targetPath, allowedPath string) bool {
+	targetPath = strings.Trim(strings.TrimSpace(targetPath), "/")
+	allowedPath = strings.Trim(strings.TrimSpace(allowedPath), "/")
+	if allowedPath == "" {
+		return true
+	}
+	return targetPath == allowedPath || strings.HasPrefix(targetPath, allowedPath+"/")
+}
+
+func (h *restHandler) signShareToken(claims shareClaims) (string, error) {
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, h.shareKey())
+	_, _ = mac.Write([]byte(payloadPart))
+	return payloadPart + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return nil, errBadRequest("invalid share token")
+	}
+	mac := hmac.New(sha256.New, h.shareKey())
+	_, _ = mac.Write([]byte(parts[0]))
+	expected := mac.Sum(nil)
+	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || !hmac.Equal(actual, expected) {
+		return nil, errForbidden("invalid share token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, errBadRequest("invalid share token")
+	}
+	var claims shareClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, errBadRequest("invalid share token")
+	}
+	if claims.Kind != "share" {
+		return nil, errForbidden("invalid share token")
+	}
+	if claims.Expires <= time.Now().Unix() {
+		return nil, errForbidden("share token expired")
+	}
+	return &claims, nil
 }
 
 func (h *restHandler) decodeJSON(r *http.Request, dst any) error {

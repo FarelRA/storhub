@@ -7,7 +7,7 @@ What it teaches:
 - how to expose StorHub over HTTP with the public `rest` package
 - how to keep the handler unauthenticated by leaving `Options.Auth` unset
 - how to use the default `/api/v1` route layout from a standalone process
-- how to use the built-in Alpine.js console at `/ui`
+- how to use the built-in file browser at `/` or `/ui`
 
 How to use it:
 

@@ -126,7 +126,7 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080
 GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --auth-file ./rest-auth.json
 ```
 
-Open `http://localhost:8080/ui` for the built-in Alpine.js web interface.
+Open `http://localhost:8080/ui` for the built-in Alpine.js file browser and console.
 
 ## API Guide
 
@@ -211,7 +211,7 @@ func main() {
 }
 ```
 
-The handler also serves a browser UI at `/ui`.
+The handler also serves a browser UI at `/` and `/ui`.
 
 REST endpoint groups:
 
@@ -221,6 +221,7 @@ REST endpoint groups:
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
 - `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
+- `POST /api/v1/projects/{project}/ops/share`, `GET /shares/{token}`, and `GET /shares/{token}/download` - shareable UI links with optional direct downloads
 - `GET /api/v1/projects/{project}/revisions` - metadata revision history
 
 Authenticated REST:

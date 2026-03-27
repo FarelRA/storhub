@@ -190,7 +190,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	root := mustRequest(t, handler, http.MethodGet, "/", nil, nil, http.StatusOK)
-	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub Console") || !strings.Contains(body, "/ui/app.js") {
+	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub") || !strings.Contains(body, "shared-mode") || !strings.Contains(body, "/ui/app.js") {
 		t.Fatalf("unexpected ui body: %q", body)
 	}
 	config := mustRequest(t, handler, http.MethodGet, "/ui/config.js", nil, nil, http.StatusOK)
@@ -205,6 +205,51 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 	if body := string(readBody(t, authedConfig)); !strings.Contains(body, "true") {
 		t.Fatalf("expected auth-enabled config: %q", body)
 	}
+}
+
+func TestRESTShareCreateAndAccess(t *testing.T) {
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/share", shareRequest{Path: "hello.txt"}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+	if share.Token == "" || share.URL == "" {
+		t.Fatalf("unexpected share response: %+v", share)
+	}
+	// Test redirect to UI
+	redirect := mustRequest(t, handler, http.MethodGet, share.URL, nil, nil, http.StatusFound)
+	location := redirect.Header.Get("Location")
+	if !strings.Contains(location, "/ui?share=") {
+		t.Fatalf("unexpected redirect location: %q", location)
+	}
+	// Test download endpoint
+	downloadURL := share.URL + "/download"
+	shared := mustRequest(t, handler, http.MethodGet, downloadURL, nil, nil, http.StatusOK)
+	if body := string(readBody(t, shared)); body != "hello world" {
+		t.Fatalf("unexpected shared body: %q", body)
+	}
+}
+
+func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
+	download := false
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/share", shareRequest{Path: "hello.txt", Download: &download}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+	if share.Download {
+		t.Fatalf("expected disabled download in response: %+v", share)
+	}
+	resp := mustRequest(t, handler, http.MethodGet, share.URL+"/download", nil, nil, http.StatusForbidden)
+	assertErrorCode(t, resp, "forbidden")
 }
 
 func mustJSONRequest(t *testing.T, handler http.Handler, method, target string, payload any, wantStatus int) *http.Response {

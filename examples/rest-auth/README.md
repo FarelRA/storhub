@@ -7,7 +7,7 @@ What it teaches:
 - how to turn on auth through `rest.Options.Auth`
 - how to hash a password with `rest.HashPassword`
 - how UNIX-style authorization is layered onto the same REST handler
-- how to sign in from the built-in Alpine.js console at `/ui`
+- how to sign in from the built-in file browser at `/` or `/ui`
 
 How to use it:
 

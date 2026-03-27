@@ -55,6 +55,7 @@ type restAuthenticator struct {
 }
 
 type restPrincipal struct {
+	Kind       string   `json:"kind"`
 	Username   string   `json:"username"`
 	UID        uint32   `json:"uid"`
 	PrimaryGID uint32   `json:"primary_gid"`
@@ -130,19 +131,48 @@ func (h *restAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.base.serveUI(w, r) {
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/shares/") {
+		h.base.handleShareAccess(w, r)
+		return
+	}
 	if r.URL.Path == strings.TrimRight(h.basePath, "/")+"/auth/login" {
 		h.handleLogin(w, r)
 		return
 	}
-	principal, err := h.requireBearer(r)
-	if err != nil {
+
+	// Try to get bearer token
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(auth, "Bearer ") {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, h.auth.realm))
-		h.base.writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
+		h.base.writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 		return
 	}
-	authed := *h.base
-	authed.client = &authorizedClient{base: h.base.client, principal: principal}
-	authed.ServeHTTP(w, r)
+
+	token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+
+	// Try to parse as regular auth token first
+	principal, err := h.auth.parseToken(token)
+	if err == nil {
+		// Regular auth token - use authorized client
+		authed := *h.base
+		authed.client = &authorizedClient{base: h.base.client, principal: principal}
+		authed.ServeHTTP(w, r)
+		return
+	}
+
+	// Try to parse as share token
+	claims, err := h.base.parseShareToken(token)
+	if err == nil {
+		// Share token - use restricted client
+		restricted := *h.base
+		restricted.client = newRestrictedClient(h.base.client, claims.Project, claims.Path)
+		restricted.ServeHTTP(w, r)
+		return
+	}
+
+	// Neither token type worked
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, h.auth.realm))
+	h.base.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 }
 
 func (h *restAuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +206,7 @@ func (a *restAuthenticator) login(username, password string) (restPrincipal, str
 	if !ok || user.Disabled || !verifyPassword(password, user.PasswordHash) {
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
-	principal := restPrincipal{Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin, ExpiresAt: a.now().Add(a.tokenTTL).Unix()}
+	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin, ExpiresAt: a.now().Add(a.tokenTTL).Unix()}
 	token, err := a.signToken(principal)
 	return principal, token, a.tokenTTL, err
 }
@@ -211,6 +241,9 @@ func (a *restAuthenticator) parseToken(token string) (*restPrincipal, error) {
 	}
 	var principal restPrincipal
 	if err := json.Unmarshal(payload, &principal); err != nil {
+		return nil, errors.New("invalid bearer token")
+	}
+	if principal.Kind != "auth" {
 		return nil, errors.New("invalid bearer token")
 	}
 	if principal.ExpiresAt <= a.now().Unix() {
