@@ -119,19 +119,20 @@ type inodeWriteState struct {
 	fs    *Filesystem
 	inode uint64
 
-	opMu         sync.Mutex
-	mu           sync.Mutex
-	temp         *os.File
-	tempPath     string
-	baseTemp     *os.File
-	baseTempPath string
-	path         string
-	closed       bool
-	deleted      bool
-	refs         int
-	baseSize     int64
-	logicalSize  int64
-	dirtyRanges  []ByteRange
+	opMu              sync.Mutex
+	mu                sync.Mutex
+	temp              *os.File
+	tempPath          string
+	baseTemp          *os.File
+	baseTempPath      string
+	path              string
+	closed            bool
+	deleted           bool
+	refs              int
+	baseSize          int64
+	logicalSize       int64
+	dirtyRanges       []ByteRange
+	tempAuthoritative bool
 }
 
 type ByteRange struct {
@@ -1023,6 +1024,7 @@ func (w *inodeWriteState) materializeBootstrap(size int64) error {
 	w.tempPath = temp.Name()
 	w.baseSize = size
 	w.logicalSize = size
+	w.tempAuthoritative = size == 0
 	if err := w.temp.Truncate(size); err != nil {
 		return err
 	}
@@ -1228,6 +1230,11 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	w.logicalSize = size
 	if err := w.temp.Truncate(size); err != nil {
 		return err
+	}
+	if size == 0 {
+		w.tempAuthoritative = true
+	} else if size > oldSize && oldSize < size && !w.tempAuthoritative {
+		w.tempAuthoritative = false
 	}
 	if size > oldSize {
 		w.markDirtyLocked(oldSize, size)
@@ -1480,7 +1487,7 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		_ = os.Remove(temp.Name())
 		return "", err
 	}
-	if w.coversRangeLocked(0, w.logicalSize) {
+	if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
 		if _, err := io.CopyN(temp, io.NewSectionReader(w.temp, 0, w.logicalSize), w.logicalSize); err != nil {
 			_ = temp.Close()
 			_ = os.Remove(temp.Name())
@@ -1720,6 +1727,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 				h.writeState.clearBaseSnapshotLocked()
 			}
 			h.writeState.baseSize = logicalSize
+			h.writeState.tempAuthoritative = false
 			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
@@ -1756,6 +1764,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			}
 			h.writeState.baseSize = logicalSize
 			h.writeState.dirtyRanges = nil
+			h.writeState.tempAuthoritative = false
 			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
@@ -1781,6 +1790,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			}
 			h.writeState.baseSize = logicalSize
 			h.writeState.dirtyRanges = nil
+			h.writeState.tempAuthoritative = false
 			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
@@ -1830,6 +1840,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		}
 		h.writeState.baseSize = logicalSize
 		h.writeState.dirtyRanges = nil
+		h.writeState.tempAuthoritative = false
 		if err := h.writeState.temp.Truncate(logicalSize); err != nil {
 			h.fs.debugf("commit failed path=%s inode=%d step=local-truncate err=%v", targetPath, h.inode, err)
 			h.writeState.mu.Unlock()

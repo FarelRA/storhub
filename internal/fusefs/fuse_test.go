@@ -229,6 +229,45 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	state.closeTemp()
 }
 
+func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
+	cacheDir := t.TempDir()
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	working, err := os.CreateTemp(cacheDir, "inode-working-*")
+	if err != nil {
+		t.Fatalf("create working temp: %v", err)
+	}
+	if _, err := working.WriteAt([]byte("abcdef"), 0); err != nil {
+		t.Fatalf("seed working temp: %v", err)
+	}
+	state := &inodeWriteState{
+		fs:                fsys,
+		inode:             1,
+		temp:              working,
+		tempPath:          working.Name(),
+		baseSize:          10,
+		logicalSize:       6,
+		dirtyRanges:       []ByteRange{{Start: 2, End: 6}},
+		tempAuthoritative: true,
+	}
+	snapshotPath, err := state.createCommittedSnapshotLocked(context.Background())
+	if err != nil {
+		t.Fatalf("create committed snapshot after truncate: %v", err)
+	}
+	defer os.Remove(snapshotPath)
+	got, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read committed snapshot: %v", err)
+	}
+	if string(got) != "abcdef" {
+		t.Fatalf("unexpected committed snapshot after truncate: %q", got)
+	}
+	state.closeTemp()
+}
+
 func TestLockAndErrorHelpers(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
