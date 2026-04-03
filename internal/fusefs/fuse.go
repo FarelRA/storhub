@@ -118,6 +118,7 @@ type inodeWriteState struct {
 	fs    *Filesystem
 	inode uint64
 
+	opMu         sync.Mutex
 	mu           sync.Mutex
 	temp         *os.File
 	tempPath     string
@@ -736,9 +737,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	targetPath := n.currentPath()
 	if size, ok := in.GetSize(); ok && !n.isDir {
 		if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
+			handle.writeState.opMu.Lock()
 			handle.writeState.mu.Lock()
 			err := handle.writeState.setSizeLocked(int64(size))
 			handle.writeState.mu.Unlock()
+			handle.writeState.opMu.Unlock()
 			if err != nil {
 				return errnoFromError(err)
 			}
@@ -1514,6 +1517,8 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		}
 	}
 	if h.writeState != nil {
+		h.writeState.opMu.Lock()
+		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
 		defer h.writeState.mu.Unlock()
 		if h.flags&syscall.O_APPEND != 0 {
@@ -1562,6 +1567,8 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 	if h.writeState != nil {
+		h.writeState.opMu.Lock()
+		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
 		defer h.writeState.mu.Unlock()
 		if h.writeState.temp == nil {
@@ -1609,6 +1616,8 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 
 func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	if h.writeState != nil {
+		h.writeState.opMu.Lock()
+		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
 		if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize {
 			h.writeState.mu.Unlock()

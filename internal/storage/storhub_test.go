@@ -2310,6 +2310,61 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 	}
 }
 
+func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "editor.txt", []byte("original content"))
+	if _, err := hub.UploadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", input); err != nil {
+		t.Fatalf("upload editor file: %v", err)
+	}
+	fsys, err := hub.NewFUSE("project-fuse-editor-cycles", fusefs.DefaultOptions())
+	if err != nil {
+		t.Fatalf("new fuse fs: %v", err)
+	}
+	defer fsys.Close()
+	entry, err := hub.StatPathContext(ctx, "project-fuse-editor-cycles", "editor.txt")
+	if err != nil {
+		t.Fatalf("stat editor file: %v", err)
+	}
+	node := fsys.EnsureNodeForTest(ctx, entry)
+	save := func(parts ...string) {
+		hAny, _, errno := node.Open(ctx, syscall.O_WRONLY)
+		if errno != 0 {
+			t.Fatalf("open editor handle: %v", errno)
+		}
+		h := hAny.(*fusefs.TestHandle)
+		var attr fuse.SetAttrIn
+		attr.Valid = fuse.FATTR_SIZE
+		attr.Size = 0
+		var out fuse.AttrOut
+		if errno := node.Setattr(ctx, h, &attr, &out); errno != 0 {
+			t.Fatalf("truncate editor handle: %v", errno)
+		}
+		offset := int64(0)
+		for _, part := range parts {
+			data := []byte(part)
+			if written, errno := h.Write(ctx, data, offset); errno != 0 || written != uint32(len(data)) {
+				t.Fatalf("write editor handle: written=%d errno=%v", written, errno)
+			}
+			offset += int64(len(data))
+		}
+		if errno := h.Fsync(ctx, 0); errno != 0 {
+			t.Fatalf("fsync editor handle: %v", errno)
+		}
+		if errno := h.Release(ctx); errno != 0 {
+			t.Fatalf("release editor handle: %v", errno)
+		}
+	}
+	save("first ", "save")
+	save("second ", "save", " cycle")
+	output := filepath.Join(t.TempDir(), "editor-cycles.txt")
+	if err := hub.DownloadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", output); err != nil {
+		t.Fatalf("download saved file: %v", err)
+	}
+	assertFileContent(t, output, []byte("second save cycle"))
+}
+
 func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
