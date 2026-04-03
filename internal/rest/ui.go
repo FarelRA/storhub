@@ -7,1174 +7,670 @@ const uiDocument = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>StorHub</title>
+  <title>StorHub Console</title>
   <link rel="stylesheet" href="/ui/styles.css">
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
   <script src="/ui/config.js"></script>
   <script src="/ui/app.js"></script>
 </head>
-<body x-data="storhubApp()" x-init="init()">
-  <div class="app shared-mode" :class="{'is-shared': isSharedMode}">
-    <header class="header">
-      <div class="header-brand">
-        <div class="logo-mark">SH</div>
+<body x-data="storhubConsole()" x-init="init()">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand-row">
+        <div class="brand">StorHub</div>
+        <div class="brand-note">REST console</div>
+      </div>
+
+      <div class="section">
+        <label class="field">
+          <span>Project</span>
+          <input x-model.trim="project" @keydown.enter.prevent="loadProject()" type="text" placeholder="demo-project" autocomplete="off">
+        </label>
+        <div class="row two">
+          <button class="button solid" @click="loadProject()" type="button">Load</button>
+          <button class="button subtle" @click="refreshAll()" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div class="section" x-show="config.authEnabled">
+        <template x-if="!token">
+          <form class="stack" @submit.prevent="login()">
+            <label class="field"><span>Username</span><input x-model.trim="auth.username" type="text" autocomplete="username"></label>
+            <label class="field"><span>Password</span><input x-model="auth.password" type="password" autocomplete="current-password"></label>
+            <button class="button solid" type="submit">Sign In</button>
+          </form>
+        </template>
+        <template x-if="token">
+          <div class="stack">
+            <div class="meta good">Authenticated session active</div>
+            <button class="button subtle" @click="logout()" type="button">Sign Out</button>
+          </div>
+        </template>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Project</div>
+        <div class="stats">
+          <div><span>Files</span><strong x-text="projectStats.files ?? '-' "></strong></div>
+          <div><span>Dirs</span><strong x-text="projectStats.directories ?? '-' "></strong></div>
+          <div><span>Bytes</span><strong x-text="formatNumber(projectStats.bytes)"></strong></div>
+          <div><span>Releases</span><strong x-text="projectStats.releases ?? '-' "></strong></div>
+        </div>
+        <button class="button danger" @click="deleteProject()" type="button">Delete Project</button>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Directory Actions</div>
+        <div class="stack">
+          <button class="button subtle" @click="openModal('mkdir')" type="button">Make Directory</button>
+          <button class="button subtle" @click="goUp()" type="button">Up One Level</button>
+          <button class="button subtle" @click="removeCurrentDirectory()" type="button">Remove Current Dir</button>
+        </div>
+      </div>
+
+      <div class="section hint">
+        All file, metadata, revision, and maintenance actions use the same REST endpoints exposed by the server.
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="toolbar">
         <div>
-          <div class="eyebrow">Built-In Browser</div>
-          <div class="logo-title">StorHub</div>
+          <div class="pathbar" x-text="project ? project + ':' + currentPathLabel() : 'No project loaded'"></div>
+          <div class="meta" x-text="statusText"></div>
         </div>
-      </div>
-      <div class="header-main">
-        <nav class="breadcrumb" x-show="project">
-          <button class="crumb home" @click="navigateHome()" type="button" x-text="project"></button>
-          <template x-for="(part, idx) in breadcrumbParts()" :key="part.path + ':' + idx">
-            <span class="crumb-wrap">
-              <span class="crumb-sep">/</span>
-              <button class="crumb" @click="navigateTo(part.path)" type="button" x-text="part.label"></button>
-            </span>
-          </template>
-        </nav>
-        <div class="header-status" x-text="status"></div>
-      </div>
-      <div class="header-actions">
-        <div class="shared-badge" x-show="isSharedMode">Shared View</div>
-        <template x-if="!isSharedMode && config.authEnabled && !token">
-          <button class="btn btn-primary" @click="openModal('login')" type="button">Sign In</button>
-        </template>
-        <template x-if="!isSharedMode && config.authEnabled && token">
-          <button class="btn btn-ghost" @click="logout()" type="button">Sign Out</button>
-        </template>
-      </div>
-    </header>
-
-    <div class="workspace">
-      <aside class="sidebar" x-show="!isSharedMode">
-        <section class="panel">
-          <div class="panel-title">Open Project</div>
-          <label class="field">
-            <span>Name</span>
-            <input class="input" x-model.trim="project" @keydown.enter.prevent="openProject()" type="text" placeholder="my-project">
-          </label>
-          <button class="btn btn-primary btn-block" @click="openProject()" type="button">Load Project</button>
-        </section>
-
-        <section class="panel" x-show="project">
-          <div class="panel-title">Overview</div>
-          <div class="stats-grid">
-            <div class="stat-card">
-              <div class="stat-value" x-text="formatNumber(projectStats.files)"></div>
-              <div class="stat-label">Files</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-value" x-text="formatNumber(projectStats.directories)"></div>
-              <div class="stat-label">Folders</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-value" x-text="formatBytes(projectStats.bytes)"></div>
-              <div class="stat-label">Storage</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-value" x-text="formatNumber(projectStats.assets)"></div>
-              <div class="stat-label">Assets</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel" x-show="selectedEntry">
-          <div class="panel-title">Selection</div>
-          <div class="selection-card">
-            <div class="selection-name" x-text="selectedEntry ? selectedEntry.name : ''"></div>
-            <div class="selection-path mono" x-text="selectedPath"></div>
-            <div class="selection-meta">
-              <span x-text="selectedEntry && selectedEntry.isDir ? 'Folder' : getFileType(selectedEntry || {})"></span>
-              <span x-show="selectedEntry && !selectedEntry.isDir" x-text="selectedEntry ? formatBytes(selectedEntry.size) : ''"></span>
-            </div>
-          </div>
-          <div class="action-stack">
-            <button class="btn btn-secondary btn-block" @click="downloadSelected()" :disabled="!canDownload()" type="button">Download</button>
-            <button class="btn btn-secondary btn-block" @click="shareSelected()" :disabled="!canShare()" type="button">Create Share Link</button>
-            <button class="btn btn-secondary btn-block" @click="openModal('rename')" :disabled="!selectedEntry" type="button">Rename</button>
-            <button class="btn btn-danger btn-block" @click="removeSelected()" :disabled="!selectedEntry" type="button">Delete</button>
-          </div>
-        </section>
-      </aside>
-
-      <main class="main">
-        <div class="toolbar">
-          <div class="toolbar-group">
-            <button class="btn btn-icon" @click="goUp()" :disabled="!canGoUp()" type="button" title="Go up">Up</button>
-            <button class="btn btn-icon" @click="refreshAll()" type="button" title="Refresh">Refresh</button>
-            <div class="view-toggle">
-              <button class="toggle" :class="{'active': viewMode === 'list'}" @click="viewMode = 'list'" type="button">List</button>
-              <button class="toggle" :class="{'active': viewMode === 'grid'}" @click="viewMode = 'grid'" type="button">Grid</button>
-            </div>
-          </div>
-          <div class="toolbar-group" x-show="!isSharedMode">
-            <button class="btn btn-secondary" @click="pickUpload()" type="button">Upload</button>
-            <button class="btn btn-secondary" @click="openModal('create-file')" type="button">New File</button>
-            <button class="btn btn-secondary" @click="openModal('mkdir')" type="button">New Folder</button>
-          </div>
+        <div class="toolbar-actions">
+          <button class="button subtle" @click="openModal('create-file')" type="button">New File</button>
+          <button class="button subtle" @click="openModal('rename')" :disabled="!selectedPath" type="button">Rename</button>
+          <button class="button subtle" @click="openModal('link')" :disabled="!selectedPath || selectedEntry?.isDir" type="button">Link</button>
+          <button class="button subtle" @click="openModal('symlink')" type="button">Symlink</button>
+          <button class="button solid" @click="saveFile()" :disabled="!canEditFile()" type="button">Save</button>
         </div>
+      </header>
 
-        <div class="content-shell">
-          <section class="browser-panel">
-            <div class="browser-head">
-              <div>
-                <div class="panel-title">Files</div>
-                <div class="panel-subtitle" x-text="locationLabel()"></div>
-              </div>
-              <div class="count-chip" x-text="entries.length + ' items'"></div>
+      <div class="workspace">
+        <section class="pane pane-tree">
+          <div class="pane-head">
+            <div class="pane-title">Directory</div>
+            <div class="meta" x-text="entries.length + ' entries'"></div>
+          </div>
+          <div class="list tree-list">
+            <template x-for="entry in entries" :key="entry.path">
+              <button class="item" :class="{'active': selectedPath === entry.path}" @click="selectEntry(entry)" type="button">
+                <span class="item-main">
+                  <strong x-text="entry.name"></strong>
+                  <small x-text="entryKind(entry)"></small>
+                </span>
+                <span x-text="entry.isDir ? '' : formatNumber(entry.size)"></span>
+              </button>
+            </template>
+            <div class="meta" x-show="entries.length === 0">Empty directory</div>
+          </div>
+        </section>
+
+        <section class="pane pane-editor">
+          <div class="pane-head">
+            <div class="pane-title">Editor</div>
+            <div class="meta" x-text="selectedPath || 'Select a file or directory'"></div>
+          </div>
+
+          <div class="editor-actions">
+            <button class="button subtle" @click="readSelected()" :disabled="!selectedPath" type="button">Read</button>
+            <button class="button subtle" @click="appendToSelected()" :disabled="!canEditFile()" type="button">Append</button>
+            <button class="button subtle" @click="patchSelected()" :disabled="!canEditFile()" type="button">Patch</button>
+            <button class="button subtle" @click="truncateSelected()" :disabled="!canEditFile()" type="button">Truncate</button>
+            <button class="button danger" @click="removeSelected()" :disabled="!selectedPath" type="button">Remove</button>
+          </div>
+
+          <textarea x-model="editor" spellcheck="false" placeholder="File content or symlink target will appear here."></textarea>
+
+          <div class="range-bar">
+            <label class="field inline"><span>Offset</span><input x-model="range.offset" type="number" min="0"></label>
+            <label class="field inline"><span>Length</span><input x-model="range.length" type="number" min="1"></label>
+            <button class="button subtle" @click="readRange()" :disabled="!canReadRanges()" type="button">Read Range</button>
+          </div>
+        </section>
+
+        <section class="pane pane-side">
+          <div class="subpanel">
+            <div class="pane-head">
+              <div class="pane-title">Entry</div>
+              <div class="meta" x-text="selectedEntry ? entryKind(selectedEntry) : 'None'"></div>
             </div>
+            <dl class="detail-grid">
+              <template x-for="row in entryRows()" :key="row.key">
+                <>
+                  <dt x-text="row.key"></dt>
+                  <dd x-text="row.value"></dd>
+                </>
+              </template>
+            </dl>
+            <div class="row two">
+              <button class="button subtle" @click="openModal('chmod')" :disabled="!selectedPath" type="button">Chmod</button>
+              <button class="button subtle" @click="openModal('chown')" :disabled="!selectedPath" type="button">Chown</button>
+            </div>
+            <button class="button subtle full" @click="openModal('utimes')" :disabled="!selectedPath" type="button">Update Timestamps</button>
+          </div>
 
-            <div class="file-list" :class="'view-' + viewMode" x-show="entries.length">
-              <template x-for="entry in entries" :key="entry.path">
-                <button class="file-item" :class="{'selected': selectedPath === entry.path}" @click="select(entry)" @dblclick="openEntry(entry)" type="button">
-                  <div class="file-icon" x-text="getFileIcon(entry)"></div>
-                  <div class="file-body">
-                    <div class="file-name" x-text="entry.name"></div>
-                    <div class="file-path mono" x-text="entry.path"></div>
-                  </div>
-                  <div class="file-meta">
-                    <span x-text="entry.isDir ? 'Folder' : getFileType(entry)"></span>
-                    <span x-text="entry.isDir ? '--' : formatBytes(entry.size)"></span>
-                  </div>
+          <div class="subpanel">
+            <div class="pane-head">
+              <div class="pane-title">XAttrs</div>
+              <button class="button subtle mini" @click="loadXAttrs()" :disabled="!selectedPath" type="button">Reload</button>
+            </div>
+            <div class="list compact">
+              <template x-for="item in xattrs" :key="item.name">
+                <button class="item" @click="inspectXAttr(item.name)" type="button">
+                  <span class="item-main"><strong x-text="item.name"></strong><small x-text="item.value"></small></span>
                 </button>
               </template>
+              <div class="meta" x-show="xattrs.length === 0">No xattrs</div>
             </div>
-
-            <div class="empty-state" x-show="project && !entries.length">
-              <div class="empty-title">Nothing here yet</div>
-              <div class="empty-copy" x-show="!isSharedMode">Create a file or folder in this location.</div>
-              <div class="empty-copy" x-show="isSharedMode">This shared location has no visible entries.</div>
-            </div>
-
-            <div class="empty-state" x-show="!project && !isSharedMode">
-              <div class="empty-title">Open a project</div>
-              <div class="empty-copy">Use the left panel to browse StorHub like a normal file manager.</div>
-            </div>
-          </section>
-
-          <aside class="preview-panel">
-            <div class="preview-head">
-              <div>
-                <div class="panel-title">Preview</div>
-                <div class="panel-subtitle" x-text="selectedEntry ? selectedEntry.name : 'No selection'"></div>
-              </div>
-              <button class="btn btn-ghost" @click="closePreview()" :disabled="!selectedEntry" type="button">Clear</button>
-            </div>
-
-            <div class="preview-empty" x-show="!selectedEntry">Pick a file to inspect it.</div>
-            <div class="preview-empty" x-show="selectedEntry && selectedEntry.isDir">Open the folder or choose a file inside it.</div>
-
-            <template x-if="selectedEntry && !selectedEntry.isDir && preview.kind === 'image'">
-              <img class="preview-image" :src="preview.url" alt="preview">
-            </template>
-            <template x-if="selectedEntry && !selectedEntry.isDir && preview.kind === 'audio'">
-              <audio class="preview-media" :src="preview.url" controls></audio>
-            </template>
-            <template x-if="selectedEntry && !selectedEntry.isDir && preview.kind === 'video'">
-              <video class="preview-media" :src="preview.url" controls></video>
-            </template>
-            <template x-if="selectedEntry && !selectedEntry.isDir && preview.kind === 'text'">
-              <textarea class="editor" x-model="editor" spellcheck="false"></textarea>
-            </template>
-            <div class="preview-empty" x-show="selectedEntry && !selectedEntry.isDir && preview.kind === 'none'">No inline preview for this file type.</div>
-
-            <div class="preview-actions" x-show="selectedEntry && !selectedEntry.isDir">
-              <button class="btn btn-secondary" @click="downloadSelected()" :disabled="!canDownload()" type="button">Download</button>
-              <button class="btn btn-primary" @click="saveSelected()" :disabled="!canSave()" type="button">Save Changes</button>
-            </div>
-          </aside>
-        </div>
-      </main>
-    </div>
-  </div>
-
-  <input x-ref="uploader" type="file" class="hidden-input" @change="uploadPicked($event)">
-
-  <div class="modal-backdrop" x-show="modal.open" x-transition.opacity @click="closeModal()">
-    <div class="modal" @click.stop>
-      <div class="modal-head">
-        <div class="modal-title" x-text="modal.title"></div>
-        <button class="btn btn-ghost" @click="closeModal()" type="button">Close</button>
-      </div>
-      <div class="modal-body">
-        <template x-if="modal.kind === 'login'">
-          <form class="form" @submit.prevent="login()">
-            <label class="field">
-              <span>Username</span>
-              <input class="input" x-model.trim="auth.username" type="text" autofocus>
-            </label>
-            <label class="field">
-              <span>Password</span>
-              <input class="input" x-model="auth.password" type="password">
-            </label>
-            <div class="modal-actions">
-              <button class="btn btn-primary" type="submit">Sign In</button>
-              <button class="btn btn-ghost" @click="closeModal()" type="button">Cancel</button>
-            </div>
-          </form>
-        </template>
-
-        <template x-if="modal.kind === 'share'">
-          <div class="form">
-            <label class="field">
-              <span>Share URL</span>
-              <input class="input mono" :value="share.url" type="text" readonly>
-            </label>
-            <div class="share-hint" x-text="share.download ? 'This share can also be downloaded directly.' : 'This share opens in the browser UI only.'"></div>
-            <div class="modal-actions">
-              <button class="btn btn-primary" @click="copyShare()" type="button">Copy Link</button>
-              <button class="btn btn-secondary" @click="openShare()" type="button">Open Link</button>
-              <button class="btn btn-ghost" @click="closeModal()" type="button">Done</button>
+            <div class="row two">
+              <button class="button subtle" @click="openModal('xattr-set')" :disabled="!selectedPath" type="button">Set</button>
+              <button class="button danger" @click="openModal('xattr-remove')" :disabled="!selectedPath || xattrs.length === 0" type="button">Remove</button>
             </div>
           </div>
-        </template>
 
-        <template x-if="modal.kind !== 'login' && modal.kind !== 'share'">
-          <form class="form" @submit.prevent="submitModal()">
-            <template x-for="field in modal.fields" :key="field.key">
-              <label class="field">
-                <span x-text="field.label"></span>
-                <input class="input" x-model.trim="modal.form[field.key]" :type="field.type || 'text'" :placeholder="field.placeholder || ''">
-              </label>
-            </template>
-            <div class="modal-actions">
-              <button class="btn btn-primary" type="submit">Apply</button>
-              <button class="btn btn-ghost" @click="closeModal()" type="button">Cancel</button>
+          <div class="subpanel">
+            <div class="pane-head">
+              <div class="pane-title">Revisions</div>
+              <button class="button subtle mini" @click="loadRevisions()" :disabled="!project" type="button">Reload</button>
             </div>
-          </form>
-        </template>
+            <div class="list compact">
+              <template x-for="revision in revisions" :key="revision.commit_sha">
+                <button class="item" @click="rollback(revision.commit_sha)" type="button">
+                  <span class="item-main"><strong x-text="revision.commit_sha.slice(0, 10)"></strong><small x-text="revision.message || ''"></small></span>
+                </button>
+              </template>
+              <div class="meta" x-show="revisions.length === 0">No revisions</div>
+            </div>
+          </div>
+
+          <div class="subpanel">
+            <div class="pane-head">
+              <div class="pane-title">Response</div>
+            </div>
+            <pre class="response" x-text="responseText"></pre>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="overlay" x-show="modal.open" x-transition.opacity>
+    <div class="dialog" @click.outside="closeModal()">
+      <div class="pane-head">
+        <div class="pane-title" x-text="modal.title"></div>
+        <button class="button subtle mini" @click="closeModal()" type="button">Close</button>
+      </div>
+      <div class="stack" x-show="modal.kind === 'mkdir' || modal.kind === 'create-file' || modal.kind === 'rename' || modal.kind === 'link' || modal.kind === 'symlink'">
+        <label class="field" x-show="modal.kind !== 'rename' && modal.kind !== 'link' && modal.kind !== 'symlink'"><span>Path</span><input x-model="modal.form.path" type="text"></label>
+        <label class="field" x-show="modal.kind === 'rename'"><span>New path</span><input x-model="modal.form.newPath" type="text"></label>
+        <label class="field" x-show="modal.kind === 'link'"><span>New path</span><input x-model="modal.form.newPath" type="text"></label>
+        <label class="field" x-show="modal.kind === 'symlink'"><span>Target</span><input x-model="modal.form.target" type="text"></label>
+        <label class="field" x-show="modal.kind === 'symlink'"><span>Link path</span><input x-model="modal.form.newPath" type="text"></label>
+      </div>
+      <div class="stack" x-show="modal.kind === 'chmod' || modal.kind === 'chown' || modal.kind === 'utimes' || modal.kind === 'xattr-set' || modal.kind === 'xattr-remove'">
+        <label class="field" x-show="modal.kind === 'chmod'"><span>Mode</span><input x-model="modal.form.mode" type="text" placeholder="0644"></label>
+        <label class="field" x-show="modal.kind === 'chown'"><span>UID</span><input x-model="modal.form.uid" type="number" min="0"></label>
+        <label class="field" x-show="modal.kind === 'chown'"><span>GID</span><input x-model="modal.form.gid" type="number" min="0"></label>
+        <label class="field" x-show="modal.kind === 'utimes'"><span>Atime</span><input x-model="modal.form.atime" type="datetime-local"></label>
+        <label class="field" x-show="modal.kind === 'utimes'"><span>Mtime</span><input x-model="modal.form.mtime" type="datetime-local"></label>
+        <label class="field" x-show="modal.kind === 'xattr-set' || modal.kind === 'xattr-remove'"><span>Name</span><input x-model="modal.form.name" type="text"></label>
+        <label class="field" x-show="modal.kind === 'xattr-set'"><span>Value</span><input x-model="modal.form.value" type="text"></label>
+      </div>
+      <div class="row two">
+        <button class="button solid" @click="submitModal()" type="button">Apply</button>
+        <button class="button subtle" @click="closeModal()" type="button">Cancel</button>
       </div>
     </div>
   </div>
-
-  <div class="toast" x-show="toast.show" x-transition.opacity x-text="toast.message"></div>
 </body>
 </html>
 `
 
-const uiStyles = `:root{
-  --bg:#f4f0e8;
-  --bg-accent:#e8dfcf;
-  --panel:#fbf8f2;
-  --panel-strong:#ffffff;
-  --line:#d5cab8;
-  --line-strong:#b9ab95;
-  --text:#2f261d;
-  --muted:#756754;
-  --accent:#1f6c5c;
-  --accent-strong:#154d42;
-  --danger:#a24334;
-  --shadow:0 18px 50px rgba(63,44,22,0.12);
-  --radius:18px;
+const uiStyles = `:root {
+  --bg: #161311;
+  --surface: #201c19;
+  --surface-2: #2a2521;
+  --surface-3: #332d29;
+  --line: #453d38;
+  --text: #f3eadc;
+  --muted: #b9ad9c;
+  --accent: #c67a24;
+  --accent-2: #889d6c;
+  --danger: #9c4c36;
 }
-*{box-sizing:border-box}
-html,body{min-height:100%;margin:0}
-body{
-  background:radial-gradient(circle at top left,#fff8ea 0%,var(--bg) 42%,#efe4d2 100%);
-  color:var(--text);
-  font:14px/1.5 "IBM Plex Sans","Avenir Next","Segoe UI",sans-serif;
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 "IBM Plex Sans", "Iosevka Aile", sans-serif; }
+body { background-image: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 24%), repeating-linear-gradient(0deg, transparent, transparent 31px, rgba(255,255,255,0.028) 32px); }
+button, input, textarea { font: inherit; }
+.shell { min-height: 100vh; display: grid; grid-template-columns: 252px 1fr; }
+.sidebar { background: rgba(0,0,0,0.14); border-right: 1px solid var(--line); padding: 18px; overflow: auto; }
+.main { min-width: 0; display: grid; grid-template-rows: 58px 1fr; }
+.brand-row { margin-bottom: 18px; }
+.brand { font: 600 18px/1.1 "IBM Plex Mono", monospace; }
+.brand-note, .meta, .hint, .field span, .pane-title, .section-title, .item small { color: var(--muted); font-size: 12px; }
+.section { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.stack { display: grid; gap: 8px; }
+.row { display: flex; gap: 8px; }
+.row.two > * { flex: 1; }
+.field { display: grid; gap: 6px; }
+.field.inline { grid-template-columns: 56px 1fr; align-items: center; }
+.field input, textarea { width: 100%; background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 10px 12px; outline: none; }
+.field input:focus, textarea:focus { border-color: var(--accent); }
+.button { appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 8px; padding: 9px 12px; cursor: pointer; transition: background-color .14s ease, border-color .14s ease; }
+.button:hover { border-color: var(--accent); background: var(--surface-2); }
+.button:disabled { opacity: .45; cursor: default; }
+.button.solid { background: var(--accent); border-color: #d99243; color: #1f1408; font-weight: 600; }
+.button.solid:hover { background: #d1842a; }
+.button.danger { background: transparent; color: #f0bbb0; border-color: #7b4638; }
+.button.danger:hover { background: rgba(156, 76, 54, 0.18); }
+.button.mini { padding: 6px 9px; }
+.button.full { width: 100%; }
+.toolbar { padding: 10px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pathbar { font: 600 14px/1.2 "IBM Plex Mono", monospace; }
+.toolbar-actions, .editor-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.workspace { min-height: 0; display: grid; grid-template-columns: 300px minmax(360px, 1fr) 340px; }
+.pane { min-width: 0; min-height: 0; padding: 16px; border-right: 1px solid var(--line); overflow: auto; }
+.pane-side { border-right: 0; background: rgba(255,255,255,0.02); }
+.pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.list { display: grid; gap: 2px; margin-top: 10px; }
+.compact { max-height: 220px; overflow: auto; }
+.tree-list { max-height: calc(100vh - 180px); overflow: auto; }
+.item { width: 100%; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); text-align: left; padding: 9px 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+.item:hover, .item.active { background: var(--surface); border-color: var(--line); }
+.item-main { display: grid; gap: 2px; min-width: 0; }
+.item strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+textarea { min-height: 360px; resize: vertical; margin-top: 10px; }
+.range-bar { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+.subpanel { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.detail-grid { margin: 10px 0 0; display: grid; grid-template-columns: 88px 1fr; gap: 8px 10px; }
+.detail-grid dt { color: var(--muted); }
+.detail-grid dd { margin: 0; word-break: break-word; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; margin-bottom: 12px; }
+.stats div { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--surface); }
+.stats span { display: block; color: var(--muted); font-size: 12px; }
+.stats strong { display: block; margin-top: 2px; font: 600 16px/1.1 "IBM Plex Mono", monospace; }
+.response { min-height: 160px; max-height: 240px; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; white-space: pre-wrap; word-break: break-word; }
+.good { color: #b9d19a; }
+.overlay { position: fixed; inset: 0; background: rgba(10, 8, 7, 0.66); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.dialog { width: min(420px, 100%); background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+@media (max-width: 1120px) {
+  .workspace { grid-template-columns: 260px 1fr; }
+  .pane-side { grid-column: 1 / -1; border-top: 1px solid var(--line); }
 }
-button,input,textarea{font:inherit}
-button{cursor:pointer}
-a{color:inherit}
-.mono{font-family:"IBM Plex Mono","SFMono-Regular",monospace}
-.app{min-height:100vh;display:flex;flex-direction:column}
-.header{
-  display:grid;
-  grid-template-columns:auto 1fr auto;
-  gap:18px;
-  align-items:center;
-  padding:18px 24px;
-  border-bottom:1px solid rgba(47,38,29,0.08);
-  backdrop-filter:blur(18px);
-  background:rgba(251,248,242,0.88);
-  position:sticky;
-  top:0;
-  z-index:10;
-}
-.header-brand{display:flex;align-items:center;gap:12px}
-.logo-mark{
-  width:44px;height:44px;border-radius:14px;
-  display:grid;place-items:center;
-  background:linear-gradient(135deg,var(--accent),#5f9470);
-  color:#fff;font-weight:700;letter-spacing:0.08em;
-  box-shadow:0 12px 24px rgba(31,108,92,0.2);
-}
-.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:0.14em;color:var(--muted)}
-.logo-title{font-size:20px;font-weight:650}
-.header-main{min-width:0}
-.breadcrumb{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:13px}
-.crumb-wrap{display:flex;align-items:center;gap:6px}
-.crumb,.crumb.home{
-  border:0;background:none;color:var(--muted);padding:4px 8px;border-radius:999px;
-}
-.crumb:hover,.crumb.home:hover{background:rgba(31,108,92,0.08);color:var(--accent-strong)}
-.crumb-sep{color:#a3947d}
-.header-status{margin-top:6px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.header-actions{display:flex;align-items:center;gap:10px}
-.shared-badge{
-  padding:8px 12px;border-radius:999px;background:#e0efe8;color:var(--accent-strong);
-  font-weight:600;letter-spacing:0.04em;text-transform:uppercase;font-size:11px;
-}
-.workspace{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;padding:20px;min-height:0;flex:1}
-.sidebar{display:flex;flex-direction:column;gap:16px}
-.panel,.browser-panel,.preview-panel,.modal{
-  background:rgba(255,255,255,0.78);
-  border:1px solid rgba(47,38,29,0.1);
-  border-radius:var(--radius);
-  box-shadow:var(--shadow);
-}
-.panel{padding:18px}
-.panel-title{font-size:12px;text-transform:uppercase;letter-spacing:0.14em;color:var(--muted);margin-bottom:12px}
-.panel-subtitle{color:var(--muted);font-size:13px;word-break:break-word}
-.field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
-.field span{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em}
-.input,.editor{
-  width:100%;border:1px solid var(--line);border-radius:14px;background:var(--panel-strong);
-  color:var(--text);padding:12px 14px;outline:none;
-}
-.input:focus,.editor:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(31,108,92,0.12)}
-.btn{
-  border:1px solid transparent;border-radius:999px;padding:10px 14px;background:transparent;color:var(--text);
-}
-.btn:hover:not(:disabled){transform:translateY(-1px)}
-.btn:disabled{opacity:0.45;cursor:not-allowed}
-.btn-primary{background:var(--accent);color:#fff}
-.btn-primary:hover:not(:disabled){background:var(--accent-strong)}
-.btn-secondary{background:var(--panel-strong);border-color:var(--line)}
-.btn-secondary:hover:not(:disabled),.btn-ghost:hover:not(:disabled),.btn-icon:hover:not(:disabled){background:var(--bg-accent)}
-.btn-danger{background:#f7e2de;color:var(--danger)}
-.btn-danger:hover:not(:disabled){background:#f1d4cd}
-.btn-ghost,.btn-icon{background:transparent;border-color:var(--line)}
-.btn-block{width:100%}
-.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.stat-card{padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--panel)}
-.stat-value{font-size:18px;font-weight:650}
-.stat-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em}
-.selection-card{padding:14px;border-radius:16px;background:var(--panel);border:1px solid var(--line)}
-.selection-name{font-size:16px;font-weight:650;word-break:break-word}
-.selection-path{margin-top:6px;color:var(--muted);word-break:break-word}
-.selection-meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:13px}
-.action-stack{display:grid;gap:10px;margin-top:14px}
-.main{display:flex;flex-direction:column;gap:16px;min-width:0}
-.toolbar{
-  display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
-}
-.toolbar-group{display:flex;gap:10px;flex-wrap:wrap}
-.view-toggle{display:flex;padding:4px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,0.6)}
-.toggle{border:0;background:transparent;border-radius:999px;padding:8px 12px;color:var(--muted)}
-.toggle.active{background:var(--accent);color:#fff}
-.content-shell{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,0.9fr);gap:18px;min-height:0;flex:1}
-.browser-panel,.preview-panel{padding:18px;display:flex;flex-direction:column;min-height:0}
-.browser-head,.preview-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px}
-.count-chip{padding:6px 10px;border-radius:999px;background:var(--bg-accent);color:var(--muted);font-size:12px}
-.file-list{display:grid;gap:10px;min-height:0;overflow:auto;padding-right:2px}
-.file-list.view-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
-.file-item{
-  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px;
-  padding:14px;border:1px solid var(--line);border-radius:18px;background:var(--panel);text-align:left;
-}
-.file-item:hover{border-color:var(--line-strong);background:#fffdf8}
-.file-item.selected{border-color:var(--accent);background:#eef8f5;box-shadow:0 0 0 3px rgba(31,108,92,0.1)}
-.file-icon{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:#fff;font-size:20px;border:1px solid rgba(47,38,29,0.08)}
-.file-body{min-width:0}
-.file-name{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.file-path{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.file-meta{display:flex;flex-direction:column;align-items:flex-end;color:var(--muted);font-size:12px;gap:4px}
-.preview-panel{gap:14px}
-.preview-empty{
-  display:grid;place-items:center;min-height:220px;border:1px dashed var(--line-strong);border-radius:18px;
-  color:var(--muted);background:rgba(248,244,236,0.72);padding:20px;text-align:center;
-}
-.preview-image,.preview-media{max-width:100%;max-height:440px;border-radius:16px;border:1px solid var(--line);background:#fff}
-.editor{min-height:320px;resize:vertical;font:13px/1.6 "IBM Plex Mono","SFMono-Regular",monospace;background:#fdfcf9}
-.preview-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:auto}
-.empty-state{
-  min-height:220px;display:grid;place-items:center;text-align:center;padding:24px;border:1px dashed var(--line-strong);
-  border-radius:20px;background:rgba(248,244,236,0.72);
-}
-.empty-title{font-size:22px;font-weight:650}
-.empty-copy{margin-top:8px;color:var(--muted);max-width:34ch}
-.hidden-input{display:none}
-.modal-backdrop{
-  position:fixed;inset:0;background:rgba(47,38,29,0.38);display:grid;place-items:center;padding:20px;z-index:20;
-}
-.modal{width:min(520px,100%);padding:18px}
-.modal-head,.modal-actions{display:flex;justify-content:space-between;align-items:center;gap:10px}
-.modal-title{font-size:18px;font-weight:650}
-.modal-body{margin-top:16px}
-.form{display:grid;gap:12px}
-.share-hint{color:var(--muted);font-size:13px}
-.toast{
-  position:fixed;right:18px;bottom:18px;padding:12px 16px;border-radius:14px;background:#2f261d;color:#fff;z-index:30;
-  box-shadow:0 16px 32px rgba(47,38,29,0.26);
-}
-@media (max-width: 1080px){
-  .workspace,.content-shell{grid-template-columns:1fr}
-  .preview-panel{order:-1}
-}
-@media (max-width: 760px){
-  .header{grid-template-columns:1fr;align-items:flex-start}
-  .workspace{padding:14px}
-  .sidebar{order:2}
-  .file-item{grid-template-columns:auto minmax(0,1fr)}
-  .file-meta{grid-column:2;align-items:flex-start}
+@media (max-width: 780px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+  .workspace { grid-template-columns: 1fr; }
+  .pane { border-right: 0; border-bottom: 1px solid var(--line); }
+  .toolbar { flex-direction: column; align-items: stretch; }
+  .range-bar { grid-template-columns: 1fr; }
 }
 `
 
-const uiScript = `window.storhubApp = function () {
+const uiScript = `window.storhubConsole = function () {
   return {
-    config: window.STORHUB_UI_CONFIG || { basePath: '/api/v1', authEnabled: false, sharePath: '/shares/' },
-    viewMode: 'list',
+    config: window.STORHUB_UI_CONFIG || { basePath: '/api/v1', authEnabled: false },
     token: localStorage.getItem('storhub.token') || '',
-    shareToken: '',
-    shareRootPath: '',
-    shareRootIsDir: false,
     project: '',
     currentPath: '',
     selectedPath: '',
     selectedEntry: null,
+    projectStats: {},
     entries: [],
-    projectStats: { files: 0, directories: 0, bytes: 0, assets: 0 },
-    status: 'Ready',
+    revisions: [],
+    xattrs: [],
     editor: '',
-    preview: { kind: 'none', url: '', revoke: null },
-    share: { url: '', download: true },
+    responseText: 'Ready.',
+    statusText: 'Waiting for a project.',
     auth: { username: '', password: '' },
-    modal: { open: false, title: '', kind: '', fields: [], form: {} },
-    toast: { show: false, message: '', timer: null },
-
-    get isSharedMode() {
-      return !!this.shareToken;
+    range: { offset: 0, length: 4096 },
+    modal: { open: false, kind: '', title: '', form: {} },
+    init() {
+      this.responseText = 'Open a project to browse the filesystem.'
     },
-
-    async init() {
-      const params = new URLSearchParams(window.location.search);
-      const shareToken = params.get('share');
-      if (shareToken) {
-        this.shareToken = shareToken;
-        this.token = shareToken;
-        await this.bootstrapSharedMode();
-      }
+    headers(extra = {}) {
+      const headers = { ...extra }
+      if (this.token) headers.Authorization = 'Bearer ' + this.token
+      return headers
     },
-
-    headers(extra) {
-      const headers = Object.assign({}, extra || {});
-      if (this.token) {
-        headers.Authorization = 'Bearer ' + this.token;
-      }
-      return headers;
+    currentPathLabel() {
+      return this.currentPath || '/'
     },
-
-    normalizePath(value) {
-      return String(value || '').trim().replace(/^\/+|\/+$/g, '');
-    },
-
-    joinPath(basePath, nextPart) {
-      const base = this.normalizePath(basePath);
-      const next = this.normalizePath(nextPart);
-      if (!base) {
-        return next;
-      }
-      if (!next) {
-        return base;
-      }
-      return base + '/' + next;
-    },
-
-    parentPath(value) {
-      const current = this.normalizePath(value);
-      if (!current) {
-        return '';
-      }
-      const parts = current.split('/');
-      parts.pop();
-      return parts.join('/');
-    },
-
-    pathParts(value) {
-      const current = this.normalizePath(value);
-      return current ? current.split('/') : [];
-    },
-
-    withinSharedRoot(targetPath) {
-      if (!this.isSharedMode) {
-        return true;
-      }
-      const target = this.normalizePath(targetPath);
-      const root = this.normalizePath(this.shareRootPath);
-      if (!root) {
-        return true;
-      }
-      if (this.shareRootIsDir) {
-        return target === root || target.indexOf(root + '/') === 0;
-      }
-      return target === root;
-    },
-
-    decodeShareToken(token) {
-      try {
-        const parts = String(token || '').split('.');
-        if (parts.length !== 2) {
-          return null;
-        }
-        let payload = parts[0].replace(/-/g, '+').replace(/_/g, '/');
-        while (payload.length % 4) {
-          payload += '=';
-        }
-        const decoded = atob(payload);
-        const bytes = new Uint8Array(decoded.length);
-        for (let i = 0; i < decoded.length; i += 1) {
-          bytes[i] = decoded.charCodeAt(i);
-        }
-        return JSON.parse(new TextDecoder().decode(bytes));
-      } catch (error) {
-        return null;
-      }
-    },
-
-    normalizeEntry(entry) {
-      return Object.assign({}, entry, {
-        path: this.normalizePath(entry.path),
-        isDir: !!(entry.isDir || entry.is_dir),
-        isSymlink: !!(entry.isSymlink || entry.is_symlink)
-      });
-    },
-
-    locationLabel() {
-      if (!this.project) {
-        return 'No project selected';
-      }
-      if (!this.currentPath) {
-        return '/';
-      }
-      return this.currentPath;
-    },
-
-    breadcrumbParts() {
-      const current = this.normalizePath(this.currentPath || this.shareRootPath);
-      const parts = this.pathParts(current);
-      if (!this.isSharedMode) {
-        return parts.map((part, idx) => ({
-          label: part,
-          path: parts.slice(0, idx + 1).join('/')
-        }));
-      }
-      const rootParts = this.pathParts(this.shareRootPath);
-      const visible = [];
-      if (rootParts.length) {
-        visible.push({ label: rootParts.join('/'), path: this.shareRootPath });
-      }
-      for (let i = rootParts.length; i < parts.length; i += 1) {
-        visible.push({
-          label: parts[i],
-          path: parts.slice(0, i + 1).join('/')
-        });
-      }
-      return visible;
-    },
-
     formatNumber(value) {
-      if (value === undefined || value === null || value === '') {
-        return '-';
-      }
-      return Number(value).toLocaleString();
+      if (value === undefined || value === null || value === '') return '-'
+      return Number(value).toLocaleString()
     },
-
-    formatBytes(bytes) {
-      const value = Number(bytes || 0);
-      if (!value) {
-        return '0 B';
-      }
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-      const amount = value / Math.pow(1024, index);
-      return (Math.round(amount * 10) / 10) + ' ' + units[index];
+    entryKind(entry) {
+      if (!entry) return '-'
+      if (entry.is_dir || entry.isDir) return 'directory'
+      if (entry.is_symlink || entry.isSymlink) return 'symlink'
+      return 'file'
     },
-
-    getFileIcon(entry) {
-      if (!entry) {
-        return '[ ]';
-      }
-      if (entry.isDir) {
-        return '[D]';
-      }
-      const name = String(entry.name || '').toLowerCase();
-      if (/\.(png|jpg|jpeg|gif|bmp|svg|webp)$/.test(name)) return '[I]';
-      if (/\.(mp4|mov|avi|mkv|webm)$/.test(name)) return '[V]';
-      if (/\.(mp3|wav|ogg|flac|m4a)$/.test(name)) return '[A]';
-      if (/\.(txt|md|json|yaml|yml|xml|js|ts|go|py|java|c|cpp|h|css|html)$/.test(name)) return '[T]';
-      if (/\.(zip|gz|tar|rar|7z)$/.test(name)) return '[Z]';
-      return '[F]';
+    entryRows() {
+      const entry = this.selectedEntry
+      if (!entry) return []
+      return [
+        { key: 'path', value: entry.path || '/' },
+        { key: 'kind', value: this.entryKind(entry) },
+        { key: 'mode', value: String(entry.mode ?? '-') },
+        { key: 'uid', value: String(entry.uid ?? '-') },
+        { key: 'gid', value: String(entry.gid ?? '-') },
+        { key: 'size', value: this.formatNumber(entry.size) },
+        { key: 'inode', value: String(entry.inode ?? '-') },
+        { key: 'links', value: String(entry.nLink ?? entry.nlink ?? '-') },
+        { key: 'target', value: entry.symlinkTarget || entry.symlink_target || '-' }
+      ]
     },
-
-    getFileType(entry) {
-      if (!entry || entry.isDir) {
-        return 'Folder';
-      }
-      const name = String(entry.name || '').toLowerCase();
-      const bits = name.split('.');
-      if (bits.length <= 1) {
-        return entry.isSymlink ? 'Symlink' : 'File';
-      }
-      return bits.pop().toUpperCase();
+    canEditFile() {
+      return this.selectedEntry && !(this.selectedEntry.is_dir || this.selectedEntry.isDir)
     },
-
-    async api(url, options) {
-      const opts = options || {};
-      const res = await fetch(url, Object.assign({}, opts, { headers: this.headers(opts.headers || {}) }));
-      const contentType = res.headers.get('content-type') || '';
-      let payload = null;
-      if (contentType.indexOf('application/json') !== -1) {
-        payload = await res.json().catch(function () { return null; });
-      } else {
-        payload = await res.text();
-      }
-      if (!res.ok) {
-        const message = payload && payload.error ? payload.error.message : (typeof payload === 'string' && payload.trim() ? payload.trim() : res.statusText);
-        throw new Error(message || 'Request failed');
-      }
-      return { res: res, payload: payload };
+    canReadRanges() {
+      return this.canEditFile() && !(this.selectedEntry.is_symlink || this.selectedEntry.isSymlink)
     },
-
-    async fetchBlobURL(url) {
-      const res = await fetch(url, { headers: this.headers() });
-      if (!res.ok) {
-        const text = await res.text().catch(function () { return ''; });
-        throw new Error(text || res.statusText || 'Failed to fetch asset');
+    async api(path, options = {}) {
+      const response = await fetch(path, { ...options, headers: this.headers(options.headers || {}) })
+      const contentType = response.headers.get('content-type') || ''
+      const payload = contentType.includes('application/json') ? await response.json().catch(() => null) : await response.text()
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error.message : response.statusText
+        throw { status: response.status, payload, message }
       }
-      const blob = await res.blob();
-      const objectURL = URL.createObjectURL(blob);
-      return {
-        url: objectURL,
-        revoke: function () {
-          URL.revokeObjectURL(objectURL);
-        }
-      };
+      this.responseText = JSON.stringify(payload, null, 2)
+      return { response, payload }
     },
-
-    showToast(message) {
-      if (this.toast.timer) {
-        clearTimeout(this.toast.timer);
-      }
-      this.toast.message = message;
-      this.toast.show = true;
-      this.toast.timer = setTimeout(() => {
-        this.toast.show = false;
-      }, 3000);
-    },
-
-    clearPreview() {
-      if (this.preview.revoke) {
-        this.preview.revoke();
-      }
-      this.preview = { kind: 'none', url: '', revoke: null };
-      this.editor = '';
-    },
-
-    clearSelection() {
-      this.selectedPath = '';
-      this.selectedEntry = null;
-      this.clearPreview();
-    },
-
-    contentURL(targetPath) {
-      return this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.normalizePath(targetPath));
-    },
-
-    async loadNode(targetPath) {
-      const response = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/nodes?path=' + encodeURIComponent(this.normalizePath(targetPath)));
-      return this.normalizeEntry(response.payload.entry || {});
-    },
-
-    async bootstrapSharedMode() {
-      const claims = this.decodeShareToken(this.shareToken);
-      if (!claims || !claims.project) {
-        this.status = 'Invalid share link';
-        this.showToast('Failed to open share');
-        return;
-      }
-      this.project = claims.project;
-      this.shareRootPath = this.normalizePath(claims.path);
-      this.share.download = claims.download !== false;
-      this.status = 'Loading shared resource...';
-      try {
-        const entry = await this.loadNode(this.shareRootPath);
-        this.shareRootIsDir = !!entry.isDir;
-        if (entry.isDir) {
-          this.currentPath = entry.path;
-          this.clearSelection();
-          await this.loadDirectory(false);
-          this.status = 'Shared folder loaded';
-          return;
-        }
-        this.currentPath = entry.path;
-        this.entries = [entry];
-        await this.select(entry);
-        this.status = 'Shared file loaded';
-      } catch (error) {
-        this.entries = [];
-        this.clearSelection();
-        this.status = 'Failed to load share: ' + error.message;
-        this.showToast('Failed to load shared resource');
-      }
-    },
-
-    async openProject() {
-      this.currentPath = '';
-      this.clearSelection();
-      await this.loadProject();
-    },
-
-    async loadProject() {
-      if (!this.project) {
-        this.status = 'Enter a project name';
-        return;
-      }
-      if (this.isSharedMode) {
-        await this.bootstrapSharedMode();
-        return;
-      }
-      this.status = 'Loading project...';
-      try {
-        const response = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project));
-        this.projectStats = response.payload.stats || this.projectStats;
-        await this.loadDirectory(true);
-        this.status = 'Project loaded';
-      } catch (error) {
-        this.entries = [];
-        this.clearSelection();
-        this.status = 'Failed to load project: ' + error.message;
-      }
-    },
-
-    async loadDirectory(preserveSelection) {
-      if (!this.project) {
-        return;
-      }
-      if (this.isSharedMode && !this.shareRootIsDir && this.currentPath === this.shareRootPath) {
-        const entry = await this.loadNode(this.shareRootPath);
-        this.entries = [entry];
-        if (preserveSelection && this.selectedPath === entry.path) {
-          await this.select(entry);
-        }
-        return;
-      }
-      this.status = 'Loading directory...';
-      try {
-        const path = this.normalizePath(this.currentPath);
-        const response = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/children?path=' + encodeURIComponent(path));
-        this.entries = (response.payload.entries || []).map((entry) => this.normalizeEntry(entry));
-        if (preserveSelection && this.selectedPath) {
-          const match = this.entries.find((entry) => entry.path === this.selectedPath);
-          if (match) {
-            await this.select(match);
-          } else {
-            this.clearSelection();
-          }
-        } else {
-          this.clearSelection();
-        }
-        this.status = this.entries.length + ' items';
-      } catch (error) {
-        this.entries = [];
-        this.clearSelection();
-        this.status = 'Failed to load directory: ' + error.message;
-      }
-    },
-
-    async refreshAll() {
-      if (this.isSharedMode) {
-        await this.bootstrapSharedMode();
-        return;
-      }
-      await this.loadProject();
-    },
-
-    async navigateHome() {
-      if (this.isSharedMode) {
-        await this.navigateTo(this.shareRootPath);
-        return;
-      }
-      await this.navigateTo('');
-    },
-
-    async navigateTo(targetPath) {
-      const next = this.normalizePath(targetPath);
-      if (this.isSharedMode && !this.withinSharedRoot(next)) {
-        this.showToast('That location is outside the shared area');
-        return;
-      }
-      this.currentPath = next;
-      if (this.isSharedMode && !this.shareRootIsDir && next === this.shareRootPath) {
-        await this.loadDirectory(false);
-        return;
-      }
-      await this.loadDirectory(false);
-    },
-
-    canGoUp() {
-      if (!this.currentPath) {
-        return false;
-      }
-      if (!this.isSharedMode) {
-        return true;
-      }
-      if (!this.shareRootIsDir) {
-        return false;
-      }
-      return this.normalizePath(this.currentPath) !== this.normalizePath(this.shareRootPath);
-    },
-
-    async goUp() {
-      if (!this.canGoUp()) {
-        return;
-      }
-      await this.navigateTo(this.parentPath(this.currentPath));
-    },
-
-    async select(entry) {
-      const normalized = this.normalizeEntry(entry);
-      this.selectedPath = normalized.path;
-      this.selectedEntry = normalized;
-      if (normalized.isDir) {
-        this.clearPreview();
-        return;
-      }
-      await this.loadPreview(normalized);
-    },
-
-    async openEntry(entry) {
-      const normalized = this.normalizeEntry(entry);
-      if (normalized.isDir) {
-        await this.navigateTo(normalized.path);
-        return;
-      }
-      await this.select(normalized);
-    },
-
-    closePreview() {
-      this.clearSelection();
-    },
-
-    async loadPreview(entry) {
-      this.clearPreview();
-      const name = String(entry.name || '').toLowerCase();
-      const url = this.contentURL(entry.path);
-      try {
-        if (/\.(txt|md|json|yaml|yml|xml|js|ts|go|py|java|c|cpp|h|css|html|svg)$/.test(name)) {
-          const response = await this.api(url);
-          this.editor = response.payload;
-          this.preview.kind = 'text';
-          return;
-        }
-        if (/\.(png|jpg|jpeg|gif|bmp|webp|svg)$/.test(name)) {
-          const asset = await this.fetchBlobURL(url);
-          this.preview = { kind: 'image', url: asset.url, revoke: asset.revoke };
-          return;
-        }
-        if (/\.(mp3|wav|ogg|flac|m4a)$/.test(name)) {
-          const asset = await this.fetchBlobURL(url);
-          this.preview = { kind: 'audio', url: asset.url, revoke: asset.revoke };
-          return;
-        }
-        if (/\.(mp4|mov|avi|mkv|webm)$/.test(name)) {
-          const asset = await this.fetchBlobURL(url);
-          this.preview = { kind: 'video', url: asset.url, revoke: asset.revoke };
-          return;
-        }
-        this.preview.kind = 'none';
-      } catch (error) {
-        this.preview.kind = 'none';
-        this.showToast('Preview failed: ' + error.message);
-      }
-    },
-
-    canDownload() {
-      return !!(this.selectedEntry && !this.selectedEntry.isDir);
-    },
-
-    async downloadSelected() {
-      if (!this.canDownload()) {
-        return;
-      }
-      try {
-        const res = await fetch(this.contentURL(this.selectedPath), { headers: this.headers() });
-        if (!res.ok) {
-          throw new Error('Download failed');
-        }
-        const blob = await res.blob();
-        const objectURL = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = objectURL;
-        anchor.download = this.selectedEntry ? this.selectedEntry.name : 'download';
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(objectURL);
-      } catch (error) {
-        this.showToast(error.message || 'Download failed');
-      }
-    },
-
-    canShare() {
-      return !!(this.selectedEntry && !this.isSharedMode);
-    },
-
-    async shareSelected() {
-      if (!this.canShare()) {
-        return;
-      }
-      try {
-        const response = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/share', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: this.selectedPath })
-        });
-        this.share.url = window.location.origin + response.payload.url;
-        this.share.download = response.payload.download !== false;
-        this.modal = { open: true, title: 'Share Link', kind: 'share', fields: [], form: {} };
-      } catch (error) {
-        this.showToast('Failed to create share link');
-      }
-    },
-
-    copyShare() {
-      if (!this.share.url) {
-        return;
-      }
-      navigator.clipboard.writeText(this.share.url).then(() => {
-        this.showToast('Link copied to clipboard');
-      }).catch(() => {
-        this.showToast('Clipboard copy failed');
-      });
-    },
-
-    openShare() {
-      if (!this.share.url) {
-        return;
-      }
-      window.open(this.share.url, '_blank', 'noopener');
-    },
-
-    canSave() {
-      return !!(this.selectedEntry && !this.selectedEntry.isDir && this.preview.kind === 'text' && !this.isSharedMode);
-    },
-
-    async saveSelected() {
-      if (!this.canSave()) {
-        return;
-      }
-      try {
-        await this.api(this.contentURL(this.selectedPath), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: this.editor
-        });
-        this.showToast('File saved');
-        await this.loadDirectory(true);
-      } catch (error) {
-        this.showToast('Failed to save file');
-      }
-    },
-
-    async removeSelected() {
-      if (!this.selectedEntry || this.isSharedMode) {
-        return;
-      }
-      if (!window.confirm('Delete ' + this.selectedEntry.name + '?')) {
-        return;
-      }
-      const path = this.selectedPath;
-      const endpoint = this.selectedEntry.isDir ? 'rmdir' : 'unlink';
-      try {
-        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/' + endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: path })
-        });
-        this.showToast('Deleted');
-        await this.loadDirectory(false);
-      } catch (error) {
-        this.showToast('Failed to delete');
-      }
-    },
-
-    pickUpload() {
-      if (this.isSharedMode || !this.project) {
-        return;
-      }
-      this.$refs.uploader.click();
-    },
-
-    async uploadPicked(event) {
-      const file = event.target.files && event.target.files[0];
-      if (!file) {
-        return;
-      }
-      const targetPath = this.joinPath(this.currentPath, file.name);
-      try {
-        await this.api(this.contentURL(targetPath), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: await file.arrayBuffer()
-        });
-        this.showToast('File uploaded');
-        await this.loadDirectory(false);
-      } catch (error) {
-        this.showToast('Failed to upload file');
-      } finally {
-        event.target.value = '';
-      }
-    },
-
-    openModal(kind) {
-      if (kind === 'login') {
-        this.modal = { open: true, title: 'Sign In', kind: 'login', fields: [], form: {} };
-        return;
-      }
-      if (kind === 'mkdir') {
-        this.modal = {
-          open: true,
-          title: 'New Folder',
-          kind: kind,
-          fields: [{ key: 'path', label: 'Folder name', placeholder: 'documents' }],
-          form: { path: '' }
-        };
-        return;
-      }
-      if (kind === 'create-file') {
-        this.modal = {
-          open: true,
-          title: 'New File',
-          kind: kind,
-          fields: [{ key: 'path', label: 'File name', placeholder: 'notes.txt' }],
-          form: { path: '' }
-        };
-        return;
-      }
-      if (kind === 'rename' && this.selectedEntry) {
-        this.modal = {
-          open: true,
-          title: 'Rename',
-          kind: kind,
-          fields: [{ key: 'new_path', label: 'New name or path', placeholder: this.selectedEntry.name }],
-          form: { new_path: this.selectedEntry.name }
-        };
-      }
-    },
-
-    closeModal() {
-      this.modal.open = false;
-    },
-
-    resolveCurrentPath(input) {
-      return this.joinPath(this.currentPath, input);
-    },
-
-    resolveRenamePath(input) {
-      const value = String(input || '').trim();
-      if (!value) {
-        return '';
-      }
-      if (value.indexOf('/') !== -1) {
-        return this.normalizePath(value);
-      }
-      return this.joinPath(this.parentPath(this.selectedPath), value);
-    },
-
-    async submitModal() {
-      try {
-        if (this.modal.kind === 'mkdir') {
-          await this.mkdir();
-        } else if (this.modal.kind === 'create-file') {
-          await this.createFile();
-        } else if (this.modal.kind === 'rename') {
-          await this.rename();
-        }
-        this.closeModal();
-      } catch (error) {
-        this.showToast(error.message || 'Action failed');
-      }
-    },
-
-    async mkdir() {
-      const targetPath = this.resolveCurrentPath(this.modal.form.path);
-      if (!targetPath) {
-        throw new Error('Folder name is required');
-      }
-      await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/mkdir', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath })
-      });
-      this.showToast('Folder created');
-      await this.loadDirectory(false);
-    },
-
-    async createFile() {
-      const targetPath = this.resolveCurrentPath(this.modal.form.path);
-      if (!targetPath) {
-        throw new Error('File name is required');
-      }
-      await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/create-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath })
-      });
-      this.showToast('File created');
-      await this.loadDirectory(false);
-    },
-
-    async rename() {
-      const newPath = this.resolveRenamePath(this.modal.form.new_path);
-      if (!newPath || !this.selectedPath) {
-        throw new Error('New path is required');
-      }
-      await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ old_path: this.selectedPath, new_path: newPath })
-      });
-      this.showToast('Renamed');
-      this.selectedPath = newPath;
-      await this.loadDirectory(true);
-    },
-
     async login() {
       try {
-        const response = await this.api(this.config.basePath + '/auth/login', {
+        const { payload } = await this.api(this.config.basePath + '/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(this.auth)
-        });
-        this.token = response.payload.token;
-        localStorage.setItem('storhub.token', this.token);
-        this.auth.password = '';
-        this.showToast('Signed in');
-        this.closeModal();
-        if (this.project) {
-          await this.loadProject();
-        }
+          body: JSON.stringify({ username: this.auth.username, password: this.auth.password })
+        })
+        this.token = payload.token
+        localStorage.setItem('storhub.token', this.token)
+        this.auth.password = ''
+        this.statusText = 'Authenticated.'
+        if (this.project) await this.refreshAll()
       } catch (error) {
-        this.showToast('Sign in failed');
+        this.fail('Login failed', error)
       }
     },
-
     logout() {
-      this.token = '';
-      localStorage.removeItem('storhub.token');
-      this.project = '';
-      this.currentPath = '';
-      this.entries = [];
-      this.projectStats = { files: 0, directories: 0, bytes: 0, assets: 0 };
-      this.clearSelection();
-      this.showToast('Signed out');
+      this.token = ''
+      localStorage.removeItem('storhub.token')
+      this.statusText = 'Signed out.'
+    },
+    requireProject() {
+      if (!this.project) throw new Error('Project is required')
+    },
+    fail(label, error) {
+      this.statusText = label
+      this.responseText = JSON.stringify(error.payload || { error: { message: error.message || String(error) } }, null, 2)
+    },
+    async loadProject() {
+      try {
+        this.requireProject()
+        this.currentPath = ''
+        this.selectedPath = ''
+        this.selectedEntry = null
+        await this.refreshAll()
+      } catch (error) {
+        this.fail('Project load failed', error)
+      }
+    },
+    async refreshAll() {
+      await Promise.all([this.loadStats(), this.loadDirectory(this.currentPath), this.loadRevisions()])
+      if (this.selectedPath) await this.inspectPath(this.selectedPath)
+    },
+    async loadStats() {
+      const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project))
+      this.projectStats = payload.stats || {}
+    },
+    async loadDirectory(path) {
+      this.currentPath = path || ''
+      this.statusText = 'Loading directory ' + this.currentPathLabel()
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/children?path=' + encodeURIComponent(this.currentPath))
+        this.entries = payload.entries || []
+        this.statusText = 'Loaded ' + this.entries.length + ' entries'
+      } catch (error) {
+        this.entries = []
+        this.fail('Directory request failed', error)
+      }
+    },
+    async selectEntry(entry) {
+      this.selectedPath = entry.path
+      if (entry.is_dir || entry.isDir) {
+        await this.inspectPath(entry.path)
+        await this.loadDirectory(entry.path)
+        return
+      }
+      await this.inspectPath(entry.path)
+      await this.readSelected()
+    },
+    async inspectPath(path) {
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/nodes?path=' + encodeURIComponent(path))
+        this.selectedEntry = payload.entry
+        this.selectedPath = path
+        await this.loadXAttrs()
+      } catch (error) {
+        this.fail('Stat failed', error)
+      }
+    },
+    async readSelected() {
+      if (!this.selectedPath) return
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath))
+        this.editor = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+        this.statusText = 'Loaded content for ' + this.selectedPath
+      } catch (error) {
+        this.fail('Read failed', error)
+      }
+    },
+    async readRange() {
+      if (!this.canReadRanges()) return
+      try {
+        const end = Number(this.range.offset) + Number(this.range.length) - 1
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath), {
+          headers: { Range: 'bytes=' + this.range.offset + '-' + end }
+        })
+        this.editor = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+        this.statusText = 'Loaded range for ' + this.selectedPath
+      } catch (error) {
+        this.fail('Range read failed', error)
+      }
+    },
+    async saveFile() {
+      if (!this.canEditFile()) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath), {
+          method: 'PUT',
+          body: this.editor
+        })
+        await this.inspectPath(this.selectedPath)
+        await this.loadDirectory(this.currentPath)
+        await this.loadRevisions()
+        this.statusText = 'Saved ' + this.selectedPath
+      } catch (error) {
+        this.fail('Save failed', error)
+      }
+    },
+    async appendToSelected() {
+      const text = prompt('Append text')
+      if (text === null) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath) + '&op=append', {
+          method: 'PATCH',
+          body: text
+        })
+        await this.readSelected()
+        await this.loadRevisions()
+      } catch (error) {
+        this.fail('Append failed', error)
+      }
+    },
+    async patchSelected() {
+      const offset = prompt('Patch offset', '0')
+      if (offset === null) return
+      const deleteSize = prompt('Delete size', '0')
+      if (deleteSize === null) return
+      const text = prompt('Replacement text', '')
+      if (text === null) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath) + '&op=patch&offset=' + encodeURIComponent(offset) + '&delete_size=' + encodeURIComponent(deleteSize), {
+          method: 'PATCH',
+          body: text
+        })
+        await this.readSelected()
+        await this.loadRevisions()
+      } catch (error) {
+        this.fail('Patch failed', error)
+      }
+    },
+    async truncateSelected() {
+      const size = prompt('New file size', '0')
+      if (size === null) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/content?path=' + encodeURIComponent(this.selectedPath) + '&op=truncate&size=' + encodeURIComponent(size), {
+          method: 'PATCH'
+        })
+        await this.readSelected()
+        await this.loadRevisions()
+      } catch (error) {
+        this.fail('Truncate failed', error)
+      }
+    },
+    async loadRevisions() {
+      if (!this.project) return
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/revisions')
+        this.revisions = payload.revisions || []
+      } catch (error) {
+        this.fail('Revision load failed', error)
+      }
+    },
+    async rollback(sha) {
+      if (!confirm('Rollback metadata to ' + sha + '?')) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/ops/rollback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ commit_sha: sha })
+        })
+        await this.refreshAll()
+      } catch (error) {
+        this.fail('Rollback failed', error)
+      }
+    },
+    async loadXAttrs() {
+      if (!this.selectedPath) { this.xattrs = []; return }
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/xattrs?path=' + encodeURIComponent(this.selectedPath))
+        const names = payload.names || []
+        this.xattrs = []
+        for (const name of names) {
+          try {
+            const value = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/xattrs/value?path=' + encodeURIComponent(this.selectedPath) + '&name=' + encodeURIComponent(name))
+            this.xattrs.push({ name, value: typeof value.payload === 'string' ? value.payload : JSON.stringify(value.payload) })
+          } catch (_) {
+            this.xattrs.push({ name, value: '[unavailable]' })
+          }
+        }
+      } catch (error) {
+        this.xattrs = []
+        this.fail('XAttr load failed', error)
+      }
+    },
+    async inspectXAttr(name) {
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/xattrs/value?path=' + encodeURIComponent(this.selectedPath) + '&name=' + encodeURIComponent(name))
+        this.responseText = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+      } catch (error) {
+        this.fail('XAttr read failed', error)
+      }
+    },
+    openModal(kind) {
+      this.modal = { open: true, kind, title: this.modalTitle(kind), form: { path: this.currentPath ? this.currentPath + '/' : '', newPath: this.selectedPath || '', target: this.selectedPath || '', mode: this.selectedEntry ? String(this.selectedEntry.mode || '') : '0644', uid: this.selectedEntry ? this.selectedEntry.uid || 0 : 0, gid: this.selectedEntry ? this.selectedEntry.gid || 0 : 0, atime: '', mtime: '', name: this.xattrs[0] ? this.xattrs[0].name : '', value: '' } }
+    },
+    closeModal() { this.modal.open = false },
+    modalTitle(kind) {
+      return ({ 'mkdir': 'Create Directory', 'create-file': 'Create File', 'rename': 'Rename Entry', 'link': 'Create Hard Link', 'symlink': 'Create Symlink', 'chmod': 'Change Mode', 'chown': 'Change Owner', 'utimes': 'Update Timestamps', 'xattr-set': 'Set XAttr', 'xattr-remove': 'Remove XAttr' })[kind] || 'Action'
+    },
+    async submitModal() {
+      const f = this.modal.form
+      try {
+        if (this.modal.kind === 'mkdir') await this.jsonPost('/ops/mkdir', { path: f.path })
+        if (this.modal.kind === 'create-file') await this.jsonPost('/ops/create-file', { path: f.path })
+        if (this.modal.kind === 'rename') await this.jsonPost('/ops/rename', { old_path: this.selectedPath, new_path: f.newPath })
+        if (this.modal.kind === 'link') await this.jsonPost('/ops/link', { existing_path: this.selectedPath, new_path: f.newPath })
+        if (this.modal.kind === 'symlink') await this.jsonPost('/ops/symlink', { target: f.target, link_path: f.newPath })
+        if (this.modal.kind === 'chmod') await this.jsonPost('/ops/chmod', { path: this.selectedPath, mode: parseInt(f.mode, 8) || Number(f.mode) })
+        if (this.modal.kind === 'chown') await this.jsonPost('/ops/chown', { path: this.selectedPath, uid: Number(f.uid), gid: Number(f.gid) })
+        if (this.modal.kind === 'utimes') await this.jsonPost('/ops/utimes', { path: this.selectedPath, atime: new Date(f.atime).toISOString(), mtime: new Date(f.mtime).toISOString() })
+        if (this.modal.kind === 'xattr-set') await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/xattrs/value?path=' + encodeURIComponent(this.selectedPath) + '&name=' + encodeURIComponent(f.name), { method: 'PUT', body: f.value })
+        if (this.modal.kind === 'xattr-remove') await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/xattrs/value?path=' + encodeURIComponent(this.selectedPath) + '&name=' + encodeURIComponent(f.name), { method: 'DELETE' })
+        this.closeModal()
+        await this.refreshAll()
+      } catch (error) {
+        this.fail('Action failed', error)
+      }
+    },
+    async jsonPost(suffix, body) {
+      return this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + suffix, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    },
+    async removeSelected() {
+      if (!this.selectedPath) return
+      if (!confirm('Remove ' + this.selectedPath + '?')) return
+      try {
+        if (this.selectedEntry && (this.selectedEntry.is_dir || this.selectedEntry.isDir)) {
+          await this.jsonPost('/ops/rmdir', { path: this.selectedPath })
+        } else {
+          await this.jsonPost('/ops/unlink', { path: this.selectedPath })
+        }
+        this.selectedPath = ''
+        this.selectedEntry = null
+        this.editor = ''
+        await this.refreshAll()
+      } catch (error) {
+        this.fail('Remove failed', error)
+      }
+    },
+    async removeCurrentDirectory() {
+      if (!this.currentPath) return
+      if (!confirm('Remove current directory ' + this.currentPath + '?')) return
+      try {
+        await this.jsonPost('/ops/rmdir', { path: this.currentPath })
+        this.goUp()
+      } catch (error) {
+        this.fail('Directory removal failed', error)
+      }
+    },
+    goUp() {
+      if (!this.currentPath) return this.loadDirectory('')
+      const next = this.currentPath.split('/').slice(0, -1).join('/')
+      this.loadDirectory(next)
+    },
+    async deleteProject() {
+      if (!this.project) return
+      if (!confirm('Delete project ' + this.project + '?')) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project), { method: 'DELETE' })
+        this.entries = []
+        this.revisions = []
+        this.projectStats = {}
+        this.selectedPath = ''
+        this.selectedEntry = null
+        this.editor = ''
+        this.statusText = 'Project deleted.'
+      } catch (error) {
+        this.fail('Project deletion failed', error)
+      }
     }
-  };
-};
-`
+  }
+}`
 
 func (h *restHandler) writeHTML(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

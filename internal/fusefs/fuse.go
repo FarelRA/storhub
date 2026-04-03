@@ -130,6 +130,10 @@ type ByteRange struct {
 	End   int64
 }
 
+type writeBootstrap struct {
+	baseSize int64
+}
+
 type (
 	TestNode   = storhubNode
 	TestHandle = storhubHandle
@@ -145,6 +149,7 @@ func DefaultOptions() Options {
 		PageSize:        128 * 1024,
 		ReadAheadPages:  4,
 		MaxCachedPages:  256,
+		Debug:           true,
 	}
 }
 
@@ -219,6 +224,9 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if opts.MaxCachedPages <= 0 {
 		opts.MaxCachedPages = defaults.MaxCachedPages
 	}
+	if opts.Logger == nil {
+		opts.Logger = log.New(os.Stderr, "storhub/fuse: ", log.LstdFlags|log.Lmicroseconds)
+	}
 	cacheDir := opts.CacheDir
 	if strings.TrimSpace(cacheDir) == "" {
 		cacheDir = path.Join(os.TempDir(), "storhub-fuse", project)
@@ -248,6 +256,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 }
 
 func (s *Filesystem) Mount(mountPoint string) error {
+	s.debugf("mount start project=%s target=%s allow_other=%t cache_dir=%s", s.project, mountPoint, s.opts.AllowOther, s.cacheDir)
 	options := &gofusefs.Options{
 		EntryTimeout:    durationPtr(s.opts.EntryTimeout),
 		AttrTimeout:     durationPtr(s.opts.AttrTimeout),
@@ -260,9 +269,11 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.AllowOther = s.opts.AllowOther
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
+		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
 		return err
 	}
 	s.server = server
+	s.debugf("mount ready project=%s target=%s", s.project, mountPoint)
 	return nil
 }
 
@@ -276,10 +287,18 @@ func (s *Filesystem) Unmount() error {
 	if s.server == nil {
 		return nil
 	}
-	return s.server.Unmount()
+	s.debugf("unmount start project=%s", s.project)
+	err := s.server.Unmount()
+	if err != nil {
+		s.debugf("unmount failed project=%s err=%v", s.project, err)
+		return err
+	}
+	s.debugf("unmount complete project=%s", s.project)
+	return nil
 }
 
 func (s *Filesystem) Close() error {
+	s.debugf("close start project=%s", s.project)
 	s.mu.Lock()
 	if s.closing {
 		s.mu.Unlock()
@@ -299,7 +318,15 @@ func (s *Filesystem) Close() error {
 	for _, handle := range handles {
 		handle.closeTemp()
 	}
+	s.debugf("close complete project=%s", s.project)
 	return nil
+}
+
+func (s *Filesystem) debugf(format string, args ...any) {
+	if !s.opts.Debug || s.opts.Logger == nil {
+		return
+	}
+	s.opts.Logger.Printf(format, args...)
 }
 
 func (s *Filesystem) Invalidate() {
@@ -576,6 +603,7 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 }
 
 func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
+	targetPath := n.currentPath()
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return nil, 0, errnoFromError(err)
@@ -586,10 +614,11 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if entry.IsSymlink {
 		return nil, 0, syscall.ELOOP
 	}
-	h, err := n.fs.newHandle(ctx, n.inode, flags)
+	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
 	if err != nil {
 		return nil, 0, errnoFromError(err)
 	}
+	n.fs.debugf("open path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
 	return h, 0, 0
 }
 
@@ -609,10 +638,11 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	h, err := n.fs.newHandle(ctx, entry.Inode, flags)
+	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
 		return nil, nil, 0, errnoFromError(err)
 	}
+	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
 	return ino, h, 0, 0
 }
 
@@ -633,6 +663,7 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.debugf("mkdir path=%s mode=%#o", childPath, mode)
 	return ino, 0
 }
 
@@ -654,6 +685,7 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	} else {
 		n.notifyEntry(name)
 	}
+	n.fs.debugf("unlink path=%s", childPath)
 	return 0
 }
 
@@ -669,6 +701,7 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	} else {
 		n.notifyEntry(name)
 	}
+	n.fs.debugf("rmdir path=%s", childPath)
 	return 0
 }
 
@@ -686,6 +719,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	if err == nil {
 		n.fs.rememberPath(entry.Inode, newPath)
 	}
+	n.fs.debugf("rename old=%s new=%s flags=%#x", oldPath, newPath, flags)
 	return 0
 }
 
@@ -750,6 +784,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	}
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
+	n.fs.debugf("setattr path=%s valid=%#x", targetPath, in.Valid)
 	_ = f
 	return 0
 }
@@ -852,13 +887,16 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 	return 0
 }
 
-func (s *Filesystem) newHandle(ctx context.Context, inode uint64, flags uint32) (*storhubHandle, error) {
-	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: s.pathForInode(inode), owners: make(map[uint64]struct{})}
+func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap) (*storhubHandle, error) {
+	if strings.TrimSpace(targetPath) == "" {
+		targetPath = s.pathForInode(inode)
+	}
+	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{})}
 	s.mu.Lock()
 	s.handles[h.id] = h
 	s.mu.Unlock()
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND|syscall.O_TRUNC) != 0 {
-		writeState, err := s.acquireWriteState(ctx, inode, h.path)
+		writeState, err := s.acquireWriteState(ctx, inode, h.path, bootstrap)
 		if err != nil {
 			h.closeTemp()
 			s.mu.Lock()
@@ -867,7 +905,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, flags uint32) 
 			return nil, err
 		}
 		h.writeState = writeState
-		if flags&syscall.O_TRUNC != 0 {
+		if flags&syscall.O_TRUNC != 0 && bootstrap == nil {
 			writeState.mu.Lock()
 			if err := writeState.setSizeLocked(0); err != nil {
 				writeState.mu.Unlock()
@@ -915,9 +953,10 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 	return nil
 }
 
-func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, targetPath string) (*inodeWriteState, error) {
+func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, targetPath string, bootstrap *writeBootstrap) (*inodeWriteState, error) {
 	s.mu.Lock()
 	if existing := s.writeStates[inode]; existing != nil {
+		existing.path = targetPath
 		existing.refs++
 		s.mu.Unlock()
 		return existing, nil
@@ -925,7 +964,13 @@ func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, target
 	state := &inodeWriteState{fs: s, inode: inode, path: targetPath, refs: 1}
 	s.writeStates[inode] = state
 	s.mu.Unlock()
-	if err := state.materialize(ctx); err != nil {
+	var err error
+	if bootstrap != nil {
+		err = state.materializeBootstrap(bootstrap.baseSize)
+	} else {
+		err = state.materialize(ctx)
+	}
+	if err != nil {
 		s.mu.Lock()
 		if s.writeStates[inode] == state {
 			delete(s.writeStates, inode)
@@ -935,6 +980,26 @@ func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, target
 		return nil, err
 	}
 	return state, nil
+}
+
+func (w *inodeWriteState) materializeBootstrap(size int64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.temp != nil {
+		return nil
+	}
+	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
+	if err != nil {
+		return err
+	}
+	w.temp = temp
+	w.tempPath = temp.Name()
+	w.baseSize = size
+	w.logicalSize = size
+	if err := w.temp.Truncate(size); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Filesystem) releaseWriteState(state *inodeWriteState) {
@@ -1463,6 +1528,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 			}
 		}
 		h.writeState.markDirtyLocked(off, end)
+		h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
 		return uint32(n), 0
 	}
 	if err := h.materialize(ctx); err != nil {
@@ -1481,6 +1547,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err != nil {
 		return uint32(n), errnoFromError(err)
 	}
+	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.path, h.inode, off, n)
 	return uint32(n), 0
 }
 
@@ -1511,10 +1578,12 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
+	h.fs.debugf("fsync path=%s inode=%d", h.path, h.inode)
 	return h.commit(ctx)
 }
 
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
+	h.fs.debugf("release path=%s inode=%d", h.path, h.inode)
 	errno := h.commit(ctx)
 	h.releaseTrackedLocks()
 	h.closeTemp()
@@ -1547,8 +1616,10 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		targetPath := h.writeState.path
 		baseSize := h.writeState.baseSize
 		logicalSize := h.writeState.logicalSize
+		dirtyCount := len(h.writeState.dirtyRanges)
 		if len(h.writeState.dirtyRanges) == 0 {
 			h.writeState.mu.Unlock()
+			h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
 			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
 				return errnoFromError(err)
 			}
@@ -1567,6 +1638,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 				return errnoFromError(err)
 			}
 			defer os.Remove(snapshotPath)
+			h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 			repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 			if err != nil {
 				return errnoFromError(err)
@@ -1593,6 +1665,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 				return errnoFromError(err)
 			}
 			defer os.Remove(snapshotPath)
+			h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
 			if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
 				return errnoFromError(err)
 			}
@@ -1618,6 +1691,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			edits[i] = buf
 		}
 		h.writeState.mu.Unlock()
+		h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 		for i := len(planned) - 1; i >= 0; i-- {
 			dirty := planned[i]
 			deleteSize := dirty.End - dirty.Start

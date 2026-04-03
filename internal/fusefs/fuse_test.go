@@ -339,7 +339,77 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 	}
 }
 
+func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
+	now := time.Unix(30, 0).UTC()
+	var replacedPath string
+	var replacedBytes []byte
+	fake := &stubHub{
+		createFile: func(_ context.Context, _ string, target string) (*meta.FileMetadata, error) {
+			return &meta.FileMetadata{
+				Name:       target,
+				Kind:       meta.NodeKindFile,
+				Inode:      8,
+				Mode:       0o644,
+				UID:        1000,
+				GID:        1000,
+				NLink:      1,
+				UploadedAt: now,
+				ModifiedAt: now,
+				AccessedAt: now,
+				ChangedAt:  now,
+			}, nil
+		},
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			switch target {
+			case "docs":
+				return &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			case "docs/new.txt":
+				return nil, syscall.ENOENT
+			default:
+				return nil, syscall.ENOENT
+			}
+		},
+		replaceFile: func(_ context.Context, _ string, target, inputPath string) (*meta.FileMetadata, error) {
+			data, err := os.ReadFile(inputPath)
+			if err != nil {
+				return nil, err
+			}
+			replacedPath = target
+			replacedBytes = data
+			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 8, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	var out fuse.EntryOut
+	_, handleAny, _, errno := dirNode.Create(context.Background(), "new.txt", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL, 0o644, &out)
+	if errno != 0 {
+		t.Fatalf("create file: %v", errno)
+	}
+	handle := handleAny.(*storhubHandle)
+	if written, errno := handle.Write(context.Background(), []byte("hello"), 0); errno != 0 || written != 5 {
+		t.Fatalf("write created file: written=%d errno=%v", written, errno)
+	}
+	if errno := handle.Fsync(context.Background(), 0); errno != 0 {
+		t.Fatalf("fsync created file: %v", errno)
+	}
+	if replacedPath != "docs/new.txt" {
+		t.Fatalf("unexpected replace path: %q", replacedPath)
+	}
+	if string(replacedBytes) != "hello" {
+		t.Fatalf("unexpected replace payload: %q", replacedBytes)
+	}
+	if errno := handle.Release(context.Background()); errno != 0 {
+		t.Fatalf("release created file: %v", errno)
+	}
+}
+
 type stubHub struct {
+	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
 	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)
 	readDir      func(context.Context, string, string) ([]shfs.DirEntry, error)
 	statFS       func(context.Context, string) (*shfs.FSStats, error)
@@ -351,6 +421,7 @@ type stubHub struct {
 	readlink     func(context.Context, string, string) (string, error)
 	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
+	replaceFile  func(context.Context, string, string, string) (*meta.FileMetadata, error)
 	now          time.Time
 	chunkSize    int64
 }
@@ -376,7 +447,10 @@ func (s *stubHub) StatFSContext(ctx context.Context, project string) (*shfs.FSSt
 	return &shfs.FSStats{}, nil
 }
 
-func (*stubHub) CreateFileContext(context.Context, string, string) (*meta.FileMetadata, error) {
+func (s *stubHub) CreateFileContext(ctx context.Context, project, target string) (*meta.FileMetadata, error) {
+	if s.createFile != nil {
+		return s.createFile(ctx, project, target)
+	}
 	return nil, io.EOF
 }
 func (*stubHub) MkdirContext(context.Context, string, string) error  { return nil }
@@ -436,7 +510,10 @@ func (s *stubHub) ReadFileAtContext(ctx context.Context, project, target string,
 func (*stubHub) PatchFileContext(context.Context, string, string, int64, int64, []byte) (*meta.FileMetadata, error) {
 	return nil, nil
 }
-func (*stubHub) ReplaceFileContext(context.Context, string, string, string) (*meta.FileMetadata, error) {
+func (s *stubHub) ReplaceFileContext(ctx context.Context, project, target, inputPath string) (*meta.FileMetadata, error) {
+	if s.replaceFile != nil {
+		return s.replaceFile(ctx, project, target, inputPath)
+	}
 	return nil, nil
 }
 func (s *stubHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error) {

@@ -85,45 +85,61 @@ func (a *App) Run(args []string) error {
 	}
 	cmd := args[0]
 	rest := args[1:]
+	a.logf("command start: %s %s", cmd, strings.Join(rest, " "))
+	var err error
 	switch cmd {
 	case "help", "-h", "--help":
 		a.printRootHelp()
 		return nil
 	case "upload":
-		return a.runUpload(rest, false)
+		err = a.runUpload(rest, false)
 	case "replace":
-		return a.runUpload(rest, true)
+		err = a.runUpload(rest, true)
 	case "download":
-		return a.runDownload(rest)
+		err = a.runDownload(rest)
 	case "ls":
-		return a.runList(rest)
+		err = a.runList(rest)
 	case "stat":
-		return a.runStat(rest)
+		err = a.runStat(rest)
 	case "cat":
-		return a.runCat(rest)
+		err = a.runCat(rest)
 	case "mkdir":
-		return a.runMkdir(rest)
+		err = a.runMkdir(rest)
 	case "rm":
-		return a.runRemove(rest)
+		err = a.runRemove(rest)
 	case "mv":
-		return a.runMove(rest)
+		err = a.runMove(rest)
 	case "append":
-		return a.runAppend(rest)
+		err = a.runAppend(rest)
 	case "write":
-		return a.runWrite(rest)
+		err = a.runWrite(rest)
 	case "patch":
-		return a.runPatch(rest)
+		err = a.runPatch(rest)
 	case "revisions":
-		return a.runRevisions(rest)
+		err = a.runRevisions(rest)
 	case "rollback":
-		return a.runRollback(rest)
+		err = a.runRollback(rest)
 	case "mount":
-		return a.runMount(rest)
+		err = a.runMount(rest)
 	case "serve-rest":
-		return a.runServeREST(rest)
+		err = a.runServeREST(rest)
 	default:
-		return fmt.Errorf("unknown command %q\n\n%s", cmd, rootHelp)
+		err = fmt.Errorf("unknown command %q\n\n%s", cmd, rootHelp)
 	}
+	if err != nil {
+		a.logf("command failed: %s err=%v", cmd, err)
+		return err
+	}
+	a.logf("command complete: %s", cmd)
+	return nil
+}
+
+func (a *App) logf(format string, args ...any) {
+	if a.stderr == nil {
+		return
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	_, _ = fmt.Fprintf(a.stderr, "%s storhub: %s\n", stamp, fmt.Sprintf(format, args...))
 }
 
 type restAuthFile struct {
@@ -518,7 +534,7 @@ func (a *App) runMount(args []string) error {
 	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
 	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
 	allowOther := fs.Bool("allow-other", false, "Enable allow_other on the FUSE mount")
-	debug := fs.Bool("debug", false, "Enable FUSE debug logging")
+	debug := fs.Bool("debug", true, "Enable FUSE debug logging")
 	cacheDir := fs.String("cache-dir", "", "Optional cache directory")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -589,12 +605,36 @@ func (a *App) runServeREST(args []string) error {
 	if err != nil {
 		return err
 	}
+	handler = a.loggingMiddleware(handler)
 	mode := "without auth"
 	if opts.Auth != nil {
 		mode = "with auth"
 	}
 	fmt.Fprintf(a.stdout, "serving REST API on %s%s %s\n", *listen, opts.BasePath, mode)
 	return restListenAndServeFn(*listen, handler)
+}
+
+func (a *App) loggingMiddleware(next http.Handler) http.Handler {
+	if next == nil {
+		return nil
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		a.logf("http start: method=%s path=%s remote=%s", r.Method, r.URL.RequestURI(), r.RemoteAddr)
+		next.ServeHTTP(wrapped, r)
+		a.logf("http done: method=%s path=%s status=%d duration=%s", r.Method, r.URL.RequestURI(), wrapped.status, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
