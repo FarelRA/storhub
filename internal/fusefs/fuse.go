@@ -1233,6 +1233,7 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	}
 	if size == 0 {
 		w.tempAuthoritative = true
+		w.clearBaseSnapshotLocked()
 	} else if size > oldSize && oldSize < size && !w.tempAuthoritative {
 		w.tempAuthoritative = false
 	}
@@ -1261,6 +1262,7 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 		limit = max
 	}
 	filled := int64(0)
+	visibleBaseSize := minInt64(w.baseSize, w.logicalSize)
 	for filled < limit {
 		segmentStart := off + filled
 		dirty, dirtyRange := w.nextDirtyRangeLocked(segmentStart)
@@ -1286,7 +1288,7 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 		if dirtyRange.Start >= 0 && dirtyRange.Start < cleanEnd {
 			cleanEnd = dirtyRange.Start
 		}
-		if segmentStart >= w.baseSize {
+		if segmentStart >= visibleBaseSize {
 			for i := filled; i < cleanEnd-off; i++ {
 				dest[i] = 0
 			}
@@ -1294,8 +1296,8 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 			continue
 		}
 		readEnd := cleanEnd
-		if readEnd > w.baseSize {
-			readEnd = w.baseSize
+		if readEnd > visibleBaseSize {
+			readEnd = visibleBaseSize
 		}
 		if w.baseTemp != nil {
 			n, err := w.baseTemp.ReadAt(dest[filled:filled+(readEnd-segmentStart)], segmentStart)

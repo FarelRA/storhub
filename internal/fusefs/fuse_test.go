@@ -115,11 +115,20 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	if got := state.dirtyBytesLocked(); got != 6 {
 		t.Fatalf("unexpected dirty bytes: %d", got)
 	}
+	baseTemp, err := os.CreateTemp(cacheDir, "inode-base-*")
+	if err != nil {
+		t.Fatalf("create base temp file: %v", err)
+	}
+	state.baseTemp = baseTemp
+	state.baseTempPath = baseTemp.Name()
 	if err := state.setSizeLocked(12); err != nil {
 		t.Fatalf("grow file: %v", err)
 	}
 	if err := state.setSizeLocked(6); err != nil {
 		t.Fatalf("shrink file: %v", err)
+	}
+	if state.baseSize != 10 {
+		t.Fatalf("expected committed base size 10, got %d", state.baseSize)
 	}
 	if err := state.setSizeLocked(-1); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("expected invalid size error, got %v", err)
