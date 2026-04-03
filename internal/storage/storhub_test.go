@@ -150,6 +150,43 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	}
 }
 
+func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
+	backend := newMockGitHub(t)
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
+			current := active.Add(1)
+			for {
+				peak := maxActive.Load()
+				if current <= peak || maxActive.CompareAndSwap(peak, current) {
+					break
+				}
+			}
+			time.Sleep(15 * time.Millisecond)
+			active.Add(-1)
+		}
+		return false
+	}
+	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 3, MaxRetries: 0})
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
+	input := writeTempFile(t, t.TempDir(), "video.bin", data)
+	if _, err := hub.UploadFileContext(ctx, "project-parallel-read", "video.bin", input); err != nil {
+		t.Fatalf("upload large file: %v", err)
+	}
+	got, err := hub.ReadFileAtContext(ctx, "project-parallel-read", "video.bin", 0, int64(len(data)))
+	if err != nil {
+		t.Fatalf("read file at: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("read data mismatch")
+	}
+	if peak := maxActive.Load(); peak < 2 {
+		t.Fatalf("expected concurrent chunk downloads, got peak %d", peak)
+	}
+}
+
 func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())

@@ -8,7 +8,7 @@ import (
 
 const (
 	MaxReleaseAssetSize           int64 = (2 * 1024 * 1024 * 1024) - 1
-	DefaultChunkSize              int64 = 256 * 1024 * 1024
+	DefaultChunkSize              int64 = 32 * 1024 * 1024
 	DefaultBufferSize                   = 1 * 1024 * 1024
 	DefaultMaxConcurrentTransfers       = 8
 )

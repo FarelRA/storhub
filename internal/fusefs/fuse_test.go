@@ -316,6 +316,41 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	state.closeTemp()
 }
 
+func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
+	cacheDir := t.TempDir()
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	working, err := os.CreateTemp(cacheDir, "inode-working-*")
+	if err != nil {
+		t.Fatalf("create working temp: %v", err)
+	}
+	if _, err := working.WriteAt([]byte("abcdef"), 0); err != nil {
+		t.Fatalf("seed working temp: %v", err)
+	}
+	state := &inodeWriteState{
+		fs:                fsys,
+		inode:             1,
+		temp:              working,
+		tempPath:          working.Name(),
+		logicalSize:       6,
+		tempAuthoritative: true,
+	}
+	inputPath, cleanup, err := state.replaceInputPathLocked(context.Background())
+	if err != nil {
+		t.Fatalf("replace input path: %v", err)
+	}
+	if cleanup {
+		t.Fatal("expected working temp reuse without cleanup")
+	}
+	if inputPath != working.Name() {
+		t.Fatalf("expected working temp path %q, got %q", working.Name(), inputPath)
+	}
+	state.closeTemp()
+}
+
 func TestLockAndErrorHelpers(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
@@ -1588,6 +1589,20 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 	return temp.Name(), nil
 }
 
+func (w *inodeWriteState) replaceInputPathLocked(ctx context.Context) (string, bool, error) {
+	if w.temp != nil && w.tempPath != "" && (w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize)) {
+		if err := w.temp.Truncate(w.logicalSize); err != nil {
+			return "", false, err
+		}
+		return w.tempPath, false, nil
+	}
+	snapshotPath, err := w.createCommittedSnapshotLocked(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return snapshotPath, true, nil
+}
+
 func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges []ByteRange) (string, error) {
 	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-ranges-*")
 	if err != nil {
@@ -1854,13 +1869,15 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			return 0
 		}
 		if h.writeState.shouldReplaceLocked(planned) {
-			snapshotPath, err := h.writeState.createCommittedSnapshotLocked(ctx)
+			snapshotPath, cleanupSnapshot, err := h.writeState.replaceInputPathLocked(ctx)
 			h.writeState.mu.Unlock()
 			if err != nil {
 				h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
 				return errnoFromError(err)
 			}
-			defer os.Remove(snapshotPath)
+			if cleanupSnapshot {
+				defer os.Remove(snapshotPath)
+			}
 			h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
 			if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
 				h.fs.debugf("commit failed path=%s inode=%d step=replace err=%v", targetPath, h.inode, err)
@@ -2502,7 +2519,7 @@ func validateProject(project string) error {
 
 func normalizedChunkSize(chunkSize int64) int64 {
 	if chunkSize <= 0 {
-		chunkSize = 256 * 1024 * 1024
+		chunkSize = chunking.DefaultChunkSize
 	}
 	const maxReleaseAssetSize = int64(2 * 1024 * 1024 * 1024)
 	if chunkSize > maxReleaseAssetSize {

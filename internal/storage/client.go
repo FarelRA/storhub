@@ -889,7 +889,97 @@ func (h *StorHub) ReadFileAt(project, filePath string, offset, length int64) ([]
 }
 
 func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
-	return h.fsService().ReadFileAtContext(ctx, project, filePath, offset, length)
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	cleanPath, err := shfs.NormalizePath(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "" {
+		return nil, errors.New("file name is required")
+	}
+	if offset < 0 || length < 0 {
+		return nil, errors.New("read offset and length must be non-negative")
+	}
+	repo, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	file := repo.FindFile(cleanPath)
+	if file == nil {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if file.Kind == NodeKindSymlink {
+		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
+	}
+	if offset > file.Size {
+		return nil, io.EOF
+	}
+	if length == 0 {
+		return []byte{}, nil
+	}
+	end := offset + length
+	if end > file.Size {
+		end = file.Size
+	}
+	result := make([]byte, end-offset)
+	segments := overlappingFileSegments(file, offset, end)
+	if len(segments) == 0 {
+		return result, nil
+	}
+	if len(segments) == 1 || h.config.MaxConcurrentTransfers <= 1 {
+		for _, segment := range segments {
+			if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+	if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(segments), func(i int) error {
+		segment := segments[i]
+		return h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end])
+	}); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+type fileReadSegment struct {
+	chunk metadata.ChunkInfo
+	start int
+	end   int
+}
+
+func overlappingFileSegments(file *metadata.FileMetadata, offset, end int64) []fileReadSegment {
+	if file == nil || end <= offset {
+		return nil
+	}
+	segments := make([]fileReadSegment, 0, len(file.Chunks))
+	startIndex := sort.Search(len(file.Chunks), func(i int) bool {
+		return file.Chunks[i].Offset+file.Chunks[i].Size > offset
+	})
+	for _, chunk := range file.Chunks[startIndex:] {
+		chunkEnd := chunk.Offset + chunk.Size
+		if chunk.Offset >= end {
+			break
+		}
+		if chunkEnd <= offset || chunk.Size == 0 {
+			continue
+		}
+		segmentStart := shfs.MaxInt64(offset, chunk.Offset)
+		segmentEnd := shfs.MinInt64(end, chunkEnd)
+		segment := chunk
+		segment.Offset = segmentStart
+		segment.AssetOffset = chunk.AssetOffset + (segmentStart - chunk.Offset)
+		segment.Size = segmentEnd - segmentStart
+		segments = append(segments, fileReadSegment{
+			chunk: segment,
+			start: int(segmentStart - offset),
+			end:   int(segmentEnd - offset),
+		})
+	}
+	return segments
 }
 
 func (h *StorHub) StatPath(project, targetPath string) (*shfs.EntryInfo, error) {
