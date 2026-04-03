@@ -28,6 +28,7 @@ const (
 	renameNoReplace = 0x1
 	renameExchange  = 0x2
 	renameWhiteout  = 0x4
+	mountMaxIOSize  = 256 * 1024 * 1024
 )
 
 var (
@@ -114,6 +115,7 @@ type storhubHandle struct {
 	deleted    bool
 	owners     map[uint64]struct{}
 	writeState *inodeWriteState
+	readSeq    *sequentialReadState
 }
 
 type inodeWriteState struct {
@@ -134,6 +136,25 @@ type inodeWriteState struct {
 	logicalSize       int64
 	dirtyRanges       []ByteRange
 	tempAuthoritative bool
+	stream            *streamingUploadState
+}
+
+type streamingUploadState struct {
+	releaseTag string
+	uploadURL  string
+	prepared   bool
+	chunks     []metadata.ChunkInfo
+	tail       []byte
+	uploaded   int64
+}
+
+type sequentialReadState struct {
+	start          int64
+	data           []byte
+	window         int64
+	lastOffset     int64
+	lastLength     int64
+	sequentialHits int
 }
 
 type ByteRange struct {
@@ -197,6 +218,10 @@ type Hub interface {
 	RemoveXAttrContext(context.Context, string, string, string) error
 	DownloadFileContext(context.Context, string, string, string) error
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
+	PrepareReplaceContext(context.Context, string, string, int) (string, string, error)
+	UploadChunkDataContext(context.Context, string, string, string, int, int64, []byte) (metadata.ChunkInfo, error)
+	FinalizeReplaceChunksContext(context.Context, string, string, string, int64, []metadata.ChunkInfo) (*metadata.FileMetadata, error)
+	FillChunkRangeContext(context.Context, string, metadata.ChunkInfo, []byte) error
 	PatchFileContext(context.Context, string, string, int64, int64, []byte) (*metadata.FileMetadata, error)
 	ReplaceFileContext(context.Context, string, string, string) (*metadata.FileMetadata, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
@@ -278,6 +303,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	}
 	options.MountOptions.Debug = s.opts.Debug
 	options.MountOptions.AllowOther = s.opts.AllowOther
+	options.MountOptions.MaxWrite = mountMaxIOSize
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
@@ -1273,6 +1299,18 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL
 	}
+	if w.stream != nil {
+		if size != w.logicalSize {
+			if err := w.materializeStreamToTempLocked(context.Background()); err != nil {
+				return err
+			}
+		}
+	}
+	if w.temp == nil {
+		if err := w.ensureTempLocked(); err != nil {
+			return err
+		}
+	}
 	oldSize := w.logicalSize
 	w.logicalSize = size
 	if err := w.temp.Truncate(size); err != nil {
@@ -1289,6 +1327,127 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 		return nil
 	}
 	w.truncateDirtyRangesLocked(size)
+	return nil
+}
+
+func (w *inodeWriteState) ensureTempLocked() error {
+	if w.temp != nil {
+		return nil
+	}
+	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
+	if err != nil {
+		return err
+	}
+	w.temp = temp
+	w.tempPath = temp.Name()
+	if err := w.temp.Truncate(w.logicalSize); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *inodeWriteState) canStreamSequentialWriteLocked() bool {
+	return !w.deleted && w.tempAuthoritative && len(w.dirtyRanges) == 0
+}
+
+func (w *inodeWriteState) ensureStreamingPreparedLocked(ctx context.Context) error {
+	if w.stream == nil {
+		return syscall.EINVAL
+	}
+	if w.stream.prepared {
+		return nil
+	}
+	releaseTag, uploadURL, err := w.fs.hub.PrepareReplaceContext(ctx, w.fs.project, w.path, 1)
+	if err != nil {
+		return err
+	}
+	w.stream.releaseTag = releaseTag
+	w.stream.uploadURL = uploadURL
+	w.stream.prepared = true
+	return nil
+}
+
+func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force bool) error {
+	if w.stream == nil {
+		return nil
+	}
+	chunkSize := normalizedChunkSize(w.fs.hub.ChunkSize())
+	for int64(len(w.stream.tail)) >= chunkSize || (force && len(w.stream.tail) > 0) {
+		chunkLen := int(chunkSize)
+		if len(w.stream.tail) < chunkLen {
+			chunkLen = len(w.stream.tail)
+		}
+		if err := w.ensureStreamingPreparedLocked(ctx); err != nil {
+			return err
+		}
+		chunkData := append([]byte(nil), w.stream.tail[:chunkLen]...)
+		chunk, err := w.fs.hub.UploadChunkDataContext(ctx, w.fs.project, w.stream.releaseTag, w.stream.uploadURL, len(w.stream.chunks), w.stream.uploaded, chunkData)
+		if err != nil {
+			return err
+		}
+		w.stream.chunks = append(w.stream.chunks, chunk)
+		w.stream.tail = append(w.stream.tail[:0], w.stream.tail[chunkLen:]...)
+		w.stream.uploaded += int64(chunkLen)
+	}
+	return nil
+}
+
+func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte, off int64, hasOtherWriter bool) (uint32, bool, error) {
+	if w.stream == nil {
+		if hasOtherWriter || off != w.logicalSize || !w.canStreamSequentialWriteLocked() {
+			return 0, false, nil
+		}
+		w.stream = &streamingUploadState{}
+		if w.temp != nil {
+			_ = w.temp.Close()
+			w.temp = nil
+		}
+		if w.tempPath != "" {
+			_ = os.Remove(w.tempPath)
+			w.tempPath = ""
+		}
+	}
+	if hasOtherWriter || off != w.logicalSize {
+		if err := w.materializeStreamToTempLocked(ctx); err != nil {
+			return 0, true, err
+		}
+		return 0, false, nil
+	}
+	w.stream.tail = append(w.stream.tail, data...)
+	w.logicalSize += int64(len(data))
+	if err := w.flushStreamingChunksLocked(ctx, false); err != nil {
+		return 0, true, err
+	}
+	return uint32(len(data)), true, nil
+}
+
+func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) error {
+	if w.stream == nil {
+		return nil
+	}
+	if err := w.ensureTempLocked(); err != nil {
+		return err
+	}
+	if err := w.temp.Truncate(w.logicalSize); err != nil {
+		return err
+	}
+	for _, chunk := range w.stream.chunks {
+		buf := make([]byte, chunk.Size)
+		if err := w.fs.hub.FillChunkRangeContext(ctx, w.fs.project, chunk, buf); err != nil {
+			return err
+		}
+		if _, err := w.temp.WriteAt(buf, chunk.Offset); err != nil {
+			return err
+		}
+	}
+	if len(w.stream.tail) > 0 {
+		if _, err := w.temp.WriteAt(w.stream.tail, w.stream.uploaded); err != nil {
+			return err
+		}
+	}
+	w.dirtyRanges = []ByteRange{{Start: 0, End: w.logicalSize}}
+	w.tempAuthoritative = true
+	w.stream = nil
 	return nil
 }
 
@@ -1647,6 +1806,46 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 	return temp.Name(), nil
 }
 
+func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if length <= 0 {
+		return []byte{}, nil
+	}
+	if h.readSeq == nil {
+		h.readSeq = &sequentialReadState{window: h.fs.sequentialReadWindow()}
+	}
+	state := h.readSeq
+	if off == state.lastOffset+state.lastLength {
+		state.sequentialHits++
+	} else if off != state.lastOffset {
+		state.sequentialHits = 0
+	}
+	state.lastOffset = off
+	state.lastLength = length
+	if off >= state.start && off+length <= state.start+int64(len(state.data)) {
+		start := off - state.start
+		return append([]byte(nil), state.data[start:start+length]...), nil
+	}
+	window := h.fs.opts.PageSize * h.fs.opts.ReadAheadPages
+	if state.sequentialHits >= 2 {
+		window = state.window
+	}
+	if window < length {
+		window = length
+	}
+	data, err := h.fs.hub.ReadFileAtContext(ctx, h.fs.project, h.path, off, window)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	state.start = off
+	state.data = append(state.data[:0], data...)
+	if int64(len(data)) < length {
+		length = int64(len(data))
+	}
+	return append([]byte(nil), state.data[:length]...), nil
+}
+
 func (w *inodeWriteState) closeTemp() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1671,6 +1870,12 @@ func (w *inodeWriteState) closeTemp() {
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if writeState := h.writeState; writeState != nil {
 		writeState.mu.Lock()
+		if writeState.stream != nil {
+			if err := writeState.materializeStreamToTempLocked(ctx); err != nil {
+				writeState.mu.Unlock()
+				return nil, errnoFromError(err)
+			}
+		}
 		buf := make([]byte, len(dest))
 		n, err := writeState.readIntoLocked(ctx, buf, off)
 		writeState.mu.Unlock()
@@ -1690,7 +1895,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		}
 		return fuse.ReadResultData(buf[:n]), 0
 	}
-	data, err := h.fs.readCached(ctx, h.inode, off, int64(len(dest)))
+	data, err := h.readCached(ctx, off, int64(len(dest)))
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
@@ -1707,10 +1912,24 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		h.writeState.opMu.Lock()
 		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
+		hasOtherWriter := h.fs.hasOtherWriteHandle(h.inode, h.id)
 		defer h.writeState.mu.Unlock()
 		if h.flags&syscall.O_APPEND != 0 {
 			off = h.writeState.logicalSize
-		} else if off > h.writeState.logicalSize {
+		}
+		if n, streamed, err := h.writeState.tryStreamWriteLocked(ctx, data, off, hasOtherWriter); streamed {
+			if err != nil {
+				return 0, errnoFromError(err)
+			}
+			h.fs.debugf("stream write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
+			return n, 0
+		}
+		if h.writeState.temp == nil {
+			if err := h.writeState.ensureTempLocked(); err != nil {
+				return 0, errnoFromError(err)
+			}
+		}
+		if off > h.writeState.logicalSize {
 			h.writeState.markDirtyLocked(h.writeState.logicalSize, off)
 			if err := h.writeState.temp.Truncate(off); err != nil {
 				return 0, errnoFromError(err)
@@ -1801,8 +2020,10 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
 		if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize {
-			h.writeState.mu.Unlock()
-			return 0
+			if h.writeState.stream == nil {
+				h.writeState.mu.Unlock()
+				return 0
+			}
 		}
 		if h.writeState.deleted || strings.TrimSpace(h.writeState.path) == "" {
 			h.writeState.mu.Unlock()
@@ -1811,6 +2032,30 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		targetPath := h.writeState.path
 		baseSize := h.writeState.baseSize
 		logicalSize := h.writeState.logicalSize
+		if h.writeState.stream != nil {
+			if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
+				h.writeState.mu.Unlock()
+				h.fs.debugf("commit failed path=%s inode=%d step=stream-flush err=%v", targetPath, h.inode, err)
+				return errnoFromError(err)
+			}
+			releaseTag := h.writeState.stream.releaseTag
+			chunks := append([]metadata.ChunkInfo(nil), h.writeState.stream.chunks...)
+			h.writeState.mu.Unlock()
+			h.fs.debugf("commit stream-replace path=%s inode=%d base=%d size=%d chunks=%d", targetPath, h.inode, baseSize, logicalSize, len(chunks))
+			if _, err := h.fs.hub.FinalizeReplaceChunksContext(ctx, h.fs.project, targetPath, releaseTag, logicalSize, chunks); err != nil {
+				h.fs.debugf("commit failed path=%s inode=%d step=stream-replace err=%v", targetPath, h.inode, err)
+				return errnoFromError(err)
+			}
+			h.writeState.mu.Lock()
+			h.writeState.baseSize = logicalSize
+			h.writeState.dirtyRanges = nil
+			h.writeState.tempAuthoritative = false
+			h.writeState.stream = nil
+			h.writeState.mu.Unlock()
+			h.fs.evictInodeCache(h.inode)
+			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
+			return 0
+		}
 		dirtyCount := len(h.writeState.dirtyRanges)
 		if len(h.writeState.dirtyRanges) == 0 {
 			h.writeState.mu.Unlock()
@@ -2526,6 +2771,17 @@ func normalizedChunkSize(chunkSize int64) int64 {
 		return maxReleaseAssetSize
 	}
 	return chunkSize
+}
+
+func (s *Filesystem) sequentialReadWindow() int64 {
+	window := normalizedChunkSize(s.hub.ChunkSize())
+	if window < s.opts.PageSize*s.opts.ReadAheadPages {
+		window = s.opts.PageSize * s.opts.ReadAheadPages
+	}
+	if window > mountMaxIOSize {
+		window = mountMaxIOSize
+	}
+	return window
 }
 
 func minInt64(a, b int64) int64 {

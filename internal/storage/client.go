@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -130,6 +131,102 @@ func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMetadat
 
 func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMetadata, error) {
 	return h.putFileContext(ctx, project, fileName, inputPath, true)
+}
+
+func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName string, requiredSlots int) (string, string, error) {
+	if err := validateProject(project); err != nil {
+		return "", "", err
+	}
+	cleanName, err := shfs.NormalizePath(fileName)
+	if err != nil {
+		return "", "", err
+	}
+	if cleanName == "" {
+		return "", "", errors.New("file name is required")
+	}
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return "", "", err
+	}
+	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
+		return "", "", err
+	}
+	existing := repoMeta.FindFile(cleanName)
+	if existing == nil {
+		return "", "", fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	workingMeta := repoMeta.Clone()
+	workingMeta.RemoveFile(cleanName)
+	return h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, existing.Release)
+}
+
+func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, index int, offset int64, data []byte) (ChunkInfo, error) {
+	assetName, err := randomAssetName()
+	if err != nil {
+		return ChunkInfo{}, err
+	}
+	assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return ChunkInfo{}, err
+	}
+	return ChunkInfo{
+		Name:        assetName,
+		Size:        int64(len(data)),
+		Index:       index,
+		Offset:      offset,
+		Release:     releaseTag,
+		AssetID:     assetID,
+		AssetOffset: 0,
+		CRC32C:      checksum,
+	}, nil
+}
+
+func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (*FileMetadata, error) {
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	cleanName, err := shfs.NormalizePath(fileName)
+	if err != nil {
+		return nil, err
+	}
+	if cleanName == "" {
+		return nil, errors.New("file name is required")
+	}
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	current := repoMeta.FindFile(cleanName)
+	if current == nil {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	crc32cSum, err := chunking.CombineChunkCRC32Cs(chunks)
+	if err != nil {
+		return nil, err
+	}
+	now := h.config.Now().UTC()
+	fileMeta := current.Clone()
+	fileMeta.Chunks = append([]ChunkInfo(nil), chunks...)
+	fileMeta.Release = releaseTag
+	fileMeta.Size = size
+	fileMeta.CRC32C = crc32cSum
+	implposix.ApplyUpdatedFileIdentity(&fileMeta, current, now)
+	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		latest := meta.FindFile(cleanName)
+		if latest == nil {
+			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		}
+		implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
+		implposix.ReplaceInodeFamily(meta, latest, fileMeta, now)
+		return nil
+	}, metadataCommitMessage(cleanName, true)); err != nil {
+		return nil, err
+	}
+	return &fileMeta, nil
+}
+
+func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chunk metadata.ChunkInfo, dst []byte) error {
+	return h.fillAssetRange(ctx, project, chunk, dst)
 }
 
 func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {

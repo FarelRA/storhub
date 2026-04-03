@@ -351,6 +351,92 @@ func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.
 	state.closeTemp()
 }
 
+func TestSequentialReadHandleExpandsWindow(t *testing.T) {
+	var lengths []int64
+	fsys, err := New(&stubHub{
+		chunkSize: 16,
+		readFileAt: func(_ context.Context, _ string, _ string, off, length int64) ([]byte, error) {
+			lengths = append(lengths, length)
+			data := []byte("abcdefghijklmnop")
+			if off >= int64(len(data)) {
+				return []byte{}, io.EOF
+			}
+			end := off + length
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			return append([]byte(nil), data[off:end]...), nil
+		},
+	}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, ReadAheadPages: 1, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin"}
+	for _, off := range []int64{0, 4, 8} {
+		res, errno := h.Read(context.Background(), make([]byte, 4), off)
+		if errno != 0 {
+			t.Fatalf("read offset %d: %v", off, errno)
+		}
+		buf, status := res.Bytes(make([]byte, 4))
+		if status != fuse.OK || len(buf) != 4 {
+			t.Fatalf("read result offset %d: %q %v", off, buf, status)
+		}
+	}
+	if len(lengths) != 2 {
+		t.Fatalf("expected 2 backend reads, got %v", lengths)
+	}
+	if lengths[1] != 16 {
+		t.Fatalf("expected sequential window fetch of 16 bytes, got %d", lengths[1])
+	}
+}
+
+func TestSequentialWriteCommitStreamsChunks(t *testing.T) {
+	var uploads []meta.ChunkInfo
+	var finalized bool
+	fsys, err := New(&stubHub{
+		chunkSize: 4,
+		prepareReplace: func(_ context.Context, _ string, target string, required int) (string, string, error) {
+			if target != "demo.bin" || required != 1 {
+				t.Fatalf("unexpected prepare args target=%q required=%d", target, required)
+			}
+			return "v1", "upload", nil
+		},
+		uploadChunk: func(_ context.Context, _ string, releaseTag, uploadURL string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
+			chunk := meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, AssetID: int64(index + 1), CRC32C: string(data)}
+			uploads = append(uploads, chunk)
+			return chunk, nil
+		},
+		finalizeChunks: func(_ context.Context, _ string, target, releaseTag string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
+			finalized = true
+			if target != "demo.bin" || size != 10 || len(chunks) != 3 {
+				t.Fatalf("unexpected finalize args target=%q size=%d chunks=%d", target, size, len(chunks))
+			}
+			return &meta.FileMetadata{Name: target, Size: size, Release: releaseTag, Chunks: chunks}, nil
+		},
+	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	if err != nil {
+		t.Fatalf("new handle: %v", err)
+	}
+	if n, errno := h.Write(context.Background(), []byte("abcdefghij"), 0); errno != 0 || n != 10 {
+		t.Fatalf("stream write: n=%d errno=%v", n, errno)
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release stream handle: %v", errno)
+	}
+	if !finalized {
+		t.Fatal("expected streamed commit finalization")
+	}
+	if len(uploads) != 3 || uploads[0].Offset != 0 || uploads[1].Offset != 4 || uploads[2].Offset != 8 {
+		t.Fatalf("unexpected uploaded chunks: %+v", uploads)
+	}
+}
+
 func TestLockAndErrorHelpers(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
@@ -583,6 +669,18 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 			replacedBytes = data
 			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 8, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
+		uploadChunk: func(_ context.Context, _ string, releaseTag, _ string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
+			return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: string(data)}, nil
+		},
+		finalizeChunks: func(_ context.Context, _ string, target, _ string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
+			replacedPath = target
+			buf := make([]byte, size)
+			for _, chunk := range chunks {
+				copy(buf[chunk.Offset:], chunk.CRC32C)
+			}
+			replacedBytes = buf
+			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 8, Size: size, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
 	}
 	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -781,6 +879,18 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 			backendSize = int64(len(data))
 			return &meta.FileMetadata{Name: "docs/file.txt", Kind: meta.NodeKindFile, Inode: 7, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
+		uploadChunk: func(_ context.Context, _ string, releaseTag, _ string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
+			return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: string(data)}, nil
+		},
+		finalizeChunks: func(_ context.Context, _ string, _ string, _ string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
+			buf := make([]byte, size)
+			for _, chunk := range chunks {
+				copy(buf[chunk.Offset:], chunk.CRC32C)
+			}
+			replaced = buf
+			backendSize = size
+			return &meta.FileMetadata{Name: "docs/file.txt", Kind: meta.NodeKindFile, Inode: 7, Size: size, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
 	}
 	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -831,23 +941,27 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 }
 
 type stubHub struct {
-	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
-	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)
-	readDir      func(context.Context, string, string) ([]shfs.DirEntry, error)
-	statFS       func(context.Context, string) (*shfs.FSStats, error)
-	readFileAt   func(context.Context, string, string, int64, int64) ([]byte, error)
-	getXAttr     func(context.Context, string, string, string) ([]byte, error)
-	setXAttr     func(context.Context, string, string, string, []byte) error
-	listXAttr    func(context.Context, string, string) ([]string, error)
-	removeXAttr  func(context.Context, string, string, string) error
-	readlink     func(context.Context, string, string) (string, error)
-	chmod        func(context.Context, string, string, uint32) error
-	truncateFile func(context.Context, string, string, int64) (*meta.FileMetadata, error)
-	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
-	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
-	replaceFile  func(context.Context, string, string, string) (*meta.FileMetadata, error)
-	now          time.Time
-	chunkSize    int64
+	createFile     func(context.Context, string, string) (*meta.FileMetadata, error)
+	statPath       func(context.Context, string, string) (*shfs.EntryInfo, error)
+	readDir        func(context.Context, string, string) ([]shfs.DirEntry, error)
+	statFS         func(context.Context, string) (*shfs.FSStats, error)
+	readFileAt     func(context.Context, string, string, int64, int64) ([]byte, error)
+	getXAttr       func(context.Context, string, string, string) ([]byte, error)
+	setXAttr       func(context.Context, string, string, string, []byte) error
+	listXAttr      func(context.Context, string, string) ([]string, error)
+	removeXAttr    func(context.Context, string, string, string) error
+	readlink       func(context.Context, string, string) (string, error)
+	chmod          func(context.Context, string, string, uint32) error
+	truncateFile   func(context.Context, string, string, int64) (*meta.FileMetadata, error)
+	loadReadonly   func(context.Context, string) (*meta.RepoMetadata, string, error)
+	updateMeta     func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
+	replaceFile    func(context.Context, string, string, string) (*meta.FileMetadata, error)
+	prepareReplace func(context.Context, string, string, int) (string, string, error)
+	uploadChunk    func(context.Context, string, string, string, int, int64, []byte) (meta.ChunkInfo, error)
+	finalizeChunks func(context.Context, string, string, string, int64, []meta.ChunkInfo) (*meta.FileMetadata, error)
+	fillChunk      func(context.Context, string, meta.ChunkInfo, []byte) error
+	now            time.Time
+	chunkSize      int64
 }
 
 func (s *stubHub) StatPathContext(ctx context.Context, project, target string) (*shfs.EntryInfo, error) {
@@ -938,6 +1052,30 @@ func (s *stubHub) ReadFileAtContext(ctx context.Context, project, target string,
 		return s.readFileAt(ctx, project, target, off, length)
 	}
 	return []byte{}, nil
+}
+func (s *stubHub) PrepareReplaceContext(ctx context.Context, project, target string, required int) (string, string, error) {
+	if s.prepareReplace != nil {
+		return s.prepareReplace(ctx, project, target, required)
+	}
+	return "v1", "upload", nil
+}
+func (s *stubHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
+	if s.uploadChunk != nil {
+		return s.uploadChunk(ctx, project, releaseTag, uploadURL, index, offset, data)
+	}
+	return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: "sum"}, nil
+}
+func (s *stubHub) FinalizeReplaceChunksContext(ctx context.Context, project, target, releaseTag string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
+	if s.finalizeChunks != nil {
+		return s.finalizeChunks(ctx, project, target, releaseTag, size, chunks)
+	}
+	return &meta.FileMetadata{Name: target, Size: size, Release: releaseTag, Chunks: chunks}, nil
+}
+func (s *stubHub) FillChunkRangeContext(ctx context.Context, project string, chunk meta.ChunkInfo, dst []byte) error {
+	if s.fillChunk != nil {
+		return s.fillChunk(ctx, project, chunk, dst)
+	}
+	return nil
 }
 func (*stubHub) PatchFileContext(context.Context, string, string, int64, int64, []byte) (*meta.FileMetadata, error) {
 	return nil, nil
