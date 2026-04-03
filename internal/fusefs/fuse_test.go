@@ -146,6 +146,51 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	}
 }
 
+func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
+	cacheDir := t.TempDir()
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	working, err := os.CreateTemp(cacheDir, "inode-working-*")
+	if err != nil {
+		t.Fatalf("create working temp: %v", err)
+	}
+	base, err := os.CreateTemp(cacheDir, "inode-base-*")
+	if err != nil {
+		t.Fatalf("create base temp: %v", err)
+	}
+	if _, err := working.WriteAt([]byte("abXYef"), 0); err != nil {
+		t.Fatalf("seed working temp: %v", err)
+	}
+	if _, err := base.WriteAt([]byte("abcdef"), 0); err != nil {
+		t.Fatalf("seed base temp: %v", err)
+	}
+	state := &inodeWriteState{
+		fs:           fsys,
+		inode:        1,
+		temp:         working,
+		tempPath:     working.Name(),
+		baseTemp:     base,
+		baseTempPath: base.Name(),
+		baseSize:     6,
+		logicalSize:  6,
+		dirtyRanges:  []ByteRange{{Start: 2, End: 4}},
+	}
+	if err := state.refreshBaseSnapshotLocked(); err != nil {
+		t.Fatalf("refresh base snapshot: %v", err)
+	}
+	got := make([]byte, 6)
+	if _, err := state.baseTemp.ReadAt(got, 0); err != nil && err != io.EOF {
+		t.Fatalf("read refreshed base temp: %v", err)
+	}
+	if string(got) != "abXYef" {
+		t.Fatalf("unexpected refreshed base temp: %q", got)
+	}
+	state.closeTemp()
+}
+
 func TestLockAndErrorHelpers(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})

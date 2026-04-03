@@ -2312,9 +2312,12 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 
 func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
+	hub := backend.newClient(t, Config{ChunkSize: 4096, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
 	ctx := context.Background()
-	input := writeTempFile(t, t.TempDir(), "editor.txt", []byte("original content"))
+	original := append(bytes.Repeat([]byte("A"), 4096), bytes.Repeat([]byte("B"), 4096)...)
+	original = append(original, bytes.Repeat([]byte("C"), 4096)...)
+	original = append(original, []byte("tail")...)
+	input := writeTempFile(t, t.TempDir(), "editor.txt", original)
 	if _, err := hub.UploadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", input); err != nil {
 		t.Fatalf("upload editor file: %v", err)
 	}
@@ -2328,7 +2331,7 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 		t.Fatalf("stat editor file: %v", err)
 	}
 	node := fsys.EnsureNodeForTest(ctx, entry)
-	save := func(parts ...string) {
+	save := func(parts ...[]byte) {
 		hAny, _, errno := node.Open(ctx, syscall.O_WRONLY)
 		if errno != 0 {
 			t.Fatalf("open editor handle: %v", errno)
@@ -2343,11 +2346,10 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 		}
 		offset := int64(0)
 		for _, part := range parts {
-			data := []byte(part)
-			if written, errno := h.Write(ctx, data, offset); errno != 0 || written != uint32(len(data)) {
+			if written, errno := h.Write(ctx, part, offset); errno != 0 || written != uint32(len(part)) {
 				t.Fatalf("write editor handle: written=%d errno=%v", written, errno)
 			}
-			offset += int64(len(data))
+			offset += int64(len(part))
 		}
 		if errno := h.Fsync(ctx, 0); errno != 0 {
 			t.Fatalf("fsync editor handle: %v", errno)
@@ -2356,13 +2358,15 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 			t.Fatalf("release editor handle: %v", errno)
 		}
 	}
-	save("first ", "save")
-	save("second ", "save", " cycle")
+	first := append(append([]byte(nil), original...), 'X')
+	second := append([]byte(nil), original...)
+	save(first[:4096], first[4096:8192], first[8192:12288], first[12288:])
+	save(second[:4096], second[4096:8192], second[8192:12288], second[12288:])
 	output := filepath.Join(t.TempDir(), "editor-cycles.txt")
 	if err := hub.DownloadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", output); err != nil {
 		t.Fatalf("download saved file: %v", err)
 	}
-	assertFileContent(t, output, []byte("second save cycle"))
+	assertFileContent(t, output, second)
 }
 
 func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
