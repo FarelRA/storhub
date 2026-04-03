@@ -521,6 +521,24 @@ func TestSafeNotifyEntryDoesNotBlockCaller(t *testing.T) {
 	close(release)
 }
 
+func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	base, err := os.CreateTemp(t.TempDir(), "base-*")
+	if err != nil {
+		t.Fatalf("create base temp: %v", err)
+	}
+	defer os.Remove(base.Name())
+	state := &inodeWriteState{fs: fsys, inode: 1, baseTemp: base, baseTempPath: base.Name(), baseSize: 4, logicalSize: 4}
+	buf := make([]byte, 4)
+	if _, err := state.readIntoLocked(context.Background(), buf, 0); !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("expected io.ErrNoProgress, got %v", err)
+	}
+}
+
 type stubHub struct {
 	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
 	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)

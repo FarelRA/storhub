@@ -1215,12 +1215,18 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 			if err != nil && !errors.Is(err, io.EOF) {
 				return int(filled), err
 			}
+			if n == 0 {
+				return int(filled), io.ErrNoProgress
+			}
 			filled += int64(n)
 			continue
 		}
 		data, err := w.readBaseRangeLocked(ctx, segmentStart, readEnd-segmentStart, exactBase)
 		if err != nil {
 			return int(filled), err
+		}
+		if len(data) == 0 {
+			return int(filled), io.ErrNoProgress
 		}
 		copy(dest[filled:], data)
 		filled += int64(len(data))
@@ -1399,11 +1405,6 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		_ = os.Remove(temp.Name())
 		return "", err
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		_ = os.Remove(temp.Name())
-		return "", err
-	}
 	if err := temp.Close(); err != nil {
 		_ = os.Remove(temp.Name())
 		return "", err
@@ -1447,11 +1448,6 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 			}
 			offset += int64(n)
 		}
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		_ = os.Remove(temp.Name())
-		return "", err
 	}
 	if err := temp.Close(); err != nil {
 		_ = os.Remove(temp.Name())
@@ -1574,9 +1570,6 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 		if h.writeState.temp == nil {
 			return 0
 		}
-		if err := h.writeState.temp.Sync(); err != nil {
-			return errnoFromError(err)
-		}
 		_ = ctx
 		return 0
 	}
@@ -1584,9 +1577,6 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 	defer h.mu.Unlock()
 	if h.temp == nil {
 		return 0
-	}
-	if err := h.temp.Sync(); err != nil {
-		return errnoFromError(err)
 	}
 	_ = ctx
 	return 0
@@ -1626,10 +1616,6 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		if h.writeState.deleted || strings.TrimSpace(h.writeState.path) == "" {
 			h.writeState.mu.Unlock()
 			return 0
-		}
-		if err := h.writeState.temp.Sync(); err != nil {
-			h.writeState.mu.Unlock()
-			return errnoFromError(err)
 		}
 		targetPath := h.writeState.path
 		baseSize := h.writeState.baseSize
