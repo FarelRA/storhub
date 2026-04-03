@@ -624,15 +624,16 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 
 func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, gofusefs.FileHandle, uint32, syscall.Errno) {
 	childPath := path.Join(n.currentPath(), name)
+	n.fs.debugf("create start path=%s flags=%#x mode=%#o", childPath, flags, mode)
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
+		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
-	if mode != 0 {
-		if err := n.fs.hub.ChmodContext(ctx, n.fs.project, childPath, mode&0o7777); err != nil {
-			return nil, nil, 0, errnoFromError(err)
-		}
-		file.Mode = mode & 0o7777
+	if desiredMode := mode & 0o7777; desiredMode != 0 && desiredMode != file.Mode {
+		// Avoid a second metadata update during create. The backend already assigns a
+		// sane default mode for new files, and later setattr/chmod calls can adjust it.
+		n.fs.debugf("create deferred chmod path=%s requested=%#o actual=%#o", childPath, desiredMode, file.Mode)
 	}
 	entry := entryInfoFromFile(file)
 	child := n.fs.ensureNode(ctx, entry)
@@ -640,6 +641,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	fillEntryOut(out, entry, n.fs.opts)
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
+		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
 	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)

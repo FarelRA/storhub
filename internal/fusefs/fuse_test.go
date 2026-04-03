@@ -408,6 +408,62 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 	}
 }
 
+func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
+	now := time.Unix(31, 0).UTC()
+	chmodCalled := false
+	fake := &stubHub{
+		createFile: func(_ context.Context, _ string, target string) (*meta.FileMetadata, error) {
+			return &meta.FileMetadata{
+				Name:       target,
+				Kind:       meta.NodeKindFile,
+				Inode:      9,
+				Mode:       0o644,
+				UID:        1000,
+				GID:        1000,
+				NLink:      1,
+				UploadedAt: now,
+				ModifiedAt: now,
+				AccessedAt: now,
+				ChangedAt:  now,
+			}, nil
+		},
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			switch target {
+			case "docs":
+				return &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			case "docs/new.txt":
+				return &shfs.EntryInfo{Path: target, Inode: 9, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			default:
+				return nil, syscall.ENOENT
+			}
+		},
+		replaceFile: func(_ context.Context, _ string, target, inputPath string) (*meta.FileMetadata, error) {
+			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 9, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+		chmod: func(_ context.Context, _ string, _ string, _ uint32) error {
+			chmodCalled = true
+			return nil
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	var out fuse.EntryOut
+	_, handleAny, _, errno := dirNode.Create(context.Background(), "new.txt", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL, 0o664, &out)
+	if errno != 0 {
+		t.Fatalf("create file: %v", errno)
+	}
+	if chmodCalled {
+		t.Fatal("expected create to skip chmod round-trip")
+	}
+	if errno := handleAny.(*storhubHandle).Release(context.Background()); errno != 0 {
+		t.Fatalf("release created file: %v", errno)
+	}
+}
+
 type stubHub struct {
 	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
 	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)
@@ -419,6 +475,7 @@ type stubHub struct {
 	listXAttr    func(context.Context, string, string) ([]string, error)
 	removeXAttr  func(context.Context, string, string, string) error
 	readlink     func(context.Context, string, string) (string, error)
+	chmod        func(context.Context, string, string, uint32) error
 	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
 	replaceFile  func(context.Context, string, string, string) (*meta.FileMetadata, error)
@@ -459,7 +516,12 @@ func (*stubHub) RmdirContext(context.Context, string, string) error  { return ni
 func (*stubHub) TruncateFileContext(context.Context, string, string, int64) (*meta.FileMetadata, error) {
 	return nil, nil
 }
-func (*stubHub) ChmodContext(context.Context, string, string, uint32) error         { return nil }
+func (s *stubHub) ChmodContext(ctx context.Context, project, target string, mode uint32) error {
+	if s.chmod != nil {
+		return s.chmod(ctx, project, target, mode)
+	}
+	return nil
+}
 func (*stubHub) ChownContext(context.Context, string, string, uint32, uint32) error { return nil }
 func (*stubHub) ChtimesContext(context.Context, string, string, time.Time, time.Time) error {
 	return nil
