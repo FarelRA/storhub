@@ -1477,6 +1477,41 @@ func (w *inodeWriteState) writeRangeToLocked(ctx context.Context, out *os.File, 
 	return nil
 }
 
+func (w *inodeWriteState) writeWorkingRangeToLocked(out *os.File, start, end int64) error {
+	bufSize := normalizedChunkSize(w.fs.hub.ChunkSize())
+	if bufSize <= 0 {
+		bufSize = w.fs.opts.PageSize
+	}
+	buf := make([]byte, bufSize)
+	for offset := start; offset < end; {
+		want := int64(len(buf))
+		if remaining := end - offset; want > remaining {
+			want = remaining
+		}
+		n, err := w.temp.ReadAt(buf[:want], offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if n == 0 {
+			for i := range buf[:want] {
+				buf[i] = 0
+			}
+			n = int(want)
+		}
+		if int64(n) < want {
+			for i := n; i < int(want); i++ {
+				buf[i] = 0
+			}
+			n = int(want)
+		}
+		if _, err := out.WriteAt(buf[:n], offset); err != nil {
+			return err
+		}
+		offset += int64(n)
+	}
+	return nil
+}
+
 func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (string, error) {
 	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-commit-*")
 	if err != nil {
@@ -1488,7 +1523,7 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		return "", err
 	}
 	if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
-		if _, err := io.CopyN(temp, io.NewSectionReader(w.temp, 0, w.logicalSize), w.logicalSize); err != nil {
+		if err := w.writeWorkingRangeToLocked(temp, 0, w.logicalSize); err != nil {
 			_ = temp.Close()
 			_ = os.Remove(temp.Name())
 			return "", err

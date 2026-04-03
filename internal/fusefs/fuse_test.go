@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -264,6 +265,44 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 	}
 	if string(got) != "abcdef" {
 		t.Fatalf("unexpected committed snapshot after truncate: %q", got)
+	}
+	state.closeTemp()
+}
+
+func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
+	cacheDir := t.TempDir()
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	working, err := os.CreateTemp(cacheDir, "inode-working-*")
+	if err != nil {
+		t.Fatalf("create working temp: %v", err)
+	}
+	if _, err := working.WriteAt([]byte("tail"), 4); err != nil {
+		t.Fatalf("seed sparse working temp: %v", err)
+	}
+	state := &inodeWriteState{
+		fs:                fsys,
+		inode:             1,
+		temp:              working,
+		tempPath:          working.Name(),
+		logicalSize:       8,
+		tempAuthoritative: true,
+	}
+	snapshotPath, err := state.createCommittedSnapshotLocked(context.Background())
+	if err != nil {
+		t.Fatalf("create committed snapshot from sparse authoritative temp: %v", err)
+	}
+	defer os.Remove(snapshotPath)
+	got, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read committed snapshot: %v", err)
+	}
+	want := append([]byte{0, 0, 0, 0}, []byte("tail")...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("unexpected sparse committed snapshot: %v", got)
 	}
 	state.closeTemp()
 }
