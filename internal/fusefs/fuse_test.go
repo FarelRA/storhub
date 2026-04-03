@@ -709,6 +709,92 @@ func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
 	}
 }
 
+func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
+	now := time.Unix(40, 0).UTC()
+	var truncates int
+	var replaced []byte
+	backendSize := int64(len("abcdefghij"))
+	fake := &stubHub{
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if target != "docs/file.txt" {
+				return nil, syscall.ENOENT
+			}
+			return &shfs.EntryInfo{Path: target, Inode: 7, Size: backendSize, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+		readFileAt: func(_ context.Context, _ string, _ string, off, length int64) ([]byte, error) {
+			data := []byte("abcdefghij")
+			if off >= backendSize {
+				return []byte{}, nil
+			}
+			end := off + length
+			if end > backendSize {
+				end = backendSize
+			}
+			return append([]byte(nil), data[off:end]...), nil
+		},
+		truncateFile: func(_ context.Context, _ string, _ string, size int64) (*meta.FileMetadata, error) {
+			truncates++
+			backendSize = size
+			return &meta.FileMetadata{Name: "docs/file.txt", Kind: meta.NodeKindFile, Inode: 7, Size: size, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+		replaceFile: func(_ context.Context, _ string, _ string, inputPath string) (*meta.FileMetadata, error) {
+			data, err := os.ReadFile(inputPath)
+			if err != nil {
+				return nil, err
+			}
+			replaced = data
+			backendSize = int64(len(data))
+			return &meta.FileMetadata{Name: "docs/file.txt", Kind: meta.NodeKindFile, Inode: 7, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: backendSize, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	hAny, _, errno := node.Open(context.Background(), syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("open write handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	var attr fuse.SetAttrIn
+	attr.Valid = fuse.FATTR_SIZE
+	attr.Size = 0
+	var out fuse.AttrOut
+	if errno := node.Setattr(context.Background(), nil, &attr, &out); errno != 0 {
+		t.Fatalf("setattr without handle: %v", errno)
+	}
+	if truncates != 0 {
+		t.Fatalf("expected setattr to avoid backend truncate, got %d calls", truncates)
+	}
+	if out.Attr.Size != 0 {
+		t.Fatalf("expected local setattr size 0, got %d", out.Attr.Size)
+	}
+	if written, errno := h.Write(context.Background(), []byte("hello"), 0); errno != 0 || written != 5 {
+		t.Fatalf("write after local truncate: written=%d errno=%v", written, errno)
+	}
+	if errno := h.Fsync(context.Background(), 0); errno != 0 {
+		t.Fatalf("fsync rewritten file: %v", errno)
+	}
+	if string(replaced) != "hello" {
+		t.Fatalf("unexpected replace payload: %q", replaced)
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release rewritten file: %v", errno)
+	}
+	if backendSize != 5 {
+		t.Fatalf("expected backend size to update after commit, got %d", backendSize)
+	}
+	var getattr fuse.AttrOut
+	if errno := node.Getattr(context.Background(), nil, &getattr); errno != 0 {
+		t.Fatalf("getattr after commit: %v", errno)
+	}
+	if getattr.Attr.Size != 5 {
+		t.Fatalf("expected getattr size 5 after commit, got %d", getattr.Attr.Size)
+	}
+}
+
 type stubHub struct {
 	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
 	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)
@@ -721,6 +807,7 @@ type stubHub struct {
 	removeXAttr  func(context.Context, string, string, string) error
 	readlink     func(context.Context, string, string) (string, error)
 	chmod        func(context.Context, string, string, uint32) error
+	truncateFile func(context.Context, string, string, int64) (*meta.FileMetadata, error)
 	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
 	replaceFile  func(context.Context, string, string, string) (*meta.FileMetadata, error)
@@ -758,7 +845,10 @@ func (s *stubHub) CreateFileContext(ctx context.Context, project, target string)
 func (*stubHub) MkdirContext(context.Context, string, string) error  { return nil }
 func (*stubHub) UnlinkContext(context.Context, string, string) error { return nil }
 func (*stubHub) RmdirContext(context.Context, string, string) error  { return nil }
-func (*stubHub) TruncateFileContext(context.Context, string, string, int64) (*meta.FileMetadata, error) {
+func (s *stubHub) TruncateFileContext(ctx context.Context, project, target string, size int64) (*meta.FileMetadata, error) {
+	if s.truncateFile != nil {
+		return s.truncateFile(ctx, project, target, size)
+	}
 	return nil, nil
 }
 func (s *stubHub) ChmodContext(ctx context.Context, project, target string, mode uint32) error {

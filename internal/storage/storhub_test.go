@@ -24,6 +24,7 @@ import (
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
+	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
@@ -2318,6 +2319,14 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 	})
 }
 
+func TestFUSERepeatedEditorStyleSaveCyclesWithoutSetattrHandle(t *testing.T) {
+	testFUSEEditorSaveCycleWithSetattrHandle(t, "full-rewrite-no-setattr-handle", false, func(original []byte) ([]byte, []byte) {
+		first := append(append([]byte(nil), original...), 'X')
+		second := append([]byte(nil), original...)
+		return first, second
+	})
+}
+
 func TestFUSEPartialEditorRewriteSaveCycles(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2370,6 +2379,10 @@ func TestFUSEPartialEditorRewriteSaveCycles(t *testing.T) {
 }
 
 func testFUSEEditorSaveCycle(t *testing.T, projectSuffix string, mutator func([]byte) ([]byte, []byte)) {
+	testFUSEEditorSaveCycleWithSetattrHandle(t, projectSuffix, true, mutator)
+}
+
+func testFUSEEditorSaveCycleWithSetattrHandle(t *testing.T, projectSuffix string, passHandleToSetattr bool, mutator func([]byte) ([]byte, []byte)) {
 	t.Helper()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 4096, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
@@ -2402,7 +2415,11 @@ func testFUSEEditorSaveCycle(t *testing.T, projectSuffix string, mutator func([]
 		attr.Valid = fuse.FATTR_SIZE
 		attr.Size = 0
 		var out fuse.AttrOut
-		if errno := node.Setattr(ctx, h, &attr, &out); errno != 0 {
+		var setattrHandle gofusefs.FileHandle
+		if passHandleToSetattr {
+			setattrHandle = h
+		}
+		if errno := node.Setattr(ctx, setattrHandle, &attr, &out); errno != 0 {
 			t.Fatalf("truncate editor handle: %v", errno)
 		}
 		for offset := 0; offset < len(content); offset += 4096 {

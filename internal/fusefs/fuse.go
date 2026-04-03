@@ -372,6 +372,34 @@ func (s *Filesystem) pathForInode(inode uint64) string {
 	return s.inodePaths[inode]
 }
 
+func (s *Filesystem) writeStateForInode(inode uint64) *inodeWriteState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.writeStates[inode]
+}
+
+func (s *Filesystem) pendingSizeForInode(inode uint64) (int64, bool) {
+	state := s.writeStateForInode(inode)
+	if state == nil {
+		return 0, false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleted {
+		return 0, false
+	}
+	return state.logicalSize, true
+}
+
+func (s *Filesystem) applyPendingSize(entry *shfs.EntryInfo) {
+	if entry == nil {
+		return
+	}
+	if size, ok := s.pendingSizeForInode(entry.Inode); ok {
+		entry.Size = size
+	}
+}
+
 func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
 	if targetPath == "" {
 		return s.root
@@ -560,6 +588,7 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		}
 		return nil, errnoFromError(err)
 	}
+	n.fs.applyPendingSize(entry)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
@@ -605,6 +634,7 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	if err != nil {
 		return errnoFromError(err)
 	}
+	n.fs.applyPendingSize(entry)
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
 	_ = f
@@ -751,13 +781,24 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 
 func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	targetPath := n.currentPath()
+	usedLocalSize := false
+	localSize := int64(0)
 	if size, ok := in.GetSize(); ok && !n.isDir {
+		state := n.fs.writeStateForInode(n.inode)
 		if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
-			handle.writeState.opMu.Lock()
-			handle.writeState.mu.Lock()
-			err := handle.writeState.setSizeLocked(int64(size))
-			handle.writeState.mu.Unlock()
-			handle.writeState.opMu.Unlock()
+			state = handle.writeState
+		}
+		if state != nil {
+			state.opMu.Lock()
+			state.mu.Lock()
+			err := state.setSizeLocked(int64(size))
+			if err == nil {
+				state.path = targetPath
+				usedLocalSize = true
+				localSize = state.logicalSize
+			}
+			state.mu.Unlock()
+			state.opMu.Unlock()
 			if err != nil {
 				return errnoFromError(err)
 			}
@@ -809,6 +850,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)
+	}
+	if usedLocalSize {
+		entry.Size = localSize
+	} else {
+		n.fs.applyPendingSize(entry)
 	}
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
