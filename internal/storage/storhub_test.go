@@ -647,6 +647,37 @@ func TestDeleteProject(t *testing.T) {
 	}
 }
 
+func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
+	backend := newMockGitHub(t)
+	backend.repos["existing-project"] = &mockRepo{
+		name:          "existing-project",
+		private:       true,
+		nextReleaseID: 1,
+		nextAssetID:   1,
+		nextBlobID:    1,
+		nextCommitID:  1,
+		releasesByTag: make(map[string]*mockRelease),
+		releasesByID:  make(map[int64]*mockRelease),
+		assets:        make(map[int64]*mockAsset),
+		files:         make(map[string]*mockFile),
+		commitsByPath: make(map[string][]mockCommit),
+	}
+	createCalls := 0
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" {
+			createCalls++
+		}
+		return false
+	}
+	hub := backend.newClient(t, defaultTestConfig())
+	if err := hub.ensureRepo(context.Background(), "existing-project"); err != nil {
+		t.Fatalf("ensure existing repo: %v", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("expected ensureRepo to skip create for existing repo, got %d create calls", createCalls)
+	}
+}
+
 func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryDisabledTestConfig())

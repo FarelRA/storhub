@@ -41,17 +41,19 @@ func (h *StorHub) ensureRepo(ctx context.Context, project string) error {
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
 	}
-	h.repoMu.Lock()
-	if h.repoState[project] {
-		h.repoMu.Unlock()
+	exists, err := h.repoExists(ctx, project)
+	if err != nil {
+		return err
+	}
+	if exists {
 		return nil
 	}
-	h.repoMu.Unlock()
 	if err := h.gh.CreateRepo(ctx, project, h.config.RepoDescription, !h.config.CreatePublicRepo, true); err != nil {
 		var apiErr *ghapi.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == 422 && isRepoAlreadyExistsError(apiErr) {
 			exists, existsErr := h.repoExists(ctx, project)
 			if existsErr == nil && exists {
+				h.setRepoState(project, true)
 				return nil
 			}
 		}
