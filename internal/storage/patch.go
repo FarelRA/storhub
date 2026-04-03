@@ -70,7 +70,9 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL, fileName string, fileOffset int64, data []byte) ([]ChunkInfo, error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
 	results := make([]ChunkInfo, count)
-	uploadKey := uploadAssetKey(fmt.Sprintf("%s-%d", fileName, fileOffset), h.config.Now().UTC())
+	_ = fileName
+	_ = fileOffset
+	namer := newAssetNamer()
 	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
 		start := int64(i) * normalizedChunkSize(h.config.ChunkSize)
 		end := start + normalizedChunkSize(h.config.ChunkSize)
@@ -78,7 +80,10 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 			end = int64(len(data))
 		}
 		part := data[start:end]
-		assetName := fmt.Sprintf("%s.part%03d", uploadKey, i+1)
+		assetName, err := namer.Next()
+		if err != nil {
+			return err
+		}
 		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
 		if err != nil {
 			return fmt.Errorf("upload patch chunk %d: %w", i, err)
@@ -203,7 +208,8 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
 	results := make([]ChunkInfo, count)
-	uploadKey := uploadAssetKey(fmt.Sprintf("%s-%d", fileName, start), h.config.Now().UTC())
+	_ = fileName
+	namer := newAssetNamer()
 	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
 		chunkStart := start + int64(i)*chunkSize
 		chunkEnd := chunkStart + chunkSize
@@ -211,7 +217,10 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 			chunkEnd = end
 		}
 		section := io.NewSectionReader(snapshot, chunkStart, chunkEnd-chunkStart)
-		assetName := fmt.Sprintf("%s.part%03d", uploadKey, i+1)
+		assetName, err := namer.Next()
+		if err != nil {
+			return err
+		}
 		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
 		if err != nil {
 			return fmt.Errorf("upload rewritten chunk %d: %w", i, err)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -35,8 +37,24 @@ func TestHelperUtilities(t *testing.T) {
 	if shortSHA("1234567890123456") != "123456789012" || shortSHA("short") != "short" {
 		t.Fatal("unexpected short sha")
 	}
-	if key := uploadAssetKey(strings.Repeat("a", 20), time.Unix(1, 0)); !strings.HasPrefix(key, "aaaaaaaaaaaa-") {
-		t.Fatalf("unexpected asset key: %q", key)
+	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){1,3}\.[a-z]+$`)
+	seen := make(map[string]struct{})
+	namer := newAssetNamer()
+	for i := 0; i < 32; i++ {
+		name, err := namer.Next()
+		if err != nil {
+			t.Fatalf("generate asset name: %v", err)
+		}
+		if !nameRe.MatchString(name) {
+			t.Fatalf("unexpected asset name format: %q", name)
+		}
+		if strings.Contains(name, "file") || strings.Contains(name, "txt") || strings.Contains(name, filepath.Base("docs/file.txt")) {
+			t.Fatalf("asset name should not derive from source file name: %q", name)
+		}
+		if _, ok := seen[name]; ok {
+			t.Fatalf("duplicate asset name generated: %q", name)
+		}
+		seen[name] = struct{}{}
 	}
 	if sumCRC32C([]byte("abc")) != formatCRC32C(910901175) {
 		t.Fatalf("unexpected crc32c: %s", sumCRC32C([]byte("abc")))

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -298,7 +297,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 
 	results := []ChunkInfo{}
 	if fileInfo.Size() > 0 {
-		results, err = h.uploadChunks(ctx, project, releaseTag, uploadURL, planner, uploadAssetKey(fileName, h.config.Now().UTC()))
+		results, err = h.uploadChunks(ctx, project, releaseTag, uploadURL, planner)
 		if err != nil {
 			return nil, err
 		}
@@ -681,10 +680,6 @@ func metadataCommitMessage(fileName string, replace bool) string {
 		return fmt.Sprintf("storhub: replace %s", fileName)
 	}
 	return fmt.Sprintf("storhub: add %s", fileName)
-}
-
-func uploadAssetKey(fileName string, now time.Time) string {
-	return shortSHA(fileName) + "-" + strconv.FormatInt(now.UnixNano(), 36)
 }
 
 func shortSHA(value string) string {

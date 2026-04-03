@@ -256,6 +256,18 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	}
 }
 
+func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
+	if got := normalizeCLIChunkSize(0); got != 0 {
+		t.Fatalf("expected zero chunk size to remain unset, got %d", got)
+	}
+	if got := normalizeCLIChunkSize(1024); got != minCLIChunkSize {
+		t.Fatalf("expected small chunk size to clamp to %d, got %d", minCLIChunkSize, got)
+	}
+	if got := normalizeCLIChunkSize(64 << 20); got != 64<<20 {
+		t.Fatalf("expected larger chunk size to remain unchanged, got %d", got)
+	}
+}
+
 type fakeHub struct{ t *testing.T }
 
 func (h *fakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {

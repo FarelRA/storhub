@@ -149,6 +149,18 @@ type restAuthFile struct {
 	Users           []shrest.User `json:"users"`
 }
 
+const minCLIChunkSize int64 = 32 * 1024 * 1024
+
+func normalizeCLIChunkSize(size int64) int64 {
+	if size <= 0 {
+		return size
+	}
+	if size < minCLIChunkSize {
+		return minCLIChunkSize
+	}
+	return size
+}
+
 func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
 	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token; defaults to GITHUB_TOKEN")
 	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
@@ -169,8 +181,8 @@ func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
 	if strings.TrimSpace(*apiBase) != "" {
 		cfg.APIBaseURL = *apiBase
 	}
-	if *chunkSize > 0 {
-		cfg.ChunkSize = *chunkSize
+	if normalized := normalizeCLIChunkSize(*chunkSize); normalized > 0 {
+		cfg.ChunkSize = normalized
 	}
 	if *concurrency > 0 {
 		cfg.MaxConcurrentTransfers = *concurrency
@@ -666,8 +678,8 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, concurrency int, pu
 	if strings.TrimSpace(apiBase) != "" {
 		cfg.APIBaseURL = apiBase
 	}
-	if chunkSize > 0 {
-		cfg.ChunkSize = chunkSize
+	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
+		cfg.ChunkSize = normalized
 	}
 	if concurrency > 0 {
 		cfg.MaxConcurrentTransfers = concurrency

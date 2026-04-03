@@ -13,16 +13,17 @@ import (
 
 const metadataFilePath = ".storhub/metadata.json"
 
-func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker, uploadKey string) ([]ChunkInfo, error) {
+func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker) ([]ChunkInfo, error) {
 	results := make([]ChunkInfo, planner.NumChunks())
+	namer := newAssetNamer()
 	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, planner.NumChunks(), func(i int) error {
 		chunk, err := planner.GetChunk(i)
 		if err != nil {
 			return err
 		}
-		assetName := chunk.Name()
-		if uploadKey != "" {
-			assetName = uploadKey + "." + assetName
+		assetName, err := namer.Next()
+		if err != nil {
+			return err
 		}
 		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
 		if err != nil {
