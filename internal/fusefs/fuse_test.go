@@ -464,6 +464,63 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
+	oldNotifyDelete := notifyDeleteFunc
+	t.Cleanup(func() { notifyDeleteFunc = oldNotifyDelete })
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	notifyDeleteFunc = func(parent *storhubNode, name string, child *storhubNode) {
+		started <- struct{}{}
+		<-release
+	}
+	parent := &storhubNode{}
+	child := &storhubNode{}
+	done := make(chan struct{})
+	go func() {
+		safeNotifyDelete(parent, "swap", child)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("safeNotifyDelete blocked caller")
+	}
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("safeNotifyDelete did not dispatch notification")
+	}
+	close(release)
+}
+
+func TestSafeNotifyEntryDoesNotBlockCaller(t *testing.T) {
+	oldNotifyEntry := notifyEntryFunc
+	t.Cleanup(func() { notifyEntryFunc = oldNotifyEntry })
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	notifyEntryFunc = func(node *storhubNode, name string) {
+		started <- struct{}{}
+		<-release
+	}
+	node := &storhubNode{}
+	done := make(chan struct{})
+	go func() {
+		safeNotifyEntry(node, "swap")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("safeNotifyEntry blocked caller")
+	}
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("safeNotifyEntry did not dispatch notification")
+	}
+	close(release)
+}
+
 type stubHub struct {
 	createFile   func(context.Context, string, string) (*meta.FileMetadata, error)
 	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)

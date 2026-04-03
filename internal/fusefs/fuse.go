@@ -29,6 +29,13 @@ const (
 	renameWhiteout  = 0x4
 )
 
+var (
+	notifyEntryFunc  = func(node *storhubNode, name string) { _ = node.NotifyEntry(name) }
+	notifyDeleteFunc = func(parent *storhubNode, name string, child *storhubNode) {
+		_ = parent.NotifyDelete(name, child.EmbeddedInode())
+	}
+)
+
 type Options struct {
 	EntryTimeout    time.Duration
 	AttrTimeout     time.Duration
@@ -2022,27 +2029,31 @@ func safeNotifyContent(node *storhubNode) {
 }
 
 func safeNotifyEntry(node *storhubNode, name string) {
-	defer func() {
-		_ = recover()
-	}()
 	if node == nil {
 		return
 	}
-	_ = node.NotifyEntry(name)
+	go func() {
+		defer func() {
+			_ = recover()
+		}()
+		notifyEntryFunc(node, name)
+	}()
 }
 
 func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
-	defer func() {
-		_ = recover()
-	}()
 	if parent == nil {
 		return
 	}
-	if child == nil {
-		_ = parent.NotifyEntry(name)
-		return
-	}
-	_ = parent.NotifyDelete(name, child.EmbeddedInode())
+	go func() {
+		defer func() {
+			_ = recover()
+		}()
+		if child == nil {
+			notifyEntryFunc(parent, name)
+			return
+		}
+		notifyDeleteFunc(parent, name, child)
+	}()
 }
 
 func (s *Filesystem) runJanitor() {
