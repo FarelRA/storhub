@@ -1200,6 +1200,26 @@ func (w *inodeWriteState) truncateDirtyRangesLocked(size int64) {
 	w.dirtyRanges = trimmed
 }
 
+func (w *inodeWriteState) coversRangeLocked(start, end int64) bool {
+	if start >= end {
+		return true
+	}
+	covered := start
+	for _, existing := range w.dirtyRanges {
+		if existing.End <= covered {
+			continue
+		}
+		if existing.Start > covered {
+			return false
+		}
+		covered = existing.End
+		if covered >= end {
+			return true
+		}
+	}
+	return covered >= end
+}
+
 func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL
@@ -1460,7 +1480,13 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		_ = os.Remove(temp.Name())
 		return "", err
 	}
-	if err := w.writeRangeToLocked(ctx, temp, 0, w.logicalSize); err != nil {
+	if w.coversRangeLocked(0, w.logicalSize) {
+		if _, err := io.CopyN(temp, io.NewSectionReader(w.temp, 0, w.logicalSize), w.logicalSize); err != nil {
+			_ = temp.Close()
+			_ = os.Remove(temp.Name())
+			return "", err
+		}
+	} else if err := w.writeRangeToLocked(ctx, temp, 0, w.logicalSize); err != nil {
 		_ = temp.Close()
 		_ = os.Remove(temp.Name())
 		return "", err

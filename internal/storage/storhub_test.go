@@ -2311,6 +2311,66 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 }
 
 func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
+	testFUSEEditorSaveCycle(t, "full-rewrite", func(original []byte) ([]byte, []byte) {
+		first := append(append([]byte(nil), original...), 'X')
+		second := append([]byte(nil), original...)
+		return first, second
+	})
+}
+
+func TestFUSEPartialEditorRewriteSaveCycles(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutator func([]byte) ([]byte, []byte)
+	}{
+		{
+			name: "rewrite-99-percent",
+			mutator: func(original []byte) ([]byte, []byte) {
+				first := append([]byte(nil), original...)
+				first[len(first)-1] = 'Z'
+				second := append([]byte(nil), original...)
+				return first, second
+			},
+		},
+		{
+			name: "rewrite-80-percent",
+			mutator: func(original []byte) ([]byte, []byte) {
+				first := append([]byte(nil), original[:len(original)/5]...)
+				first = append(first, bytes.Repeat([]byte("Q"), len(original)-len(original)/5)...)
+				second := append([]byte(nil), original...)
+				return first, second
+			},
+		},
+		{
+			name: "rewrite-50-percent",
+			mutator: func(original []byte) ([]byte, []byte) {
+				half := len(original) / 2
+				first := append([]byte(nil), original[:half]...)
+				first = append(first, bytes.Repeat([]byte("R"), len(original)-half)...)
+				second := append([]byte(nil), original...)
+				return first, second
+			},
+		},
+		{
+			name: "rewrite-40-percent",
+			mutator: func(original []byte) ([]byte, []byte) {
+				prefix := (len(original) * 3) / 5
+				first := append([]byte(nil), original[:prefix]...)
+				first = append(first, bytes.Repeat([]byte("S"), len(original)-prefix)...)
+				second := append([]byte(nil), original...)
+				return first, second
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testFUSEEditorSaveCycle(t, tt.name, tt.mutator)
+		})
+	}
+}
+
+func testFUSEEditorSaveCycle(t *testing.T, projectSuffix string, mutator func([]byte) ([]byte, []byte)) {
+	t.Helper()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 4096, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
 	ctx := context.Background()
@@ -2318,20 +2378,21 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 	original = append(original, bytes.Repeat([]byte("C"), 4096)...)
 	original = append(original, []byte("tail")...)
 	input := writeTempFile(t, t.TempDir(), "editor.txt", original)
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", input); err != nil {
+	project := "project-fuse-editor-cycles-" + projectSuffix
+	if _, err := hub.UploadFileContext(ctx, project, "editor.txt", input); err != nil {
 		t.Fatalf("upload editor file: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-editor-cycles", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE(project, fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer fsys.Close()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-editor-cycles", "editor.txt")
+	entry, err := hub.StatPathContext(ctx, project, "editor.txt")
 	if err != nil {
 		t.Fatalf("stat editor file: %v", err)
 	}
 	node := fsys.EnsureNodeForTest(ctx, entry)
-	save := func(parts ...[]byte) {
+	save := func(content []byte) {
 		hAny, _, errno := node.Open(ctx, syscall.O_WRONLY)
 		if errno != 0 {
 			t.Fatalf("open editor handle: %v", errno)
@@ -2344,12 +2405,15 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 		if errno := node.Setattr(ctx, h, &attr, &out); errno != 0 {
 			t.Fatalf("truncate editor handle: %v", errno)
 		}
-		offset := int64(0)
-		for _, part := range parts {
-			if written, errno := h.Write(ctx, part, offset); errno != 0 || written != uint32(len(part)) {
+		for offset := 0; offset < len(content); offset += 4096 {
+			end := offset + 4096
+			if end > len(content) {
+				end = len(content)
+			}
+			part := content[offset:end]
+			if written, errno := h.Write(ctx, part, int64(offset)); errno != 0 || written != uint32(len(part)) {
 				t.Fatalf("write editor handle: written=%d errno=%v", written, errno)
 			}
-			offset += int64(len(part))
 		}
 		if errno := h.Fsync(ctx, 0); errno != 0 {
 			t.Fatalf("fsync editor handle: %v", errno)
@@ -2358,12 +2422,11 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 			t.Fatalf("release editor handle: %v", errno)
 		}
 	}
-	first := append(append([]byte(nil), original...), 'X')
-	second := append([]byte(nil), original...)
-	save(first[:4096], first[4096:8192], first[8192:12288], first[12288:])
-	save(second[:4096], second[4096:8192], second[8192:12288], second[12288:])
-	output := filepath.Join(t.TempDir(), "editor-cycles.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-editor-cycles", "editor.txt", output); err != nil {
+	first, second := mutator(original)
+	save(first)
+	save(second)
+	output := filepath.Join(t.TempDir(), projectSuffix+"-editor-cycles.txt")
+	if err := hub.DownloadFileContext(ctx, project, "editor.txt", output); err != nil {
 		t.Fatalf("download saved file: %v", err)
 	}
 	assertFileContent(t, output, second)
