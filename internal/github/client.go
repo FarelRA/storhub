@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"math/rand"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 const (
@@ -35,6 +37,7 @@ type Client struct {
 	baseRetryDelay time.Duration
 	maxRetryDelay  time.Duration
 	sleep          func(context.Context, time.Duration) error
+	logger         *slog.Logger
 }
 
 type Release struct {
@@ -101,6 +104,7 @@ func NewClient(token string, cfg storcfg.Config) *Client {
 		baseRetryDelay: cfg.BaseRetryDelay,
 		maxRetryDelay:  cfg.MaxRetryDelay,
 		sleep:          cfg.Sleep,
+		logger:         logging.WithComponent(cfg.Logger, "github"),
 	}
 }
 
@@ -224,11 +228,15 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 	parsed.RawQuery = query.Encode()
 	endpoint := parsed.String()
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		started := time.Now().UTC()
 		assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
 		if err == nil {
+			logging.Info(c.logger, "upload asset complete", "asset", assetName, "size", size, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started))
 			return assetID, nil
 		}
+		logging.Warn(c.logger, "upload asset attempt failed", "asset", assetName, "size", size, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started), "err", err)
 		if existingID, resolveErr := c.FindAssetIDByName(ctx, owner, project, releaseTag, assetName); resolveErr == nil && existingID != 0 {
+			logging.Warn(c.logger, "upload asset reused existing asset after failure", "asset", assetName, "asset_id", existingID, "attempt", attempt+1)
 			return existingID, nil
 		}
 		var apiErr *APIError
@@ -238,7 +246,9 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 		if attempt == c.maxRetries {
 			return 0, fmt.Errorf("upload asset: %w", err)
 		}
-		if sleepErr := c.sleep(ctx, c.retryDelay(attempt, apiErr)); sleepErr != nil {
+		delay := c.retryDelay(attempt, apiErr)
+		logging.Warn(c.logger, "upload asset retry sleep", "asset", assetName, "attempt", attempt+1, "delay", delay, "err", err)
+		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 			return 0, sleepErr
 		}
 	}
@@ -365,6 +375,8 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFactory func() (io.Reader, error), opts requestOptions) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		started := time.Now().UTC()
+		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
 		reader, err := bodyFactory()
 		if err != nil {
 			return nil, err
@@ -384,23 +396,30 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		if err == nil {
 			apiErr := decodeAPIError(resp)
 			if apiErr == nil {
+				logging.Debug(c.logger, "http request complete", "method", method, "url", endpoint, "attempt", attempt+1, "status", resp.StatusCode, "elapsed", time.Now().UTC().Sub(started))
 				return resp, nil
 			}
 			resp.Body.Close()
 			lastErr = apiErr
+			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "err", apiErr)
 			if attempt == c.maxRetries || !opts.retryable || !apiErr.IsRetryable() {
 				return nil, apiErr
 			}
-			if sleepErr := c.sleep(ctx, c.retryDelay(attempt, apiErr)); sleepErr != nil {
+			delay := c.retryDelay(attempt, apiErr)
+			logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
+			if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 				return nil, sleepErr
 			}
 			continue
 		}
 		lastErr = fmt.Errorf("perform request: %w", err)
+		logging.Warn(c.logger, "http request transport error", "method", method, "url", endpoint, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started), "retryable", isRetryableNetworkError(err), "err", err)
 		if attempt == c.maxRetries || !opts.retryable || !isRetryableNetworkError(err) {
 			return nil, lastErr
 		}
-		if sleepErr := c.sleep(ctx, c.retryDelay(attempt, nil)); sleepErr != nil {
+		delay := c.retryDelay(attempt, nil)
+		logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
+		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 			return nil, sleepErr
 		}
 	}

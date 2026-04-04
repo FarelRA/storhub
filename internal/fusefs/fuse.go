@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -47,10 +49,11 @@ type Options struct {
 	PageSize        int64
 	ReadAheadPages  int64
 	MaxCachedPages  int
+	ExtraMountOpts  []string
 	CacheDir        string
 	AllowOther      bool
 	Debug           bool
-	Logger          *log.Logger
+	Logger          *slog.Logger
 }
 
 type Filesystem struct {
@@ -182,6 +185,7 @@ func DefaultOptions() Options {
 		PageSize:        128 * 1024,
 		ReadAheadPages:  4,
 		MaxCachedPages:  256,
+		ExtraMountOpts:  []string{"lazytime", "noatime"},
 		Debug:           true,
 	}
 }
@@ -262,8 +266,11 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if opts.MaxCachedPages <= 0 {
 		opts.MaxCachedPages = defaults.MaxCachedPages
 	}
+	if len(opts.ExtraMountOpts) == 0 {
+		opts.ExtraMountOpts = append([]string(nil), defaults.ExtraMountOpts...)
+	}
 	if opts.Logger == nil {
-		opts.Logger = log.New(os.Stderr, "storhub/fuse: ", log.LstdFlags|log.Lmicroseconds)
+		opts.Logger = logging.WithComponent(logging.NewLogger(logging.Options{Level: logging.LevelDebug, Format: logging.FormatPretty, Color: true, Output: os.Stderr}), "fuse")
 	}
 	cacheDir := opts.CacheDir
 	if strings.TrimSpace(cacheDir) == "" {
@@ -301,11 +308,12 @@ func (s *Filesystem) Mount(mountPoint string) error {
 		NegativeTimeout: durationPtr(s.opts.NegativeTimeout),
 		NullPermissions: true,
 		RootStableAttr:  &gofusefs.StableAttr{Ino: 1, Gen: 1},
-		Logger:          s.opts.Logger,
+		Logger:          log.New(os.Stderr, "storhub/go-fuse: ", log.LstdFlags|log.Lmicroseconds),
 	}
 	options.MountOptions.Debug = s.opts.Debug
 	options.MountOptions.AllowOther = s.opts.AllowOther
 	options.MountOptions.MaxWrite = mountMaxIOSize
+	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
@@ -379,7 +387,7 @@ func (s *Filesystem) debugf(format string, args ...any) {
 	if !s.opts.Debug || s.opts.Logger == nil {
 		return
 	}
-	s.opts.Logger.Printf(format, args...)
+	logging.Debug(s.opts.Logger, fmt.Sprintf(format, args...))
 }
 
 func (s *Filesystem) Invalidate() {
@@ -625,6 +633,7 @@ func (s *Filesystem) callerContext(ctx context.Context) context.Context {
 func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
 	childPath := path.Join(n.currentPath(), name)
+	n.fs.debugf("lookup path=%s child=%s", n.currentPath(), name)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
 		if out != nil {
@@ -657,6 +666,7 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 
 func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
+	n.fs.debugf("readdir path=%s", n.currentPath())
 	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return nil, errnoFromError(err)
@@ -676,6 +686,7 @@ func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.
 
 func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
+	n.fs.debugf("getattr path=%s inode=%d", n.currentPath(), n.inode)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return errnoFromError(err)
@@ -705,6 +716,7 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
 	targetPath := n.currentPath()
+	n.fs.debugf("open start path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return nil, 0, errnoFromError(err)
@@ -725,6 +737,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 
 func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
+	n.fs.debugf("access path=%s inode=%d mask=%#x", n.currentPath(), n.inode, mask)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return errnoFromError(err)

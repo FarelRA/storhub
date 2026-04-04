@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +21,7 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
+	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
@@ -57,16 +58,22 @@ func NewRepoMetadata(project string) *RepoMetadata {
 }
 
 type StorHub struct {
-	token      string
-	owner      string
-	gh         *ghapi.Client
-	config     storcfg.Config
-	bufferPool sync.Pool
-	ownerMu    sync.Mutex
-	repoMu     sync.Mutex
-	repoState  map[string]bool
-	metaMu     sync.RWMutex
-	metaCache  map[string]cachedMetadata
+	token          string
+	owner          string
+	gh             *ghapi.Client
+	config         storcfg.Config
+	bufferPool     sync.Pool
+	ownerMu        sync.Mutex
+	repoMu         sync.Mutex
+	repoState      map[string]bool
+	logger         *slog.Logger
+	metaMu         sync.RWMutex
+	metaCache      map[string]cachedMetadata
+	metaLockMu     sync.Mutex
+	metaLocks      map[string]*sync.Mutex
+	atimeMu        sync.Mutex
+	atimePending   map[string]map[atimeKey]atimeUpdate
+	atimeScheduled map[string]bool
 }
 
 type cachedMetadata struct {
@@ -75,7 +82,22 @@ type cachedMetadata struct {
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
-	log.Printf("storhub/storage: "+format, args...)
+	logging.Debug(h.logger, fmt.Sprintf(format, args...))
+}
+
+func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
+	logging.Info(h.projectLogger(project), op+" start", args...)
+	return time.Now().UTC()
+}
+
+func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
+	args = append(args, "elapsed", time.Since(started))
+	if err != nil {
+		args = append(args, "err", err)
+		logging.Error(h.projectLogger(project), op+" failed", args...)
+		return
+	}
+	logging.Info(h.projectLogger(project), op+" complete", args...)
 }
 
 func NewStorHub(token string) (*StorHub, error) {
@@ -93,11 +115,15 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 
 	cfg = cfg.WithDefaults()
 	hub := &StorHub{
-		token:     token,
-		gh:        ghapi.NewClient(token, cfg),
-		config:    cfg,
-		repoState: make(map[string]bool),
-		metaCache: make(map[string]cachedMetadata),
+		token:          token,
+		gh:             ghapi.NewClient(token, cfg),
+		config:         cfg,
+		repoState:      make(map[string]bool),
+		metaCache:      make(map[string]cachedMetadata),
+		logger:         logging.WithComponent(cfg.Logger, "storage"),
+		metaLocks:      make(map[string]*sync.Mutex),
+		atimePending:   make(map[string]map[atimeKey]atimeUpdate),
+		atimeScheduled: make(map[string]bool),
 		bufferPool: sync.Pool{New: func() any {
 			buf := make([]byte, cfg.BufferSize)
 			return &buf
@@ -138,7 +164,11 @@ func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inp
 	return h.putFileContext(ctx, project, fileName, inputPath, true)
 }
 
-func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName string, requiredSlots int) (string, string, error) {
+func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName string, requiredSlots int) (releaseTag string, uploadURL string, err error) {
+	started := h.logOpStart(project, "prepare-replace", "path", fileName, "required_slots", requiredSlots)
+	defer func() {
+		h.logOpFinish(project, "prepare-replace", started, err, "path", fileName, "required_slots", requiredSlots, "release", releaseTag)
+	}()
 	if err := validateProject(project); err != nil {
 		return "", "", err
 	}
@@ -162,7 +192,8 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	}
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
-	return h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, existing.Release)
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, existing.Release)
+	return releaseTag, uploadURL, err
 }
 
 func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, index int, offset int64, data []byte) (ChunkInfo, error) {
@@ -185,7 +216,11 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 	}, nil
 }
 
-func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (*FileMetadata, error) {
+func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (result *FileMetadata, err error) {
+	started := h.logOpStart(project, "finalize-replace", "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
+	defer func() {
+		h.logOpFinish(project, "finalize-replace", started, err, "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
+	}()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -221,7 +256,8 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}, metadataCommitMessage(cleanName, true)); err != nil {
 		return nil, err
 	}
-	return &fileMeta, nil
+	result = &fileMeta
+	return result, nil
 }
 
 func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chunk metadata.ChunkInfo, dst []byte) error {
@@ -232,7 +268,11 @@ func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, 
 	return h.PatchFileContext(context.Background(), project, fileName, offset, deleteSize, edit)
 }
 
-func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
+func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte) (result *FileMetadata, err error) {
+	started := h.logOpStart(project, "patch-file", "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
+	defer func() {
+		h.logOpFinish(project, "patch-file", started, err, "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
+	}()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -269,7 +309,8 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 		return nil, fmt.Errorf("patch range [%d,%d) exceeds file size %d", offset, patchEnd, fileMeta.Size)
 	}
 
-	return h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
+	result, err = h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
+	return result, err
 }
 
 func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMetadata, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
@@ -328,7 +369,13 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	return &rewritten, nil
 }
 
-func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (*FileMetadata, error) {
+func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (result *FileMetadata, err error) {
+	op := "upload-file"
+	if replace {
+		op = "replace-file"
+	}
+	started := h.logOpStart(project, op, "path", fileName, "input", inputPath)
+	defer func() { h.logOpFinish(project, op, started, err, "path", fileName, "input", inputPath) }()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -435,7 +482,8 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}, metadataCommitMessage(cleanName, replace)); err != nil {
 		return nil, err
 	}
-	return &fileMeta, nil
+	result = &fileMeta
+	return result, nil
 }
 
 func (h *StorHub) DownloadFile(project, fileName, outputPath string) error {
@@ -443,6 +491,8 @@ func (h *StorHub) DownloadFile(project, fileName, outputPath string) error {
 }
 
 func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, outputPath string) (err error) {
+	started := h.logOpStart(project, "download-file", "path", fileName, "output", outputPath)
+	defer func() { h.logOpFinish(project, "download-file", started, err, "path", fileName, "output", outputPath) }()
 	if err := validateProject(project); err != nil {
 		return err
 	}
@@ -504,7 +554,9 @@ func (h *StorHub) ListFiles(project string) ([]FileMetadata, error) {
 	return h.ListFilesContext(context.Background(), project)
 }
 
-func (h *StorHub) ListFilesContext(ctx context.Context, project string) ([]FileMetadata, error) {
+func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result []FileMetadata, err error) {
+	started := h.logOpStart(project, "list-files")
+	defer func() { h.logOpFinish(project, "list-files", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -514,14 +566,17 @@ func (h *StorHub) ListFilesContext(ctx context.Context, project string) ([]FileM
 	}
 	files := repoMeta.AllFiles()
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	return files, nil
+	result = files
+	return result, nil
 }
 
 func (h *StorHub) ListReleases(project string) ([]ReleaseMetadata, error) {
 	return h.ListReleasesContext(context.Background(), project)
 }
 
-func (h *StorHub) ListReleasesContext(ctx context.Context, project string) ([]ReleaseMetadata, error) {
+func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (result []ReleaseMetadata, err error) {
+	started := h.logOpStart(project, "list-releases")
+	defer func() { h.logOpFinish(project, "list-releases", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -533,25 +588,31 @@ func (h *StorHub) ListReleasesContext(ctx context.Context, project string) ([]Re
 	for i := range repoMeta.Releases {
 		releases[i] = repoMeta.Releases[i].Clone()
 	}
-	return releases, nil
+	result = releases
+	return result, nil
 }
 
 func (h *StorHub) ListMetadataRevisions(project string) ([]MetadataRevision, error) {
 	return h.ListMetadataRevisionsContext(context.Background(), project)
 }
 
-func (h *StorHub) ListMetadataRevisionsContext(ctx context.Context, project string) ([]MetadataRevision, error) {
+func (h *StorHub) ListMetadataRevisionsContext(ctx context.Context, project string) (result []MetadataRevision, err error) {
+	started := h.logOpStart(project, "list-metadata-revisions")
+	defer func() { h.logOpFinish(project, "list-metadata-revisions", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	return h.listMetadataRevisions(ctx, project)
+	result, err = h.listMetadataRevisions(ctx, project)
+	return result, err
 }
 
 func (h *StorHub) RollbackMetadata(project, commitSHA string) error {
 	return h.RollbackMetadataContext(context.Background(), project, commitSHA)
 }
 
-func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) (err error) {
+	started := h.logOpStart(project, "rollback-metadata", "commit_sha", commitSHA)
+	defer func() { h.logOpFinish(project, "rollback-metadata", started, err, "commit_sha", commitSHA) }()
 	if err := validateProject(project); err != nil {
 		return err
 	}
@@ -581,6 +642,12 @@ func (h *StorHub) getBuffer() *[]byte { return h.bufferPool.Get().(*[]byte) }
 func (h *StorHub) putBuffer(buf *[]byte) { h.bufferPool.Put(buf) }
 
 func (h *StorHub) updateRepoMetadata(ctx context.Context, project string, apply func(*RepoMetadata) error, message string) (*RepoMetadata, error) {
+	lockStarted := h.config.Now().UTC()
+	lock := h.metadataLock(project)
+	logging.Debug(h.projectLogger(project), "metadata writer wait", "message", message)
+	lock.Lock()
+	defer lock.Unlock()
+	logging.Debug(h.projectLogger(project), "metadata writer acquired", "message", message, "wait", h.config.Now().UTC().Sub(lockStarted))
 	for attempt := 0; attempt <= h.config.MaxRetries+1; attempt++ {
 		started := h.config.Now().UTC()
 		h.debugf("metadata update start project=%s attempt=%d message=%q", project, attempt+1, message)
@@ -830,6 +897,9 @@ func defaultOwnerIDs() (uint32, uint32) {
 }
 
 func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesystem, error) {
+	if opts.Logger == nil {
+		opts.Logger = logging.WithComponent(h.logger, "fuse")
+	}
 	return fusefs.New(h, project, opts)
 }
 

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
@@ -54,6 +55,48 @@ type storhubClient struct {
 	*storhub.StorHub
 }
 
+var (
+	cliLogLevel  = envOrDefault("STORHUB_LOG_LEVEL", "debug")
+	cliLogFormat = envOrDefault("STORHUB_LOG_FORMAT", "pretty")
+	cliLogColor  = parseEnvBool("STORHUB_LOG_COLOR", true)
+)
+
+type stringFlagSink struct{ target *string }
+
+func (s stringFlagSink) String() string {
+	if s.target == nil {
+		return ""
+	}
+	return *s.target
+}
+
+func (s stringFlagSink) Set(value string) error {
+	if s.target != nil {
+		*s.target = value
+	}
+	return nil
+}
+
+type boolFlagSink struct{ target *bool }
+
+func (b boolFlagSink) String() string {
+	if b.target == nil {
+		return "false"
+	}
+	return strconv.FormatBool(*b.target)
+}
+
+func (b boolFlagSink) Set(value string) error {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	if b.target != nil {
+		*b.target = parsed
+	}
+	return nil
+}
+
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return c.StorHub.NewFUSE(project, opts)
 }
@@ -67,6 +110,13 @@ var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency
 }
 
 var newRESTHubFromFlagsFn = newHubFromFlags
+var newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
+	hub, err := newMountHubFromFlags(token, apiBase)
+	if err != nil {
+		return nil, err
+	}
+	return storhubClient{StorHub: hub}, nil
+}
 var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
 	return shrest.New(hub, opts)
 }
@@ -76,6 +126,15 @@ var restListenAndServeFn = func(addr string, handler http.Handler) error {
 
 func New() *App {
 	return &App{stdout: os.Stdout, stderr: os.Stderr}
+}
+
+func addLoggingFlags(fs *flag.FlagSet) {
+	cliLogLevel = envOrDefault("STORHUB_LOG_LEVEL", cliLogLevel)
+	cliLogFormat = envOrDefault("STORHUB_LOG_FORMAT", cliLogFormat)
+	cliLogColor = parseEnvBool("STORHUB_LOG_COLOR", cliLogColor)
+	fs.Var(stringFlagSink{target: &cliLogLevel}, "log-level", "Log level: debug, info, warn, error")
+	fs.Var(stringFlagSink{target: &cliLogFormat}, "log-format", "Log format: pretty, text")
+	fs.Var(boolFlagSink{target: &cliLogColor}, "log-color", "Enable ANSI colors in logs")
 }
 
 func (a *App) Run(args []string) error {
@@ -167,6 +226,7 @@ func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
 	chunkSize := fs.Int64("chunk-size", 0, "Chunk size in bytes")
 	concurrency := fs.Int("concurrency", 0, "Max concurrent transfers")
 	public := fs.Bool("public", false, "Create public repos instead of private")
+	addLoggingFlags(fs)
 	fs.SetOutput(a.stderr)
 	fs.Usage = func() {
 		fmt.Fprintln(a.stderr, fs.Name()+" usage:")
@@ -188,6 +248,9 @@ func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
 		cfg.MaxConcurrentTransfers = *concurrency
 	}
 	cfg.CreatePublicRepo = *public
+	cfg.LogLevel = cliLogLevel
+	cfg.LogFormat = cliLogFormat
+	cfg.LogColor = cliLogColor
 	hub, err := storhub.NewStorHubWithConfig(*token, cfg)
 	if err != nil {
 		return nil, err
@@ -197,6 +260,7 @@ func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
 
 func (a *App) parseCommand(name, usage string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	addLoggingFlags(fs)
 	fs.SetOutput(a.stderr)
 	fs.Usage = func() {
 		fmt.Fprintf(a.stderr, "Usage: %s\n\n", usage)
@@ -214,6 +278,7 @@ func (a *App) runUpload(args []string, replace bool) error {
 	chunkSize := fs.Int64("chunk-size", 0, "Chunk size in bytes")
 	concurrency := fs.Int("concurrency", 0, "Max concurrent transfers")
 	public := fs.Bool("public", false, "Create public repos")
+	addLoggingFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -249,7 +314,7 @@ func (a *App) runDownload(args []string) error {
 	if len(rest) != 3 {
 		return fmt.Errorf("usage: storhub download [flags] <project> <remote-path> <local-path>")
 	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+	hub, err := newMountHubFromFlagsFn(*token, *apiBase)
 	if err != nil {
 		return err
 	}
@@ -685,7 +750,42 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, concurrency int, pu
 		cfg.MaxConcurrentTransfers = concurrency
 	}
 	cfg.CreatePublicRepo = public
+	cfg.LogLevel = cliLogLevel
+	cfg.LogFormat = cliLogFormat
+	cfg.LogColor = cliLogColor
 	return storhub.NewStorHubWithConfig(token, cfg)
+}
+
+func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
+	}
+	cfg := storhub.DefaultConfig()
+	if strings.TrimSpace(apiBase) != "" {
+		cfg.APIBaseURL = apiBase
+	}
+	cfg.AtimePolicy = storcfg.AtimeNo
+	return storhub.NewStorHubWithConfig(token, cfg)
+}
+
+func envOrDefault(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func parseEnvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func ternary[T any](cond bool, left, right T) T {

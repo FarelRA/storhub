@@ -9,6 +9,7 @@ import (
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	ghapi "github.com/FarelRA/storhub/internal/github"
+	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -102,6 +103,8 @@ func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) 
 }
 
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "load metadata start")
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, "", err
 	}
@@ -118,8 +121,10 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 			}
 			meta := NewRepoMetadata(project)
 			h.storeRepoMetadata(project, *meta, "")
+			logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 			return meta, "", nil
 		}
+		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
 	meta := NewRepoMetadata(project)
@@ -131,10 +136,13 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		return nil, "", fmt.Errorf("validate metadata: %w", err)
 	}
 	h.storeRepoMetadata(project, *meta, sha)
+	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
 	return meta, sha, nil
 }
 
 func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metadata RepoMetadata, previousSHA, message string) (string, string, error) {
+	started := h.config.Now().UTC()
+	logging.Info(h.projectLogger(project), "commit metadata start", "message", message, "previous_sha", shortSHA(previousSHA))
 	if err := h.ensureOwner(ctx); err != nil {
 		return "", "", err
 	}
@@ -153,9 +161,11 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	}
 	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, payload, previousSHA, message)
 	if err != nil {
+		logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return "", "", err
 	}
 	h.storeRepoMetadata(project, metadata, contentSHA)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
 	return commitSHA, contentSHA, nil
 }
 

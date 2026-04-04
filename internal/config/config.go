@@ -2,8 +2,13 @@ package config
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 const (
@@ -36,6 +41,11 @@ type Config struct {
 	MaxRetries             int
 	BaseRetryDelay         time.Duration
 	MaxRetryDelay          time.Duration
+	Logger                 *slog.Logger
+	LogOutput              io.Writer
+	LogLevel               string
+	LogFormat              string
+	LogColor               bool
 	AtimePolicy            AtimePolicy
 	Now                    func() time.Time
 	Sleep                  func(context.Context, time.Duration) error
@@ -54,6 +64,10 @@ func Default() Config {
 		MaxRetries:             4,
 		BaseRetryDelay:         500 * time.Millisecond,
 		MaxRetryDelay:          8 * time.Second,
+		LogOutput:              os.Stderr,
+		LogLevel:               logging.LevelDebug,
+		LogFormat:              logging.FormatPretty,
+		LogColor:               true,
 		AtimePolicy:            AtimeRelatime,
 		Now:                    time.Now,
 		Sleep:                  sleepWithContext,
@@ -95,6 +109,25 @@ func (c Config) WithDefaults() Config {
 	if c.MaxRetryDelay <= 0 {
 		c.MaxRetryDelay = defaults.MaxRetryDelay
 	}
+	if c.LogOutput == nil {
+		c.LogOutput = defaults.LogOutput
+	}
+	c.LogLevel = logging.NormalizeLevel(c.LogLevel)
+	if c.LogLevel == "" {
+		c.LogLevel = defaults.LogLevel
+	}
+	c.LogFormat = logging.NormalizeFormat(c.LogFormat)
+	if c.LogFormat == "" {
+		c.LogFormat = defaults.LogFormat
+	}
+	if c.Logger == nil {
+		c.Logger = logging.NewLogger(logging.Options{
+			Level:  c.LogLevel,
+			Format: c.LogFormat,
+			Color:  c.LogColor,
+			Output: c.LogOutput,
+		})
+	}
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
 	}
@@ -119,6 +152,11 @@ func isZeroConfig(c Config) bool {
 		c.MaxRetries == 0 &&
 		c.BaseRetryDelay == 0 &&
 		c.MaxRetryDelay == 0 &&
+		c.Logger == nil &&
+		c.LogOutput == nil &&
+		c.LogLevel == "" &&
+		c.LogFormat == "" &&
+		!c.LogColor &&
 		c.AtimePolicy == "" &&
 		c.Now == nil &&
 		c.Sleep == nil

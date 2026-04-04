@@ -155,10 +155,12 @@ func TestPrintRootHelp(t *testing.T) {
 
 func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
+	oldMountFactory := newMountHubFromFlagsFn
 	oldRESTFactory := newRESTHubFromFlagsFn
 	oldRESTHandler := newRESTHandlerFn
 	oldRESTListen := restListenAndServeFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	t.Cleanup(func() { newMountHubFromFlagsFn = oldMountFactory })
 	t.Cleanup(func() {
 		newRESTHubFromFlagsFn = oldRESTFactory
 		newRESTHandlerFn = oldRESTHandler
@@ -172,6 +174,9 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	downloadFile := filepath.Join(t.TempDir(), "download.txt")
 	mountDir := t.TempDir()
 	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+		return &fakeHub{t: t}, nil
+	}
+	newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
@@ -221,10 +226,12 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 
 func TestServeRESTLoadsAuthFile(t *testing.T) {
 	oldHubFactory := newRESTHubFromFlagsFn
+	oldMountFactory := newMountHubFromFlagsFn
 	oldHandlerFactory := newRESTHandlerFn
 	oldListen := restListenAndServeFn
 	t.Cleanup(func() {
 		newRESTHubFromFlagsFn = oldHubFactory
+		newMountHubFromFlagsFn = oldMountFactory
 		newRESTHandlerFn = oldHandlerFactory
 		restListenAndServeFn = oldListen
 	})

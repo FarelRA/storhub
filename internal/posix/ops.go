@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -20,6 +22,8 @@ type Backend interface {
 	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
+	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time)
+	Logger() *slog.Logger
 	Now() time.Time
 	AtimePolicy() storcfg.AtimePolicy
 	FileNotFound(path string) error
@@ -35,7 +39,24 @@ func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
 
-func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (*meta.FileMetadata, error) {
+func (s *Service) logger(project string) *slog.Logger {
+	return logging.WithComponent(s.backend.Logger(), "posix").With("project", project)
+}
+
+func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
+	args = append(args, "elapsed", time.Since(started))
+	if err != nil {
+		args = append(args, "err", err)
+		logging.Error(s.logger(project), op+" failed", args...)
+		return
+	}
+	logging.Info(s.logger(project), op+" complete", args...)
+}
+
+func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "symlink start", "target", target, "path", linkPath)
+	defer func() { s.logFinish(project, "symlink", started, err, "target", target, "path", linkPath) }()
 	if err := s.backend.ValidateProjectName(project); err != nil {
 		return nil, err
 	}
@@ -99,10 +120,14 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	}, fmt.Sprintf("storhub: symlink %s -> %s", cleanPath, target)); err != nil {
 		return nil, err
 	}
-	return &symlink, nil
+	result = &symlink
+	return result, nil
 }
 
-func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
+func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string) (target string, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "readlink start", "path", linkPath)
+	defer func() { s.logFinish(project, "readlink", started, err, "path", linkPath) }()
 	cleanPath, err := shfs.NormalizePath(linkPath)
 	if err != nil {
 		return "", err
@@ -122,10 +147,14 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 		return "", fmt.Errorf("path is not a symlink: %s", cleanPath)
 	}
 	shfs.TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
-	return file.SymlinkTarget, nil
+	target = file.SymlinkTarget
+	return target, nil
 }
 
-func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPath string) (*meta.FileMetadata, error) {
+func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPath string) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "link start", "source", existingPath, "path", newPath)
+	defer func() { s.logFinish(project, "link", started, err, "source", existingPath, "path", newPath) }()
 	sourcePath, err := shfs.NormalizePath(existingPath)
 	if err != nil {
 		return nil, err
@@ -176,10 +205,14 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 	}, fmt.Sprintf("storhub: link %s to %s", sourcePath, linkPath)); err != nil {
 		return nil, err
 	}
-	return &linked, nil
+	result = &linked
+	return result, nil
 }
 
-func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "chmod start", "path", targetPath, "mode", mode)
+	defer func() { s.logFinish(project, "chmod", started, err, "path", targetPath, "mode", mode) }()
 	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
 	if err != nil {
 		return err
@@ -202,7 +235,10 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 	})
 }
 
-func (s *Service) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+func (s *Service) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "chown start", "path", targetPath, "uid", uid, "gid", gid)
+	defer func() { s.logFinish(project, "chown", started, err, "path", targetPath, "uid", uid, "gid", gid) }()
 	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
 		return err
 	}
@@ -226,7 +262,10 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	})
 }
 
-func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime time.Time) error {
+func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime time.Time) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "chtimes start", "path", targetPath, "atime", atime, "mtime", mtime)
+	defer func() { s.logFinish(project, "chtimes", started, err, "path", targetPath) }()
 	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
 	if err != nil {
 		return err
@@ -252,7 +291,12 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 	})
 }
 
-func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "setxattr start", "path", targetPath, "attr", attr, "bytes", len(data))
+	defer func() {
+		s.logFinish(project, "setxattr", started, err, "path", targetPath, "attr", attr, "bytes", len(data))
+	}()
 	if strings.TrimSpace(attr) == "" {
 		return errors.New("xattr name is required")
 	}
@@ -284,7 +328,10 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	})
 }
 
-func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
+func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr string) (result []byte, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "getxattr start", "path", targetPath, "attr", attr)
+	defer func() { s.logFinish(project, "getxattr", started, err, "path", targetPath, "attr", attr) }()
 	if strings.TrimSpace(attr) == "" {
 		return nil, errors.New("xattr name is required")
 	}
@@ -305,10 +352,14 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 	if !ok {
 		return nil, fmt.Errorf("xattr not found: %s", cleanPath)
 	}
-	return []byte(value), nil
+	result = []byte(value)
+	return result, nil
 }
 
-func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
+func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath string) (result []string, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "listxattr start", "path", targetPath)
+	defer func() { s.logFinish(project, "listxattr", started, err, "path", targetPath) }()
 	repo, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
 	if err != nil {
 		return nil, err
@@ -327,10 +378,14 @@ func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath stri
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, nil
+	result = names
+	return result, nil
 }
 
-func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "removexattr start", "path", targetPath, "attr", attr)
+	defer func() { s.logFinish(project, "removexattr", started, err, "path", targetPath, "attr", attr) }()
 	if strings.TrimSpace(attr) == "" {
 		return errors.New("xattr name is required")
 	}
@@ -366,7 +421,10 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	})
 }
 
-func (s *Service) updatePathMetadataContext(ctx context.Context, project, targetPath string, mutate func(*meta.RepoMetadata, *meta.FileMetadata, *meta.DirectoryMetadata) error) error {
+func (s *Service) updatePathMetadataContext(ctx context.Context, project, targetPath string, mutate func(*meta.RepoMetadata, *meta.FileMetadata, *meta.DirectoryMetadata) error) (err error) {
+	started := time.Now().UTC()
+	logging.Debug(s.logger(project), "update-path-metadata start", "path", targetPath)
+	defer func() { s.logFinish(project, "update-path-metadata", started, err, "path", targetPath) }()
 	cleanPath := ""
 	if strings.TrimSpace(targetPath) != "" {
 		var err error
@@ -375,7 +433,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			return err
 		}
 	}
-	_, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if cleanPath == "" {
 			root := &meta.DirectoryMetadata{
 				Path:       "",
@@ -421,7 +479,10 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 	return err
 }
 
-func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) error {
+func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "apply-metadata-patch start", "path", targetPath, "has_mode", patch.HasMode, "has_owner", patch.HasOwner, "has_times", patch.HasTimes)
+	defer func() { s.logFinish(project, "apply-metadata-patch", started, err, "path", targetPath) }()
 	if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
 		return nil
 	}

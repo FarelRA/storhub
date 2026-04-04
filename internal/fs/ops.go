@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -23,6 +25,8 @@ type Backend interface {
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
 	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMetadata, offset, deleteSize int64, edit []byte) (*meta.FileMetadata, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
+	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time)
+	Logger() *slog.Logger
 	Now() time.Time
 	AtimePolicy() storcfg.AtimePolicy
 	FileNotFound(path string) error
@@ -40,7 +44,24 @@ func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
 
-func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (*meta.FileMetadata, error) {
+func (s *Service) logger(project string) *slog.Logger {
+	return logging.WithComponent(s.backend.Logger(), "fs").With("project", project)
+}
+
+func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
+	args = append(args, "elapsed", time.Since(started))
+	if err != nil {
+		args = append(args, "err", err)
+		logging.Error(s.logger(project), op+" failed", args...)
+		return
+	}
+	logging.Info(s.logger(project), op+" complete", args...)
+}
+
+func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "create-file start", "path", filePath)
+	defer func() { s.logFinish(project, "create-file", started, err, "path", filePath) }()
 	cleanPath, err := NormalizePath(filePath)
 	if err != nil {
 		return nil, err
@@ -103,10 +124,14 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	}, fmt.Sprintf("storhub: create %s", cleanPath)); err != nil {
 		return nil, err
 	}
-	return &fileMeta, nil
+	result = &fileMeta
+	return result, nil
 }
 
-func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) error {
+func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "mkdir start", "path", dirPath)
+	defer func() { s.logFinish(project, "mkdir", started, err, "path", dirPath) }()
 	cleanPath, err := NormalizePath(dirPath)
 	if err != nil {
 		return err
@@ -145,7 +170,10 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) err
 	return err
 }
 
-func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "rmdir start", "path", dirPath)
+	defer func() { s.logFinish(project, "rmdir", started, err, "path", dirPath) }()
 	cleanPath, err := NormalizePath(dirPath)
 	if err != nil {
 		return err
@@ -177,7 +205,10 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) err
 	return err
 }
 
-func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "rename start", "old_path", oldPath, "new_path", newPath)
+	defer func() { s.logFinish(project, "rename", started, err, "old_path", oldPath, "new_path", newPath) }()
 	oldClean, err := NormalizePath(oldPath)
 	if err != nil {
 		return err
@@ -264,7 +295,10 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 	return err
 }
 
-func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*meta.FileMetadata, error) {
+func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "truncate start", "path", filePath, "size", size)
+	defer func() { s.logFinish(project, "truncate", started, err, "path", filePath, "size", size) }()
 	cleanPath, err := NormalizePath(filePath)
 	if err != nil {
 		return nil, err
@@ -288,15 +322,21 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	}
 	if size == file.Size {
 		clone := file.Clone()
-		return &clone, nil
+		result = &clone
+		return result, nil
 	}
 	if size < file.Size {
-		return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, size, file.Size-size, nil)
+		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, size, file.Size-size, nil)
+		return result, err
 	}
-	return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, make([]byte, size-file.Size))
+	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, make([]byte, size-file.Size))
+	return result, err
 }
 
-func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*meta.FileMetadata, error) {
+func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "append start", "path", filePath, "bytes", len(data))
+	defer func() { s.logFinish(project, "append", started, err, "path", filePath, "bytes", len(data)) }()
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
@@ -315,10 +355,16 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	if file.Kind == meta.NodeKindSymlink {
 		return nil, fmt.Errorf("cannot append to symlink: %s", cleanPath)
 	}
-	return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, data)
+	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, data)
+	return result, err
 }
 
-func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*meta.FileMetadata, error) {
+func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMetadata, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "write-at start", "path", filePath, "offset", offset, "bytes", len(data))
+	defer func() {
+		s.logFinish(project, "write-at", started, err, "path", filePath, "offset", offset, "bytes", len(data))
+	}()
 	cleanPath, err := NormalizePath(filePath)
 	if err != nil {
 		return nil, err
@@ -342,20 +388,28 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	}
 	if len(data) == 0 {
 		clone := file.Clone()
-		return &clone, nil
+		result = &clone
+		return result, nil
 	}
 	if offset > file.Size {
 		gap := make([]byte, offset-file.Size)
-		return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, append(gap, data...))
+		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, append(gap, data...))
+		return result, err
 	}
 	deleteSize := int64(len(data))
 	if max := file.Size - offset; deleteSize > max {
 		deleteSize = max
 	}
-	return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, offset, deleteSize, data)
+	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, offset, deleteSize, data)
+	return result, err
 }
 
-func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
+func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) (result []byte, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "read-at start", "path", filePath, "offset", offset, "length", length)
+	defer func() {
+		s.logFinish(project, "read-at", started, err, "path", filePath, "offset", offset, "length", length)
+	}()
 	cleanPath, err := NormalizePath(filePath)
 	if err != nil {
 		return nil, err
@@ -381,13 +435,14 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 		return nil, io.EOF
 	}
 	if length == 0 {
-		return []byte{}, nil
+		result = []byte{}
+		return result, nil
 	}
 	end := offset + length
 	if end > file.Size {
 		end = file.Size
 	}
-	result := make([]byte, end-offset)
+	result = make([]byte, end-offset)
 	startIndex := sort.Search(len(file.Chunks), func(i int) bool {
 		return file.Chunks[i].Offset+file.Chunks[i].Size > offset
 	})
@@ -414,7 +469,10 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	return result, nil
 }
 
-func (s *Service) StatPathContext(ctx context.Context, project, targetPath string) (*EntryInfo, error) {
+func (s *Service) StatPathContext(ctx context.Context, project, targetPath string) (result *EntryInfo, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "stat-path start", "path", targetPath)
+	defer func() { s.logFinish(project, "stat-path", started, err, "path", targetPath) }()
 	cleanPath := ""
 	if strings.TrimSpace(targetPath) != "" {
 		var err error
@@ -431,18 +489,24 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 		return nil, err
 	}
 	if cleanPath == "" {
-		return &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: repo.Root.NLink, CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}, nil
+		result = &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: repo.Root.NLink, CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}
+		return result, nil
 	}
 	if file := repo.FindFile(cleanPath); file != nil {
-		return EntryInfoFromFile(file), nil
+		result = EntryInfoFromFile(file)
+		return result, nil
 	}
 	if dir := repo.GetDirectory(cleanPath); dir != nil {
-		return EntryInfoFromDirectory(dir), nil
+		result = EntryInfoFromDirectory(dir)
+		return result, nil
 	}
 	return nil, fmt.Errorf("path not found: %s", cleanPath)
 }
 
-func (s *Service) StatFSContext(ctx context.Context, project string) (*FSStats, error) {
+func (s *Service) StatFSContext(ctx context.Context, project string) (result *FSStats, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "statfs start")
+	defer func() { s.logFinish(project, "statfs", started, err) }()
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
@@ -451,10 +515,14 @@ func (s *Service) StatFSContext(ctx context.Context, project string) (*FSStats, 
 	for _, release := range repo.Releases {
 		stats.Assets += release.AssetCount
 	}
-	return stats, nil
+	result = stats
+	return result, nil
 }
 
-func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) ([]DirEntry, error) {
+func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (result []DirEntry, err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "readdir start", "path", dirPath)
+	defer func() { s.logFinish(project, "readdir", started, err, "path", dirPath) }()
 	cleanPath := ""
 	if strings.TrimSpace(dirPath) != "" {
 		var err error
@@ -486,7 +554,8 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	TouchDirectoryAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
-	return entries, nil
+	result = entries
+	return result, nil
 }
 
 func RequireParentDirectory(repo *meta.RepoMetadata, filePath string) error {

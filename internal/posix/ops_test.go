@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"syscall"
 	"testing"
 	"time"
@@ -53,6 +54,27 @@ func (b *testBackend) UpdateRepoMetadataContext(_ context.Context, _ string, fn 
 	b.repo = &clone
 	return &clone, nil
 }
+
+func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time) {
+	_, _ = b.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if isDir {
+			if targetPath == "" {
+				repo.Root.AccessedAt = now
+				return nil
+			}
+			if dir := repo.GetDirectory(targetPath); dir != nil {
+				dir.AccessedAt = now
+			}
+			return nil
+		}
+		if file := repo.FindFile(targetPath); file != nil {
+			file.AccessedAt = now
+		}
+		return nil
+	}, "test atime")
+}
+
+func (b *testBackend) Logger() *slog.Logger { return nil }
 
 func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ string, repoMeta *meta.RepoMetadata, _ int, _ string) (string, string, error) {
 	repoMeta.EnsureRelease("v1", b.now)
