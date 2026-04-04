@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -859,6 +860,62 @@ func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
 	}
 }
 
+func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
+	now := time.Unix(35, 0).UTC()
+	patchCalls := 0
+	chmodCalls := 0
+	fake := &stubHub{
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if target == "docs/file.txt" {
+				return &shfs.EntryInfo{Path: target, Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			}
+			return nil, syscall.ENOENT
+		},
+		chmod: func(context.Context, string, string, uint32) error {
+			chmodCalls++
+			return nil
+		},
+		applyPatch: func(_ context.Context, _ string, target string, patch shfs.MetadataPatch) error {
+			patchCalls++
+			if target != "docs/file.txt" || !patch.HasMode || patch.Mode != 0o644 || !patch.HasTimes {
+				return fmt.Errorf("unexpected patch: %+v target=%s", patch, target)
+			}
+			return nil
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	hAny, _, errno := node.Open(context.Background(), syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("open write handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	var attr fuse.SetAttrIn
+	attr.Valid = fuse.FATTR_MODE | fuse.FATTR_MTIME | fuse.FATTR_ATIME
+	attr.Mode = 0o644
+	attr.Atime = uint64(now.Add(-time.Hour).Unix())
+	attr.Atimensec = uint32(now.Add(-time.Hour).Nanosecond())
+	attr.Mtime = uint64(now.Add(-2 * time.Hour).Unix())
+	attr.Mtimensec = uint32(now.Add(-2 * time.Hour).Nanosecond())
+	var out fuse.AttrOut
+	if errno := node.Setattr(context.Background(), h, &attr, &out); errno != 0 {
+		t.Fatalf("setattr with handle: %v", errno)
+	}
+	if chmodCalls != 0 || patchCalls != 0 {
+		t.Fatalf("expected no immediate backend metadata writes, got chmod=%d patch=%d", chmodCalls, patchCalls)
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release handle: %v", errno)
+	}
+	if patchCalls != 1 {
+		t.Fatalf("expected one deferred metadata patch, got %d", patchCalls)
+	}
+}
+
 func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
 	oldNotifyDelete := notifyDeleteFunc
 	t.Cleanup(func() { notifyDeleteFunc = oldNotifyDelete })
@@ -1044,6 +1101,7 @@ type stubHub struct {
 	removeXAttr    func(context.Context, string, string, string) error
 	readlink       func(context.Context, string, string) (string, error)
 	chmod          func(context.Context, string, string, uint32) error
+	applyPatch     func(context.Context, string, string, shfs.MetadataPatch) error
 	truncateFile   func(context.Context, string, string, int64) (*meta.FileMetadata, error)
 	loadReadonly   func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta     func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
@@ -1095,6 +1153,12 @@ func (s *stubHub) TruncateFileContext(ctx context.Context, project, target strin
 func (s *stubHub) ChmodContext(ctx context.Context, project, target string, mode uint32) error {
 	if s.chmod != nil {
 		return s.chmod(ctx, project, target, mode)
+	}
+	return nil
+}
+func (s *stubHub) ApplyMetadataPatchContext(ctx context.Context, project, target string, patch shfs.MetadataPatch) error {
+	if s.applyPatch != nil {
+		return s.applyPatch(ctx, project, target, patch)
 	}
 	return nil
 }

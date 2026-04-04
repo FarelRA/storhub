@@ -24,6 +24,17 @@ type EntryInfo struct {
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 }
 
+type MetadataPatch struct {
+	HasMode  bool
+	Mode     uint32
+	HasOwner bool
+	UID      uint32
+	GID      uint32
+	HasTimes bool
+	ATime    time.Time
+	MTime    time.Time
+}
+
 type DirEntry struct {
 	Name      string            `json:"name"`
 	Path      string            `json:"path"`

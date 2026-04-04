@@ -137,6 +137,7 @@ type inodeWriteState struct {
 	dirtyRanges       []ByteRange
 	tempAuthoritative bool
 	stream            *streamingUploadState
+	pending           shfs.MetadataPatch
 }
 
 type streamingUploadState struct {
@@ -216,6 +217,7 @@ type Hub interface {
 	SetXAttrContext(context.Context, string, string, string, []byte) error
 	ListXAttrContext(context.Context, string, string) ([]string, error)
 	RemoveXAttrContext(context.Context, string, string, string) error
+	ApplyMetadataPatchContext(context.Context, string, string, shfs.MetadataPatch) error
 	DownloadFileContext(context.Context, string, string, string) error
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
 	PrepareReplaceContext(context.Context, string, string, int) (string, string, error)
@@ -422,9 +424,16 @@ func (s *Filesystem) applyPendingSize(entry *shfs.EntryInfo) {
 	if entry == nil {
 		return
 	}
-	if size, ok := s.pendingSizeForInode(entry.Inode); ok {
-		entry.Size = size
+	state := s.writeStateForInode(entry.Inode)
+	if state == nil {
+		return
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.deleted {
+		return
+	}
+	state.overlayEntryLocked(entry)
 }
 
 func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
@@ -856,11 +865,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	targetPath := n.currentPath()
 	usedLocalSize := false
 	localSize := int64(0)
+	state := n.fs.writeStateForInode(n.inode)
+	if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
+		state = handle.writeState
+	}
 	if size, ok := in.GetSize(); ok && !n.isDir {
-		state := n.fs.writeStateForInode(n.inode)
-		if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
-			state = handle.writeState
-		}
 		if state != nil {
 			state.opMu.Lock()
 			state.mu.Lock()
@@ -882,8 +891,17 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		}
 	}
 	if mode, ok := in.GetMode(); ok {
-		if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
-			return errnoFromError(err)
+		if state != nil && !n.isDir {
+			state.opMu.Lock()
+			state.mu.Lock()
+			state.pending.HasMode = true
+			state.pending.Mode = mode & 0o7777
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		} else {
+			if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
+				return errnoFromError(err)
+			}
 		}
 	}
 	uid, uidOK := in.GetUID()
@@ -893,14 +911,31 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		if err != nil {
 			return errnoFromError(err)
 		}
-		if !uidOK {
-			uid = entry.UID
-		}
-		if !gidOK {
-			gid = entry.GID
-		}
-		if err := n.fs.hub.ChownContext(ctx, n.fs.project, targetPath, uid, gid); err != nil {
-			return errnoFromError(err)
+		if state != nil && !n.isDir {
+			state.opMu.Lock()
+			state.mu.Lock()
+			state.overlayEntryLocked(entry)
+			if !uidOK {
+				uid = entry.UID
+			}
+			if !gidOK {
+				gid = entry.GID
+			}
+			state.pending.HasOwner = true
+			state.pending.UID = uid
+			state.pending.GID = gid
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		} else {
+			if !uidOK {
+				uid = entry.UID
+			}
+			if !gidOK {
+				gid = entry.GID
+			}
+			if err := n.fs.hub.ChownContext(ctx, n.fs.project, targetPath, uid, gid); err != nil {
+				return errnoFromError(err)
+			}
 		}
 	}
 	atime, atimeOK := in.GetATime()
@@ -916,8 +951,25 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		if !mtimeOK {
 			mtime = entry.ModifiedAt
 		}
-		if err := n.fs.hub.ChtimesContext(ctx, n.fs.project, targetPath, atime, mtime); err != nil {
-			return errnoFromError(err)
+		if state != nil && !n.isDir {
+			state.opMu.Lock()
+			state.mu.Lock()
+			state.overlayEntryLocked(entry)
+			if !atimeOK {
+				atime = entry.AccessedAt
+			}
+			if !mtimeOK {
+				mtime = entry.ModifiedAt
+			}
+			state.pending.HasTimes = true
+			state.pending.ATime = atime
+			state.pending.MTime = mtime
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		} else {
+			if err := n.fs.hub.ChtimesContext(ctx, n.fs.project, targetPath, atime, mtime); err != nil {
+				return errnoFromError(err)
+			}
 		}
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
@@ -928,6 +980,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		entry.Size = localSize
 	} else {
 		n.fs.applyPendingSize(entry)
+	}
+	if state != nil && !n.isDir {
+		state.mu.Lock()
+		state.overlayEntryLocked(entry)
+		state.mu.Unlock()
 	}
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
@@ -1612,6 +1669,36 @@ func (w *inodeWriteState) dirtyBytesLocked() int64 {
 	return total
 }
 
+func (w *inodeWriteState) hasPendingMetadataLocked() bool {
+	return w.pending.HasMode || w.pending.HasOwner || w.pending.HasTimes
+}
+
+func (w *inodeWriteState) overlayEntryLocked(entry *shfs.EntryInfo) {
+	if entry == nil {
+		return
+	}
+	if w.pending.HasMode {
+		entry.Mode = w.pending.Mode
+	}
+	if w.pending.HasOwner {
+		entry.UID = w.pending.UID
+		entry.GID = w.pending.GID
+	}
+	if w.pending.HasTimes {
+		entry.AccessedAt = w.pending.ATime
+		entry.ModifiedAt = w.pending.MTime
+	}
+	entry.Size = w.logicalSize
+	entry.ChangedAt = maxTime(entry.ChangedAt, w.fs.hub.Now())
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
 func (w *inodeWriteState) plannedRangesLocked() []ByteRange {
 	chunkSize := normalizedChunkSize(w.fs.hub.ChunkSize())
 	if chunkSize <= 0 {
@@ -2072,7 +2159,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		h.writeState.opMu.Lock()
 		defer h.writeState.opMu.Unlock()
 		h.writeState.mu.Lock()
-		if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize {
+		if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() {
 			if h.writeState.stream == nil {
 				h.writeState.mu.Unlock()
 				return 0
@@ -2085,6 +2172,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		targetPath := h.writeState.path
 		baseSize := h.writeState.baseSize
 		logicalSize := h.writeState.logicalSize
+		pending := h.writeState.pending
 		if h.writeState.stream != nil {
 			if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
 				h.writeState.mu.Unlock()
@@ -2105,6 +2193,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			h.writeState.tempAuthoritative = false
 			h.writeState.stream = nil
 			h.writeState.mu.Unlock()
+			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+				return errno
+			}
+			h.writeState.mu.Lock()
+			h.writeState.pending = shfs.MetadataPatch{}
+			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 			return 0
@@ -2112,10 +2206,15 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		dirtyCount := len(h.writeState.dirtyRanges)
 		if len(h.writeState.dirtyRanges) == 0 {
 			h.writeState.mu.Unlock()
-			h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
-			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=truncate err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
+			if logicalSize != baseSize {
+				h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
+				if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
+					h.fs.debugf("commit failed path=%s inode=%d step=truncate err=%v", targetPath, h.inode, err)
+					return errnoFromError(err)
+				}
+			}
+			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+				return errno
 			}
 			h.writeState.mu.Lock()
 			if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
@@ -2126,6 +2225,9 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			h.writeState.tempAuthoritative = false
 			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
+			h.writeState.mu.Lock()
+			h.writeState.pending = shfs.MetadataPatch{}
+			h.writeState.mu.Unlock()
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 			return 0
 		}
@@ -2162,6 +2264,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			h.writeState.dirtyRanges = nil
 			h.writeState.tempAuthoritative = false
 			h.writeState.mu.Unlock()
+			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+				return errno
+			}
+			h.writeState.mu.Lock()
+			h.writeState.pending = shfs.MetadataPatch{}
+			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 			return 0
@@ -2189,6 +2297,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 			h.writeState.baseSize = logicalSize
 			h.writeState.dirtyRanges = nil
 			h.writeState.tempAuthoritative = false
+			h.writeState.mu.Unlock()
+			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+				return errno
+			}
+			h.writeState.mu.Lock()
+			h.writeState.pending = shfs.MetadataPatch{}
 			h.writeState.mu.Unlock()
 			h.fs.evictInodeCache(h.inode)
 			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
@@ -2246,6 +2360,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		}
 		h.fs.evictInodeCache(h.inode)
 		h.writeState.mu.Unlock()
+		if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+			return errno
+		}
+		h.writeState.mu.Lock()
+		h.writeState.pending = shfs.MetadataPatch{}
+		h.writeState.mu.Unlock()
 		h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 		return 0
 	}
@@ -2275,6 +2395,17 @@ func (h *storhubHandle) closeTemp() {
 	if h.tempPath != "" {
 		_ = os.Remove(h.tempPath)
 	}
+}
+
+func (h *storhubHandle) applyMetadataPatch(ctx context.Context, targetPath string, patch shfs.MetadataPatch) syscall.Errno {
+	if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
+		return 0
+	}
+	if err := h.fs.hub.ApplyMetadataPatchContext(ctx, h.fs.project, targetPath, patch); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=metadata-patch err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	return 0
 }
 
 func (h *storhubHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
@@ -2548,11 +2679,12 @@ func safeNotifyEntry(node *storhubNode, name string) {
 	if node == nil {
 		return
 	}
+	entryFn := notifyEntryFunc
 	go func() {
 		defer func() {
 			_ = recover()
 		}()
-		notifyEntryFunc(node, name)
+		entryFn(node, name)
 	}()
 }
 
@@ -2560,15 +2692,17 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	if parent == nil {
 		return
 	}
+	entryFn := notifyEntryFunc
+	deleteFn := notifyDeleteFunc
 	go func() {
 		defer func() {
 			_ = recover()
 		}()
 		if child == nil {
-			notifyEntryFunc(parent, name)
+			entryFn(parent, name)
 			return
 		}
-		notifyDeleteFunc(parent, name, child)
+		deleteFn(parent, name, child)
 	}()
 }
 

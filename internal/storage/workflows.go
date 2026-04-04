@@ -382,7 +382,9 @@ func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chun
 			if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
 				return err
 			}
-			if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(err))); sleepErr != nil {
+			delay := h.retryDelay(attempt, extractAPIError(err))
+			h.debugf("asset range open retry project=%s asset=%d attempt=%d delay=%s err=%v", project, chunk.AssetID, attempt+1, delay, err)
+			if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
 				return sleepErr
 			}
 			continue
@@ -398,7 +400,9 @@ func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chun
 		if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
 			return err
 		}
-		if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(err))); sleepErr != nil {
+		delay := h.retryDelay(attempt, extractAPIError(err))
+		h.debugf("asset range read retry project=%s asset=%d attempt=%d delay=%s err=%v", project, chunk.AssetID, attempt+1, delay, err)
+		if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
 			return sleepErr
 		}
 	}

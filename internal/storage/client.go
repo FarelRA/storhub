@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -71,6 +72,10 @@ type StorHub struct {
 type cachedMetadata struct {
 	sha  string
 	meta metadata.RepoMetadata
+}
+
+func (h *StorHub) debugf(format string, args ...any) {
+	log.Printf("storhub/storage: "+format, args...)
 }
 
 func NewStorHub(token string) (*StorHub, error) {
@@ -577,21 +582,29 @@ func (h *StorHub) putBuffer(buf *[]byte) { h.bufferPool.Put(buf) }
 
 func (h *StorHub) updateRepoMetadata(ctx context.Context, project string, apply func(*RepoMetadata) error, message string) (*RepoMetadata, error) {
 	for attempt := 0; attempt <= h.config.MaxRetries+1; attempt++ {
+		started := h.config.Now().UTC()
+		h.debugf("metadata update start project=%s attempt=%d message=%q", project, attempt+1, message)
 		meta, sha, err := h.loadRepoMetadataFresh(ctx, project)
 		if err != nil {
+			h.debugf("metadata update failed project=%s attempt=%d step=load err=%v", project, attempt+1, err)
 			return nil, err
 		}
 		if err := apply(meta); err != nil {
+			h.debugf("metadata update failed project=%s attempt=%d step=apply err=%v", project, attempt+1, err)
 			return nil, err
 		}
 		if _, _, err := h.commitRepoMetadata(ctx, project, *meta, sha, message); err != nil {
 			if isConflictError(err) && attempt < h.config.MaxRetries+1 {
+				h.debugf("metadata update conflict project=%s attempt=%d elapsed=%s retrying", project, attempt+1, h.config.Now().UTC().Sub(started))
 				continue
 			}
+			h.debugf("metadata update failed project=%s attempt=%d step=commit elapsed=%s err=%v", project, attempt+1, h.config.Now().UTC().Sub(started), err)
 			return nil, err
 		}
+		h.debugf("metadata update complete project=%s attempt=%d elapsed=%s", project, attempt+1, h.config.Now().UTC().Sub(started))
 		return meta, nil
 	}
+	h.debugf("metadata update exhausted retries project=%s message=%q", project, message)
 	return nil, errors.New("metadata update exhausted retries")
 }
 
@@ -1162,4 +1175,8 @@ func (h *StorHub) RemoveXAttr(project, targetPath, attr string) error {
 
 func (h *StorHub) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
 	return h.posixService().RemoveXAttrContext(ctx, project, targetPath, attr)
+}
+
+func (h *StorHub) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) error {
+	return h.posixService().ApplyMetadataPatchContext(ctx, project, targetPath, patch)
 }

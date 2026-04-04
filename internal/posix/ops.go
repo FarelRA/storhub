@@ -62,11 +62,6 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	if repo.FindFile(cleanPath) != nil || repo.HasDirectory(cleanPath) {
 		return nil, fmt.Errorf("path already exists: %s", cleanPath)
 	}
-	workingMeta := repo.Clone()
-	releaseTag, _, err := s.backend.GetOrCreateUploadReleaseContext(ctx, project, &workingMeta, 0, "")
-	if err != nil {
-		return nil, err
-	}
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -75,7 +70,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		Kind:          meta.NodeKindSymlink,
 		Size:          int64(len([]byte(target))),
 		Chunks:        []meta.ChunkInfo{},
-		Release:       releaseTag,
+		Release:       shfs.PendingReleaseTag,
 		UploadedAt:    now,
 		ModifiedAt:    now,
 		AccessedAt:    now,
@@ -424,6 +419,72 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 		return s.backend.FileNotFound(cleanPath)
 	}, fmt.Sprintf("storhub: update metadata for %s", cleanPath))
 	return err
+}
+
+func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) error {
+	if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
+		return nil
+	}
+	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	working := *entry
+	if patch.HasOwner {
+		if err := shfs.CanChown(ctx); err != nil {
+			return err
+		}
+		working.UID = patch.UID
+		working.GID = patch.GID
+		working.Mode &^= 0o6000
+	}
+	if patch.HasMode {
+		if err := shfs.CanChmod(ctx, &working); err != nil {
+			return err
+		}
+		working.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
+	}
+	if patch.HasTimes {
+		if err := shfs.CanSetTimes(ctx, &working); err != nil {
+			return err
+		}
+		working.AccessedAt = patch.ATime
+		working.ModifiedAt = patch.MTime
+	}
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+		now := s.backend.Now().UTC()
+		if file != nil {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+				if patch.HasOwner {
+					current.UID = patch.UID
+					current.GID = patch.GID
+					current.Mode &^= 0o6000
+				}
+				if patch.HasMode {
+					current.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
+				}
+				if patch.HasTimes {
+					current.AccessedAt = patch.ATime.UTC()
+					current.ModifiedAt = patch.MTime.UTC()
+				}
+				current.ChangedAt = now
+			})
+		}
+		if patch.HasOwner {
+			dir.UID = patch.UID
+			dir.GID = patch.GID
+			dir.Mode &^= 0o6000
+		}
+		if patch.HasMode {
+			dir.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
+		}
+		if patch.HasTimes {
+			dir.AccessedAt = patch.ATime.UTC()
+			dir.ModifiedAt = patch.MTime.UTC()
+		}
+		dir.ChangedAt = now
+		return nil
+	})
 }
 
 func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*meta.RepoMetadata, string, *meta.FileMetadata, *meta.DirectoryMetadata, error) {

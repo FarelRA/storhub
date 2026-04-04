@@ -34,6 +34,8 @@ type Service struct {
 	backend Backend
 }
 
+const PendingReleaseTag = "pending"
+
 func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
@@ -65,11 +67,6 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	if repoMeta.FindFile(cleanPath) != nil {
 		return nil, fmt.Errorf("file already exists: %s", cleanPath)
 	}
-	workingMeta := repoMeta.Clone()
-	releaseTag, _, err := s.backend.GetOrCreateUploadReleaseContext(ctx, project, &workingMeta, 0, "")
-	if err != nil {
-		return nil, err
-	}
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -78,7 +75,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		Kind:       meta.NodeKindFile,
 		Size:       0,
 		Chunks:     []meta.ChunkInfo{},
-		Release:    releaseTag,
+		Release:    PendingReleaseTag,
 		UploadedAt: now,
 		ModifiedAt: now,
 		AccessedAt: now,
