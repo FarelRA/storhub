@@ -46,6 +46,23 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 	}
 }
 
+func TestCallerContextSuppressesAtime(t *testing.T) {
+	fake := &stubHub{}
+	fsys, err := New(fake, "demo-project", Options{CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+
+	ctx := fsys.callerContext(context.Background())
+	if !shfs.AtimeSuppressed(ctx) {
+		t.Fatal("expected FUSE caller context to suppress atime")
+	}
+	if identity := shfs.IdentityFromContext(ctx); identity.UID != 0 {
+		t.Fatalf("unexpected identity in background context: %+v", identity)
+	}
+}
+
 func TestReadCacheAndCleanupHelpers(t *testing.T) {
 	var reads int
 	fake := &stubHub{

@@ -624,6 +624,7 @@ func (n *storhubNode) currentPath() string {
 }
 
 func (s *Filesystem) callerContext(ctx context.Context) context.Context {
+	ctx = shfs.WithSuppressedAtime(ctx)
 	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
 		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Admin: caller.Uid == 0})
 	}
