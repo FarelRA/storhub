@@ -35,6 +35,9 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
 			return err
 		}
+		if err := shfs.CheckStickyDelete(ctx, meta, shfs.ParentPath(cleanName), cleanName); err != nil {
+			return err
+		}
 		if meta.HasDirectory(cleanName) {
 			return fmt.Errorf("is a directory: %s", cleanName)
 		}
@@ -46,8 +49,10 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 		}
 		if len(meta.FindFilesByInode(existing.Inode)) > 0 {
+			shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
 			return implposix.TouchInodeFamilyChangedAt(meta, existing.Inode, h.config.Now().UTC())
 		}
+		shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
 		return nil
 	}, fmt.Sprintf("storhub: delete %s", cleanName))
 	return err

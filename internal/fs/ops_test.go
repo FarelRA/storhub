@@ -280,6 +280,39 @@ func TestServicePermissionEnforcement(t *testing.T) {
 	}
 }
 
+func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
+	now := time.Unix(260, 0).UTC()
+	backend := newTestBackend(now)
+	backend.seedDir("shared")
+	parent := backend.repo.GetDirectory("shared")
+	parent.Mode = 0o2775
+	parent.UID = 50
+	parent.GID = 60
+	parent.ModifiedAt = now.Add(-time.Hour)
+	parent.ChangedAt = now.Add(-time.Hour)
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 70, GID: 80, Groups: []uint32{80, 60}})
+	created, err := svc.CreateFileContext(ctx, "demo", "shared/file.txt")
+	if err != nil {
+		t.Fatalf("create with setgid parent: %v", err)
+	}
+	if created.GID != 60 {
+		t.Fatalf("expected inherited gid 60, got %d", created.GID)
+	}
+	if err := svc.MkdirContext(ctx, "demo", "shared/subdir"); err != nil {
+		t.Fatalf("mkdir with setgid parent: %v", err)
+	}
+	dir := backend.repo.GetDirectory("shared/subdir")
+	if dir == nil || dir.GID != 60 || dir.Mode&0o2000 == 0 {
+		t.Fatalf("expected setgid inheritance on directory, got %+v", dir)
+	}
+	parent = backend.repo.GetDirectory("shared")
+	if !parent.ModifiedAt.Equal(now) || !parent.ChangedAt.Equal(now) {
+		t.Fatalf("expected parent timestamps touched, got mtime=%v ctime=%v", parent.ModifiedAt, parent.ChangedAt)
+	}
+}
+
 func returnFail(t *testing.T, label string, err error, value any) {
 	t.Helper()
 	t.Fatalf("%s: value=%+v err=%v", label, value, err)

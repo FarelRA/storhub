@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -174,6 +175,62 @@ func CanSetTimes(ctx context.Context, entry *EntryInfo) error {
 
 func CanAccessEntry(id Identity, entry *EntryInfo, need int) error {
 	return checkAccess(id, nodeAttrsFromEntry(entry), need)
+}
+
+func ApplyParentInheritance(repo *meta.RepoMetadata, targetPath string, isDir bool, mode, uid, gid uint32) (uint32, uint32, uint32) {
+	parent := ParentPath(targetPath)
+	attrs, err := lookupNode(repo, parent)
+	if err != nil || !attrs.IsDir {
+		return mode, uid, gid
+	}
+	if attrs.Mode&0o2000 != 0 {
+		gid = attrs.GID
+		if isDir {
+			mode |= 0o2000
+		}
+	}
+	return mode, uid, gid
+}
+
+func CheckStickyDelete(ctx context.Context, repo *meta.RepoMetadata, parentPath, targetPath string) error {
+	parent, err := lookupNode(repo, parentPath)
+	if err != nil {
+		return err
+	}
+	if parent.Mode&0o1000 == 0 {
+		return nil
+	}
+	id := IdentityFromContext(ctx)
+	if id.Admin || id.UID == parent.UID {
+		return nil
+	}
+	target, err := lookupNode(repo, targetPath)
+	if err != nil {
+		return err
+	}
+	if id.UID == target.UID {
+		return nil
+	}
+	return syscall.EPERM
+}
+
+func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now time.Time) {
+	if repo == nil {
+		return
+	}
+	if dirPath == "" {
+		repo.Root.ModifiedAt = now.UTC()
+		repo.Root.ChangedAt = now.UTC()
+		return
+	}
+	if dir := repo.GetDirectory(dirPath); dir != nil {
+		dir.ModifiedAt = now.UTC()
+		dir.ChangedAt = now.UTC()
+	}
+}
+
+func TouchParentDirectory(repo *meta.RepoMetadata, targetPath string, now time.Time) {
+	TouchDirectory(repo, ParentPath(targetPath), now)
 }
 
 func checkPathAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath string, need int) error {

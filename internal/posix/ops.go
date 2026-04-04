@@ -82,6 +82,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		GID:           gid,
 		SymlinkTarget: target,
 	}
+	symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(repo, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
 		if err := shfs.CheckParentWrite(ctx, current, cleanPath); err != nil {
 			return err
@@ -92,8 +93,10 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		if current.FindFile(cleanPath) != nil || current.HasDirectory(cleanPath) {
 			return fmt.Errorf("path already exists: %s", cleanPath)
 		}
+		symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(current, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 		symlink.Inode = current.AllocateInode()
 		current.UpsertFile(symlink, now)
+		shfs.TouchParentDirectory(current, cleanPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: symlink %s -> %s", cleanPath, target)); err != nil {
 		return nil, err
@@ -164,10 +167,12 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		linked.Name = linkPath
 		linked.ChangedAt = now
 		linked.AccessedAt = now
+		linked.Mode, linked.UID, linked.GID = shfs.ApplyParentInheritance(repo, linkPath, false, linked.Mode, linked.UID, linked.GID)
 		if err := TouchInodeFamilyChangedAt(repo, source.Inode, now); err != nil {
 			return err
 		}
 		repo.UpsertFile(linked, now)
+		shfs.TouchParentDirectory(repo, linkPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: link %s to %s", sourcePath, linkPath)); err != nil {
 		return nil, err

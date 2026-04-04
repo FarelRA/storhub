@@ -84,6 +84,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		UID:        uid,
 		GID:        gid,
 	}
+	fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repoMeta, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
 			return err
@@ -94,8 +95,10 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		if repo.FindFile(cleanPath) != nil {
 			return fmt.Errorf("file already exists: %s", cleanPath)
 		}
+		fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repo, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 		fileMeta.Inode = repo.AllocateInode()
 		repo.UpsertFile(fileMeta, now)
+		TouchParentDirectory(repo, cleanPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: create %s", cleanPath)); err != nil {
 		return nil, err
@@ -132,9 +135,10 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) err
 		}
 		repo.EnsureDirectory(cleanPath, s.backend.Now().UTC())
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
-			dir.Mode = ApplyCreateMode(ctx, dir.Mode)
+			dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
 			dir.ChangedAt = s.backend.Now().UTC()
 		}
+		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
 		return nil
 	}, fmt.Sprintf("storhub: mkdir %s", cleanPath))
 	return err
@@ -152,6 +156,9 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) err
 		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
 			return err
 		}
+		if err := CheckStickyDelete(ctx, repo, ParentPath(cleanPath), cleanPath); err != nil {
+			return err
+		}
 		if repo.FindFile(cleanPath) != nil {
 			return fmt.Errorf("not a directory: %s", cleanPath)
 		}
@@ -163,6 +170,7 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) err
 			return fmt.Errorf("directory not empty: %s", cleanPath)
 		}
 		repo.RemoveDirectory(cleanPath)
+		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
 		return nil
 	}, fmt.Sprintf("storhub: rmdir %s", cleanPath))
 	return err
@@ -194,17 +202,37 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return fmt.Errorf("parent directory does not exist: %s", parent)
 		}
 		if file := repo.FindFile(oldClean); file != nil {
+			if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
+				return err
+			}
+			if existing := repo.FindFile(newClean); existing != nil {
+				if err := CheckStickyDelete(ctx, repo, ParentPath(newClean), newClean); err != nil {
+					return err
+				}
+			}
 			if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
 				return fmt.Errorf("destination already exists: %s", newClean)
 			}
 			renamed := file.Clone()
 			renamed.Name = newClean
+			renamed.ChangedAt = s.backend.Now().UTC()
 			repo.RemoveFile(oldClean)
 			repo.UpsertFile(renamed, s.backend.Now().UTC())
+			TouchParentDirectory(repo, oldClean, s.backend.Now().UTC())
+			TouchParentDirectory(repo, newClean, s.backend.Now().UTC())
 			return nil
 		}
 		if !repo.HasDirectory(oldClean) {
 			return fmt.Errorf("path not found: %s", oldClean)
+		}
+		if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
+			return err
+		}
+		if existing := repo.GetDirectory(newClean); existing != nil {
+			if err := CheckStickyDelete(ctx, repo, ParentPath(newClean), newClean); err != nil {
+				return err
+			}
+			_ = existing
 		}
 		if IsParentOrSame(oldClean, newClean) {
 			return fmt.Errorf("cannot move directory %s into itself %s", oldClean, newClean)
@@ -223,9 +251,12 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			for j := range repo.Releases[i].Files {
 				if IsParentOrSame(oldClean, repo.Releases[i].Files[j].Name) {
 					repo.Releases[i].Files[j].Name = RemapPath(oldClean, newClean, repo.Releases[i].Files[j].Name)
+					repo.Releases[i].Files[j].ChangedAt = now
 				}
 			}
 		}
+		TouchParentDirectory(repo, oldClean, now)
+		TouchParentDirectory(repo, newClean, now)
 		repo.RecomputeStats()
 		return nil
 	}, fmt.Sprintf("storhub: rename %s to %s", oldClean, newClean))

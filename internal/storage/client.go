@@ -352,6 +352,9 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
 		return nil, err
 	}
+	if err := shfs.CheckParentWrite(ctx, repoMeta, cleanName); err != nil {
+		return nil, err
+	}
 	existing := repoMeta.FindFile(cleanName)
 	var preferredRelease string
 	if existing != nil {
@@ -393,7 +396,11 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		Release: releaseTag,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
+	fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(repoMeta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
+			return err
+		}
 		if err := shfs.RequireParentDirectory(meta, cleanName); err != nil {
 			return err
 		}
@@ -405,9 +412,11 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 			implposix.ApplyUpdatedFileIdentity(&fileMeta, current, h.config.Now().UTC())
 			implposix.ReplaceInodeFamily(meta, current, fileMeta, h.config.Now().UTC())
 		} else {
+			fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(meta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 			metadata.InitializeNewFileIdentity(meta, &fileMeta, h.config.Now().UTC())
 			meta.UpsertFile(fileMeta, h.config.Now().UTC())
 		}
+		shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
 		return nil
 	}, metadataCommitMessage(cleanName, replace)); err != nil {
 		return nil, err
