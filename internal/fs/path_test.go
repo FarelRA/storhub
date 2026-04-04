@@ -9,14 +9,20 @@ func TestPathHelpers(t *testing.T) {
 	if got, err := NormalizePath("."); err != nil || got != "" {
 		t.Fatalf("unexpected root normalization: %q %v", got, err)
 	}
+	if got, err := NormalizePath(" /docs/guide.txt "); err != nil || got != "docs/guide.txt" {
+		t.Fatalf("unexpected absolute normalization: %q %v", got, err)
+	}
+	if got, err := NormalizePath("/"); err != nil || got != "" {
+		t.Fatalf("unexpected absolute root normalization: %q %v", got, err)
+	}
 	if _, err := NormalizePath(""); err == nil {
 		t.Fatal("expected empty path error")
 	}
-	if _, err := NormalizePath("/tmp/file"); err == nil {
-		t.Fatal("expected absolute path error")
-	}
 	if _, err := NormalizePath("../escape"); err == nil {
 		t.Fatal("expected path escape error")
+	}
+	if _, err := NormalizePath("/../escape"); err == nil {
+		t.Fatal("expected absolute path escape error")
 	}
 	if got := normalizeStoredPath(" /tmp/file "); got != "tmp/file" {
 		t.Fatalf("unexpected stored path fallback: %q", got)

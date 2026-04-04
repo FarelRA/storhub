@@ -11,9 +11,7 @@ func NormalizePath(value string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	if strings.HasPrefix(trimmed, "/") {
-		return "", fmt.Errorf("absolute paths are not supported: %s", value)
-	}
+	trimmed = strings.TrimLeft(trimmed, "/")
 	cleaned := path.Clean(trimmed)
 	if cleaned == "." {
 		return "", nil

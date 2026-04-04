@@ -32,6 +32,9 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		return err
 	}
 	_, err = h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
+		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
+			return err
+		}
 		if meta.HasDirectory(cleanName) {
 			return fmt.Errorf("is a directory: %s", cleanName)
 		}

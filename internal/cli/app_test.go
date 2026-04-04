@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	rest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
@@ -268,7 +269,23 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 	}
 }
 
-type fakeHub struct{ t *testing.T }
+func TestListAcceptsAbsolutePath(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+		return &fakeHub{t: t, assertReadDirPath: "docs/readme.txt"}, nil
+	}
+	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
+		t.Fatalf("run ls with absolute path: %v", err)
+	}
+}
+
+type fakeHub struct {
+	t                 *testing.T
+	assertReadDirPath string
+	assertStatPath    string
+}
 
 func (h *fakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
 	return &storhub.FileMetadata{Name: remotePath, Size: 11, Release: "v1", Inode: 1, Mode: 0o644, NLink: 1}, nil
@@ -280,9 +297,27 @@ func (h *fakeHub) DownloadFile(project, remotePath, localPath string) error {
 	return os.WriteFile(localPath, []byte("downloaded"), 0o644)
 }
 func (h *fakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
+	if h.assertReadDirPath != "" {
+		got, err := shfs.NormalizePath(dir)
+		if err != nil {
+			h.t.Fatalf("normalize read dir path: %v", err)
+		}
+		if got != h.assertReadDirPath {
+			h.t.Fatalf("unexpected read dir path: %q", dir)
+		}
+	}
 	return []storhub.DirEntry{{Name: "readme.txt", Path: "docs/readme.txt", Size: 11, Mode: 0o644}}, nil
 }
 func (h *fakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, error) {
+	if h.assertStatPath != "" {
+		got, err := shfs.NormalizePath(targetPath)
+		if err != nil {
+			h.t.Fatalf("normalize stat path: %v", err)
+		}
+		if got != h.assertStatPath {
+			h.t.Fatalf("unexpected stat path: %q", targetPath)
+		}
+	}
 	return &storhub.EntryInfo{Path: targetPath, Size: 11, Mode: 0o644, Inode: 1, UID: 1, GID: 2, NLink: 1, ModifiedAt: time.Unix(1, 0), AccessedAt: time.Unix(2, 0), ChangedAt: time.Unix(3, 0)}, nil
 }
 func (h *fakeHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {

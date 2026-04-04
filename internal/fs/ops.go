@@ -54,6 +54,9 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	if err != nil {
 		return nil, err
 	}
+	if err := CheckParentWrite(ctx, repoMeta, cleanPath); err != nil {
+		return nil, err
+	}
 	if err := RequireParentDirectory(repoMeta, cleanPath); err != nil {
 		return nil, err
 	}
@@ -77,11 +80,14 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		ModifiedAt: now,
 		AccessedAt: now,
 		ChangedAt:  now,
-		Mode:       s.backend.DefaultFileMode(meta.NodeKindFile),
+		Mode:       ApplyCreateMode(ctx, s.backend.DefaultFileMode(meta.NodeKindFile)),
 		UID:        uid,
 		GID:        gid,
 	}
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+			return err
+		}
 		if err := RequireParentDirectory(repo, cleanPath); err != nil {
 			return err
 		}
@@ -112,6 +118,9 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) err
 		return err
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+			return err
+		}
 		if repo.HasDirectory(cleanPath) {
 			return fmt.Errorf("directory already exists: %s", cleanPath)
 		}
@@ -122,6 +131,10 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) err
 			return fmt.Errorf("parent directory does not exist: %s", parent)
 		}
 		repo.EnsureDirectory(cleanPath, s.backend.Now().UTC())
+		if dir := repo.GetDirectory(cleanPath); dir != nil {
+			dir.Mode = ApplyCreateMode(ctx, dir.Mode)
+			dir.ChangedAt = s.backend.Now().UTC()
+		}
 		return nil
 	}, fmt.Sprintf("storhub: mkdir %s", cleanPath))
 	return err
@@ -136,6 +149,9 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) err
 		return errors.New("cannot remove root directory")
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+			return err
+		}
 		if repo.FindFile(cleanPath) != nil {
 			return fmt.Errorf("not a directory: %s", cleanPath)
 		}
@@ -165,6 +181,15 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		return nil
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckParentWrite(ctx, repo, oldClean); err != nil {
+			return err
+		}
+		if err := CheckParentWrite(ctx, repo, newClean); err != nil {
+			return err
+		}
+		if err := CheckTraverse(ctx, repo, oldClean); err != nil {
+			return err
+		}
 		if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
 			return fmt.Errorf("parent directory does not exist: %s", parent)
 		}
@@ -223,6 +248,9 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
+	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	if file.Kind == meta.NodeKindSymlink {
 		return nil, fmt.Errorf("cannot truncate symlink: %s", cleanPath)
 	}
@@ -249,6 +277,9 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
+	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	if file.Kind == meta.NodeKindSymlink {
 		return nil, fmt.Errorf("cannot append to symlink: %s", cleanPath)
 	}
@@ -267,6 +298,9 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	file := repo.FindFile(cleanPath)
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
+	}
+	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
 	}
 	if file.Kind == meta.NodeKindSymlink {
 		return nil, fmt.Errorf("cannot write symlink: %s", cleanPath)
@@ -304,6 +338,9 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	file := repo.FindFile(cleanPath)
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
+	}
+	if err := CheckReadAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
 	}
 	if file.Kind == meta.NodeKindSymlink {
 		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
@@ -357,6 +394,9 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 	if err != nil {
 		return nil, err
 	}
+	if err := CheckTraverse(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	if cleanPath == "" {
 		return &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: repo.Root.NLink, CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}, nil
 	}
@@ -392,6 +432,9 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
+		return nil, err
+	}
+	if err := CheckListDirAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
 	if cleanPath != "" && repo.FindFile(cleanPath) != nil {

@@ -297,7 +297,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 		EntryTimeout:    durationPtr(s.opts.EntryTimeout),
 		AttrTimeout:     durationPtr(s.opts.AttrTimeout),
 		NegativeTimeout: durationPtr(s.opts.NegativeTimeout),
-		NullPermissions: false,
+		NullPermissions: true,
 		RootStableAttr:  &gofusefs.StableAttr{Ino: 1, Gen: 1},
 		Logger:          s.opts.Logger,
 	}
@@ -606,7 +606,15 @@ func (n *storhubNode) currentPath() string {
 	return n.fs.pathForInode(n.inode)
 }
 
+func (s *Filesystem) callerContext(ctx context.Context) context.Context {
+	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
+		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Admin: caller.Uid == 0})
+	}
+	return ctx
+}
+
 func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	childPath := path.Join(n.currentPath(), name)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
@@ -639,6 +647,7 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 }
 
 func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return nil, errnoFromError(err)
@@ -657,6 +666,7 @@ func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.
 }
 
 func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return errnoFromError(err)
@@ -684,6 +694,7 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 }
 
 func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	targetPath := n.currentPath()
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
@@ -703,18 +714,40 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	return h, 0, 0
 }
 
+func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
+	if err != nil {
+		return errnoFromError(err)
+	}
+	need := 0
+	if mask&0x4 != 0 {
+		need |= shfs.AccessRead
+	}
+	if mask&0x2 != 0 {
+		need |= shfs.AccessWrite
+	}
+	if mask&0x1 != 0 {
+		need |= shfs.AccessExec
+	}
+	if need == 0 {
+		return 0
+	}
+	id := shfs.IdentityFromContext(ctx)
+	if err := shfs.CanAccessEntry(id, entry, need); err != nil {
+		return errnoFromError(err)
+	}
+	return 0
+}
+
 func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, gofusefs.FileHandle, uint32, syscall.Errno) {
+	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
 	childPath := path.Join(n.currentPath(), name)
 	n.fs.debugf("create start path=%s flags=%#x mode=%#o", childPath, flags, mode)
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
-	}
-	if desiredMode := mode & 0o7777; desiredMode != 0 && desiredMode != file.Mode {
-		// Avoid a second metadata update during create. The backend already assigns a
-		// sane default mode for new files, and later setattr/chmod calls can adjust it.
-		n.fs.debugf("create deferred chmod path=%s requested=%#o actual=%#o", childPath, desiredMode, file.Mode)
 	}
 	entry := entryInfoFromFile(file)
 	child := n.fs.ensureNode(ctx, entry)
@@ -730,14 +763,10 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 }
 
 func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
 	childPath := path.Join(n.currentPath(), name)
 	if err := n.fs.hub.MkdirContext(ctx, n.fs.project, childPath); err != nil {
 		return nil, errnoFromError(err)
-	}
-	if mode != 0 {
-		if err := n.fs.hub.ChmodContext(ctx, n.fs.project, childPath, mode&0o7777); err != nil {
-			return nil, errnoFromError(err)
-		}
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
@@ -751,6 +780,7 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 }
 
 func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	childPath := path.Join(n.currentPath(), name)
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if entry != nil {
@@ -773,6 +803,7 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	childPath := path.Join(n.currentPath(), name)
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err := n.fs.hub.RmdirContext(ctx, n.fs.project, childPath); err != nil {
@@ -789,6 +820,7 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusefs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	oldPath := path.Join(n.currentPath(), name)
 	parentNode, ok := newParent.(*storhubNode)
 	if !ok {
@@ -807,6 +839,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 }
 
 func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	targetPath := n.currentPath()
 	usedLocalSize := false
 	localSize := int64(0)
@@ -891,6 +924,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 }
 
 func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	childPath := path.Join(n.currentPath(), name)
 	file, err := n.fs.hub.SymlinkContext(ctx, n.fs.project, target, childPath)
 	if err != nil {
@@ -904,6 +938,7 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 }
 
 func (n *storhubNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	target, err := n.fs.hub.ReadlinkContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return nil, errnoFromError(err)
@@ -912,6 +947,7 @@ func (n *storhubNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 }
 
 func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	targetNode, ok := target.(*storhubNode)
 	if !ok {
 		return nil, syscall.EINVAL
@@ -928,6 +964,7 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 }
 
 func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	data, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, n.currentPath(), attr)
 	if err != nil {
 		return 0, errnoFromError(err)
@@ -943,6 +980,7 @@ func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (u
 }
 
 func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	if flags != 0 {
 		_, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, n.currentPath(), attr)
 		exists := err == nil
@@ -963,6 +1001,7 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 }
 
 func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
 	attrs, err := n.fs.hub.ListXAttrContext(ctx, n.fs.project, n.currentPath())
 	if err != nil {
 		return 0, errnoFromError(err)
@@ -982,6 +1021,7 @@ func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, sysca
 }
 
 func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
 	if err := n.fs.hub.RemoveXAttrContext(ctx, n.fs.project, n.currentPath(), attr); err != nil {
 		return errnoFromError(err)
 	}
@@ -2585,6 +2625,15 @@ func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath str
 		}
 	}
 	_, err := s.hub.UpdateRepoMetadataContext(ctx, s.project, func(meta *metadata.RepoMetadata) error {
+		if err := shfs.CheckParentWrite(ctx, meta, oldPath); err != nil {
+			return err
+		}
+		if err := shfs.CheckParentWrite(ctx, meta, newPath); err != nil {
+			return err
+		}
+		if err := shfs.CheckTraverse(ctx, meta, oldPath); err != nil {
+			return err
+		}
 		if parent := shfs.ParentPath(newPath); parent != "" && !meta.HasDirectory(parent) {
 			return fmt.Errorf("parent directory does not exist: %s", parent)
 		}

@@ -51,6 +51,9 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	if err != nil {
 		return nil, err
 	}
+	if err := shfs.CheckParentWrite(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	if err := shfs.RequireParentDirectory(repo, cleanPath); err != nil {
 		return nil, err
 	}
@@ -80,6 +83,9 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		SymlinkTarget: target,
 	}
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
+		if err := shfs.CheckParentWrite(ctx, current, cleanPath); err != nil {
+			return err
+		}
 		if err := shfs.RequireParentDirectory(current, cleanPath); err != nil {
 			return err
 		}
@@ -102,6 +108,9 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
+		return "", err
+	}
+	if err := shfs.CheckTraverse(ctx, repo, cleanPath); err != nil {
 		return "", err
 	}
 	file := repo.FindFile(cleanPath)
@@ -132,6 +141,12 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 	now := s.backend.Now().UTC()
 	var linked meta.FileMetadata
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := shfs.CheckReadAccess(ctx, repo, sourcePath); err != nil {
+			return err
+		}
+		if err := shfs.CheckParentWrite(ctx, repo, linkPath); err != nil {
+			return err
+		}
 		if err := shfs.RequireParentDirectory(repo, linkPath); err != nil {
 			return err
 		}
@@ -161,6 +176,13 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 }
 
 func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	if err := shfs.CanChmod(ctx, entry); err != nil {
+		return err
+	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
@@ -176,6 +198,12 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 }
 
 func (s *Service) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
+		return err
+	}
+	if err := shfs.CanChown(ctx); err != nil {
+		return err
+	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
@@ -193,6 +221,13 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 }
 
 func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime time.Time) error {
+	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	if err := shfs.CanSetTimes(ctx, entry); err != nil {
+		return err
+	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
 		now := s.backend.Now().UTC()
 		atime = ChooseNonZeroTime(atime, now)
@@ -214,6 +249,13 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
 	if strings.TrimSpace(attr) == "" {
 		return errors.New("xattr name is required")
+	}
+	repo, cleanPath, _, _, err := s.lookupPath(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	if err := shfs.CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+		return err
 	}
 	value := string(append([]byte(nil), data...))
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
@@ -244,7 +286,9 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 	if err != nil {
 		return nil, err
 	}
-	_ = repo
+	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	var value string
 	var ok bool
 	if file != nil {
@@ -259,8 +303,11 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 }
 
 func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
-	_, _, file, dir, err := s.lookupPath(ctx, project, targetPath)
+	repo, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
 	if err != nil {
+		return nil, err
+	}
+	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
 	var attrs map[string]string
@@ -283,6 +330,13 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	}
 	_, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
 	if err != nil {
+		return err
+	}
+	repo, _, lookupErr := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+	if lookupErr != nil {
+		return lookupErr
+	}
+	if err := shfs.CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return err
 	}
 	if file != nil {
@@ -395,6 +449,20 @@ func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*
 		return repo, cleanPath, nil, &clone, nil
 	}
 	return nil, cleanPath, nil, nil, s.backend.FileNotFound(cleanPath)
+}
+
+func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
+	repo, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := shfs.CheckTraverse(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
+	if file != nil {
+		return shfs.EntryInfoFromFile(file), nil
+	}
+	return shfs.EntryInfoFromDirectory(dir), nil
 }
 
 func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.FileMetadata)) error {

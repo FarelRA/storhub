@@ -22,6 +22,9 @@ func TestHelperUtilities(t *testing.T) {
 	if got, err := shfs.NormalizePath("."); err != nil || got != "" {
 		t.Fatalf("expected root path normalization, got %q %v", got, err)
 	}
+	if got, err := shfs.NormalizePath("/docs/guide.txt"); err != nil || got != "docs/guide.txt" {
+		t.Fatalf("expected absolute fs path normalization, got %q %v", got, err)
+	}
 	if _, err := shfs.NormalizePath("../escape"); err == nil {
 		t.Fatal("expected path escape error")
 	}

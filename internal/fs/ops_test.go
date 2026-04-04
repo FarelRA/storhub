@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"syscall"
 	"testing"
 	"time"
 
@@ -246,6 +247,36 @@ func TestServiceErrors(t *testing.T) {
 	}
 	if err := RequireParentDirectory(backend.repo, "missing/file"); err == nil {
 		t.Fatal("expected missing parent failure")
+	}
+}
+
+func TestServicePermissionEnforcement(t *testing.T) {
+	backend := newTestBackend(time.Unix(250, 0).UTC())
+	backend.seedDir("private")
+	file := backend.seedFile("private/note.txt", []byte("secret"))
+	file.Mode = 0o640
+	file.UID = 11
+	file.GID = 22
+	backend.repo.UpsertFile(*file, backend.now)
+	dir := backend.repo.GetDirectory("private")
+	dir.Mode = 0o750
+	dir.UID = 11
+	dir.GID = 22
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 30, GID: 40, Groups: []uint32{40}})
+	if _, err := svc.ReadFileAtContext(ctx, "demo", "private/note.txt", 0, 1); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("expected read denial, got %v", err)
+	}
+	if _, err := svc.WriteFileAtContext(ctx, "demo", "private/note.txt", 0, []byte("x")); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("expected write denial, got %v", err)
+	}
+	if _, err := svc.ReadDirContext(ctx, "demo", "private"); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("expected list denial, got %v", err)
+	}
+	ownerCtx := WithIdentity(context.Background(), Identity{UID: 11, GID: 22, Groups: []uint32{22}})
+	if data, err := svc.ReadFileAtContext(ownerCtx, "demo", "private/note.txt", 0, 6); err != nil || string(data) != "secret" {
+		t.Fatalf("expected owner read access, got %q %v", data, err)
 	}
 }
 

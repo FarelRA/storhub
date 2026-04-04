@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"syscall"
 	"testing"
 	"time"
 
@@ -193,5 +194,32 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 	}
 	if ChooseNonZeroTime() != (time.Time{}) || CloneStringMap(nil) != nil {
 		t.Fatal("helper coverage failure")
+	}
+}
+
+func TestServicePOSIXPermissionEnforcement(t *testing.T) {
+	backend := newTestBackend(time.Unix(500, 0).UTC())
+	backend.seedDir("docs")
+	base := backend.seedFile("docs/base.txt")
+	base.Mode = 0o640
+	base.UID = 7
+	base.GID = 8
+	backend.repo.UpsertFile(*base, backend.now)
+	dir := backend.repo.GetDirectory("docs")
+	dir.Mode = 0o755
+	dir.UID = 7
+	dir.GID = 8
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 9, GID: 10, Groups: []uint32{10}})
+	if err := svc.ChmodContext(ctx, "demo", "docs/base.txt", 0o600); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("expected chmod denial, got %v", err)
+	}
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.note", []byte("x")); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("expected xattr write denial, got %v", err)
+	}
+	ownerCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 7, GID: 8, Groups: []uint32{8}})
+	if err := svc.ChmodContext(ownerCtx, "demo", "docs/base.txt", 0o600); err != nil {
+		t.Fatalf("expected owner chmod success, got %v", err)
 	}
 }

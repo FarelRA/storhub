@@ -960,6 +960,9 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if file == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
 	}
+	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
+		return nil, err
+	}
 	if file.Kind == NodeKindSymlink {
 		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
 	}

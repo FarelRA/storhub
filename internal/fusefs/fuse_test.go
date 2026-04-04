@@ -767,6 +767,76 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
+	now := time.Unix(32, 0).UTC()
+	var seenIdentity shfs.Identity
+	var seenMode uint32
+	fake := &stubHub{
+		createFile: func(ctx context.Context, _ string, target string) (*meta.FileMetadata, error) {
+			seenIdentity = shfs.IdentityFromContext(ctx)
+			seenMode, _ = shfs.CreateModeFromContext(ctx)
+			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 9, Mode: seenMode, UID: seenIdentity.UID, GID: seenIdentity.GID, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		},
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			switch target {
+			case "docs":
+				return &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			case "docs/new.txt":
+				return &shfs.EntryInfo{Path: target, Inode: 9, Mode: seenMode, UID: seenIdentity.UID, GID: seenIdentity.GID, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			default:
+				return nil, syscall.ENOENT
+			}
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	ctx := fuse.NewContext(context.Background(), &fuse.Caller{Owner: fuse.Owner{Uid: 123, Gid: 456}, Pid: 789})
+	var out fuse.EntryOut
+	_, handleAny, _, errno := dirNode.Create(ctx, "new.txt", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL, 0o640, &out)
+	if errno != 0 {
+		t.Fatalf("create file: %v", errno)
+	}
+	if seenIdentity.UID != 123 || seenIdentity.GID != 456 || seenIdentity.PID != 789 {
+		t.Fatalf("unexpected identity: %+v", seenIdentity)
+	}
+	if seenMode != 0o640 {
+		t.Fatalf("unexpected create mode: %#o", seenMode)
+	}
+	if errno := handleAny.(*storhubHandle).Release(context.Background()); errno != 0 {
+		t.Fatalf("release created file: %v", errno)
+	}
+}
+
+func TestAccessChecksCallerPermissions(t *testing.T) {
+	now := time.Unix(33, 0).UTC()
+	fake := &stubHub{
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if target == "docs/file.txt" {
+				return &shfs.EntryInfo{Path: target, Inode: 7, Mode: 0o640, UID: 10, GID: 20, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			}
+			return nil, syscall.ENOENT
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Mode: 0o640, UID: 10, GID: 20, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	denied := fuse.NewContext(context.Background(), &fuse.Caller{Owner: fuse.Owner{Uid: 99, Gid: 99}, Pid: 1})
+	if errno := node.Access(denied, 0x4); errno != syscall.EACCES {
+		t.Fatalf("expected read denial, got %v", errno)
+	}
+	allowed := fuse.NewContext(context.Background(), &fuse.Caller{Owner: fuse.Owner{Uid: 10, Gid: 20}, Pid: 1})
+	if errno := node.Access(allowed, 0x4); errno != 0 {
+		t.Fatalf("expected owner read success, got %v", errno)
+	}
+}
+
 func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
 	oldNotifyDelete := notifyDeleteFunc
 	t.Cleanup(func() { notifyDeleteFunc = oldNotifyDelete })
