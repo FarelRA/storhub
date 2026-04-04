@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
+
+	charmlog "github.com/charmbracelet/log"
+	"github.com/muesli/termenv"
 )
 
 const (
@@ -31,25 +33,16 @@ func NewLogger(opts Options) *slog.Logger {
 	if output == nil {
 		output = os.Stderr
 	}
-	return slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{
-		Level: parseLevel(opts.Level),
-		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
-			switch attr.Key {
-			case slog.TimeKey:
-				if attr.Value.Kind() == slog.KindTime {
-					attr.Value = slog.StringValue(attr.Value.Time().UTC().Format(time.RFC3339Nano))
-				}
-			case slog.LevelKey:
-				level := strings.ToUpper(attr.Value.String())
-				if normalizeFormat(opts.Format) == FormatPretty {
-					attr.Value = slog.StringValue(colorizeLevel(level, opts.Color))
-				} else {
-					attr.Value = slog.StringValue(level)
-				}
-			}
-			return attr
-		},
-	}))
+	logger := charmlog.NewWithOptions(output, charmlog.Options{
+		Level:           parseLevel(opts.Level),
+		Formatter:       parseFormatter(opts.Format),
+		ReportTimestamp: true,
+		TimeFormat:      "2006-01-02T15:04:05.999999999Z07:00",
+	})
+	if !opts.Color {
+		logger.SetColorProfile(termenv.Ascii)
+	}
+	return slog.New(logger)
 }
 
 func WithComponent(logger *slog.Logger, component string) *slog.Logger {
@@ -112,16 +105,25 @@ func NormalizeFormat(format string) string {
 	return normalizeFormat(format)
 }
 
-func parseLevel(level string) slog.Level {
+func parseLevel(level string) charmlog.Level {
 	switch NormalizeLevel(level) {
 	case LevelDebug:
-		return slog.LevelDebug
+		return charmlog.DebugLevel
 	case LevelWarn:
-		return slog.LevelWarn
+		return charmlog.WarnLevel
 	case LevelError:
-		return slog.LevelError
+		return charmlog.ErrorLevel
 	default:
-		return slog.LevelInfo
+		return charmlog.InfoLevel
+	}
+}
+
+func parseFormatter(format string) charmlog.Formatter {
+	switch normalizeFormat(format) {
+	case FormatText:
+		return charmlog.LogfmtFormatter
+	default:
+		return charmlog.TextFormatter
 	}
 }
 
@@ -133,23 +135,5 @@ func normalizeFormat(format string) string {
 		return FormatText
 	default:
 		return FormatPretty
-	}
-}
-
-func colorizeLevel(level string, enabled bool) string {
-	if !enabled {
-		return level
-	}
-	switch level {
-	case "DEBUG":
-		return "\x1b[36mDEBUG\x1b[0m"
-	case "INFO":
-		return "\x1b[32mINFO\x1b[0m"
-	case "WARN":
-		return "\x1b[33mWARN\x1b[0m"
-	case "ERROR":
-		return "\x1b[31mERROR\x1b[0m"
-	default:
-		return level
 	}
 }
