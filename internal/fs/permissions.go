@@ -68,6 +68,22 @@ func IdentityFromContext(ctx context.Context) Identity {
 	return Identity{UID: 0, GID: 0, Admin: true}
 }
 
+func IdentityPresent(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	_, ok := ctx.Value(identityContextKey).(Identity)
+	return ok
+}
+
+func OwnerIDsForCreate(ctx context.Context, fallbackUID, fallbackGID uint32) (uint32, uint32) {
+	if !IdentityPresent(ctx) {
+		return fallbackUID, fallbackGID
+	}
+	id := IdentityFromContext(ctx)
+	return id.UID, id.GID
+}
+
 func WithCreateMode(ctx context.Context, mode uint32) context.Context {
 	return context.WithValue(ctx, createModeContextKey, createMode{mode: mode & 0o7777, set: true})
 }

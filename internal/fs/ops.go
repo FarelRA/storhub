@@ -71,7 +71,8 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		return nil, err
 	}
 	now := s.backend.Now().UTC()
-	uid, gid := s.backend.DefaultOwnerIDs()
+	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
+	uid, gid := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	fileMeta := meta.FileMetadata{
 		Name:       cleanPath,
 		Kind:       meta.NodeKindFile,
@@ -137,6 +138,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) err
 		}
 		repo.EnsureDirectory(cleanPath, s.backend.Now().UTC())
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
+			dir.UID, dir.GID = OwnerIDsForCreate(ctx, dir.UID, dir.GID)
 			dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
 			dir.ChangedAt = s.backend.Now().UTC()
 		}

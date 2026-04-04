@@ -25,6 +25,7 @@ import (
 	"time"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -117,6 +118,27 @@ func newLiveHub(t *testing.T, token string, cfg Config) *StorHub {
 		t.Fatalf("new storhub client: %v", err)
 	}
 	return hub
+}
+
+func TestUploadUsesCallerOwnershipForNewFiles(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	adminCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
+	if err := hub.MkdirContext(adminCtx, "project-owner-upload", "docs"); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := hub.ChmodContext(adminCtx, "project-owner-upload", "docs", 0o777); err != nil {
+		t.Fatalf("chmod docs: %v", err)
+	}
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 986, GID: 986, Groups: []uint32{986}})
+	input := writeTempFile(t, t.TempDir(), "owner.txt", []byte("owner"))
+	file, err := hub.UploadFileContext(ctx, "project-owner-upload", "docs/file.txt", input)
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if file.UID != 986 || file.GID != 986 {
+		t.Fatalf("expected caller-owned uploaded file, got %d:%d", file.UID, file.GID)
+	}
 }
 
 func TestUploadListDownloadSingleChunk(t *testing.T) {

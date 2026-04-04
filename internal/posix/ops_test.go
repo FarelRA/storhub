@@ -226,3 +226,53 @@ func TestServicePOSIXPermissionEnforcement(t *testing.T) {
 		t.Fatalf("expected owner chmod success, got %v", err)
 	}
 }
+
+func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
+	backend := newTestBackend(time.Unix(600, 0).UTC())
+	backend.seedDir("docs")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
+	if err := svc.ChownContext(ctx, "demo", "docs", 986, 986); err != nil {
+		t.Fatalf("chown dir: %v", err)
+	}
+	if err := svc.ChmodContext(ctx, "demo", "docs", 0o775); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	dir := backend.repo.GetDirectory("docs")
+	if dir == nil {
+		t.Fatal("expected docs directory")
+	}
+	if dir.UID != 986 || dir.GID != 986 {
+		t.Fatalf("expected persisted dir ownership, got %d:%d", dir.UID, dir.GID)
+	}
+	if dir.Mode != 0o775 {
+		t.Fatalf("expected persisted dir mode, got %#o", dir.Mode)
+	}
+}
+
+func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t *testing.T) {
+	backend := newTestBackend(time.Unix(610, 0).UTC())
+	backend.seedDir("docs")
+	backend.repo.GetDirectory("docs").Mode = 0o777
+	base := backend.seedFile("docs/base.txt")
+	base.UID = 1000
+	base.GID = 1000
+	backend.repo.UpsertFile(*base, backend.now)
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 986, GID: 986, Groups: []uint32{986}})
+	symlink, err := svc.SymlinkContext(ctx, "demo", "docs/base.txt", "docs/link.txt")
+	if err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if symlink.UID != 986 || symlink.GID != 986 {
+		t.Fatalf("expected caller-owned symlink, got %d:%d", symlink.UID, symlink.GID)
+	}
+	hardlink, err := svc.LinkContext(ctx, "demo", "docs/base.txt", "docs/hard.txt")
+	if err != nil {
+		t.Fatalf("hardlink: %v", err)
+	}
+	if hardlink.UID != 1000 || hardlink.GID != 1000 {
+		t.Fatalf("expected hardlink to preserve source owner, got %d:%d", hardlink.UID, hardlink.GID)
+	}
+}

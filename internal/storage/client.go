@@ -398,6 +398,10 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		Release: releaseTag,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
+	if existing == nil {
+		defaultUID, defaultGID := h.DefaultOwnerIDs()
+		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
+	}
 	if existing != nil {
 		fileMeta.Mode = shfs.SanitizeWrittenFileMode(fileMeta.Mode)
 	}

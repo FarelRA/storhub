@@ -314,6 +314,28 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 	}
 }
 
+func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
+	backend := newTestBackend(time.Unix(265, 0).UTC())
+	backend.seedDir("docs")
+	backend.repo.GetDirectory("docs").Mode = 0o777
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 986, GID: 986, Groups: []uint32{986}})
+	file, err := svc.CreateFileContext(ctx, "demo", "docs/file.txt")
+	if err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	if file.UID != 986 || file.GID != 986 {
+		t.Fatalf("expected caller-owned file, got %d:%d", file.UID, file.GID)
+	}
+	if err := svc.MkdirContext(ctx, "demo", "docs/subdir"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dir := backend.repo.GetDirectory("docs/subdir")
+	if dir == nil || dir.UID != 986 || dir.GID != 986 {
+		t.Fatalf("expected caller-owned dir, got %+v", dir)
+	}
+}
+
 func (b *testBackend) AtimePolicy() storcfg.AtimePolicy { return storcfg.AtimeRelatime }
 
 func returnFail(t *testing.T, label string, err error, value any) {

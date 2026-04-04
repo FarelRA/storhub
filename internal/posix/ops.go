@@ -68,7 +68,8 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		return nil, err
 	}
 	now := s.backend.Now().UTC()
-	uid, gid := s.backend.DefaultOwnerIDs()
+	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
+	uid, gid := shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	symlink := meta.FileMetadata{
 		Name:          cleanPath,
 		Kind:          meta.NodeKindSymlink,
@@ -414,7 +415,11 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 		}
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
 			copy := dir.Clone()
-			return mutate(repo, nil, &copy)
+			if err := mutate(repo, nil, &copy); err != nil {
+				return err
+			}
+			*dir = copy
+			return nil
 		}
 		return s.backend.FileNotFound(cleanPath)
 	}, fmt.Sprintf("storhub: update metadata for %s", cleanPath))
