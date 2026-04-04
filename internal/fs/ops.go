@@ -26,7 +26,6 @@ type Backend interface {
 	FileNotFound(path string) error
 	DefaultFileMode(kind meta.NodeKind) uint32
 	DefaultOwnerIDs() (uint32, uint32)
-	CombineChunkCRC32Cs(chunks []meta.ChunkInfo) (string, error)
 }
 
 type Service struct {
@@ -81,10 +80,6 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		Mode:       s.backend.DefaultFileMode(meta.NodeKindFile),
 		UID:        uid,
 		GID:        gid,
-	}
-	fileMeta.CRC32C, err = s.backend.CombineChunkCRC32Cs(fileMeta.Chunks)
-	if err != nil {
-		return nil, err
 	}
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if err := RequireParentDirectory(repo, cleanPath); err != nil {

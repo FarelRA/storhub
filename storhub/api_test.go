@@ -2,8 +2,6 @@ package storhub
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -53,25 +51,5 @@ func TestDefaultConfigAndConstructors(t *testing.T) {
 	}
 	if DefaultFUSEOptions().PageSize == 0 {
 		t.Fatal("expected fuse defaults")
-	}
-}
-
-func TestIntegrityWrappers(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "payload.txt")
-	data := []byte("payload")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	fullCRC, err := chunking.CalculateCRC32CStreaming(path, 1)
-	if err != nil {
-		t.Fatalf("calculate crc: %v", err)
-	}
-	chunks := []ChunkInfo{{Index: 0, Offset: 0, Size: int64(len(data)), CRC32C: fullCRC}}
-	combined, err := CombineChunkCRC32Cs(chunks)
-	if err != nil || combined != fullCRC {
-		t.Fatalf("unexpected combined crc: %q %v", combined, err)
-	}
-	if err := VerifyFileIntegrity(path, FileMetadata{Name: "payload", Size: int64(len(data)), CRC32C: fullCRC, Chunks: chunks}, 1); err != nil {
-		t.Fatalf("verify integrity wrapper: %v", err)
 	}
 }

@@ -20,7 +20,6 @@ func printFileSummary(w io.Writer, action string, meta *storhub.FileMetadata) {
 	fmt.Fprintf(w, "  mode: %#o\n", meta.Mode)
 	fmt.Fprintf(w, "  links: %d\n", meta.NLink)
 	fmt.Fprintf(w, "  chunks: %d\n", len(meta.Chunks))
-	fmt.Fprintf(w, "  crc32c: %s\n", meta.CRC32C)
 }
 
 func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {

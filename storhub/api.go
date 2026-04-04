@@ -65,11 +65,3 @@ func DefaultFUSEOptions() FUSEOptions {
 func DefaultConfig() Config {
 	return storcfg.Default()
 }
-
-func VerifyFileIntegrity(path string, metadata FileMetadata, bufferSize int) error {
-	return chunking.VerifyFileIntegrity(path, metadata, bufferSize)
-}
-
-func CombineChunkCRC32Cs(chunks []ChunkInfo) (string, error) {
-	return chunking.CombineChunkCRC32Cs(chunks)
-}

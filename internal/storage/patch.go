@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"sort"
@@ -84,7 +83,7 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 		if err != nil {
 			return err
 		}
-		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
 		if err != nil {
 			return fmt.Errorf("upload patch chunk %d: %w", i, err)
 		}
@@ -96,7 +95,6 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 			Release:     releaseTag,
 			AssetOffset: 0,
 			AssetID:     assetID,
-			CRC32C:      checksum,
 		}
 		return nil
 	})
@@ -108,11 +106,6 @@ func (h *StorHub) sliceChunk(ctx context.Context, project string, original Chunk
 	segment.Offset = newOffset
 	segment.Size = newSize
 	segment.AssetOffset = original.AssetOffset + (newOffset - original.Offset)
-	checksum, err := h.checksumAssetRange(ctx, project, segment)
-	if err != nil {
-		return ChunkInfo{}, fmt.Errorf("slice chunk %d: %w", original.Index, err)
-	}
-	segment.CRC32C = checksum
 	return segment, nil
 }
 
@@ -133,8 +126,6 @@ func normalizedChunkSize(chunkSize int64) int64 {
 	}
 	return chunkSize
 }
-
-func sumCRC32C(data []byte) string { return formatCRC32C(crc32.Checksum(data, crc32cTable)) }
 
 func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMetadata, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
 	workingMeta := repoMeta.Clone()
@@ -221,11 +212,11 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 		if err != nil {
 			return err
 		}
-		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
 		if err != nil {
 			return fmt.Errorf("upload rewritten chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Name: assetName, Size: chunkEnd - chunkStart, Index: i, Offset: chunkStart, Release: releaseTag, AssetOffset: 0, AssetID: assetID, CRC32C: checksum}
+		results[i] = ChunkInfo{Name: assetName, Size: chunkEnd - chunkStart, Index: i, Offset: chunkStart, Release: releaseTag, AssetOffset: 0, AssetID: assetID}
 		return nil
 	})
 	return results, err

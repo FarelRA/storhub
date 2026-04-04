@@ -78,8 +78,8 @@ func TestHelpersAndRendering(t *testing.T) {
 		t.Fatalf("unexpected nil file summary: %q", buf.String())
 	}
 	buf.Reset()
-	printFileSummary(&buf, "uploaded", &storhub.FileMetadata{Name: "docs/a.txt", Size: 3, Release: "v1", Inode: 1, Mode: 0o644, NLink: 1, CRC32C: "abc"})
-	if !strings.Contains(buf.String(), "docs/a.txt") || !strings.Contains(buf.String(), "crc32c: abc") {
+	printFileSummary(&buf, "uploaded", &storhub.FileMetadata{Name: "docs/a.txt", Size: 3, Release: "v1", Inode: 1, Mode: 0o644, NLink: 1})
+	if !strings.Contains(buf.String(), "docs/a.txt") || strings.Contains(buf.String(), "crc32c") {
 		t.Fatalf("unexpected file summary: %q", buf.String())
 	}
 	buf.Reset()
@@ -271,7 +271,7 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 type fakeHub struct{ t *testing.T }
 
 func (h *fakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Name: remotePath, Size: 11, Release: "v1", Inode: 1, Mode: 0o644, NLink: 1, CRC32C: "abc"}, nil
+	return &storhub.FileMetadata{Name: remotePath, Size: 11, Release: "v1", Inode: 1, Mode: 0o644, NLink: 1}, nil
 }
 func (h *fakeHub) ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
 	return h.UploadFile(project, remotePath, localPath)
@@ -293,13 +293,13 @@ func (h *fakeHub) DeleteFile(project, filePath string) error     { return nil }
 func (h *fakeHub) Rmdir(project, dirPath string) error           { return nil }
 func (h *fakeHub) Rename(project, oldPath, newPath string) error { return nil }
 func (h *fakeHub) AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Name: filePath, Size: int64(len(data)), Release: "v1", Inode: 2, Mode: 0o644, NLink: 1, CRC32C: "def"}, nil
+	return &storhub.FileMetadata{Name: filePath, Size: int64(len(data)), Release: "v1", Inode: 2, Mode: 0o644, NLink: 1}, nil
 }
 func (h *fakeHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Name: filePath, Size: offset + int64(len(data)), Release: "v1", Inode: 3, Mode: 0o644, NLink: 1, CRC32C: "ghi"}, nil
+	return &storhub.FileMetadata{Name: filePath, Size: offset + int64(len(data)), Release: "v1", Inode: 3, Mode: 0o644, NLink: 1}, nil
 }
 func (h *fakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Name: filePath, Size: 9, Release: "v1", Inode: 4, Mode: 0o644, NLink: 1, CRC32C: "jkl"}, nil
+	return &storhub.FileMetadata{Name: filePath, Size: 9, Release: "v1", Inode: 4, Mode: 0o644, NLink: 1}, nil
 }
 func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: time.Unix(1, 0)}}, nil

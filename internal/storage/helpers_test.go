@@ -56,9 +56,6 @@ func TestHelperUtilities(t *testing.T) {
 		}
 		seen[name] = struct{}{}
 	}
-	if sumCRC32C([]byte("abc")) != formatCRC32C(910901175) {
-		t.Fatalf("unexpected crc32c: %s", sumCRC32C([]byte("abc")))
-	}
 	if defaultFileMode(NodeKindFile) != 0o644 || defaultFileMode(NodeKindSymlink) != 0o777 || defaultDirMode() != 0o755 {
 		t.Fatal("unexpected mode defaults")
 	}

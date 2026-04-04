@@ -165,7 +165,7 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 	if err != nil {
 		return ChunkInfo{}, err
 	}
-	assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
+	assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return ChunkInfo{}, err
 	}
@@ -177,7 +177,6 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 		Release:     releaseTag,
 		AssetID:     assetID,
 		AssetOffset: 0,
-		CRC32C:      checksum,
 	}, nil
 }
 
@@ -200,16 +199,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	if current == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
-	crc32cSum, err := chunking.CombineChunkCRC32Cs(chunks)
-	if err != nil {
-		return nil, err
-	}
 	now := h.config.Now().UTC()
 	fileMeta := current.Clone()
 	fileMeta.Chunks = append([]ChunkInfo(nil), chunks...)
 	fileMeta.Release = releaseTag
 	fileMeta.Size = size
-	fileMeta.CRC32C = crc32cSum
 	implposix.ApplyUpdatedFileIdentity(&fileMeta, current, now)
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
 		latest := meta.FindFile(cleanName)
@@ -286,10 +280,6 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
 	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
-	patched.CRC32C, err = chunking.CombineChunkCRC32Cs(patched.Chunks)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
 		current := meta.FindFile(cleanName)
 		if current == nil {
@@ -317,10 +307,6 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	rewritten.ModifiedAt = now
 	rewritten.ChangedAt = now
 	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
-	rewritten.CRC32C, err = chunking.CombineChunkCRC32Cs(rewritten.Chunks)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
 		current := meta.FindFile(cleanName)
 		if current == nil {
@@ -399,18 +385,12 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 			return nil, err
 		}
 	}
-	crc32cSum, err := chunking.CombineChunkCRC32Cs(results)
-	if err != nil {
-		return nil, err
-	}
-
 	fileMeta := FileMetadata{
 		Name:    cleanName,
 		Kind:    NodeKindFile,
 		Size:    fileInfo.Size(),
 		Chunks:  results,
 		Release: releaseTag,
-		CRC32C:  crc32cSum,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
@@ -481,15 +461,8 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	chunkCRC32Cs := make([]string, len(fileMeta.Chunks))
-
 	err = runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(fileMeta.Chunks), func(i int) error {
-		crc32cSum, err := h.downloadChunkWithRetry(ctx, project, outFile, fileMeta.Chunks[i])
-		if err != nil {
-			return err
-		}
-		chunkCRC32Cs[i] = crc32cSum
-		return nil
+		return h.downloadChunkWithRetry(ctx, project, outFile, fileMeta.Chunks[i])
 	})
 	if err != nil {
 		return err
@@ -500,17 +473,6 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	}
 	if err := outFile.Close(); err != nil {
 		return fmt.Errorf("close output file: %w", err)
-	}
-	verifiedChunks := append([]ChunkInfo(nil), fileMeta.Chunks...)
-	for i := range verifiedChunks {
-		verifiedChunks[i].CRC32C = chunkCRC32Cs[i]
-	}
-	crc32cSum, err := chunking.CombineChunkCRC32Cs(verifiedChunks)
-	if err != nil {
-		return err
-	}
-	if crc32cSum != fileMeta.CRC32C {
-		return fmt.Errorf("crc32c mismatch: expected %s, got %s", fileMeta.CRC32C, crc32cSum)
 	}
 	return nil
 }
@@ -615,9 +577,9 @@ func (h *StorHub) updateRepoMetadata(ctx context.Context, project string, apply 
 	return nil, errors.New("metadata update exhausted retries")
 }
 
-func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, outFile *os.File, chunk ChunkInfo) (string, error) {
+func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, outFile *os.File, chunk ChunkInfo) error {
 	if chunk.Size == 0 {
-		return formatCRC32C(0), nil
+		return nil
 	}
 	buf := h.getBuffer()
 	defer h.putBuffer(buf)
@@ -626,15 +588,15 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
 			if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
-				return "", fmt.Errorf("download chunk %d: %w", chunk.Index, err)
+				return fmt.Errorf("download chunk %d: %w", chunk.Index, err)
 			}
 			if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(err))); sleepErr != nil {
-				return "", sleepErr
+				return sleepErr
 			}
 			continue
 		}
 
-		written, crc32cSum, copyErr := h.writeChunk(outFile, reader, *buf, chunk)
+		written, copyErr := h.writeChunk(outFile, reader, *buf, chunk)
 		closeErr := reader.Close()
 		if copyErr == nil && closeErr != nil {
 			copyErr = closeErr
@@ -643,38 +605,33 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.Index, chunk.Size, written)
 		}
 		if copyErr == nil {
-			if crc32cSum != chunk.CRC32C {
-				copyErr = fmt.Errorf("chunk %d crc32c mismatch: expected %s, got %s", chunk.Index, chunk.CRC32C, crc32cSum)
-			} else {
-				return crc32cSum, nil
-			}
+			return nil
 		}
 		if !isRetryableDownloadError(copyErr) || attempt == h.config.MaxRetries {
-			return "", fmt.Errorf("download chunk %d: %w", chunk.Index, copyErr)
+			return fmt.Errorf("download chunk %d: %w", chunk.Index, copyErr)
 		}
 		if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(copyErr))); sleepErr != nil {
-			return "", sleepErr
+			return sleepErr
 		}
 	}
-	return "", fmt.Errorf("download chunk %d: exhausted retries", chunk.Index)
+	return fmt.Errorf("download chunk %d: exhausted retries", chunk.Index)
 }
 
-func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chunk ChunkInfo) (int64, string, error) {
+func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chunk ChunkInfo) (int64, error) {
 	written := int64(0)
-	hasher := newHashingReadSeeker(nopReadSeeker{reader: reader})
 	for {
-		n, readErr := hasher.Read(buf)
+		n, readErr := reader.Read(buf)
 		if n > 0 {
 			if _, writeErr := outFile.WriteAt(buf[:n], chunk.Offset+written); writeErr != nil {
-				return written, "", fmt.Errorf("write chunk %d: %w", chunk.Index, writeErr)
+				return written, fmt.Errorf("write chunk %d: %w", chunk.Index, writeErr)
 			}
 			written += int64(n)
 		}
 		if readErr == io.EOF {
-			return written, hasher.Checksum(), nil
+			return written, nil
 		}
 		if readErr != nil {
-			return written, "", fmt.Errorf("read chunk %d: %w", chunk.Index, readErr)
+			return written, fmt.Errorf("read chunk %d: %w", chunk.Index, readErr)
 		}
 	}
 }
@@ -903,10 +860,6 @@ func (h *StorHub) DefaultFileMode(kind metadata.NodeKind) uint32 {
 
 func (h *StorHub) DefaultOwnerIDs() (uint32, uint32) {
 	return defaultOwnerIDs()
-}
-
-func (h *StorHub) CombineChunkCRC32Cs(chunks []metadata.ChunkInfo) (string, error) {
-	return chunking.CombineChunkCRC32Cs(chunks)
 }
 
 func (h *StorHub) fsService() *shfs.Service {

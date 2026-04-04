@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,8 +13,6 @@ import (
 	storfuse "github.com/FarelRA/storhub/fuse"
 	"github.com/FarelRA/storhub/storhub"
 )
-
-var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
 type showcaseHub interface {
 	Owner() string
@@ -193,11 +190,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	}
 	printFile("patched file", patched)
 
-	combined, err := storhub.CombineChunkCRC32Cs(patched.Chunks)
-	if err != nil {
-		return fmt.Errorf("combine chunk crc32c: %w", err)
-	}
-	printKV("combined chunk crc32c", "%s", combined)
+	printKV("chunk count", "%d", len(patched.Chunks))
 	fmt.Println()
 
 	if err := runStep("apply POSIX metadata", func() error {
@@ -259,9 +252,6 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 		return hub.DownloadFile(project, patched.Name, downloadPath)
 	}); err != nil {
 		return err
-	}
-	if err := storhub.VerifyFileIntegrity(downloadPath, *patched, 32<<10); err != nil {
-		return fmt.Errorf("verify downloaded file integrity: %w", err)
 	}
 	downloaded, err := os.ReadFile(downloadPath)
 	if err != nil {
@@ -434,7 +424,7 @@ func printFile(label string, meta *storhub.FileMetadata) {
 	fmt.Printf("- nlink: %d\n", meta.NLink)
 	fmt.Printf("- mode: %#o\n", meta.Mode)
 	fmt.Printf("- chunks: %d\n", len(meta.Chunks))
-	fmt.Printf("- crc32c: %s\n\n", meta.CRC32C)
+	fmt.Printf("- kind: %s\n\n", meta.Kind)
 }
 
 func printFiles(files []storhub.FileMetadata) {
@@ -503,10 +493,6 @@ func shortSHA(sha string) string {
 		return sha
 	}
 	return sha[:8]
-}
-
-func checksum(data []byte) string {
-	return fmt.Sprintf("%08x", crc32.Checksum(data, crc32cTable))
 }
 
 func printTitle(title string) {

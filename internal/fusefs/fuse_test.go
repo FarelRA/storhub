@@ -403,7 +403,7 @@ func TestSequentialWriteCommitStreamsChunks(t *testing.T) {
 			return "v1", "upload", nil
 		},
 		uploadChunk: func(_ context.Context, _ string, releaseTag, uploadURL string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
-			chunk := meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, AssetID: int64(index + 1), CRC32C: string(data)}
+			chunk := meta.ChunkInfo{Name: string(data), Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, AssetID: int64(index + 1)}
 			uploads = append(uploads, chunk)
 			return chunk, nil
 		},
@@ -583,7 +583,7 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 	now := time.Unix(10, 0).UTC()
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
-	metaState.UpsertFile(meta.FileMetadata{Name: "docs/old.txt", Release: "v1", Size: 1, CRC32C: "aa", Chunks: []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1, CRC32C: "aa"}}}, now)
+	metaState.UpsertFile(meta.FileMetadata{Name: "docs/old.txt", Release: "v1", Size: 1, Chunks: []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1}}}, now)
 	fake := &stubHub{
 		now: now,
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
@@ -670,13 +670,13 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 8, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 		uploadChunk: func(_ context.Context, _ string, releaseTag, _ string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
-			return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: string(data)}, nil
+			return meta.ChunkInfo{Name: string(data), Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag}, nil
 		},
 		finalizeChunks: func(_ context.Context, _ string, target, _ string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
 			replacedPath = target
 			buf := make([]byte, size)
 			for _, chunk := range chunks {
-				copy(buf[chunk.Offset:], chunk.CRC32C)
+				copy(buf[chunk.Offset:], chunk.Name)
 			}
 			replacedBytes = buf
 			return &meta.FileMetadata{Name: target, Kind: meta.NodeKindFile, Inode: 8, Size: size, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
@@ -880,12 +880,12 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 			return &meta.FileMetadata{Name: "docs/file.txt", Kind: meta.NodeKindFile, Inode: 7, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 		uploadChunk: func(_ context.Context, _ string, releaseTag, _ string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
-			return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: string(data)}, nil
+			return meta.ChunkInfo{Name: string(data), Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag}, nil
 		},
 		finalizeChunks: func(_ context.Context, _ string, _ string, _ string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
 			buf := make([]byte, size)
 			for _, chunk := range chunks {
-				copy(buf[chunk.Offset:], chunk.CRC32C)
+				copy(buf[chunk.Offset:], chunk.Name)
 			}
 			replaced = buf
 			backendSize = size
@@ -1063,7 +1063,7 @@ func (s *stubHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 	if s.uploadChunk != nil {
 		return s.uploadChunk(ctx, project, releaseTag, uploadURL, index, offset, data)
 	}
-	return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, CRC32C: "sum"}, nil
+	return meta.ChunkInfo{Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag}, nil
 }
 func (s *stubHub) FinalizeReplaceChunksContext(ctx context.Context, project, target, releaseTag string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
 	if s.finalizeChunks != nil {

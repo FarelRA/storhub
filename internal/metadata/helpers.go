@@ -1,13 +1,9 @@
 package metadata
 
 import (
-	"fmt"
-	"hash/crc32"
 	"path"
 	"strings"
 )
-
-var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
 func normalizeStoredPath(value string) string {
 	trimmed := strings.TrimSpace(value)
@@ -37,8 +33,4 @@ func parentPath(value string) string {
 		return ""
 	}
 	return parent
-}
-
-func sumCRC32C(data []byte) string {
-	return fmt.Sprintf("%08x", crc32.Checksum(data, crc32cTable))
 }

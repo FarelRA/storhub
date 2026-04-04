@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"sort"
 	"strings"
 	"time"
@@ -12,8 +11,6 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
-
-var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
 type Backend interface {
 	ValidateProjectName(project string) error
@@ -82,7 +79,6 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		GID:           gid,
 		SymlinkTarget: target,
 	}
-	symlink.CRC32C = formatCRC32C(crc32.Checksum([]byte(target), crc32cTable))
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
 		if err := shfs.RequireParentDirectory(current, cleanPath); err != nil {
 			return err
@@ -425,8 +421,4 @@ func TouchInodeFamilyChangedAt(repo *meta.RepoMetadata, inode uint64, now time.T
 	return UpdateFileFamily(repo, inode, func(current *meta.FileMetadata) {
 		current.ChangedAt = now
 	})
-}
-
-func formatCRC32C(value uint32) string {
-	return fmt.Sprintf("%08x", value)
 }

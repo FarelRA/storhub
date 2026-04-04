@@ -17,7 +17,6 @@ type ChunkInfo struct {
 	Release     string `json:"release"`
 	AssetOffset int64  `json:"asset_offset"`
 	AssetID     int64  `json:"asset_id"`
-	CRC32C      string `json:"crc32c"`
 }
 
 type FileMetadata struct {
@@ -37,7 +36,6 @@ type FileMetadata struct {
 	NLink         uint32            `json:"nlink,omitempty"`
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	XAttrs        map[string]string `json:"xattrs,omitempty"`
-	CRC32C        string            `json:"crc32c"`
 }
 
 type DirectoryMetadata struct {
@@ -305,9 +303,6 @@ func (f *FileMetadata) Normalize(release string) {
 	if f.Kind == NodeKindSymlink {
 		f.Chunks = make([]ChunkInfo, 0)
 		f.Size = int64(len([]byte(f.SymlinkTarget)))
-		if strings.TrimSpace(f.CRC32C) == "" {
-			f.CRC32C = sumCRC32C([]byte(f.SymlinkTarget))
-		}
 	}
 	stableSortChunks(f.Chunks)
 }
@@ -835,9 +830,6 @@ func (f *FileMetadata) Validate(release string) error {
 	if release != "" && f.Release != release {
 		return fmt.Errorf("file %s release mismatch: expected %s, got %s", f.Name, release, f.Release)
 	}
-	if strings.TrimSpace(f.CRC32C) == "" {
-		return fmt.Errorf("file %s crc32c is required", f.Name)
-	}
 	if f.Kind == NodeKindSymlink {
 		if f.SymlinkTarget == "" {
 			return fmt.Errorf("file %s symlink target is required", f.Name)
@@ -876,9 +868,6 @@ func (f *FileMetadata) Validate(release string) error {
 		}
 		if chunk.Size < 0 {
 			return fmt.Errorf("file %s chunk %d size must be non-negative", f.Name, chunk.Index)
-		}
-		if strings.TrimSpace(chunk.CRC32C) == "" {
-			return fmt.Errorf("file %s chunk %d crc32c is required", f.Name, chunk.Index)
 		}
 		if chunk.Offset != nextOffset {
 			return fmt.Errorf("file %s chunk %d offset mismatch: expected %d, got %d", f.Name, chunk.Index, nextOffset, chunk.Offset)

@@ -20,7 +20,7 @@ func TestShortSHAAndPrintHelpers(t *testing.T) {
 	}
 	output := captureStdout(t, func() {
 		printFile("file", nil)
-		printFile("file", &storhub.FileMetadata{Name: "docs/a.txt", Size: 3, Release: "v1", Inode: 1, NLink: 1, Mode: 0o644, CRC32C: "abc"})
+		printFile("file", &storhub.FileMetadata{Name: "docs/a.txt", Size: 3, Release: "v1", Inode: 1, NLink: 1, Mode: 0o644})
 		printDir("docs", []storhub.DirEntry{{Path: "docs/a.txt", Inode: 1, Size: 3, Mode: 0o644}, {Path: "docs/link", IsSymlink: true, Inode: 2, Mode: 0o777}})
 		printStat("stat", nil)
 		printStat("stat", &storhub.EntryInfo{Path: "docs/a.txt", Inode: 1, Size: 3, Mode: 0o644, UID: 1, GID: 2, NLink: 1, Kind: storhub.NodeKindFile})
@@ -100,7 +100,7 @@ func TestRunShowcaseWorkflow(t *testing.T) {
 			t.Fatalf("run showcase: %v", err)
 		}
 	})
-	for _, want := range []string{"- owner: demo-owner", "ok: upload file", "combined chunk crc32c", "xattr user.demo", "Tracked Files", "Releases", "Filesystem Stats", "Recent Metadata Revisions", "rollback removed marker as expected"} {
+	for _, want := range []string{"- owner: demo-owner", "ok: upload file", "chunk count", "xattr user.demo", "Tracked Files", "Releases", "Filesystem Stats", "Recent Metadata Revisions", "rollback removed marker as expected"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected %q in output %q", want, output)
 		}
@@ -208,12 +208,10 @@ func fileMeta(path string, data []byte) *storhub.FileMetadata {
 		Inode:   1,
 		NLink:   1,
 		Mode:    0o644,
-		CRC32C:  checksum(data),
 		Chunks: []storhub.ChunkInfo{{
 			Index:  0,
 			Offset: 0,
 			Size:   int64(len(data)),
-			CRC32C: checksum(data),
 		}},
 	}
 }

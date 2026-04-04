@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +45,9 @@ func TestRESTFilesystemWorkflow(t *testing.T) {
 	rangeResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=docs/readme.txt", nil, map[string]string{"Range": "bytes=1-3"}, http.StatusPartialContent)
 	if got := string(readBody(t, rangeResp)); got != "ell" {
 		t.Fatalf("unexpected ranged content: %q", got)
+	}
+	if calls := client.takeReadCalls(); !reflect.DeepEqual(calls, []readCall{{path: "docs/readme.txt", offset: 0, length: 5}, {path: "docs/readme.txt", offset: 1, length: 3}}) {
+		t.Fatalf("unexpected read calls: %+v", calls)
 	}
 
 	mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=docs/readme.txt&op=write&offset=1", strings.NewReader("a"), map[string]string{"If-Match": putNode.ETag}, http.StatusOK)
@@ -190,10 +194,10 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	root := mustRequest(t, handler, http.MethodGet, "/", nil, nil, http.StatusOK)
-	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub") || !strings.Contains(body, "shared-mode") || !strings.Contains(body, "/ui/app.js") {
+	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub Console") || !strings.Contains(body, "Shared Access") || !strings.Contains(body, "storhubConsole") || !strings.Contains(body, "/app.js") {
 		t.Fatalf("unexpected ui body: %q", body)
 	}
-	config := mustRequest(t, handler, http.MethodGet, "/ui/config.js", nil, nil, http.StatusOK)
+	config := mustRequest(t, handler, http.MethodGet, "/config.js", nil, nil, http.StatusOK)
 	if body := string(readBody(t, config)); !strings.Contains(body, "authEnabled") || !strings.Contains(body, "/api/v1") {
 		t.Fatalf("unexpected config body: %q", body)
 	}
@@ -201,7 +205,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new authed handler: %v", err)
 	}
-	authedConfig := mustRequest(t, authed, http.MethodGet, "/ui/config.js", nil, nil, http.StatusOK)
+	authedConfig := mustRequest(t, authed, http.MethodGet, "/config.js", nil, nil, http.StatusOK)
 	if body := string(readBody(t, authedConfig)); !strings.Contains(body, "true") {
 		t.Fatalf("expected auth-enabled config: %q", body)
 	}
@@ -214,21 +218,19 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/share", shareRequest{Path: "hello.txt"}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusOK)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
-	if share.Token == "" || share.URL == "" {
+	if share.ID == "" || share.URL != "/?share="+share.ID {
 		t.Fatalf("unexpected share response: %+v", share)
 	}
-	// Test redirect to UI
-	redirect := mustRequest(t, handler, http.MethodGet, share.URL, nil, nil, http.StatusFound)
-	location := redirect.Header.Get("Location")
-	if !strings.Contains(location, "/ui?share=") {
-		t.Fatalf("unexpected redirect location: %q", location)
+	info := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusOK)
+	var public shareResponse
+	decodeJSONBody(t, info, &public)
+	if public.Path != "hello.txt" || public.ID != share.ID {
+		t.Fatalf("unexpected public share response: %+v", public)
 	}
-	// Test download endpoint
-	downloadURL := share.URL + "/download"
-	shared := mustRequest(t, handler, http.MethodGet, downloadURL, nil, nil, http.StatusOK)
+	shared := mustRequest(t, handler, http.MethodGet, share.DownloadURL, nil, nil, http.StatusOK)
 	if body := string(readBody(t, shared)); body != "hello world" {
 		t.Fatalf("unexpected shared body: %q", body)
 	}
@@ -242,14 +244,54 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
 	download := false
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/share", shareRequest{Path: "hello.txt", Download: &download}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt", Download: &download}, http.StatusOK)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 	if share.Download {
 		t.Fatalf("expected disabled download in response: %+v", share)
 	}
-	resp := mustRequest(t, handler, http.MethodGet, share.URL+"/download", nil, nil, http.StatusForbidden)
+	resp := mustRequest(t, handler, http.MethodGet, share.URL+"&download=1", nil, nil, http.StatusForbidden)
 	assertErrorCode(t, resp, "forbidden")
+}
+
+func TestRESTShareCanonicalizesPath(t *testing.T) {
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "docs/../hello.txt"}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+	if share.Path != "hello.txt" {
+		t.Fatalf("expected canonical share path, got %q", share.Path)
+	}
+	shared := mustRequest(t, handler, http.MethodGet, share.DownloadURL, nil, nil, http.StatusOK)
+	if body := string(readBody(t, shared)); body != "hello world" {
+		t.Fatalf("unexpected shared body: %q", body)
+	}
+}
+
+func TestRESTProjectShareListAndDelete(t *testing.T) {
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+	listResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/shares", nil, nil, http.StatusOK)
+	var listing sharesResponse
+	decodeJSONBody(t, listResp, &listing)
+	if len(listing.Shares) != 1 || listing.Shares[0].ID != share.ID {
+		t.Fatalf("unexpected share listing: %+v", listing)
+	}
+	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+share.ID, nil, nil, http.StatusOK)
+	missing := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusNotFound)
+	assertErrorCode(t, missing, "not_found")
 }
 
 func mustJSONRequest(t *testing.T, handler http.Handler, method, target string, payload any, wantStatus int) *http.Response {
@@ -315,6 +357,13 @@ type fakeRESTClient struct {
 	deleted   map[string]bool
 	now       time.Time
 	rollbacks []string
+	readCalls []readCall
+}
+
+type readCall struct {
+	path   string
+	offset int64
+	length int64
 }
 
 type fakeRESTProject struct {
@@ -618,6 +667,7 @@ func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize 
 func (c *fakeRESTClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.readCalls = append(c.readCalls, readCall{path: filePath, offset: offset, length: length})
 	node, _, err := c.requireReadableFile(project, filePath)
 	if err != nil {
 		return nil, err
@@ -630,6 +680,14 @@ func (c *fakeRESTClient) ReadFileAt(project, filePath string, offset, length int
 		end = int64(len(node.data.bytes))
 	}
 	return append([]byte(nil), node.data.bytes[offset:end]...), nil
+}
+
+func (c *fakeRESTClient) takeReadCalls() []readCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	calls := append([]readCall(nil), c.readCalls...)
+	c.readCalls = nil
+	return calls
 }
 
 func (c *fakeRESTClient) StatPath(project, targetPath string) (*EntryInfo, error) {

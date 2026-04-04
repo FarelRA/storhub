@@ -191,7 +191,7 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 	if err := TouchInodeFamilyChangedAt(&repo, 999, backend.now); err == nil {
 		t.Fatal("expected missing inode touch error")
 	}
-	if ChooseNonZeroTime() != (time.Time{}) || CloneStringMap(nil) != nil || formatCRC32C(1) != "00000001" {
+	if ChooseNonZeroTime() != (time.Time{}) || CloneStringMap(nil) != nil {
 		t.Fatal("helper coverage failure")
 	}
 }

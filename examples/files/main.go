@@ -52,12 +52,5 @@ func main() {
 	if err := hub.DownloadFile(project, meta.Name, output); err != nil {
 		log.Fatal(err)
 	}
-	if err := storhub.VerifyFileIntegrity(output, *meta, 32<<10); err != nil {
-		log.Fatal(err)
-	}
-	combined, err := storhub.CombineChunkCRC32Cs(meta.Chunks)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("project=%s files=%d releases=%d combined-crc32c=%s\n", project, len(files), len(releases), combined)
+	fmt.Printf("project=%s files=%d releases=%d chunks=%d\n", project, len(files), len(releases), len(meta.Chunks))
 }

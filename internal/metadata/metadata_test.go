@@ -18,9 +18,6 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 	if parentPath("docs/guide.txt") != "docs" || parentPath("guide.txt") != "" {
 		t.Fatal("unexpected parent paths")
 	}
-	if sumCRC32C([]byte("abc")) == "" {
-		t.Fatal("expected crc32c sum")
-	}
 	if defaultFileMode(NodeKindFile) != 0o644 || defaultFileMode(NodeKindSymlink) != 0o777 || defaultDirMode() != 0o755 {
 		t.Fatal("unexpected mode defaults")
 	}
@@ -48,7 +45,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	repo := &RepoMetadata{
 		Project:     "demo",
 		Directories: []DirectoryMetadata{{Path: "docs", Inode: 2}, {Path: " docs/sub ", Inode: 3, XAttrs: map[string]string{"user.dir": "1"}}},
-		Releases:    []ReleaseMetadata{{Tag: "v2", Files: []FileMetadata{{Name: "docs/sub/link", Kind: NodeKindSymlink, Release: "", Inode: 4, SymlinkTarget: "target"}, {Name: "docs/sub/file.txt", Release: "v2", Size: 3, Inode: 5, CRC32C: sumCRC32C([]byte("abc")), Chunks: []ChunkInfo{{Index: 1, Offset: 2, Size: 1, Release: "", AssetID: 2, CRC32C: sumCRC32C([]byte("c"))}, {Index: 0, Offset: 0, Size: 2, Release: "", AssetID: 1, CRC32C: sumCRC32C([]byte("ab"))}}}}}},
+		Releases:    []ReleaseMetadata{{Tag: "v2", Files: []FileMetadata{{Name: "docs/sub/link", Kind: NodeKindSymlink, Release: "", Inode: 4, SymlinkTarget: "target"}, {Name: "docs/sub/file.txt", Release: "v2", Size: 3, Inode: 5, Chunks: []ChunkInfo{{Index: 1, Offset: 2, Size: 1, Release: "", AssetID: 2}, {Index: 0, Offset: 0, Size: 2, Release: "", AssetID: 1}}}}}},
 	}
 	repo.Normalize("demo", now)
 	if err := repo.Validate(); err != nil {
@@ -113,13 +110,13 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 	if release == nil || release.Tag != "v1" {
 		t.Fatalf("unexpected release: %+v", release)
 	}
-	file := FileMetadata{Name: "docs/specs/readme.txt", Release: "v1", Size: 3, CRC32C: sumCRC32C([]byte("abc")), Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 3, Release: "v1", AssetID: 1, CRC32C: sumCRC32C([]byte("abc"))}}}
+	file := FileMetadata{Name: "docs/specs/readme.txt", Release: "v1", Size: 3, Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 3, Release: "v1", AssetID: 1}}}
 	repo.UpsertFile(file, now)
 	first := repo.FindFile(file.Name)
 	if first == nil || first.Inode == 0 || first.NLink != 1 {
 		t.Fatalf("unexpected inserted file: %+v", first)
 	}
-	repo.UpsertFile(FileMetadata{Name: file.Name, Release: "v1", Size: 4, CRC32C: sumCRC32C([]byte("abcd")), Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 4, Release: "v1", AssetID: 2, CRC32C: sumCRC32C([]byte("abcd"))}}}, now.Add(time.Minute))
+	repo.UpsertFile(FileMetadata{Name: file.Name, Release: "v1", Size: 4, Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 4, Release: "v1", AssetID: 2}}}, now.Add(time.Minute))
 	updated := repo.FindFile(file.Name)
 	if updated == nil || updated.Inode != first.Inode || updated.Size != 4 {
 		t.Fatalf("expected identity preserved on upsert: first=%+v updated=%+v", first, updated)
@@ -166,18 +163,18 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	}
 	dupRelease := NewRepoMetadata("duprel")
 	dupRelease.Directories = []DirectoryMetadata{{Path: "docs", Inode: 2}}
-	file := FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 1, Inode: 3, CRC32C: sumCRC32C([]byte("a")), Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1, CRC32C: sumCRC32C([]byte("a"))}}}
+	file := FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 1, Inode: 3, Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1}}}
 	dupRelease.Releases = []ReleaseMetadata{{Tag: "v1", Files: []FileMetadata{file}}, {Tag: "v1", Files: []FileMetadata{file}}}
 	dupRelease.RecomputeStats()
 	dupRelease.RebuildIndexes()
 	if err := dupRelease.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate release") {
 		t.Fatalf("expected duplicate release error, got %v", err)
 	}
-	badFile := FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 2, Inode: 3, CRC32C: sumCRC32C([]byte("ab")), Chunks: []ChunkInfo{{Index: 0, Offset: 1, Size: 2, Release: "v1", AssetID: 1, CRC32C: sumCRC32C([]byte("ab"))}}}
+	badFile := FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 2, Inode: 3, Chunks: []ChunkInfo{{Index: 0, Offset: 1, Size: 2, Release: "v1", AssetID: 1}}}
 	if err := badFile.Validate("v1"); err == nil || !strings.Contains(err.Error(), "offset mismatch") {
 		t.Fatalf("expected offset mismatch, got %v", err)
 	}
-	badLink := FileMetadata{Name: "link", Kind: NodeKindSymlink, Release: "v1", Inode: 4, CRC32C: sumCRC32C([]byte("x"))}
+	badLink := FileMetadata{Name: "link", Kind: NodeKindSymlink, Release: "v1", Inode: 4}
 	if err := badLink.Validate("v1"); err == nil || !strings.Contains(err.Error(), "symlink target") {
 		t.Fatalf("expected symlink validation error, got %v", err)
 	}

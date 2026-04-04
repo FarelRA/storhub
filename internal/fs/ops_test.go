@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"testing"
 	"time"
@@ -104,10 +103,6 @@ func (b *testBackend) DefaultFileMode(kind meta.NodeKind) uint32 {
 
 func (b *testBackend) DefaultOwnerIDs() (uint32, uint32) { return 1, 2 }
 
-func (b *testBackend) CombineChunkCRC32Cs(chunks []meta.ChunkInfo) (string, error) {
-	return fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(fmt.Sprint(len(chunks))))), nil
-}
-
 func (b *testBackend) seedDir(path string) {
 	b.repo.EnsureDirectory(path, b.now)
 }
@@ -126,11 +121,10 @@ func (b *testBackend) storeFile(file *meta.FileMetadata, data []byte) {
 	b.nextAsset++
 	b.assetBytes[assetID] = append([]byte(nil), data...)
 	file.Size = int64(len(data))
-	file.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: int64(len(data)), AssetID: assetID, CRC32C: fmt.Sprintf("%08x", crc32.ChecksumIEEE(data)), Release: file.Release}}
+	file.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: file.Release}}
 	if len(data) == 0 {
 		file.Chunks = nil
 	}
-	file.CRC32C = fmt.Sprintf("%08x", crc32.ChecksumIEEE(data))
 }
 
 func (b *testBackend) fileData(file *meta.FileMetadata) ([]byte, error) {

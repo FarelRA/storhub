@@ -9,6 +9,7 @@ import (
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	ghapi "github.com/FarelRA/storhub/internal/github"
+	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
 const metadataFilePath = ".storhub/metadata.json"
@@ -25,11 +26,11 @@ func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadU
 		if err != nil {
 			return err
 		}
-		assetID, checksum, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
 		if err != nil {
 			return fmt.Errorf("upload chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Name: assetName, Size: chunk.Size(), Index: i, Offset: chunk.Offset(), Release: releaseTag, AssetOffset: 0, AssetID: assetID, CRC32C: checksum}
+		results[i] = ChunkInfo{Name: assetName, Size: chunk.Size(), Index: i, Offset: chunk.Offset(), Release: releaseTag, AssetOffset: 0, AssetID: assetID}
 		return nil
 	})
 	if err != nil {
@@ -262,12 +263,12 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Release) (string, error) {
 	maxVersion := 0
 	for _, release := range metadata.Releases {
-		if n, ok := parseNumericReleaseTag(release.Tag); ok && n > maxVersion {
+		if n, ok := meta.ParseNumericReleaseTag(release.Tag); ok && n > maxVersion {
 			maxVersion = n
 		}
 	}
 	for _, release := range releases {
-		if n, ok := parseNumericReleaseTag(release.TagName); ok && n > maxVersion {
+		if n, ok := meta.ParseNumericReleaseTag(release.TagName); ok && n > maxVersion {
 			maxVersion = n
 		}
 	}
@@ -329,16 +330,15 @@ func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
 	return nil
 }
 
-func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, string, error) {
+func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
 	if err := h.ensureOwner(ctx); err != nil {
-		return 0, "", err
+		return 0, err
 	}
-	hashingReader := newHashingReadSeeker(reader)
-	assetID, err := h.gh.UploadAsset(ctx, h.owner, project, releaseTag, uploadURL, assetName, hashingReader, size)
+	assetID, err := h.gh.UploadAsset(ctx, h.owner, project, releaseTag, uploadURL, assetName, reader, size)
 	if err != nil {
-		return 0, "", err
+		return 0, err
 	}
-	return assetID, hashingReader.Checksum(), nil
+	return assetID, nil
 }
 
 func (h *StorHub) downloadAssetStream(ctx context.Context, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
@@ -373,31 +373,6 @@ func (h *StorHub) fillAssetRange(ctx context.Context, project string, chunk Chun
 		}
 		return nil
 	})
-}
-
-func (h *StorHub) checksumAssetRange(ctx context.Context, project string, chunk ChunkInfo) (string, error) {
-	if chunk.Size == 0 {
-		return formatCRC32C(0), nil
-	}
-	buf := h.getBuffer()
-	defer h.putBuffer(buf)
-	var checksum string
-	err := h.withAssetRangeReader(ctx, project, chunk, func(reader io.Reader) error {
-		hasher := newHashingReadSeeker(nopReadSeeker{reader: reader})
-		written, err := io.CopyBuffer(io.Discard, hasher, *buf)
-		if err != nil {
-			return err
-		}
-		if written != chunk.Size {
-			return fmt.Errorf("asset range size mismatch: expected %d, got %d", chunk.Size, written)
-		}
-		checksum = hasher.Checksum()
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return checksum, nil
 }
 
 func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chunk ChunkInfo, fn func(io.Reader) error) error {

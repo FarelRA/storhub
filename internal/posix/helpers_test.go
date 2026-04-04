@@ -10,7 +10,7 @@ import (
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	repo := meta.NewRepoMetadata("demo")
-	file := &meta.FileMetadata{Name: "docs/file.txt", Release: "v1", CRC32C: "abc"}
+	file := &meta.FileMetadata{Name: "docs/file.txt", Release: "v1"}
 	ApplyUploadIdentity(repo, nil, file, now)
 	if file.Inode == 0 || file.Kind != meta.NodeKindFile || file.Mode == 0 {
 		t.Fatalf("unexpected initialized file identity: %+v", file)
@@ -30,7 +30,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureDirectory("docs", now)
-	base := meta.FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 1, CRC32C: "a", Chunks: []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1, CRC32C: "a"}}}
+	base := meta.FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 1, Chunks: []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1}}}
 	repo.UpsertFile(base, now)
 	first := repo.FindFile("docs/a.txt")
 	clone := first.Clone()
@@ -38,8 +38,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	repo.UpsertFile(clone, now)
 	updated := first.Clone()
 	updated.Release = "v2"
-	updated.CRC32C = "b"
-	updated.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v2", AssetID: 2, CRC32C: "b"}}
+	updated.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v2", AssetID: 2}}
 	ReplaceInodeFamily(repo, first, updated, now.Add(time.Minute))
 	if got := repo.FindFilesByInode(first.Inode); len(got) != 2 || got[0].Release != "v2" || got[1].Release != "v2" {
 		t.Fatalf("expected inode family replacement, got %+v", got)

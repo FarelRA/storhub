@@ -12,7 +12,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,7 +128,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if len(meta.Chunks) != 1 || meta.CRC32C == "" {
+	if len(meta.Chunks) != 1 {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 
@@ -143,7 +145,6 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 		t.Fatalf("download file: %v", err)
 	}
 	assertFileContent(t, output, []byte("hello streaming world"))
-	assertIntegrity(t, output, *meta)
 	backend.assertRepoStats(t, "project-a", 1, int64(len("hello streaming world")))
 	if repo := backend.repo("project-a"); repo == nil || !repo.private {
 		t.Fatal("expected repositories to be private by default")
@@ -294,9 +295,7 @@ func TestCreateFileStoresEmptyMetadataWithoutAssetUpload(t *testing.T) {
 	if len(meta.Chunks) != 0 {
 		t.Fatalf("expected empty file to have no chunks, got %+v", meta.Chunks)
 	}
-	if meta.CRC32C != formatCRC32C(0) {
-		t.Fatalf("unexpected empty-file crc32c: %s", meta.CRC32C)
-	}
+
 	if uploadCalls.Load() != 0 {
 		t.Fatalf("expected no asset uploads for empty file, got %d", uploadCalls.Load())
 	}
@@ -395,12 +394,9 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	inputB := writeTempFile(t, t.TempDir(), "v2.txt", []byte("version-b-better"))
-	second, err := hub.ReplaceFile("project-history", "artifact.txt", inputB)
+	_, err = hub.ReplaceFile("project-history", "artifact.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
-	}
-	if second.CRC32C == first.CRC32C {
-		t.Fatal("expected replacement to change integrity")
 	}
 
 	revisions, err := hub.ListMetadataRevisions("project-history")
@@ -438,7 +434,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list files after rollback: %v", err)
 	}
-	if len(files) != 1 || files[0].CRC32C != first.CRC32C {
+	if len(files) != 1 || files[0].Size != first.Size {
 		t.Fatalf("expected rollback to restore first version, got %+v", files)
 	}
 
@@ -505,6 +501,51 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 		t.Fatal("expected patched download to use range requests")
 	}
 	assertFileContent(t, output, []byte("abcdZZghij"))
+}
+
+func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 4, MaxRetries: 0})
+	original := bytes.Repeat([]byte("a"), 100)
+	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
+	meta, err := hub.UploadFile("project-exact-ranges", "exact-ranges.bin", input)
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	patchedBytes := bytes.Repeat([]byte("b"), 47)
+	patched, err := hub.PatchFile("project-exact-ranges", "exact-ranges.bin", 3, 47, patchedBytes)
+	if err != nil {
+		t.Fatalf("patch file: %v", err)
+	}
+	if len(patched.Chunks) != 3 {
+		t.Fatalf("expected three logical chunks after patch, got %+v", patched.Chunks)
+	}
+	rangeByAsset := make(map[int64][]string)
+	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/releases/assets/") {
+			return false
+		}
+		assetID, err := strconv.ParseInt(path.Base(r.URL.Path), 10, 64)
+		if err != nil {
+			return false
+		}
+		rangeByAsset[assetID] = append(rangeByAsset[assetID], r.Header.Get("Range"))
+		return false
+	}
+	output := filepath.Join(t.TempDir(), "exact-ranges.out")
+	if err := hub.DownloadFile("project-exact-ranges", "exact-ranges.bin", output); err != nil {
+		t.Fatalf("download patched file: %v", err)
+	}
+	assertFileContent(t, output, append(append(append([]byte(nil), original[:3]...), patchedBytes...), original[50:]...))
+	for assetID := range rangeByAsset {
+		sort.Strings(rangeByAsset[assetID])
+	}
+	if got := rangeByAsset[meta.Chunks[0].AssetID]; !reflect.DeepEqual(got, []string{"bytes=0-2", "bytes=50-99"}) {
+		t.Fatalf("unexpected original asset ranges: %+v", rangeByAsset)
+	}
+	if got := rangeByAsset[patched.Chunks[1].AssetID]; !reflect.DeepEqual(got, []string{"bytes=0-46"}) {
+		t.Fatalf("unexpected patch asset ranges: %+v", rangeByAsset)
+	}
 }
 
 func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
@@ -826,7 +867,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload empty file: %v", err)
 	}
-	if meta.Size != 0 || len(meta.Chunks) != 0 || meta.CRC32C != formatCRC32C(0) {
+	if meta.Size != 0 || len(meta.Chunks) != 0 {
 		t.Fatalf("unexpected empty upload metadata: %+v", meta)
 	}
 	output := filepath.Join(t.TempDir(), "empty-upload.out")
@@ -899,12 +940,15 @@ func TestDownloadRemovesCorruptOutput(t *testing.T) {
 	backend.corruptAsset(meta.Chunks[0].AssetID)
 
 	output := filepath.Join(t.TempDir(), "corrupt.out")
-	err = hub.DownloadFile("project-corrupt", "corrupt.bin", output)
-	if err == nil || !strings.Contains(err.Error(), "mismatch") {
-		t.Fatalf("expected integrity mismatch, got %v", err)
+	if err := hub.DownloadFile("project-corrupt", "corrupt.bin", output); err != nil {
+		t.Fatalf("download file: %v", err)
 	}
-	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
-		t.Fatalf("expected direct target file to be absent after integrity failure, stat err=%v", statErr)
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if bytes.Equal(data, []byte("this file will be corrupted during download")) {
+		t.Fatal("expected corrupt bytes to be streamed through without integrity checks")
 	}
 }
 
@@ -1293,27 +1337,6 @@ func TestUploadHonorsCanceledContext(t *testing.T) {
 	cancel()
 	if err := <-errCh; err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled upload, got %v", err)
-	}
-}
-
-func TestCalculateCRC32CHelpersHandleZeroBuffer(t *testing.T) {
-	data := []byte("crc32c helper payload")
-	reader := bytes.NewReader(data)
-	sum, err := chunking.CalculateCRC32CReader(reader, 0)
-	if err != nil {
-		t.Fatalf("calculate crc32c reader: %v", err)
-	}
-	chunked, err := chunking.CalculateChunkedIntegrityReader(bytes.NewReader(data), FileMetadata{
-		Name:   "payload.bin",
-		Size:   int64(len(data)),
-		CRC32C: sum,
-		Chunks: []ChunkInfo{{Index: 0, Offset: 0, Size: int64(len(data)), CRC32C: sum}},
-	}, 0)
-	if err != nil {
-		t.Fatalf("calculate chunked integrity reader: %v", err)
-	}
-	if chunked != sum {
-		t.Fatalf("unexpected combined crc32c: %s", chunked)
 	}
 }
 
@@ -3305,13 +3328,6 @@ func assertFileContent(t *testing.T, path string, expected []byte) {
 	}
 	if !bytes.Equal(data, expected) {
 		t.Fatalf("unexpected file content for %s", path)
-	}
-}
-
-func assertIntegrity(t *testing.T, path string, metadata FileMetadata) {
-	t.Helper()
-	if err := chunking.VerifyFileIntegrity(path, metadata, chunking.DefaultBufferSize); err != nil {
-		t.Fatalf("verify integrity for %s: %v", path, err)
 	}
 }
 
