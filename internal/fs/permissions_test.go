@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -28,5 +29,23 @@ func TestCheckStickyDelete(t *testing.T) {
 	ownerCtx := WithIdentity(context.Background(), Identity{UID: 11, GID: 12, Groups: []uint32{12}})
 	if err := CheckStickyDelete(ownerCtx, repo, "tmp", "tmp/note.txt"); err != nil {
 		t.Fatalf("expected file owner delete success, got %v", err)
+	}
+}
+
+func TestShouldUpdateAtimePolicy(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	old := now.Add(-48 * time.Hour)
+	recent := now.Add(-time.Hour)
+	if ShouldUpdateAtime(storcfg.AtimeNo, old, old, old, now) {
+		t.Fatal("expected noatime to skip updates")
+	}
+	if !ShouldUpdateAtime(storcfg.AtimeStrict, recent, now, now, now) {
+		t.Fatal("expected strictatime to always update")
+	}
+	if ShouldUpdateAtime(storcfg.AtimeRelatime, recent, old, old, now) {
+		t.Fatal("expected relatime to skip recent atime")
+	}
+	if !ShouldUpdateAtime(storcfg.AtimeRelatime, old, old, old, now) {
+		t.Fatal("expected relatime to update stale atime")
 	}
 }

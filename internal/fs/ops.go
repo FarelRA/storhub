@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -23,6 +24,7 @@ type Backend interface {
 	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMetadata, offset, deleteSize int64, edit []byte) (*meta.FileMetadata, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
 	Now() time.Time
+	AtimePolicy() storcfg.AtimePolicy
 	FileNotFound(path string) error
 	DefaultFileMode(kind meta.NodeKind) uint32
 	DefaultOwnerIDs() (uint32, uint32)
@@ -409,6 +411,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 			return nil, err
 		}
 	}
+	TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
 	return result, nil
 }
 
@@ -483,6 +486,7 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 		entries = append(entries, DirEntryFromFile(file))
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	TouchDirectoryAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
 	return entries, nil
 }
 

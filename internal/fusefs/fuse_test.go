@@ -837,6 +837,28 @@ func TestAccessChecksCallerPermissions(t *testing.T) {
 	}
 }
 
+func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
+	now := time.Unix(34, 0).UTC()
+	fake := &stubHub{
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if target == "docs" {
+				return &shfs.EntryInfo{Path: target, Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			}
+			return nil, syscall.ENOENT
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	var out fuse.EntryOut
+	if _, errno := dirNode.Mknod(context.Background(), "pipe", syscall.S_IFIFO|0o644, 0, &out); errno != syscall.ENOTSUP {
+		t.Fatalf("expected fifo mknod to be unsupported, got %v", errno)
+	}
+}
+
 func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
 	oldNotifyDelete := notifyDeleteFunc
 	t.Cleanup(func() { notifyDeleteFunc = oldNotifyDelete })

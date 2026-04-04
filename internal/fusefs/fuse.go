@@ -762,6 +762,19 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	return ino, h, 0, 0
 }
 
+func (n *storhubNode) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	_ = dev
+	switch mode & syscall.S_IFMT {
+	case 0, syscall.S_IFREG:
+		inode, _, _, errno := n.Create(ctx, name, syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY, mode&0o7777, out)
+		return inode, errno
+	case syscall.S_IFIFO, syscall.S_IFCHR, syscall.S_IFBLK, syscall.S_IFSOCK:
+		return nil, syscall.ENOTSUP
+	default:
+		return nil, syscall.ENOTSUP
+	}
+}
+
 func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
 	childPath := path.Join(n.currentPath(), name)
@@ -1574,7 +1587,7 @@ func (w *inodeWriteState) readBaseRangeLocked(ctx context.Context, offset, lengt
 		return []byte{}, nil
 	}
 	if exact {
-		return w.fs.hub.ReadFileAtContext(ctx, w.fs.project, w.path, offset, length)
+		return w.fs.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), w.fs.project, w.path, offset, length)
 	}
 	return w.fs.readCached(ctx, w.inode, offset, length)
 }
@@ -2466,7 +2479,7 @@ func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]b
 	}
 	readOffset := startPage * s.opts.PageSize
 	readLength := s.opts.PageSize * readAhead
-	data, err := s.hub.ReadFileAtContext(ctx, s.project, s.pathForInode(inode), readOffset, readLength)
+	data, err := s.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), s.project, s.pathForInode(inode), readOffset, readLength)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}

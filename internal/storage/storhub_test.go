@@ -49,7 +49,7 @@ func defaultTestConfig() Config {
 }
 
 func smallTransferTestConfig() Config {
-	return Config{ChunkSize: testSmallChunkSize, BufferSize: testSmallBufferSize, MaxRetries: 0}
+	return Config{ChunkSize: testSmallChunkSize, BufferSize: testSmallBufferSize, MaxRetries: 0, AtimePolicy: "noatime"}
 }
 
 func smallRetryDisabledTestConfig() Config {
@@ -1921,6 +1921,21 @@ func TestFUSEOptionalMountLifecycle(t *testing.T) {
 	}
 	if err := os.Chmod(renamedPath, 0o600); err != nil {
 		t.Fatalf("chmod mounted file: %v", err)
+	}
+	if err := os.WriteFile(hardPath, []byte("hardlink update"), 0o600); err != nil {
+		t.Fatalf("write through mounted hardlink: %v", err)
+	}
+	if got, err := os.ReadFile(renamedPath); err != nil || string(got) != "hardlink update" {
+		t.Fatalf("expected hardlink content reflection: got=%q err=%v", got, err)
+	}
+	if err := os.Chmod(renamedPath, 0o000); err != nil {
+		t.Fatalf("chmod mounted file to 000: %v", err)
+	}
+	if _, err := os.ReadFile(renamedPath); err == nil {
+		t.Fatal("expected mounted permission denial after chmod 000")
+	}
+	if err := os.Chmod(renamedPath, 0o600); err != nil {
+		t.Fatalf("restore chmod mounted file: %v", err)
 	}
 	info, err := os.Lstat(renamedPath)
 	if err != nil {

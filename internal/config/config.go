@@ -16,6 +16,14 @@ const (
 	DefaultMaxTransfers    = 8
 )
 
+type AtimePolicy string
+
+const (
+	AtimeRelatime AtimePolicy = "relatime"
+	AtimeStrict   AtimePolicy = "strictatime"
+	AtimeNo       AtimePolicy = "noatime"
+)
+
 type Config struct {
 	APIBaseURL             string
 	APIVersion             string
@@ -28,6 +36,7 @@ type Config struct {
 	MaxRetries             int
 	BaseRetryDelay         time.Duration
 	MaxRetryDelay          time.Duration
+	AtimePolicy            AtimePolicy
 	Now                    func() time.Time
 	Sleep                  func(context.Context, time.Duration) error
 }
@@ -45,6 +54,7 @@ func Default() Config {
 		MaxRetries:             4,
 		BaseRetryDelay:         500 * time.Millisecond,
 		MaxRetryDelay:          8 * time.Second,
+		AtimePolicy:            AtimeRelatime,
 		Now:                    time.Now,
 		Sleep:                  sleepWithContext,
 	}
@@ -85,6 +95,9 @@ func (c Config) WithDefaults() Config {
 	if c.MaxRetryDelay <= 0 {
 		c.MaxRetryDelay = defaults.MaxRetryDelay
 	}
+	if c.AtimePolicy == "" {
+		c.AtimePolicy = defaults.AtimePolicy
+	}
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
@@ -106,6 +119,7 @@ func isZeroConfig(c Config) bool {
 		c.MaxRetries == 0 &&
 		c.BaseRetryDelay == 0 &&
 		c.MaxRetryDelay == 0 &&
+		c.AtimePolicy == "" &&
 		c.Now == nil &&
 		c.Sleep == nil
 }

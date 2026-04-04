@@ -277,6 +277,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	patched.Chunks = newChunks
 	patched.Release = targetRelease
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
+	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
 	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
@@ -304,6 +305,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	rewritten.Chunks = newChunks
 	rewritten.Release = targetRelease
 	rewritten.Size = finalSize
+	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
 	rewritten.ModifiedAt = now
 	rewritten.ChangedAt = now
 	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
@@ -396,6 +398,9 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		Release: releaseTag,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
+	if existing != nil {
+		fileMeta.Mode = shfs.SanitizeWrittenFileMode(fileMeta.Mode)
+	}
 	fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(repoMeta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
 		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
@@ -871,6 +876,10 @@ func (h *StorHub) DefaultOwnerIDs() (uint32, uint32) {
 	return defaultOwnerIDs()
 }
 
+func (h *StorHub) AtimePolicy() storcfg.AtimePolicy {
+	return h.config.AtimePolicy
+}
+
 func (h *StorHub) fsService() *shfs.Service {
 	return shfs.NewService(h)
 }
@@ -988,6 +997,7 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 	result := make([]byte, end-offset)
 	segments := overlappingFileSegments(file, offset, end)
 	if len(segments) == 0 {
+		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 		return result, nil
 	}
 	if len(segments) == 1 || h.config.MaxConcurrentTransfers <= 1 {
@@ -996,6 +1006,7 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 				return nil, err
 			}
 		}
+		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 		return result, nil
 	}
 	if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(segments), func(i int) error {
@@ -1004,6 +1015,7 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 	}); err != nil {
 		return nil, err
 	}
+	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 	return result, nil
 }
 

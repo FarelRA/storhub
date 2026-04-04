@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -312,6 +313,8 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 		t.Fatalf("expected parent timestamps touched, got mtime=%v ctime=%v", parent.ModifiedAt, parent.ChangedAt)
 	}
 }
+
+func (b *testBackend) AtimePolicy() storcfg.AtimePolicy { return storcfg.AtimeRelatime }
 
 func returnFail(t *testing.T, label string, err error, value any) {
 	t.Helper()

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -59,6 +60,8 @@ func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ strin
 }
 
 func (b *testBackend) Now() time.Time { return b.now }
+
+func (b *testBackend) AtimePolicy() storcfg.AtimePolicy { return storcfg.AtimeRelatime }
 
 func (b *testBackend) FileNotFound(path string) error { return fmt.Errorf("not found: %s", path) }
 

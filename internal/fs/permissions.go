@@ -158,6 +158,22 @@ func CanChmod(ctx context.Context, entry *EntryInfo) error {
 	return syscall.EPERM
 }
 
+func SanitizeChmodMode(ctx context.Context, entry *EntryInfo, mode uint32) uint32 {
+	mode &= 0o7777
+	id := IdentityFromContext(ctx)
+	if id.Admin {
+		return mode
+	}
+	if mode&0o2000 != 0 && !identityInGroup(id, entry.GID) {
+		mode &^= 0o2000
+	}
+	return mode
+}
+
+func SanitizeWrittenFileMode(mode uint32) uint32 {
+	return mode &^ 0o6000
+}
+
 func CanChown(ctx context.Context) error {
 	if IdentityFromContext(ctx).Admin {
 		return nil

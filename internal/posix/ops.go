@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -20,6 +21,7 @@ type Backend interface {
 	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
 	Now() time.Time
+	AtimePolicy() storcfg.AtimePolicy
 	FileNotFound(path string) error
 	DefaultFileMode(kind meta.NodeKind) uint32
 	DefaultOwnerIDs() (uint32, uint32)
@@ -123,6 +125,7 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 	if file.Kind != meta.NodeKindSymlink {
 		return "", fmt.Errorf("path is not a symlink: %s", cleanPath)
 	}
+	shfs.TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
 	return file.SymlinkTarget, nil
 }
 
@@ -188,6 +191,7 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 	if err := shfs.CanChmod(ctx, entry); err != nil {
 		return err
 	}
+	mode = shfs.SanitizeChmodMode(ctx, entry, mode)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
@@ -215,6 +219,7 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
 				current.UID = uid
 				current.GID = gid
+				current.Mode &^= 0o6000
 				current.ChangedAt = now
 			})
 		}
