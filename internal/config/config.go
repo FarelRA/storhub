@@ -68,7 +68,7 @@ func Default() Config {
 		LogLevel:               logging.LevelDebug,
 		LogFormat:              logging.FormatPretty,
 		LogColor:               true,
-		AtimePolicy:            AtimeRelatime,
+		AtimePolicy:            AtimeNo,
 		Now:                    time.Now,
 		Sleep:                  sleepWithContext,
 	}
