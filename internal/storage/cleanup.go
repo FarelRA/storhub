@@ -31,31 +31,39 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	if err != nil {
 		return err
 	}
-	_, err = h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
+		return err
+	}
+	if err := shfs.CheckStickyDelete(ctx, pm.meta, shfs.ParentPath(cleanName), cleanName); err != nil {
+		return err
+	}
+	if pm.meta.HasDirectory(cleanName) {
+		return fmt.Errorf("is a directory: %s", cleanName)
+	}
+	existing := pm.meta.FindFile(cleanName)
+	if existing == nil {
+		return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	if !pm.meta.RemoveFile(cleanName) {
+		return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
+		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
+		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, h.config.Now().UTC()); err != nil {
 			return err
 		}
-		if err := shfs.CheckStickyDelete(ctx, meta, shfs.ParentPath(cleanName), cleanName); err != nil {
-			return err
-		}
-		if meta.HasDirectory(cleanName) {
-			return fmt.Errorf("is a directory: %s", cleanName)
-		}
-		existing := meta.FindFile(cleanName)
-		if existing == nil {
-			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
-		}
-		if !meta.RemoveFile(cleanName) {
-			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
-		}
-		if len(meta.FindFilesByInode(existing.Inode)) > 0 {
-			shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
-			return implposix.TouchInodeFamilyChangedAt(meta, existing.Inode, h.config.Now().UTC())
-		}
-		shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
-		return nil
-	}, fmt.Sprintf("storhub: delete %s", cleanName))
-	return err
+	} else {
+		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
+	}
+	pm.dirty = true
+
+	return nil
 }
 
 func (h *StorHub) DeleteRelease(project, tag string) error {
@@ -69,25 +77,30 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	if strings.TrimSpace(tag) == "" {
 		return errors.New("release tag is required")
 	}
-	_, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		for _, release := range meta.Releases {
-			for _, file := range release.Files {
-				if file.Release == tag {
-					continue
-				}
-				for _, chunk := range file.Chunks {
-					if chunk.Release == tag {
-						return fmt.Errorf("release %s is still referenced by active file %s", tag, file.Name)
-					}
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for _, release := range pm.meta.Releases {
+		for _, file := range release.Files {
+			if file.Release == tag {
+				continue
+			}
+			for _, chunk := range file.Chunks {
+				if chunk.Release == tag {
+					return fmt.Errorf("release %s is still referenced by active file %s", tag, file.Name)
 				}
 			}
 		}
-		if !meta.RemoveRelease(tag) {
-			return fmt.Errorf("release not found: %s", tag)
-		}
-		return nil
-	}, fmt.Sprintf("storhub: hide release %s", tag))
-	return err
+	}
+	if !pm.meta.RemoveRelease(tag) {
+		return fmt.Errorf("release not found: %s", tag)
+	}
+	pm.dirty = true
+
+	return nil
 }
 
 func (h *StorHub) CleanupProject(project string) error {

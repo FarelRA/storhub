@@ -58,27 +58,35 @@ func NewRepoMetadata(project string) *RepoMetadata {
 }
 
 type StorHub struct {
-	token          string
-	owner          string
-	gh             *ghapi.Client
-	config         storcfg.Config
-	bufferPool     sync.Pool
-	ownerMu        sync.Mutex
-	repoMu         sync.Mutex
-	repoState      map[string]bool
-	logger         *slog.Logger
-	metaMu         sync.RWMutex
-	metaCache      map[string]cachedMetadata
-	metaLockMu     sync.Mutex
-	metaLocks      map[string]*sync.Mutex
-	atimeMu        sync.Mutex
-	atimePending   map[string]map[atimeKey]atimeUpdate
-	atimeScheduled map[string]bool
+	token      string
+	owner      string
+	gh         *ghapi.Client
+	config     storcfg.Config
+	bufferPool sync.Pool
+	ownerMu    sync.Mutex
+	repoMu     sync.Mutex
+	repoState  map[string]bool
+	logger     *slog.Logger
+
+	// Metadata management
+	metaMu    sync.RWMutex
+	metaCache map[string]*projectMetadata
+
+	// Shutdown coordination
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{}
+	shutdownWg   sync.WaitGroup
 }
 
-type cachedMetadata struct {
-	sha  string
-	meta metadata.RepoMetadata
+// projectMetadata holds metadata for a single project with batched commit support
+type projectMetadata struct {
+	mu         sync.RWMutex
+	meta       *metadata.RepoMetadata
+	sha        string
+	dirty      bool
+	lastCommit time.Time
+	stopCh     chan struct{}
+	stoppedCh  chan struct{}
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
@@ -115,15 +123,13 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 
 	cfg = cfg.WithDefaults()
 	hub := &StorHub{
-		token:          token,
-		gh:             ghapi.NewClient(token, cfg),
-		config:         cfg,
-		repoState:      make(map[string]bool),
-		metaCache:      make(map[string]cachedMetadata),
-		logger:         logging.WithComponent(cfg.Logger, "storage"),
-		metaLocks:      make(map[string]*sync.Mutex),
-		atimePending:   make(map[string]map[atimeKey]atimeUpdate),
-		atimeScheduled: make(map[string]bool),
+		token:      token,
+		gh:         ghapi.NewClient(token, cfg),
+		config:     cfg,
+		repoState:  make(map[string]bool),
+		metaCache:  make(map[string]*projectMetadata),
+		logger:     logging.WithComponent(cfg.Logger, "storage"),
+		shutdownCh: make(chan struct{}),
 		bufferPool: sync.Pool{New: func() any {
 			buf := make([]byte, cfg.BufferSize)
 			return &buf
@@ -146,6 +152,207 @@ func (h *StorHub) ensureOwner(ctx context.Context) error {
 	}
 	h.owner = owner
 	return nil
+}
+
+// getOrCreateProjectMeta returns the projectMetadata for a project, creating it if needed
+func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
+	// Fast path: read lock to check if exists
+	h.metaMu.RLock()
+	pm, exists := h.metaCache[project]
+	h.metaMu.RUnlock()
+
+	if exists {
+		return pm
+	}
+
+	// Slow path: write lock to create
+	h.metaMu.Lock()
+	defer h.metaMu.Unlock()
+
+	// Double-check after acquiring write lock
+	pm, exists = h.metaCache[project]
+	if exists {
+		return pm
+	}
+
+	// Create new projectMetadata
+	pm = &projectMetadata{
+		meta:      metadata.NewRepoMetadata(project),
+		stopCh:    make(chan struct{}),
+		stoppedCh: make(chan struct{}),
+	}
+	h.metaCache[project] = pm
+
+	// Start commit loop goroutine
+	h.shutdownWg.Add(1)
+	go h.commitLoop(project, pm)
+
+	return pm
+}
+
+// commitLoop periodically commits dirty metadata to GitHub
+func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
+	defer h.shutdownWg.Done()
+	defer close(pm.stoppedCh)
+
+	ticker := time.NewTicker(h.config.MetadataCommitInterval)
+	defer ticker.Stop()
+
+	logger := h.projectLogger(project)
+
+	for {
+		select {
+		case <-ticker.C:
+			pm.mu.Lock()
+			if pm.dirty {
+				// Commit metadata to GitHub
+				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+					// Check if it's a conflict error (GitHub metadata was modified by someone else)
+					if isConflictError(err) {
+						logging.Warn(logger, "metadata commit conflict detected, reloading fresh metadata", "err", err)
+						// Reload fresh metadata from GitHub to resolve conflict
+						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
+							logging.Error(logger, "failed to reload metadata after conflict", "err", loadErr)
+						} else {
+							// Update with fresh metadata and SHA
+							pm.meta = freshMeta
+							pm.sha = freshSHA
+							pm.dirty = false
+							logging.Warn(logger, "metadata reloaded from github due to conflict, in-memory changes discarded", "new_sha", shortSHA(freshSHA))
+						}
+					} else {
+						logging.Error(logger, "metadata commit failed", "err", err)
+					}
+				} else {
+					pm.dirty = false
+					pm.lastCommit = h.config.Now()
+					logging.Debug(logger, "metadata committed", "interval", h.config.MetadataCommitInterval)
+				}
+			}
+			pm.mu.Unlock()
+
+		case <-pm.stopCh:
+			// Final commit before stopping
+			pm.mu.Lock()
+			if pm.dirty {
+				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+					if isConflictError(err) {
+						logging.Warn(logger, "final commit conflict, reloading fresh metadata", "err", err)
+						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr == nil {
+							pm.meta = freshMeta
+							pm.sha = freshSHA
+							pm.dirty = false
+							logging.Warn(logger, "metadata reloaded from github due to conflict on shutdown")
+						}
+					} else {
+						logging.Error(logger, "final metadata commit failed", "err", err)
+					}
+				} else {
+					logging.Info(logger, "final metadata committed")
+				}
+			}
+			pm.mu.Unlock()
+			return
+
+		case <-h.shutdownCh:
+			// Shutdown requested
+			pm.mu.Lock()
+			if pm.dirty {
+				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+					if isConflictError(err) {
+						logging.Warn(logger, "shutdown commit conflict, reloading fresh metadata", "err", err)
+						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr == nil {
+							pm.meta = freshMeta
+							pm.sha = freshSHA
+							pm.dirty = false
+							logging.Warn(logger, "metadata reloaded from github due to conflict on shutdown")
+						}
+					} else {
+						logging.Error(logger, "shutdown metadata commit failed", "err", err)
+					}
+				} else {
+					logging.Info(logger, "shutdown metadata committed")
+				}
+			}
+			pm.mu.Unlock()
+			return
+		}
+	}
+}
+
+// commitProjectMetadata commits the metadata to GitHub (caller must hold pm.mu lock)
+func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm *projectMetadata) error {
+	started := h.config.Now().UTC()
+	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(pm.sha))
+
+	if err := h.ensureOwner(ctx); err != nil {
+		return err
+	}
+
+	// Normalize and validate metadata
+	pm.meta.Normalize(project, h.config.Now())
+	pm.meta.LastModified = h.config.Now().UTC()
+	pm.meta.RecomputeStats()
+	if err := pm.meta.Validate(); err != nil {
+		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "validate", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return fmt.Errorf("invalid metadata: %w", err)
+	}
+
+	// Serialize to JSON
+	metaBytes, err := pm.meta.ToJSON()
+	if err != nil {
+		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "serialize", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	if len(metaBytes) > maxMetadataBytes {
+		err := fmt.Errorf("metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes)
+		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return err
+	}
+
+	// Commit to GitHub with optimistic locking
+	message := "storhub: update metadata"
+	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, ".storhub/metadata.json", metaBytes, pm.sha, message)
+	if err != nil {
+		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "github_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return fmt.Errorf("commit metadata: %w", err)
+	}
+
+	// Update SHA for next commit
+	pm.sha = contentSHA
+
+	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(metaBytes))
+
+	return nil
+}
+
+// Shutdown gracefully shuts down the StorHub, committing any dirty metadata
+func (h *StorHub) Shutdown(ctx context.Context) error {
+	var shutdownErr error
+	h.shutdownOnce.Do(func() {
+		logging.Info(h.logger, "shutdown initiated")
+
+		// Signal all commit loops to stop
+		close(h.shutdownCh)
+
+		// Wait for all commit loops to finish with timeout
+		done := make(chan struct{})
+		go func() {
+			h.shutdownWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			logging.Info(h.logger, "shutdown complete")
+		case <-ctx.Done():
+			shutdownErr = fmt.Errorf("shutdown timeout: %w", ctx.Err())
+			logging.Error(h.logger, "shutdown timeout", "err", ctx.Err())
+		}
+	})
+
+	return shutdownErr
 }
 
 func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMetadata, error) {
@@ -245,17 +452,20 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	fileMeta.Release = releaseTag
 	fileMeta.Size = size
 	implposix.ApplyUpdatedFileIdentity(&fileMeta, current, now)
-	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		latest := meta.FindFile(cleanName)
-		if latest == nil {
-			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
-		}
-		implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
-		implposix.ReplaceInodeFamily(meta, latest, fileMeta, now)
-		return nil
-	}, metadataCommitMessage(cleanName, true)); err != nil {
-		return nil, err
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	latest := pm.meta.FindFile(cleanName)
+	if latest == nil {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
+	implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
+	implposix.ReplaceInodeFamily(pm.meta, latest, fileMeta, now)
+	pm.dirty = true
+
 	result = &fileMeta
 	return result, nil
 }
@@ -327,17 +537,20 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
 	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
-	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		current := meta.FindFile(cleanName)
-		if current == nil {
-			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
-		}
-		implposix.ApplyUpdatedFileIdentity(&patched, current, now)
-		implposix.ReplaceInodeFamily(meta, current, patched, now)
-		return nil
-	}, fmt.Sprintf("storhub: patch %s at %d delete %d insert %d", cleanName, offset, deleteSize, len(edit))); err != nil {
-		return nil, err
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	current := pm.meta.FindFile(cleanName)
+	if current == nil {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
+	implposix.ApplyUpdatedFileIdentity(&patched, current, now)
+	implposix.ReplaceInodeFamily(pm.meta, current, patched, now)
+	pm.dirty = true
+
 	return &patched, nil
 }
 
@@ -355,17 +568,20 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	rewritten.ModifiedAt = now
 	rewritten.ChangedAt = now
 	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
-	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		current := meta.FindFile(cleanName)
-		if current == nil {
-			return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
-		}
-		implposix.ApplyUpdatedFileIdentity(&rewritten, current, now)
-		implposix.ReplaceInodeFamily(meta, current, rewritten, now)
-		return nil
-	}, fmt.Sprintf("storhub: rewrite chunks for %s", cleanName)); err != nil {
-		return nil, err
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	current := pm.meta.FindFile(cleanName)
+	if current == nil {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
+	implposix.ApplyUpdatedFileIdentity(&rewritten, current, now)
+	implposix.ReplaceInodeFamily(pm.meta, current, rewritten, now)
+	pm.dirty = true
+
 	return &rewritten, nil
 }
 
@@ -458,30 +674,33 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		fileMeta.Mode = shfs.SanitizeWrittenFileMode(fileMeta.Mode)
 	}
 	fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(repoMeta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
-	if _, err := h.updateRepoMetadata(ctx, project, func(meta *RepoMetadata) error {
-		if err := shfs.CheckParentWrite(ctx, meta, cleanName); err != nil {
-			return err
-		}
-		if err := shfs.RequireParentDirectory(meta, cleanName); err != nil {
-			return err
-		}
-		if !replace && meta.FindFile(cleanName) != nil {
-			return fmt.Errorf("file already exists: %s", cleanName)
-		}
-		current := meta.FindFile(cleanName)
-		if current != nil {
-			implposix.ApplyUpdatedFileIdentity(&fileMeta, current, h.config.Now().UTC())
-			implposix.ReplaceInodeFamily(meta, current, fileMeta, h.config.Now().UTC())
-		} else {
-			fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(meta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
-			metadata.InitializeNewFileIdentity(meta, &fileMeta, h.config.Now().UTC())
-			meta.UpsertFile(fileMeta, h.config.Now().UTC())
-		}
-		shfs.TouchParentDirectory(meta, cleanName, h.config.Now().UTC())
-		return nil
-	}, metadataCommitMessage(cleanName, replace)); err != nil {
+
+	// Update metadata directly
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		return nil, err
 	}
+	if err := shfs.RequireParentDirectory(pm.meta, cleanName); err != nil {
+		return nil, err
+	}
+	if !replace && pm.meta.FindFile(cleanName) != nil {
+		return nil, fmt.Errorf("file already exists: %s", cleanName)
+	}
+	current := pm.meta.FindFile(cleanName)
+	if current != nil {
+		implposix.ApplyUpdatedFileIdentity(&fileMeta, current, h.config.Now().UTC())
+		implposix.ReplaceInodeFamily(pm.meta, current, fileMeta, h.config.Now().UTC())
+	} else {
+		fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(pm.meta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
+		metadata.InitializeNewFileIdentity(pm.meta, &fileMeta, h.config.Now().UTC())
+		pm.meta.UpsertFile(fileMeta, h.config.Now().UTC())
+	}
+	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
+	pm.dirty = true
+
 	result = &fileMeta
 	return result, nil
 }
@@ -640,40 +859,6 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 func (h *StorHub) getBuffer() *[]byte { return h.bufferPool.Get().(*[]byte) }
 
 func (h *StorHub) putBuffer(buf *[]byte) { h.bufferPool.Put(buf) }
-
-func (h *StorHub) updateRepoMetadata(ctx context.Context, project string, apply func(*RepoMetadata) error, message string) (*RepoMetadata, error) {
-	lockStarted := h.config.Now().UTC()
-	lock := h.metadataLock(project)
-	logging.Debug(h.projectLogger(project), "metadata writer wait", "message", message)
-	lock.Lock()
-	defer lock.Unlock()
-	logging.Debug(h.projectLogger(project), "metadata writer acquired", "message", message, "wait", h.config.Now().UTC().Sub(lockStarted))
-	for attempt := 0; attempt <= h.config.MaxRetries+1; attempt++ {
-		started := h.config.Now().UTC()
-		h.debugf("metadata update start project=%s attempt=%d message=%q", project, attempt+1, message)
-		meta, sha, err := h.loadRepoMetadataFresh(ctx, project)
-		if err != nil {
-			h.debugf("metadata update failed project=%s attempt=%d step=load err=%v", project, attempt+1, err)
-			return nil, err
-		}
-		if err := apply(meta); err != nil {
-			h.debugf("metadata update failed project=%s attempt=%d step=apply err=%v", project, attempt+1, err)
-			return nil, err
-		}
-		if _, _, err := h.commitRepoMetadata(ctx, project, *meta, sha, message); err != nil {
-			if isConflictError(err) && attempt < h.config.MaxRetries+1 {
-				h.debugf("metadata update conflict project=%s attempt=%d elapsed=%s retrying", project, attempt+1, h.config.Now().UTC().Sub(started))
-				continue
-			}
-			h.debugf("metadata update failed project=%s attempt=%d step=commit elapsed=%s err=%v", project, attempt+1, h.config.Now().UTC().Sub(started), err)
-			return nil, err
-		}
-		h.debugf("metadata update complete project=%s attempt=%d elapsed=%s", project, attempt+1, h.config.Now().UTC().Sub(started))
-		return meta, nil
-	}
-	h.debugf("metadata update exhausted retries project=%s message=%q", project, message)
-	return nil, errors.New("metadata update exhausted retries")
-}
 
 func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, outFile *os.File, chunk ChunkInfo) error {
 	if chunk.Size == 0 {
@@ -915,8 +1100,35 @@ func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 	return h.loadRepoMetadataReadonly(ctx, project)
 }
 
+// UpdateRepoMetadataContext updates metadata using the new batching system
+// The mutation is applied to in-memory metadata and marked dirty for periodic commit
 func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*metadata.RepoMetadata) error, message string) (*metadata.RepoMetadata, error) {
-	return h.updateRepoMetadata(ctx, project, fn, message)
+	lockStarted := h.config.Now().UTC()
+	pm := h.getOrCreateProjectMeta(project)
+
+	logging.Debug(h.projectLogger(project), "metadata writer wait", "message", message)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	logging.Debug(h.projectLogger(project), "metadata writer acquired", "message", message, "wait", h.config.Now().UTC().Sub(lockStarted))
+
+	started := h.config.Now().UTC()
+	h.debugf("metadata update start project=%s message=%q", project, message)
+
+	// Apply mutation to in-memory metadata
+	if err := fn(pm.meta); err != nil {
+		h.debugf("metadata update failed project=%s step=apply elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, err
+	}
+
+	// Mark as dirty for periodic commit
+	pm.dirty = true
+
+	h.debugf("metadata update complete project=%s elapsed=%s", project, h.config.Now().UTC().Sub(started))
+	logging.Debug(h.projectLogger(project), "metadata update complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started))
+
+	return pm.meta, nil
 }
 
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMetadata, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMetadata, error) {

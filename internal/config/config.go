@@ -47,6 +47,7 @@ type Config struct {
 	LogFormat              string
 	LogColor               bool
 	AtimePolicy            AtimePolicy
+	MetadataCommitInterval time.Duration
 	Now                    func() time.Time
 	Sleep                  func(context.Context, time.Duration) error
 }
@@ -69,6 +70,7 @@ func Default() Config {
 		LogFormat:              logging.FormatPretty,
 		LogColor:               true,
 		AtimePolicy:            AtimeNo,
+		MetadataCommitInterval: 10 * time.Second,
 		Now:                    time.Now,
 		Sleep:                  sleepWithContext,
 	}

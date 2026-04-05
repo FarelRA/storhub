@@ -439,21 +439,26 @@ func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, boo
 
 func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, string, bool) {
 	h.metaMu.RLock()
-	defer h.metaMu.RUnlock()
-	entry, ok := h.metaCache[project]
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
 	if !ok {
 		return nil, "", false
 	}
-	meta := entry.meta
-	return &meta, entry.sha, true
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.meta, pm.sha, true
 }
 
 func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
-	h.metaMu.Lock()
-	h.metaCache[project] = cachedMetadata{sha: sha, meta: clone}
-	h.metaMu.Unlock()
+
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	pm.meta = &clone
+	pm.sha = sha
+	pm.dirty = false // Just stored, so not dirty
+	pm.mu.Unlock()
 }
 
 func (h *StorHub) invalidateRepoMetadata(project string) {
