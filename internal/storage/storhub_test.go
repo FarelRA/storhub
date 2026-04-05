@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1721,9 +1722,16 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("readdir docs failed: %v", errno)
 	}
-	entry, errno := dirStream.Next()
-	if errno != 0 {
-		t.Fatalf("readdir next failed: %v", errno)
+	// Skip "." and ".." entries to find "file.txt"
+	var entry fuse.DirEntry
+	for {
+		entry, errno = dirStream.Next()
+		if errno != 0 {
+			t.Fatalf("readdir next failed: %v", errno)
+		}
+		if entry.Name != "." && entry.Name != ".." {
+			break
+		}
 	}
 	if entry.Name != "file.txt" {
 		t.Fatalf("unexpected directory entry: %+v", entry)
@@ -2800,6 +2808,14 @@ func (m *mockGitHub) newClient(t *testing.T, cfg Config) *StorHub {
 	return hub
 }
 
+func computeGitBlobSHA(data []byte) string {
+	header := fmt.Sprintf("blob %d\x00", len(data))
+	h := sha1.New()
+	h.Write([]byte(header))
+	h.Write(data)
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 func (m *mockGitHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if m.intercept != nil && m.intercept(w, r) {
 		return
@@ -2903,17 +2919,27 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ref := r.URL.Query().Get("ref")
+
+	// Check if client wants raw content
+	acceptRaw := r.Header.Get("Accept") == "application/vnd.github.raw"
+
 	if ref != "" {
 		for _, commit := range repo.commitsByPath[filePath] {
 			if commit.sha == ref {
-				m.writeJSON(w, http.StatusOK, map[string]any{
-					"name":     filepath.Base(filePath),
-					"path":     filePath,
-					"sha":      fmt.Sprintf("blob-%s", commit.sha),
-					"encoding": "base64",
-					"type":     "file",
-					"content":  base64.StdEncoding.EncodeToString(commit.data),
-				})
+				if acceptRaw {
+					w.Header().Set("Content-Type", "application/octet-stream")
+					w.WriteHeader(http.StatusOK)
+					w.Write(commit.data)
+				} else {
+					m.writeJSON(w, http.StatusOK, map[string]any{
+						"name":     filepath.Base(filePath),
+						"path":     filePath,
+						"sha":      fmt.Sprintf("blob-%s", commit.sha),
+						"encoding": "base64",
+						"type":     "file",
+						"content":  base64.StdEncoding.EncodeToString(commit.data),
+					})
+				}
 				return
 			}
 		}
@@ -2923,14 +2949,21 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
 		return
 	}
-	m.writeJSON(w, http.StatusOK, map[string]any{
-		"name":     filepath.Base(filePath),
-		"path":     filePath,
-		"sha":      file.sha,
-		"encoding": "base64",
-		"type":     "file",
-		"content":  base64.StdEncoding.EncodeToString(file.data),
-	})
+
+	if acceptRaw {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write(file.data)
+	} else {
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"name":     filepath.Base(filePath),
+			"path":     filePath,
+			"sha":      file.sha,
+			"encoding": "base64",
+			"type":     "file",
+			"content":  base64.StdEncoding.EncodeToString(file.data),
+		})
+	}
 }
 
 func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, repo *mockRepo, filePath string) {
@@ -2959,8 +2992,8 @@ func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, re
 		m.writeJSON(w, http.StatusConflict, map[string]any{"message": "file does not exist"})
 		return
 	}
-	blobSHA := fmt.Sprintf("blob-%d", repo.nextBlobID)
-	repo.nextBlobID++
+	// Compute real git blob SHA instead of fake counter-based SHA
+	blobSHA := computeGitBlobSHA(data)
 	repo.files[filePath] = &mockFile{path: filePath, sha: blobSHA, data: append([]byte(nil), data...)}
 	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
 	repo.nextCommitID++

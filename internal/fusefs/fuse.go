@@ -672,7 +672,15 @@ func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	result := make([]fuse.DirEntry, 0, len(entries))
+	result := make([]fuse.DirEntry, 0, len(entries)+2)
+	result = append(result, fuse.DirEntry{Name: ".", Ino: n.inode, Mode: syscall.S_IFDIR})
+	parentIno := uint64(1)
+	if _, parent := n.Parent(); parent != nil {
+		if ino := parent.StableAttr().Ino; ino != 0 {
+			parentIno = ino
+		}
+	}
+	result = append(result, fuse.DirEntry{Name: "..", Ino: parentIno, Mode: syscall.S_IFDIR})
 	for _, entry := range entries {
 		mode := uint32(syscall.S_IFREG)
 		if entry.IsDir {

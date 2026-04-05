@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -70,9 +71,10 @@ type requestOptions struct {
 }
 
 type content struct {
-	SHA      string `json:"sha"`
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"`
+	SHA         string `json:"sha"`
+	Content     string `json:"content"`
+	Encoding    string `json:"encoding"`
+	DownloadURL string `json:"download_url"`
 }
 
 type putContentResponse struct {
@@ -274,18 +276,28 @@ func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, r
 	if ref != "" {
 		endpoint += "?ref=" + url.QueryEscape(ref)
 	}
-	var result content
-	if err := c.getJSON(ctx, endpoint, &result); err != nil {
+	resp, err := c.doRequest(ctx, http.MethodGet, endpoint, func() (io.Reader, error) { return nil, nil }, requestOptions{
+		accept:    "application/vnd.github.raw",
+		retryable: true,
+	})
+	if err != nil {
 		return nil, "", err
 	}
-	if result.Encoding != "base64" {
-		return nil, "", fmt.Errorf("unsupported content encoding: %s", result.Encoding)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(result.Content, "\n", ""))
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("decode content: %w", err)
+		return nil, "", fmt.Errorf("read content: %w", err)
 	}
-	return decoded, result.SHA, nil
+	sha := computeGitBlobSHA(data)
+	return data, sha, nil
+}
+
+func computeGitBlobSHA(data []byte) string {
+	header := fmt.Sprintf("blob %d\x00", len(data))
+	h := sha1.New()
+	h.Write([]byte(header))
+	h.Write(data)
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath string, payload []byte, previousSHA, message string) (string, string, error) {
