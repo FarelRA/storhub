@@ -207,22 +207,23 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			if pm.dirty {
 				// Commit metadata to GitHub
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					// Check if it's a conflict error (GitHub metadata was modified by someone else)
-					if isConflictError(err) {
-						logging.Warn(logger, "metadata commit conflict detected, reloading fresh metadata", "err", err)
-						// Reload fresh metadata from GitHub to resolve conflict
-						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-							logging.Error(logger, "failed to reload metadata after conflict", "err", loadErr)
-						} else {
-							// Update with fresh metadata and SHA
-							pm.meta = freshMeta
-							pm.sha = freshSHA
-							pm.dirty = false
-							logging.Warn(logger, "metadata reloaded from github due to conflict, in-memory changes discarded", "new_sha", shortSHA(freshSHA))
-						}
+					logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
+					// Release lock before reloading to avoid deadlock (loadRepoMetadataFresh acquires the lock internally)
+					pm.mu.Unlock()
+					// Reload fresh metadata from GitHub to clear dirty data
+					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
+						logging.Error(logger, "failed to reload metadata after commit failure, clearing to empty", "err", loadErr)
+						// If reload fails, clear dirty data by initializing empty metadata
+						pm.mu.Lock()
+						pm.meta = NewRepoMetadata(project)
+						pm.sha = ""
+						pm.dirty = false
+						pm.mu.Unlock()
 					} else {
-						logging.Error(logger, "metadata commit failed", "err", err)
+						logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
+						// Note: loadRepoMetadataFresh already updated pm via storeRepoMetadata
 					}
+					continue // Skip the unlock at the end since we already unlocked
 				} else {
 					pm.dirty = false
 					pm.lastCommit = h.config.Now()
@@ -236,17 +237,20 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			pm.mu.Lock()
 			if pm.dirty {
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					if isConflictError(err) {
-						logging.Warn(logger, "final commit conflict, reloading fresh metadata", "err", err)
-						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr == nil {
-							pm.meta = freshMeta
-							pm.sha = freshSHA
-							pm.dirty = false
-							logging.Warn(logger, "metadata reloaded from github due to conflict on shutdown")
-						}
+					logging.Error(logger, "final metadata commit failed, reloading from github", "err", err)
+					// Release lock before reloading to avoid deadlock
+					pm.mu.Unlock()
+					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
+						logging.Error(logger, "failed to reload metadata after final commit failure, clearing to empty", "err", loadErr)
+						pm.mu.Lock()
+						pm.meta = NewRepoMetadata(project)
+						pm.sha = ""
+						pm.dirty = false
+						pm.mu.Unlock()
 					} else {
-						logging.Error(logger, "final metadata commit failed", "err", err)
+						logging.Info(logger, "metadata reloaded from github on shutdown, in-memory changes discarded")
 					}
+					return
 				} else {
 					logging.Info(logger, "final metadata committed")
 				}
@@ -259,17 +263,20 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			pm.mu.Lock()
 			if pm.dirty {
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					if isConflictError(err) {
-						logging.Warn(logger, "shutdown commit conflict, reloading fresh metadata", "err", err)
-						if freshMeta, freshSHA, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr == nil {
-							pm.meta = freshMeta
-							pm.sha = freshSHA
-							pm.dirty = false
-							logging.Warn(logger, "metadata reloaded from github due to conflict on shutdown")
-						}
+					logging.Error(logger, "shutdown metadata commit failed, reloading from github", "err", err)
+					// Release lock before reloading to avoid deadlock
+					pm.mu.Unlock()
+					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
+						logging.Error(logger, "failed to reload metadata after shutdown commit failure, clearing to empty", "err", loadErr)
+						pm.mu.Lock()
+						pm.meta = NewRepoMetadata(project)
+						pm.sha = ""
+						pm.dirty = false
+						pm.mu.Unlock()
 					} else {
-						logging.Error(logger, "shutdown metadata commit failed", "err", err)
+						logging.Info(logger, "metadata reloaded from github on shutdown, in-memory changes discarded")
 					}
+					return
 				} else {
 					logging.Info(logger, "shutdown metadata committed")
 				}
@@ -353,6 +360,39 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 	})
 
 	return shutdownErr
+}
+
+// FlushMetadata forces an immediate commit of all dirty metadata for all projects
+// This is useful for testing or when you need to ensure metadata is persisted immediately
+func (h *StorHub) FlushMetadata(ctx context.Context) error {
+	h.metaMu.RLock()
+	type projectWithName struct {
+		name string
+		meta *projectMetadata
+	}
+	projects := make([]projectWithName, 0, len(h.metaCache))
+	for name, pm := range h.metaCache {
+		projects = append(projects, projectWithName{name: name, meta: pm})
+	}
+	h.metaMu.RUnlock()
+
+	var firstErr error
+	for _, p := range projects {
+		p.meta.mu.Lock()
+		if p.meta.dirty {
+			if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				p.meta.dirty = false
+				p.meta.lastCommit = h.config.Now()
+			}
+		}
+		p.meta.mu.Unlock()
+	}
+
+	return firstErr
 }
 
 func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMetadata, error) {

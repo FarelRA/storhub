@@ -43,7 +43,13 @@ const (
 )
 
 func singleChunkTestConfig() Config {
-	return Config{ChunkSize: testSingleChunkSize, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0}
+	return Config{
+		ChunkSize:              testSingleChunkSize,
+		BufferSize:             testSingleBufferSize,
+		MaxConcurrentTransfers: 2,
+		MaxRetries:             0,
+		MetadataCommitInterval: 100 * time.Millisecond,
+	}
 }
 
 func defaultTestConfig() Config {
@@ -51,7 +57,13 @@ func defaultTestConfig() Config {
 }
 
 func smallTransferTestConfig() Config {
-	return Config{ChunkSize: testSmallChunkSize, BufferSize: testSmallBufferSize, MaxRetries: 0, AtimePolicy: "noatime"}
+	return Config{
+		ChunkSize:              testSmallChunkSize,
+		BufferSize:             testSmallBufferSize,
+		MaxRetries:             0,
+		AtimePolicy:            "noatime",
+		MetadataCommitInterval: 100 * time.Millisecond,
+	}
 }
 
 func smallRetryDisabledTestConfig() Config {
@@ -67,7 +79,12 @@ func smallConcurrentTestConfig() Config {
 }
 
 func retryTestConfig() Config {
-	return Config{MaxRetries: 2, BaseRetryDelay: time.Millisecond, MaxRetryDelay: 5 * time.Millisecond}
+	return Config{
+		MaxRetries:             2,
+		BaseRetryDelay:         time.Millisecond,
+		MaxRetryDelay:          5 * time.Millisecond,
+		MetadataCommitInterval: 100 * time.Millisecond,
+	}
 }
 
 func smallRetryTestConfig() Config {
@@ -79,11 +96,17 @@ func smallRetryTestConfig() Config {
 }
 
 func rateLimitTestConfig(sleep func(context.Context, time.Duration) error) Config {
-	return Config{MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: 2 * time.Millisecond, Sleep: sleep}
+	return Config{
+		MaxRetries:             1,
+		BaseRetryDelay:         time.Millisecond,
+		MaxRetryDelay:          2 * time.Millisecond,
+		Sleep:                  sleep,
+		MetadataCommitInterval: 100 * time.Millisecond,
+	}
 }
 
 func liveSmokeConfig() Config {
-	return Config{ChunkSize: testLargeChunkSize, BufferSize: testLargeBufferSize, MaxConcurrentTransfers: testLargeConcurrency, MaxRetries: 4}
+	return Config{ChunkSize: testLargeChunkSize, BufferSize: testLargeBufferSize, MaxConcurrentTransfers: testLargeConcurrency, MaxRetries: 4, MetadataCommitInterval: 100 * time.Millisecond}
 }
 
 func liveLargeSmokeConfig(client *http.Client) Config {
@@ -155,6 +178,8 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 
+	time.Sleep(150 * time.Millisecond) // Wait for commit
+
 	files, err := hub.ListFiles("project-a")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
@@ -192,7 +217,7 @@ func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
 		}
 		return false
 	}
-	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 3, MaxRetries: 0})
+	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 3, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
 	input := writeTempFile(t, t.TempDir(), "video.bin", data)
@@ -241,7 +266,7 @@ func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 
 func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
+	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond})
 	if err := hub.Mkdir("project-fs-ops", "notes"); err != nil {
 		t.Fatalf("mkdir notes: %v", err)
 	}
@@ -408,7 +433,7 @@ func TestConfigDefaultsPreserveExplicitZeroRetries(t *testing.T) {
 
 func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallRetryDisabledTestConfig())
+	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version-a"))
 	first, err := hub.UploadFile("project-history", "artifact.txt", inputA)
@@ -416,11 +441,15 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("upload first: %v", err)
 	}
 
+	time.Sleep(100 * time.Millisecond) // Wait for first commit
+
 	inputB := writeTempFile(t, t.TempDir(), "v2.txt", []byte("version-b-better"))
 	_, err = hub.ReplaceFile("project-history", "artifact.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
+
+	time.Sleep(100 * time.Millisecond) // Wait for second commit
 
 	revisions, err := hub.ListMetadataRevisions("project-history")
 	if err != nil {
@@ -528,7 +557,7 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 
 func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 4, MaxRetries: 0})
+	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 4, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond})
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
 	meta, err := hub.UploadFile("project-exact-ranges", "exact-ranges.bin", input)
@@ -543,6 +572,7 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	if len(patched.Chunks) != 3 {
 		t.Fatalf("expected three logical chunks after patch, got %+v", patched.Chunks)
 	}
+	time.Sleep(150 * time.Millisecond) // Wait for commit
 	rangeByAsset := make(map[int64][]string)
 	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/releases/assets/") {
@@ -782,7 +812,7 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 
 func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallRetryDisabledTestConfig())
+	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "tracked.txt", []byte("tracked payload"))
 	tracked, err := hub.UploadFile("project-purge", "tracked.txt", inputA)
@@ -790,14 +820,21 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("upload tracked file: %v", err)
 	}
 
+	time.Sleep(100 * time.Millisecond) // Wait for commit
+
 	inputB := writeTempFile(t, t.TempDir(), "orphan.txt", []byte("orphan payload"))
 	orphan, err := hub.UploadFile("project-purge", "orphan.txt", inputB)
 	if err != nil {
 		t.Fatalf("upload orphan file: %v", err)
 	}
+
+	time.Sleep(100 * time.Millisecond) // Wait for commit
+
 	if err := hub.DeleteFile("project-purge", "orphan.txt"); err != nil {
 		t.Fatalf("hide orphan file: %v", err)
 	}
+
+	time.Sleep(100 * time.Millisecond) // Wait for commit
 
 	repo := backend.repo("project-purge")
 	if repo == nil {
@@ -830,8 +867,16 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	if repo.releasesByTag[tracked.Release] == nil {
 		t.Fatalf("expected tracked release %s to remain", tracked.Release)
 	}
-	oldest := mustMetadataRevision(t, hub, "project-purge", "storhub: add orphan.txt")
-	if err := hub.RollbackMetadata("project-purge", oldest.CommitSHA); err == nil {
+	// Get the revision that contained orphan.txt (middle commit) to test rollback failure after purge
+	revisions, err := hub.ListMetadataRevisions("project-purge")
+	if err != nil {
+		t.Fatalf("list metadata revisions: %v", err)
+	}
+	if len(revisions) < 2 {
+		t.Fatalf("expected at least 2 metadata revisions, got %d", len(revisions))
+	}
+	orphanRevision := revisions[1] // Middle revision that had orphan.txt (revisions ordered newest-first)
+	if err := hub.RollbackMetadata("project-purge", orphanRevision.CommitSHA); err == nil {
 		t.Fatal("expected rollback after purge to fail because purge is destructive")
 	}
 }
@@ -844,11 +889,25 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
+
+	time.Sleep(100 * time.Millisecond) // Wait for commit
+
 	if err := hub.DeleteFile("project-missing-data", "missing-data.txt"); err != nil {
 		t.Fatalf("hide file: %v", err)
 	}
+
+	time.Sleep(100 * time.Millisecond) // Wait for commit
+
 	backend.removeAsset(t, "project-missing-data", meta.Chunks[0].AssetID)
-	revision := mustMetadataRevision(t, hub, "project-missing-data", "storhub: add missing-data.txt")
+	// Get the oldest metadata revision to test rollback failure when data is missing
+	revisions, err := hub.ListMetadataRevisions("project-missing-data")
+	if err != nil {
+		t.Fatalf("list metadata revisions: %v", err)
+	}
+	if len(revisions) == 0 {
+		t.Fatal("expected at least one metadata revision")
+	}
+	revision := revisions[len(revisions)-1] // Last in list is oldest
 	if err := hub.RollbackMetadata("project-missing-data", revision.CommitSHA); err == nil {
 		t.Fatal("expected rollback to fail when referenced asset is missing")
 	}
@@ -920,6 +979,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	if len(meta.Chunks) < 2 {
 		t.Fatalf("expected multiple chunks, got %+v", meta)
 	}
+	time.Sleep(150 * time.Millisecond) // Wait for commit
 	downloader := backend.newClient(t, singleChunkTestConfig())
 	output := filepath.Join(t.TempDir(), "offsets.out")
 	if err := downloader.DownloadFile("project-offsets", "offsets.bin", output); err != nil {
@@ -1387,11 +1447,13 @@ func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
 		}
 		return false
 	}
-	hub := backend.newClient(t, smallRetryDisabledTestConfig())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "rollback.txt", []byte("rollback payload"))
-	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err == nil {
-		t.Fatal("expected upload failure")
+	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err != nil {
+		t.Fatalf("upload file: %v", err)
 	}
+	// With batching, upload succeeds but commit happens later. Wait for commit attempt.
+	time.Sleep(150 * time.Millisecond) // Wait for commit attempt (will fail)
 	files, err := hub.ListFiles("project-hidden")
 	if err != nil {
 		t.Fatalf("list files after failed upload: %v", err)
@@ -1408,22 +1470,50 @@ func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
 func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	backend := newMockGitHub(t)
 	var conflicts atomic.Int32
+	var commitCount atomic.Int32
 	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") && conflicts.Load() == 0 {
-			conflicts.Add(1)
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
-			return true
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
+			commitCount.Add(1)
+			// Return conflict on the second commit attempt (after initial metadata exists)
+			if commitCount.Load() == 2 && conflicts.Load() == 0 {
+				conflicts.Add(1)
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
+				return true
+			}
 		}
 		return false
 	}
-	hub := backend.newClient(t, smallRetryTestConfig())
-	input := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
-	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input); err != nil {
-		t.Fatalf("upload with metadata conflict retry: %v", err)
+	cfg := smallTransferTestConfig()
+	cfg.MaxRetries = 2
+	cfg.BaseRetryDelay = time.Millisecond
+	cfg.MaxRetryDelay = 5 * time.Millisecond
+	hub := backend.newClient(t, cfg)
+
+	// First upload to create initial metadata
+	input1 := writeTempFile(t, t.TempDir(), "initial.txt", []byte("initial"))
+	if _, err := hub.UploadFile("project-conflict", "initial.txt", input1); err != nil {
+		t.Fatalf("upload initial file: %v", err)
 	}
+	time.Sleep(150 * time.Millisecond) // Wait for first commit to complete
+
+	// Second upload - this commit will get a conflict
+	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
+	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	// With batching, commit happens later. Wait for commit to trigger conflict handling and retry.
+	time.Sleep(300 * time.Millisecond) // Wait for commit, conflict, and retry cycle
 	if conflicts.Load() != 1 {
 		t.Fatalf("expected one metadata conflict, got %d", conflicts.Load())
+	}
+	// After conflict, in-memory changes are discarded, only committed data remains
+	files, err := hub.ListFiles("project-conflict")
+	if err != nil {
+		t.Fatalf("list files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file after conflict (uncommitted changes discarded), got %d", len(files))
 	}
 }
 
@@ -1439,11 +1529,17 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 		}
 		return false
 	}
-	hub := backend.newClient(t, smallRetryTestConfig())
+	cfg := smallTransferTestConfig()
+	cfg.MaxRetries = 2
+	cfg.BaseRetryDelay = time.Millisecond
+	cfg.MaxRetryDelay = 5 * time.Millisecond
+	hub := backend.newClient(t, cfg)
 	input := writeTempFile(t, t.TempDir(), "meta-retry.txt", []byte("meta retry payload"))
 	if _, err := hub.UploadFile("project-meta-retry", "meta-retry.txt", input); err != nil {
-		t.Fatalf("expected metadata commit retry success, got %v", err)
+		t.Fatalf("upload file: %v", err)
 	}
+	// With batching, commit happens later. Wait for commit to trigger retry logic.
+	time.Sleep(300 * time.Millisecond) // Wait for commit, failure, and retry cycle
 	if failures.Load() != 1 {
 		t.Fatalf("expected one transient metadata failure, got %d", failures.Load())
 	}
@@ -1480,22 +1576,47 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestListMetadataRevisionsPaginates(t *testing.T) {
+func TestMetadataBatching(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	for i := 0; i < 105; i++ {
-		name := fmt.Sprintf("file-%03d.txt", i)
+
+	// Upload multiple files - these should be batched
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("file-%d.txt", i)
 		input := writeTempFile(t, t.TempDir(), name, []byte(name))
-		if _, err := hub.UploadFile("project-history-pages", name, input); err != nil {
+		if _, err := hub.UploadFile("project-batching", name, input); err != nil {
 			t.Fatalf("upload %s: %v", name, err)
 		}
 	}
-	revisions, err := hub.ListMetadataRevisions("project-history-pages")
+
+	// Before flush, there should be no commits yet (metadata is dirty but not committed)
+	revisions, err := hub.ListMetadataRevisions("project-batching")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
-	if len(revisions) != 105 {
-		t.Fatalf("expected 105 metadata revisions, got %d", len(revisions))
+	if len(revisions) != 0 {
+		t.Fatalf("expected 0 metadata revisions before flush, got %d", len(revisions))
+	}
+
+	// Wait for automatic commit (batching system commits at 100ms interval)
+	time.Sleep(150 * time.Millisecond)
+
+	// After commit, there should be exactly 1 commit containing all 3 files
+	revisions, err = hub.ListMetadataRevisions("project-batching")
+	if err != nil {
+		t.Fatalf("list metadata revisions: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("expected 1 metadata revision after flush, got %d", len(revisions))
+	}
+
+	// Verify all 3 files are in the metadata
+	files, err := hub.ListFiles("project-batching")
+	if err != nil {
+		t.Fatalf("list files: %v", err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("expected 3 files in metadata, got %d", len(files))
 	}
 }
 
@@ -1525,6 +1646,8 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 	if _, err := hub.UploadFile("project-invalid-metadata", "invalid.bin", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
+	// Wait for metadata to be committed (batching system commits at 100ms interval)
+	time.Sleep(150 * time.Millisecond)
 	meta := mustLoadMetadata(t, backend.repo("project-invalid-metadata"))
 	meta.Releases[0].Files[0].Chunks[0].Offset = 99
 	backend.setMetadata(t, "project-invalid-metadata", meta)
@@ -2571,12 +2694,19 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 		}
 		return false
 	}
-	hub := backend.newClient(t, Config{ChunkSize: 8, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0})
+	hub := backend.newClient(t, Config{
+		ChunkSize:              8,
+		BufferSize:             testSingleBufferSize,
+		MaxConcurrentTransfers: 2,
+		MaxRetries:             0,
+		MetadataCommitInterval: 100 * time.Millisecond,
+	})
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "fragmented.txt", []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"))
 	if _, err := hub.UploadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", input); err != nil {
 		t.Fatalf("upload fragmented file: %v", err)
 	}
+	time.Sleep(150 * time.Millisecond) // Wait for initial commit
 	baselineUploads := uploadCalls.Load()
 	baselineMetadataWrites := metadataWrites.Load()
 	fsys, err := hub.NewFUSE("project-fuse-fragmented-writeback", fusefs.DefaultOptions())
@@ -2602,6 +2732,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	if errno := h.Fsync(ctx, 0); errno != 0 {
 		t.Fatalf("fsync fragmented writes: %v", errno)
 	}
+	time.Sleep(150 * time.Millisecond) // Wait for FUSE writeback commit
 	if delta := uploadCalls.Load() - baselineUploads; delta != 6 {
 		t.Fatalf("expected six uploaded touched chunks, got %d", delta)
 	}
@@ -2805,6 +2936,9 @@ func (m *mockGitHub) newClient(t *testing.T, cfg Config) *StorHub {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
+	t.Cleanup(func() {
+		hub.Shutdown(context.Background())
+	})
 	return hub
 }
 

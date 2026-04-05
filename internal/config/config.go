@@ -133,6 +133,9 @@ func (c Config) WithDefaults() Config {
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
 	}
+	if c.MetadataCommitInterval <= 0 {
+		c.MetadataCommitInterval = defaults.MetadataCommitInterval
+	}
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
