@@ -67,6 +67,7 @@ type Filesystem struct {
 	mu          sync.RWMutex
 	nodes       map[uint64]*storhubNode
 	inodePaths  map[uint64]string
+	pathToInode map[string]uint64
 	pageCache   *expirable.LRU[pageCacheKey, []byte]
 	inodePages  map[uint64]map[int64]struct{}
 	lockTable   map[uint64][]lockRecord
@@ -283,6 +284,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		opts:        opts,
 		nodes:       make(map[uint64]*storhubNode),
 		inodePaths:  map[uint64]string{1: ""},
+		pathToInode: map[string]uint64{"": 1},
 		pageCache:   expirable.NewLRU[pageCacheKey, []byte](opts.MaxCachedPages, nil, opts.CacheTTL),
 		inodePages:  make(map[uint64]map[int64]struct{}),
 		lockTable:   make(map[uint64][]lockRecord),
@@ -446,10 +448,8 @@ func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
 	if targetPath == "" {
 		return s.root
 	}
-	for ino, current := range s.inodePaths {
-		if current == targetPath {
-			return s.nodes[ino]
-		}
+	if ino, exists := s.pathToInode[targetPath]; exists {
+		return s.nodes[ino]
 	}
 	return nil
 }
@@ -457,7 +457,11 @@ func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
 func (s *Filesystem) rememberPath(inode uint64, targetPath string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if prev, ok := s.inodePaths[inode]; ok && prev != "" {
+		delete(s.pathToInode, prev)
+	}
 	s.inodePaths[inode] = targetPath
+	s.pathToInode[targetPath] = inode
 }
 
 func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
@@ -467,6 +471,7 @@ func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
 		s.mu.Unlock()
 		return remaining
 	}
+	delete(s.pathToInode, targetPath)
 	s.mu.Unlock()
 	meta, _, err := s.hub.LoadRepoMetadataReadonlyContext(context.Background(), s.project)
 	s.mu.Lock()
@@ -474,6 +479,7 @@ func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
 	if err == nil {
 		for _, file := range meta.FindFilesByInode(inode) {
 			s.inodePaths[inode] = file.Name
+			s.pathToInode[file.Name] = inode
 			return file.Name
 		}
 	}
@@ -513,7 +519,10 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 	s.mu.Lock()
 	for inode, current := range s.inodePaths {
 		if shfs.IsParentOrSame(oldPath, current) {
-			s.inodePaths[inode] = shfs.RemapPath(oldPath, newPath, current)
+			remapped := shfs.RemapPath(oldPath, newPath, current)
+			delete(s.pathToInode, current)
+			s.inodePaths[inode] = remapped
+			s.pathToInode[remapped] = inode
 		}
 	}
 	handles := make([]*storhubHandle, 0, len(s.handles))
@@ -598,12 +607,17 @@ func (s *Filesystem) ensureNode(ctx context.Context, entry *shfs.EntryInfo) *sto
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if node := s.nodes[entry.Inode]; node != nil {
+		if prev, ok := s.inodePaths[entry.Inode]; ok && prev != entry.Path && prev != "" {
+			delete(s.pathToInode, prev)
+		}
 		s.inodePaths[entry.Inode] = entry.Path
+		s.pathToInode[entry.Path] = entry.Inode
 		return node
 	}
 	node := &storhubNode{fs: s, inode: entry.Inode, kind: entry.Kind, isDir: entry.IsDir}
 	s.nodes[entry.Inode] = node
 	s.inodePaths[entry.Inode] = entry.Path
+	s.pathToInode[entry.Path] = entry.Inode
 	return node
 }
 
@@ -1581,6 +1595,11 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 			chunkEnd := dirtyRange.End
 			if chunkEnd > off+limit {
 				chunkEnd = off + limit
+			}
+			if w.temp == nil {
+				if err := w.ensureTempLocked(); err != nil {
+					return 0, err
+				}
 			}
 			n, err := w.temp.ReadAt(dest[filled:filled+(chunkEnd-segmentStart)], segmentStart)
 			if err != nil && !errors.Is(err, io.EOF) {

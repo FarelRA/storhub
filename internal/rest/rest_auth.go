@@ -87,8 +87,8 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 	if len(opts.Users) == 0 {
 		return nil, errors.New("rest auth requires at least one user")
 	}
-	if len(opts.TokenSigningKey) == 0 {
-		return nil, errors.New("rest auth requires a token signing key")
+	if len(opts.TokenSigningKey) < 32 {
+		return nil, errors.New("security constraint: token signing key must be at least 32 bytes")
 	}
 	if opts.TokenTTL <= 0 {
 		opts.TokenTTL = defaultRESTTokenTTL

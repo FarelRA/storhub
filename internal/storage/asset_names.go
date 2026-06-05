@@ -3,6 +3,7 @@ package storage
 import (
 	"crypto/rand"
 	"fmt"
+	"math/big"
 	"strings"
 	"sync"
 )
@@ -91,15 +92,9 @@ func randomInt(max int) (int, error) {
 	if max <= 0 {
 		return 0, fmt.Errorf("invalid random bound %d", max)
 	}
-	var buf [1]byte
-	limit := 256 - (256 % max)
-	for {
-		if _, err := rand.Read(buf[:]); err != nil {
-			return 0, fmt.Errorf("read random bytes: %w", err)
-		}
-		if int(buf[0]) >= limit {
-			continue
-		}
-		return int(buf[0]) % max, nil
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return 0, fmt.Errorf("generate random int: %w", err)
 	}
+	return int(n.Int64()), nil
 }

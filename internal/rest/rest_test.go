@@ -204,7 +204,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 	if body := string(readBody(t, config)); !strings.Contains(body, "authEnabled") || !strings.Contains(body, "/api/v1") {
 		t.Fatalf("unexpected config body: %q", body)
 	}
-	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("secret"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}})
+	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}})
 	if err != nil {
 		t.Fatalf("new authed handler: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 
 func TestRESTShareCreateAndAccess(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 
 func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 
 func TestRESTShareCanonicalizesPath(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestRESTShareCanonicalizesPath(t *testing.T) {
 
 func TestRESTProjectShareListAndDelete(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}

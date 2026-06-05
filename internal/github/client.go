@@ -301,14 +301,36 @@ func computeGitBlobSHA(data []byte) string {
 }
 
 func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath string, payload []byte, previousSHA, message string) (string, string, error) {
-	body := map[string]any{
-		"message": message,
-		"content": base64.StdEncoding.EncodeToString(payload),
+	msgJSON, err := json.Marshal(message)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal message: %w", err)
 	}
+	var buf bytes.Buffer
+	buf.WriteString(`{"message":`)
+	buf.Write(msgJSON)
 	if previousSHA != "" {
-		body["sha"] = previousSHA
+		shaJSON, _ := json.Marshal(previousSHA)
+		buf.WriteString(`,"sha":`)
+		buf.Write(shaJSON)
 	}
-	resp, err := c.doJSONWithRetryable(ctx, http.MethodPut, c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, path.Clean(filePath))), body, true)
+	buf.WriteString(`,"content":"`)
+	encoder := base64.NewEncoder(base64.StdEncoding, &buf)
+	if _, err := encoder.Write(payload); err != nil {
+		return "", "", fmt.Errorf("base64 encode payload: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return "", "", fmt.Errorf("close base64 encoder: %w", err)
+	}
+	buf.WriteString(`"}`)
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, path.Clean(filePath)))
+	resp, err := c.doRequest(ctx, http.MethodPut, endpoint, func() (io.Reader, error) {
+		return bytes.NewReader(buf.Bytes()), nil
+	}, requestOptions{
+		contentType: "application/json",
+		accept:      "application/vnd.github+json",
+		contentSize: int64(buf.Len()),
+		retryable:   true,
+	})
 	if err != nil {
 		return "", "", err
 	}

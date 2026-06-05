@@ -131,7 +131,7 @@ func TestHashPasswordAndTokenExpiry(t *testing.T) {
 		t.Fatalf("unexpected password verification result: hash=%q err=%v", hash, err)
 	}
 	now := time.Unix(100, 0).UTC()
-	auth, err := newAuthenticator(AuthOptions{TokenSigningKey: []byte("key"), TokenTTL: time.Second, Now: func() time.Time { return now }, Users: []User{{Username: "u", Password: "p", UID: 1, PrimaryGID: 1}}})
+	auth, err := newAuthenticator(AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"), TokenTTL: time.Second, Now: func() time.Time { return now }, Users: []User{{Username: "u", Password: "p", UID: 1, PrimaryGID: 1}}})
 	if err != nil {
 		t.Fatalf("new authenticator: %v", err)
 	}
@@ -151,8 +151,9 @@ func TestHashPasswordAndTokenExpiry(t *testing.T) {
 func newAuthedTestHandler(t *testing.T, client *fakeRESTClient) http.Handler {
 	t.Helper()
 	opts := DefaultOptions()
+	opts.ShareSigningKey = []byte("0123456789abcdef0123456789abcdef")
 	opts.Auth = &AuthOptions{
-		TokenSigningKey: []byte("test-signing-key"),
+		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
 		Users: []User{
 			{Username: "alice", Password: "alice-pass", UID: 1001, PrimaryGID: 2001},
 			{Username: "root", Password: "root-pass", UID: 0, PrimaryGID: 0, Admin: true},

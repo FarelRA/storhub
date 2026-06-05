@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
@@ -399,12 +400,12 @@ type shareResponse struct {
 }
 
 type shareClaims struct {
+	jwt.RegisteredClaims
 	ID       string `json:"id"`
-	Project  string `json:"project"`
-	Path     string `json:"path"`
-	Download bool   `json:"download,omitempty"`
-	IsDir    bool   `json:"is_dir,omitempty"`
-	Expires  int64  `json:"exp"`
+	Project  string `json:"prj"`
+	Path     string `json:"pth"`
+	Download bool   `json:"dl"`
+	IsDir    bool   `json:"dir"`
 }
 
 type sharesResponse struct {
@@ -1349,22 +1350,51 @@ func canonicalSharePath(raw string) (string, error) {
 }
 
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
-	record, ok := h.lookupShare(strings.TrimSpace(token))
-	if !ok {
-		return nil, errForbidden("invalid share token")
+	if len(h.opts.ShareSigningKey) == 0 {
+		return nil, errForbidden("share signing key not configured")
 	}
-	return &shareClaims{ID: record.ID, Project: record.Project, Path: record.Path, Download: record.Download, IsDir: record.IsDir, Expires: record.ExpiresAt.Unix()}, nil
+	claims := &shareClaims{}
+	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return h.opts.ShareSigningKey, nil
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithTimeFunc(time.Now))
+	if err != nil || !parsed.Valid {
+		return nil, errForbidden("invalid or expired share token")
+	}
+	return claims, nil
 }
 
 func (h *restHandler) newShareRecord(project, sharePath string, download, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
+	if len(h.opts.ShareSigningKey) == 0 {
+		return nil, errors.New("share signing key not configured")
+	}
 	id, err := newShareID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	record := &shareRecord{ID: id, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: now.Add(expiresIn)}
+	expiresAt := now.Add(expiresIn)
+	claims := shareClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(now),
+		},
+		ID:       id,
+		Project:  project,
+		Path:     sharePath,
+		Download: download,
+		IsDir:    isDir,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signedToken, err := token.SignedString(h.opts.ShareSigningKey)
+	if err != nil {
+		return nil, err
+	}
+	record := &shareRecord{ID: signedToken, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
 	h.shares.mu.Lock()
-	h.shares.items[id] = record
+	h.shares.items[signedToken] = record
 	h.shares.mu.Unlock()
 	return record, nil
 }

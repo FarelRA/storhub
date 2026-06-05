@@ -73,9 +73,11 @@ type StorHub struct {
 	metaCache map[string]*projectMetadata
 
 	// Shutdown coordination
-	shutdownOnce sync.Once
-	shutdownCh   chan struct{}
-	shutdownWg   sync.WaitGroup
+	shutdownOnce  sync.Once
+	shutdownCh    chan struct{}
+	shutdownWg    sync.WaitGroup
+	janitorCtx    context.Context
+	janitorCancel context.CancelFunc
 }
 
 // projectMetadata holds metadata for a single project with batched commit support
@@ -85,6 +87,7 @@ type projectMetadata struct {
 	sha        string
 	dirty      bool
 	lastCommit time.Time
+	lastAccess time.Time
 	stopCh     chan struct{}
 	stoppedCh  chan struct{}
 }
@@ -135,6 +138,8 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 			return &buf
 		}},
 	}
+	hub.janitorCtx, hub.janitorCancel = context.WithCancel(ctx)
+	go hub.startJanitor(hub.janitorCtx, 30*time.Minute)
 	return hub, nil
 }
 
@@ -162,6 +167,9 @@ func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
 	h.metaMu.RUnlock()
 
 	if exists {
+		pm.mu.Lock()
+		pm.lastAccess = h.config.Now()
+		pm.mu.Unlock()
 		return pm
 	}
 
@@ -172,14 +180,19 @@ func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
 	// Double-check after acquiring write lock
 	pm, exists = h.metaCache[project]
 	if exists {
+		pm.mu.Lock()
+		pm.lastAccess = h.config.Now()
+		pm.mu.Unlock()
 		return pm
 	}
 
+	now := h.config.Now()
 	// Create new projectMetadata
 	pm = &projectMetadata{
-		meta:      metadata.NewRepoMetadata(project),
-		stopCh:    make(chan struct{}),
-		stoppedCh: make(chan struct{}),
+		meta:       metadata.NewRepoMetadata(project),
+		stopCh:     make(chan struct{}),
+		stoppedCh:  make(chan struct{}),
+		lastAccess: now,
 	}
 	h.metaCache[project] = pm
 
@@ -327,11 +340,42 @@ func (h *StorHub) commitDirtyProjectMetadataLocked(ctx context.Context, project 
 	return nil
 }
 
+// startJanitor periodically evicts idle, non-dirty project metadata to prevent unbounded cache growth
+func (h *StorHub) startJanitor(ctx context.Context, idleTimeout time.Duration) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			h.evictIdleProjects(idleTimeout)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (h *StorHub) evictIdleProjects(idleTimeout time.Duration) {
+	h.metaMu.Lock()
+	defer h.metaMu.Unlock()
+	now := time.Now()
+	for name, pm := range h.metaCache {
+		pm.mu.Lock()
+		if !pm.dirty && now.Sub(pm.lastAccess) > idleTimeout {
+			close(pm.stopCh)
+			delete(h.metaCache, name)
+		}
+		pm.mu.Unlock()
+	}
+}
+
 // Shutdown gracefully shuts down the StorHub, committing any dirty metadata
 func (h *StorHub) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	h.shutdownOnce.Do(func() {
 		logging.Info(h.logger, "shutdown initiated")
+
+		// Stop the janitor
+		h.janitorCancel()
 
 		// Signal all commit loops to stop
 		close(h.shutdownCh)
