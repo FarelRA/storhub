@@ -963,7 +963,7 @@ func TestDownloadMissingFile(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	err := hub.DownloadFile("project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
-	if err == nil || !strings.Contains(err.Error(), ErrProjectNotFound.Error()) {
+	if err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found error, got %v", err)
 	}
 }
@@ -1172,7 +1172,7 @@ func TestRateLimitAwareRetry(t *testing.T) {
 	if hub.Owner() != "" {
 		t.Fatalf("expected lazy owner resolution, got %s", hub.Owner())
 	}
-	if _, err := hub.ListFiles("project-rate-limit-miss"); err == nil || !strings.Contains(err.Error(), ErrProjectNotFound.Error()) {
+	if _, err := hub.ListFiles("project-rate-limit-miss"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found error after owner resolution, got %v", err)
 	}
 	if hub.Owner() != backend.owner {
@@ -1201,7 +1201,7 @@ func TestReadAPIsReturnProjectNotFound(t *testing.T) {
 		{name: "rollback", fn: func() error { return hub.RollbackMetadata("missing-project", "commit-1") }},
 	}
 	for _, check := range checks {
-		if err := check.fn(); err == nil || !strings.Contains(err.Error(), ErrProjectNotFound.Error()) {
+		if err := check.fn(); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 			t.Fatalf("expected project-not-found for %s, got %v", check.name, err)
 		}
 	}
@@ -1271,7 +1271,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 		t.Fatalf("delete project: %v", err)
 	}
 	beforePostDeleteList := metadataGets.Load()
-	if _, err := hub.ListFiles("project-cache-mutate"); err == nil || !strings.Contains(err.Error(), ErrProjectNotFound.Error()) {
+	if _, err := hub.ListFiles("project-cache-mutate"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found after delete project, got %v", err)
 	}
 	if metadataGets.Load() <= beforePostDeleteList {
@@ -1449,11 +1449,9 @@ func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
 	}
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "rollback.txt", []byte("rollback payload"))
-	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err != nil {
-		t.Fatalf("upload file: %v", err)
+	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err == nil {
+		t.Fatal("expected upload to fail when metadata commit fails")
 	}
-	// With batching, upload succeeds but commit happens later. Wait for commit attempt.
-	time.Sleep(150 * time.Millisecond) // Wait for commit attempt (will fail)
 	files, err := hub.ListFiles("project-hidden")
 	if err != nil {
 		t.Fatalf("list files after failed upload: %v", err)
@@ -1497,17 +1495,15 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	}
 	time.Sleep(150 * time.Millisecond) // Wait for first commit to complete
 
-	// Second upload - this commit will get a conflict
+	// Second upload - this commit will get a conflict and fail before reporting success.
 	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
-	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
-		t.Fatalf("upload file: %v", err)
+	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err == nil {
+		t.Fatal("expected upload to fail on metadata conflict")
 	}
-	// With batching, commit happens later. Wait for commit to trigger conflict handling and retry.
-	time.Sleep(300 * time.Millisecond) // Wait for commit, conflict, and retry cycle
 	if conflicts.Load() != 1 {
 		t.Fatalf("expected one metadata conflict, got %d", conflicts.Load())
 	}
-	// After conflict, in-memory changes are discarded, only committed data remains
+	// After conflict, only committed data is visible.
 	files, err := hub.ListFiles("project-conflict")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
@@ -1576,11 +1572,11 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestMetadataBatching(t *testing.T) {
+func TestMetadataCommitsSynchronously(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
-	// Upload multiple files - these should be batched
+	// Upload multiple files - each successful call commits metadata before returning.
 	for i := 0; i < 3; i++ {
 		name := fmt.Sprintf("file-%d.txt", i)
 		input := writeTempFile(t, t.TempDir(), name, []byte(name))
@@ -1589,25 +1585,12 @@ func TestMetadataBatching(t *testing.T) {
 		}
 	}
 
-	// Before flush, there should be no commits yet (metadata is dirty but not committed)
 	revisions, err := hub.ListMetadataRevisions("project-batching")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
-	if len(revisions) != 0 {
-		t.Fatalf("expected 0 metadata revisions before flush, got %d", len(revisions))
-	}
-
-	// Wait for automatic commit (batching system commits at 100ms interval)
-	time.Sleep(150 * time.Millisecond)
-
-	// After commit, there should be exactly 1 commit containing all 3 files
-	revisions, err = hub.ListMetadataRevisions("project-batching")
-	if err != nil {
-		t.Fatalf("list metadata revisions: %v", err)
-	}
-	if len(revisions) != 1 {
-		t.Fatalf("expected 1 metadata revision after flush, got %d", len(revisions))
+	if len(revisions) != 3 {
+		t.Fatalf("expected 3 synchronous metadata revisions, got %d", len(revisions))
 	}
 
 	// Verify all 3 files are in the metadata

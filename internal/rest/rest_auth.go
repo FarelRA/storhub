@@ -1,25 +1,23 @@
 package rest
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
+	"golang.org/x/crypto/bcrypt"
 )
 
-const defaultRESTTokenTTL = 12 * time.Hour
+const (
+	defaultRESTTokenTTL = 12 * time.Hour
+	restTokenIssuer     = "storhub"
+	restTokenAudience   = "storhub-rest"
+)
 
 type AuthOptions struct {
 	Realm           string
@@ -40,12 +38,6 @@ type User struct {
 	Disabled     bool
 }
 
-type restAuthHandler struct {
-	base     *restHandler
-	auth     *restAuthenticator
-	basePath string
-}
-
 type restAuthenticator struct {
 	realm    string
 	users    map[string]User
@@ -61,7 +53,11 @@ type restPrincipal struct {
 	PrimaryGID uint32   `json:"primary_gid"`
 	Groups     []uint32 `json:"groups"`
 	Admin      bool     `json:"admin,omitempty"`
-	ExpiresAt  int64    `json:"exp"`
+}
+
+type restTokenClaims struct {
+	restPrincipal
+	jwt.RegisteredClaims
 }
 
 type restLoginRequest struct {
@@ -80,13 +76,11 @@ func HashPassword(password string) (string, error) {
 	if strings.TrimSpace(password) == "" {
 		return "", errors.New("password is required")
 	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
 		return "", err
 	}
-	const iterations = 200000
-	sum := derivePasswordHash([]byte(password), salt, iterations)
-	return fmt.Sprintf("sha256$%d$%s$%s", iterations, hex.EncodeToString(salt), hex.EncodeToString(sum)), nil
+	return "bcrypt$" + string(hash), nil
 }
 
 func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
@@ -127,167 +121,60 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), tokenTTL: opts.TokenTTL, now: opts.Now}, nil
 }
 
-func (h *restAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.base.serveUI(w, r) {
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/shares/") {
-		h.base.handleShareAccess(w, r)
-		return
-	}
-	if r.URL.Path == strings.TrimRight(h.basePath, "/")+"/auth/login" {
-		h.handleLogin(w, r)
-		return
-	}
-
-	// Try to get bearer token
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if !strings.HasPrefix(auth, "Bearer ") {
-		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, h.auth.realm))
-		h.base.writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
-		return
-	}
-
-	token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-
-	// Try to parse as regular auth token first
-	principal, err := h.auth.parseToken(token)
-	if err == nil {
-		// Regular auth token - use authorized client
-		authed := *h.base
-		authed.client = &authorizedClient{base: h.base.client, principal: principal}
-		authed.ServeHTTP(w, r)
-		return
-	}
-
-	// Try to parse as share token
-	claims, err := h.base.parseShareToken(token)
-	if err == nil {
-		// Share token - use restricted client
-		restricted := *h.base
-		restricted.client = newRestrictedClient(h.base.client, claims.Project, claims.Path)
-		restricted.ServeHTTP(w, r)
-		return
-	}
-
-	// Neither token type worked
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, h.auth.realm))
-	h.base.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
-}
-
-func (h *restAuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.base.methodNotAllowed(w, http.MethodPost)
-		return
-	}
-	var req restLoginRequest
-	if err := h.base.decodeJSON(r, &req); err != nil {
-		h.base.writeMappedError(w, err)
-		return
-	}
-	principal, token, ttl, err := h.auth.login(req.Username, req.Password)
-	if err != nil {
-		h.base.writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
-		return
-	}
-	h.base.writeJSON(w, http.StatusOK, restLoginResponse{Token: token, TokenType: "Bearer", ExpiresIn: int64(ttl.Seconds()), Principal: principal})
-}
-
-func (h *restAuthHandler) requireBearer(r *http.Request) (*restPrincipal, error) {
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if !strings.HasPrefix(auth, "Bearer ") {
-		return nil, errors.New("missing bearer token")
-	}
-	return h.auth.parseToken(strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")))
-}
-
 func (a *restAuthenticator) login(username, password string) (restPrincipal, string, time.Duration, error) {
 	user, ok := a.users[username]
 	if !ok || user.Disabled || !verifyPassword(password, user.PasswordHash) {
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
-	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin, ExpiresAt: a.now().Add(a.tokenTTL).Unix()}
+	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin}
 	token, err := a.signToken(principal)
 	return principal, token, a.tokenTTL, err
 }
 
 func (a *restAuthenticator) signToken(principal restPrincipal) (string, error) {
-	payload, err := json.Marshal(principal)
-	if err != nil {
-		return "", err
+	now := a.now()
+	claims := restTokenClaims{
+		restPrincipal: principal,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    restTokenIssuer,
+			Audience:  jwt.ClaimStrings{restTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(a.tokenTTL)),
+		},
 	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, a.key)
-	_, _ = mac.Write([]byte(payloadPart))
-	sigPart := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return payloadPart + "." + sigPart, nil
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(a.key)
 }
 
 func (a *restAuthenticator) parseToken(token string) (*restPrincipal, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return nil, errors.New("invalid bearer token")
-	}
-	mac := hmac.New(sha256.New, a.key)
-	_, _ = mac.Write([]byte(parts[0]))
-	expected := mac.Sum(nil)
-	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || subtle.ConstantTimeCompare(actual, expected) != 1 {
-		return nil, errors.New("invalid bearer token")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	claims := &restTokenClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return a.key, nil
+	},
+		jwt.WithIssuer(restTokenIssuer),
+		jwt.WithAudience(restTokenAudience),
+		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithTimeFunc(a.now),
+	)
 	if err != nil {
 		return nil, errors.New("invalid bearer token")
 	}
-	var principal restPrincipal
-	if err := json.Unmarshal(payload, &principal); err != nil {
+	principal := claims.restPrincipal
+	if principal.Kind != "auth" || !parsed.Valid {
 		return nil, errors.New("invalid bearer token")
-	}
-	if principal.Kind != "auth" {
-		return nil, errors.New("invalid bearer token")
-	}
-	if principal.ExpiresAt <= a.now().Unix() {
-		return nil, errors.New("bearer token expired")
 	}
 	return &principal, nil
 }
 
-func derivePasswordHash(password, salt []byte, iterations int) []byte {
-	sum := append([]byte(nil), salt...)
-	sum = append(sum, password...)
-	digest := sha256.Sum256(sum)
-	result := digest[:]
-	for i := 1; i < iterations; i++ {
-		next := make([]byte, 0, len(result)+len(password)+len(salt))
-		next = append(next, result...)
-		next = append(next, password...)
-		next = append(next, salt...)
-		d := sha256.Sum256(next)
-		result = d[:]
-	}
-	return append([]byte(nil), result...)
-}
-
 func verifyPassword(password, encoded string) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 4 || parts[0] != "sha256" {
-		return false
+	if hash, ok := strings.CutPrefix(encoded, "bcrypt$"); ok {
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 	}
-	iterations := 0
-	_, err := fmt.Sscanf(parts[1], "%d", &iterations)
-	if err != nil || iterations <= 0 {
-		return false
-	}
-	salt, err := hex.DecodeString(parts[2])
-	if err != nil {
-		return false
-	}
-	want, err := hex.DecodeString(parts[3])
-	if err != nil {
-		return false
-	}
-	got := derivePasswordHash([]byte(password), salt, iterations)
-	return subtle.ConstantTimeCompare(got, want) == 1
+	return false
 }
 
 func uniqueGIDs(groups []uint32) []uint32 {

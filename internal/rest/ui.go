@@ -8,10 +8,10 @@ const uiDocument = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StorHub Console</title>
-  <link rel="stylesheet" href="/ui/styles.css">
+  <link rel="stylesheet" href="/styles.css">
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
-  <script src="/ui/config.js"></script>
-  <script src="/ui/app.js"></script>
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
 </head>
 <body x-data="storhubConsole()" x-init="init()">
   <div class="shell">
@@ -32,7 +32,7 @@ const uiDocument = `<!doctype html>
         </div>
       </div>
 
-      <div class="section" x-show="config.authEnabled">
+      <div class="section" x-show="config.authEnabled && !isSharedMode">
         <template x-if="!token">
           <form class="stack" @submit.prevent="login()">
             <label class="field"><span>Username</span><input x-model.trim="auth.username" type="text" autocomplete="username"></label>
@@ -48,7 +48,7 @@ const uiDocument = `<!doctype html>
         </template>
       </div>
 
-      <div class="section">
+      <div class="section" x-show="!isSharedMode">
         <div class="section-title">Project</div>
         <div class="stats">
           <div><span>Files</span><strong x-text="projectStats.files ?? '-' "></strong></div>
@@ -59,7 +59,7 @@ const uiDocument = `<!doctype html>
         <button class="button danger" @click="deleteProject()" type="button">Delete Project</button>
       </div>
 
-      <div class="section">
+      <div class="section" x-show="!isSharedMode">
         <div class="section-title">Directory Actions</div>
         <div class="stack">
           <button class="button subtle" @click="openModal('mkdir')" type="button">Make Directory</button>
@@ -68,8 +68,38 @@ const uiDocument = `<!doctype html>
         </div>
       </div>
 
-      <div class="section hint">
+      <div class="section hint" x-show="!isSharedMode">
         All file, metadata, revision, and maintenance actions use the same REST endpoints exposed by the server.
+      </div>
+
+      <div class="section" x-show="project && !isSharedMode">
+        <div class="pane-head">
+          <div class="section-title">Shares</div>
+          <button class="button subtle mini" @click="loadShares()" :disabled="!project" type="button">Reload</button>
+        </div>
+        <div class="list compact">
+          <template x-for="share in shares" :key="share.id">
+            <div class="share-item">
+              <div class="item-main">
+                <strong x-text="share.path || '/'"></strong>
+                <small x-text="shareMeta(share)"></small>
+              </div>
+              <div class="share-actions">
+                <button class="button subtle mini" @click="copyShareURL(share)" type="button">Link</button>
+                <button class="button subtle mini" @click="copyShareDownloadURL(share)" :disabled="!share.download || share.is_dir" type="button">Direct</button>
+                <button class="button danger mini" @click="deleteShare(share)" type="button">Delete</button>
+              </div>
+            </div>
+          </template>
+          <div class="meta" x-show="shares.length === 0">No shares</div>
+        </div>
+      </div>
+
+      <div class="section" x-show="isSharedMode">
+        <div class="section-title">Shared Access</div>
+        <div class="meta">Project: <span x-text="project"></span></div>
+        <div class="meta">Root: <span x-text="shareRootLabel()"></span></div>
+        <div class="meta" x-text="shareDownload ? 'Download allowed' : 'Browser-only share'"></div>
       </div>
     </aside>
 
@@ -80,10 +110,12 @@ const uiDocument = `<!doctype html>
           <div class="meta" x-text="statusText"></div>
         </div>
         <div class="toolbar-actions">
-          <button class="button subtle" @click="openModal('create-file')" type="button">New File</button>
-          <button class="button subtle" @click="openModal('rename')" :disabled="!selectedPath" type="button">Rename</button>
-          <button class="button subtle" @click="openModal('link')" :disabled="!selectedPath || selectedEntry?.isDir" type="button">Link</button>
-          <button class="button subtle" @click="openModal('symlink')" type="button">Symlink</button>
+          <button class="button subtle" @click="copyCurrentShareLink()" :disabled="!canCopyShareLink()" type="button">Copy Share Link</button>
+          <button class="button subtle" @click="copyCurrentDirectDownload()" :disabled="!canCopyDirectDownload()" type="button">Copy Direct Download</button>
+          <button class="button subtle" @click="openModal('create-file')" :disabled="isReadOnly()" type="button">New File</button>
+          <button class="button subtle" @click="openModal('rename')" :disabled="!selectedPath || isReadOnly()" type="button">Rename</button>
+          <button class="button subtle" @click="openModal('link')" :disabled="!selectedPath || isDirectory(selectedEntry) || isReadOnly()" type="button">Link</button>
+          <button class="button subtle" @click="openModal('symlink')" :disabled="isReadOnly()" type="button">Symlink</button>
           <button class="button solid" @click="saveFile()" :disabled="!canEditFile()" type="button">Save</button>
         </div>
       </header>
@@ -101,7 +133,7 @@ const uiDocument = `<!doctype html>
                   <strong x-text="entry.name"></strong>
                   <small x-text="entryKind(entry)"></small>
                 </span>
-                <span x-text="entry.isDir ? '' : formatNumber(entry.size)"></span>
+                <span x-text="isDirectory(entry) ? '' : formatNumber(entry.size)"></span>
               </button>
             </template>
             <div class="meta" x-show="entries.length === 0">Empty directory</div>
@@ -119,7 +151,7 @@ const uiDocument = `<!doctype html>
             <button class="button subtle" @click="appendToSelected()" :disabled="!canEditFile()" type="button">Append</button>
             <button class="button subtle" @click="patchSelected()" :disabled="!canEditFile()" type="button">Patch</button>
             <button class="button subtle" @click="truncateSelected()" :disabled="!canEditFile()" type="button">Truncate</button>
-            <button class="button danger" @click="removeSelected()" :disabled="!selectedPath" type="button">Remove</button>
+            <button class="button danger" @click="removeSelected()" :disabled="!selectedPath || isReadOnly()" type="button">Remove</button>
           </div>
 
           <textarea x-model="editor" spellcheck="false" placeholder="File content or symlink target will appear here."></textarea>
@@ -139,17 +171,17 @@ const uiDocument = `<!doctype html>
             </div>
             <dl class="detail-grid">
               <template x-for="row in entryRows()" :key="row.key">
-                <>
+                <div class="detail-row">
                   <dt x-text="row.key"></dt>
                   <dd x-text="row.value"></dd>
-                </>
+                </div>
               </template>
             </dl>
             <div class="row two">
-              <button class="button subtle" @click="openModal('chmod')" :disabled="!selectedPath" type="button">Chmod</button>
-              <button class="button subtle" @click="openModal('chown')" :disabled="!selectedPath" type="button">Chown</button>
+              <button class="button subtle" @click="openModal('chmod')" :disabled="!selectedPath || isReadOnly()" type="button">Chmod</button>
+              <button class="button subtle" @click="openModal('chown')" :disabled="!selectedPath || isReadOnly()" type="button">Chown</button>
             </div>
-            <button class="button subtle full" @click="openModal('utimes')" :disabled="!selectedPath" type="button">Update Timestamps</button>
+            <button class="button subtle full" @click="openModal('utimes')" :disabled="!selectedPath || isReadOnly()" type="button">Update Timestamps</button>
           </div>
 
           <div class="subpanel">
@@ -166,12 +198,12 @@ const uiDocument = `<!doctype html>
               <div class="meta" x-show="xattrs.length === 0">No xattrs</div>
             </div>
             <div class="row two">
-              <button class="button subtle" @click="openModal('xattr-set')" :disabled="!selectedPath" type="button">Set</button>
-              <button class="button danger" @click="openModal('xattr-remove')" :disabled="!selectedPath || xattrs.length === 0" type="button">Remove</button>
+              <button class="button subtle" @click="openModal('xattr-set')" :disabled="!selectedPath || isReadOnly()" type="button">Set</button>
+              <button class="button danger" @click="openModal('xattr-remove')" :disabled="!selectedPath || xattrs.length === 0 || isReadOnly()" type="button">Remove</button>
             </div>
           </div>
 
-          <div class="subpanel">
+          <div class="subpanel" x-show="!isSharedMode">
             <div class="pane-head">
               <div class="pane-title">Revisions</div>
               <button class="button subtle mini" @click="loadRevisions()" :disabled="!project" type="button">Reload</button>
@@ -282,10 +314,13 @@ button, input, textarea { font: inherit; }
 .item:hover, .item.active { background: var(--surface); border-color: var(--line); }
 .item-main { display: grid; gap: 2px; min-width: 0; }
 .item strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.share-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 9px 10px; display: grid; gap: 8px; }
+.share-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 textarea { min-height: 360px; resize: vertical; margin-top: 10px; }
 .range-bar { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
 .subpanel { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
 .detail-grid { margin: 10px 0 0; display: grid; grid-template-columns: 88px 1fr; gap: 8px 10px; }
+.detail-row { display: contents; }
 .detail-grid dt { color: var(--muted); }
 .detail-grid dd { margin: 0; word-break: break-word; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; margin-bottom: 12px; }
@@ -314,12 +349,17 @@ const uiScript = `window.storhubConsole = function () {
   return {
     config: window.STORHUB_UI_CONFIG || { basePath: '/api/v1', authEnabled: false },
     token: localStorage.getItem('storhub.token') || '',
+    shareToken: '',
+    shareRequested: false,
+    shareRootPath: '',
+    shareDownload: true,
     project: '',
     currentPath: '',
     selectedPath: '',
     selectedEntry: null,
     projectStats: {},
     entries: [],
+    shares: [],
     revisions: [],
     xattrs: [],
     editor: '',
@@ -330,14 +370,77 @@ const uiScript = `window.storhubConsole = function () {
     modal: { open: false, kind: '', title: '', form: {} },
     init() {
       this.responseText = 'Open a project to browse the filesystem.'
+      const shareToken = new URLSearchParams(window.location.search).get('share')
+      if (shareToken) {
+        this.shareRequested = true
+        this.token = ''
+        this.bootstrapSharedMode(shareToken)
+      }
+    },
+    get isSharedMode() {
+      return this.shareRequested || !!this.shareToken
     },
     headers(extra = {}) {
       const headers = { ...extra }
       if (this.token) headers.Authorization = 'Bearer ' + this.token
       return headers
     },
+    normalizePath(path) {
+      const parts = String(path || '').split('/')
+      const clean = []
+      for (const part of parts) {
+        if (!part || part === '.') continue
+        if (part === '..') {
+          if (!clean.length) continue
+          clean.pop()
+          continue
+        }
+        clean.push(part)
+      }
+      return clean.join('/')
+    },
+    parentPath(path) {
+      const current = this.normalizePath(path)
+      if (!current) return ''
+      return current.split('/').slice(0, -1).join('/')
+    },
+    isWithinShareRoot(path) {
+      const target = this.normalizePath(path)
+      if (!this.isSharedMode || !this.shareRootPath) return true
+      return target === this.shareRootPath || target.startsWith(this.shareRootPath + '/')
+    },
+    shareRootLabel() {
+      return this.shareRootPath || '/'
+    },
+    rootURL(params) {
+      const query = new URLSearchParams(params || {})
+      const text = query.toString()
+      return '/' + (text ? '?' + text : '')
+    },
+    shareURL(share) {
+      return this.rootURL({ share: share.id || share.token })
+    },
+    shareDownloadURL(share, targetPath) {
+      const params = { share: share.id || share.token, download: '1' }
+      if (targetPath) params.path = this.normalizePath(targetPath)
+      return this.rootURL(params)
+    },
     currentPathLabel() {
       return this.currentPath || '/'
+    },
+    isDirectory(entry) {
+      return !!(entry && (entry.is_dir || entry.isDir))
+    },
+    isReadOnly() {
+      return this.isSharedMode
+    },
+    canCopyShareLink() {
+      if (this.isSharedMode) return !!this.shareToken
+      return !!this.project && !!this.selectedPath
+    },
+    canCopyDirectDownload() {
+      if (this.isSharedMode) return !!this.shareToken && !!this.selectedPath && !this.isDirectory(this.selectedEntry) && this.shareDownload
+      return !!this.project && !!this.selectedPath && !this.isDirectory(this.selectedEntry)
     },
     formatNumber(value) {
       if (value === undefined || value === null || value === '') return '-'
@@ -345,9 +448,78 @@ const uiScript = `window.storhubConsole = function () {
     },
     entryKind(entry) {
       if (!entry) return '-'
-      if (entry.is_dir || entry.isDir) return 'directory'
+      if (this.isDirectory(entry)) return 'directory'
       if (entry.is_symlink || entry.isSymlink) return 'symlink'
       return 'file'
+    },
+    shareMeta(share) {
+      const mode = share.download ? 'download' : 'browser-only'
+      const kind = share.is_dir ? 'folder' : 'file'
+      return kind + ' • ' + mode + ' • expires ' + share.expires_at
+    },
+    async copyText(value, label) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value)
+        } else {
+          window.prompt('Copy to clipboard:', value)
+        }
+        this.statusText = (label || 'Copied') + ': ' + value
+      } catch (_) {
+        window.prompt('Copy to clipboard:', value)
+      }
+    },
+    async bootstrapSharedMode(token) {
+	      try {
+	        const { payload } = await fetch(this.config.basePath + '/shares/' + encodeURIComponent(token)).then(async (response) => {
+	          const contentType = response.headers.get('content-type') || ''
+	          const payload = contentType.includes('application/json') ? await response.json().catch(() => null) : await response.text()
+	          if (!response.ok) {
+	            const message = payload && payload.error ? payload.error.message : response.statusText
+	            throw { payload, message }
+	          }
+	          return { payload }
+	        })
+	        this.shareRequested = true
+	        this.shareToken = payload.id || payload.token || token
+	        this.token = this.shareToken
+	        this.project = payload.project
+	        this.shareRootPath = this.normalizePath(payload.path)
+	        this.shareDownload = payload.download !== false
+	        this.statusText = 'Shared access ready.'
+	        await this.loadSharedResource()
+	      } catch (error) {
+	        this.shareRequested = true
+	        this.shareToken = ''
+	        this.token = ''
+	        this.project = ''
+	        this.shareRootPath = ''
+	        this.fail('Shared access failed', error.payload || { message: error.message || 'Invalid share token' })
+	      }
+    },
+    async loadSharedResource() {
+      this.projectStats = {}
+      this.revisions = []
+      if (!this.project) return
+      try {
+        if (!this.shareRootPath) {
+          this.selectedPath = ''
+          this.selectedEntry = null
+          await this.loadDirectory('')
+          return
+        }
+        const entry = await this.inspectPath(this.shareRootPath)
+        if (!entry) return
+        if (this.isDirectory(entry)) {
+          await this.loadDirectory(this.shareRootPath)
+          return
+        }
+        this.currentPath = this.shareRootPath
+        this.entries = [entry]
+        await this.readSelected()
+      } catch (error) {
+        this.fail('Shared load failed', error)
+      }
     },
     entryRows() {
       const entry = this.selectedEntry
@@ -365,10 +537,10 @@ const uiScript = `window.storhubConsole = function () {
       ]
     },
     canEditFile() {
-      return this.selectedEntry && !(this.selectedEntry.is_dir || this.selectedEntry.isDir)
+      return !this.isReadOnly() && this.selectedEntry && !this.isDirectory(this.selectedEntry)
     },
     canReadRanges() {
-      return this.canEditFile() && !(this.selectedEntry.is_symlink || this.selectedEntry.isSymlink)
+      return this.selectedEntry && !this.isDirectory(this.selectedEntry) && !(this.selectedEntry.is_symlink || this.selectedEntry.isSymlink)
     },
     async api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: this.headers(options.headers || {}) })
@@ -398,6 +570,7 @@ const uiScript = `window.storhubConsole = function () {
       }
     },
     logout() {
+      if (this.isSharedMode) return
       this.token = ''
       localStorage.removeItem('storhub.token')
       this.statusText = 'Signed out.'
@@ -410,6 +583,10 @@ const uiScript = `window.storhubConsole = function () {
       this.responseText = JSON.stringify(error.payload || { error: { message: error.message || String(error) } }, null, 2)
     },
     async loadProject() {
+      if (this.isSharedMode) {
+        await this.loadSharedResource()
+        return
+      }
       try {
         this.requireProject()
         this.currentPath = ''
@@ -421,15 +598,41 @@ const uiScript = `window.storhubConsole = function () {
       }
     },
     async refreshAll() {
-      await Promise.all([this.loadStats(), this.loadDirectory(this.currentPath), this.loadRevisions()])
+      if (this.isSharedMode) {
+        await this.loadSharedResource()
+        return
+      }
+      await Promise.all([this.loadStats(), this.loadDirectory(this.currentPath), this.loadRevisions(), this.loadShares()])
       if (this.selectedPath) await this.inspectPath(this.selectedPath)
     },
     async loadStats() {
+      if (this.isSharedMode) {
+        this.projectStats = {}
+        return
+      }
       const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project))
       this.projectStats = payload.stats || {}
     },
+    async loadShares() {
+      if (!this.project || this.isSharedMode) {
+        this.shares = []
+        return
+      }
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/shares')
+        this.shares = payload.shares || []
+      } catch (error) {
+        this.shares = []
+        this.fail('Share load failed', error)
+      }
+    },
     async loadDirectory(path) {
-      this.currentPath = path || ''
+      const nextPath = this.normalizePath(path)
+      if (this.isSharedMode && !this.isWithinShareRoot(nextPath)) {
+        this.currentPath = this.shareRootPath
+      } else {
+        this.currentPath = nextPath
+      }
       this.statusText = 'Loading directory ' + this.currentPathLabel()
       try {
         const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/children?path=' + encodeURIComponent(this.currentPath))
@@ -442,7 +645,7 @@ const uiScript = `window.storhubConsole = function () {
     },
     async selectEntry(entry) {
       this.selectedPath = entry.path
-      if (entry.is_dir || entry.isDir) {
+      if (this.isDirectory(entry)) {
         await this.inspectPath(entry.path)
         await this.loadDirectory(entry.path)
         return
@@ -456,8 +659,10 @@ const uiScript = `window.storhubConsole = function () {
         this.selectedEntry = payload.entry
         this.selectedPath = path
         await this.loadXAttrs()
+        return payload.entry
       } catch (error) {
         this.fail('Stat failed', error)
+        return null
       }
     },
     async readSelected() {
@@ -544,7 +749,10 @@ const uiScript = `window.storhubConsole = function () {
       }
     },
     async loadRevisions() {
-      if (!this.project) return
+      if (!this.project || this.isSharedMode) {
+        this.revisions = []
+        return
+      }
       try {
         const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/revisions')
         this.revisions = payload.revisions || []
@@ -592,6 +800,54 @@ const uiScript = `window.storhubConsole = function () {
         this.fail('XAttr read failed', error)
       }
     },
+    async createShareForSelected(download) {
+      if (!this.project || !this.selectedPath) return null
+      try {
+        const { payload } = await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/shares', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: this.selectedPath, download: download !== false })
+        })
+        await this.loadShares()
+        return payload
+      } catch (error) {
+        this.fail('Share create failed', error)
+        return null
+      }
+    },
+    async copyCurrentShareLink() {
+      if (this.isSharedMode) {
+        await this.copyText(this.shareURL({ id: this.shareToken }), 'Share link copied')
+        return
+      }
+      const share = await this.createShareForSelected(true)
+      if (share) await this.copyText(this.shareURL(share), 'Share link copied')
+    },
+    async copyCurrentDirectDownload() {
+      if (this.isSharedMode) {
+        if (!this.canCopyDirectDownload()) return
+        await this.copyText(this.shareDownloadURL({ id: this.shareToken }, this.selectedPath === this.shareRootPath ? '' : this.selectedPath), 'Direct download copied')
+        return
+      }
+      const share = await this.createShareForSelected(true)
+      if (share) await this.copyText(share.download_url || this.shareDownloadURL(share), 'Direct download copied')
+    },
+    async copyShareURL(share) {
+      await this.copyText(this.shareURL(share), 'Share link copied')
+    },
+    async copyShareDownloadURL(share) {
+      if (!share.download || share.is_dir) return
+      await this.copyText(share.download_url || this.shareDownloadURL(share), 'Direct download copied')
+    },
+    async deleteShare(share) {
+      if (!confirm('Delete share ' + (share.path || '/') + '?')) return
+      try {
+        await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project) + '/shares/' + encodeURIComponent(share.id || share.token), { method: 'DELETE' })
+        await this.loadShares()
+      } catch (error) {
+        this.fail('Share deletion failed', error)
+      }
+    },
     openModal(kind) {
       this.modal = { open: true, kind, title: this.modalTitle(kind), form: { path: this.currentPath ? this.currentPath + '/' : '', newPath: this.selectedPath || '', target: this.selectedPath || '', mode: this.selectedEntry ? String(this.selectedEntry.mode || '') : '0644', uid: this.selectedEntry ? this.selectedEntry.uid || 0 : 0, gid: this.selectedEntry ? this.selectedEntry.gid || 0 : 0, atime: '', mtime: '', name: this.xattrs[0] ? this.xattrs[0].name : '', value: '' } }
     },
@@ -625,7 +881,7 @@ const uiScript = `window.storhubConsole = function () {
       if (!this.selectedPath) return
       if (!confirm('Remove ' + this.selectedPath + '?')) return
       try {
-        if (this.selectedEntry && (this.selectedEntry.is_dir || this.selectedEntry.isDir)) {
+        if (this.selectedEntry && this.isDirectory(this.selectedEntry)) {
           await this.jsonPost('/ops/rmdir', { path: this.selectedPath })
         } else {
           await this.jsonPost('/ops/unlink', { path: this.selectedPath })
@@ -650,15 +906,19 @@ const uiScript = `window.storhubConsole = function () {
     },
     goUp() {
       if (!this.currentPath) return this.loadDirectory('')
+      if (this.isSharedMode && this.currentPath === this.shareRootPath) return this.loadDirectory(this.shareRootPath)
       const next = this.currentPath.split('/').slice(0, -1).join('/')
+      if (this.isSharedMode && !this.isWithinShareRoot(next)) return this.loadDirectory(this.shareRootPath)
       this.loadDirectory(next)
     },
     async deleteProject() {
+      if (this.isSharedMode) return
       if (!this.project) return
       if (!confirm('Delete project ' + this.project + '?')) return
       try {
         await this.api(this.config.basePath + '/projects/' + encodeURIComponent(this.project), { method: 'DELETE' })
         this.entries = []
+        this.shares = []
         this.revisions = []
         this.projectStats = {}
         this.selectedPath = ''

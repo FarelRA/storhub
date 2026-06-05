@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,8 +26,8 @@ func TestAppRunHelpUnknownAndUsageErrors(t *testing.T) {
 	if err := app.Run([]string{"unknown"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("expected unknown command error, got %v", err)
 	}
-	if err := app.Run([]string{"upload"}); err == nil || !strings.Contains(err.Error(), "usage: storhub upload") {
-		t.Fatalf("expected upload usage error, got %v", err)
+	if err := app.Run([]string{"upload"}); err == nil || !strings.Contains(err.Error(), "accepts") {
+		t.Fatalf("expected upload arg error, got %v", err)
 	}
 	if err := app.Run([]string{"write", "--token", "x", "project", "file", "nope", "data"}); err == nil || !strings.Contains(err.Error(), "invalid offset") {
 		t.Fatalf("expected invalid offset error, got %v", err)
@@ -36,21 +35,13 @@ func TestAppRunHelpUnknownAndUsageErrors(t *testing.T) {
 	if err := app.Run([]string{"patch", "--token", "x", "project", "file", "1", "bad", "data"}); err == nil || !strings.Contains(err.Error(), "invalid delete-size") {
 		t.Fatalf("expected invalid delete-size error, got %v", err)
 	}
-	if err := app.Run([]string{"download"}); err == nil || !strings.Contains(err.Error(), "usage: storhub download") {
-		t.Fatalf("expected download usage error, got %v", err)
+	if err := app.Run([]string{"download"}); err == nil || !strings.Contains(err.Error(), "accepts") {
+		t.Fatalf("expected download arg error, got %v", err)
 	}
 	_ = stderr
 }
 
 func TestHelpersAndRendering(t *testing.T) {
-	app, _, _ := newTestApp(t)
-	fs := app.parseCommand("ls", "storhub ls [flags] <project>")
-	if err := fs.Parse([]string{"--", "demo"}); err != nil || fs == nil || len(fs.Args()) != 1 || fs.Args()[0] != "demo" {
-		t.Fatalf("unexpected parseCommand result: fs=%v rest=%v err=%v", fs != nil, fs.Args(), err)
-	}
-	if err := app.parseCommand("ls", "storhub ls").Parse([]string{"--bad"}); err == nil {
-		t.Fatal("expected parse error")
-	}
 	if got := ternary(true, "a", "b"); got != "a" || ternary(false, 1, 2) != 2 {
 		t.Fatal("unexpected ternary result")
 	}
@@ -67,12 +58,7 @@ func TestHelpersAndRendering(t *testing.T) {
 	if err != nil || hub == nil {
 		t.Fatalf("newHubFromFlags: %v", err)
 	}
-	t.Setenv("GITHUB_TOKEN", "env-token")
-	t.Setenv("STORHUB_API_BASE_URL", "https://env.example.test")
-	fsForHub := flag.NewFlagSet("test", flag.ContinueOnError)
-	if hub, err := app.newHub(fsForHub); err != nil || hub == nil {
-		t.Fatalf("newHub with env defaults: %v", err)
-	}
+	_ = hub
 	var buf bytes.Buffer
 	printFileSummary(&buf, "uploaded", nil)
 	if !strings.Contains(buf.String(), "uploaded") {
@@ -147,8 +133,9 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 
 func TestPrintRootHelp(t *testing.T) {
 	app, stdout, _ := newTestApp(t)
-	app.printRootHelp()
-	if !strings.Contains(stdout(), rootHelp) {
+	app.rootCmd.SetOut(app.stdout)
+	app.rootCmd.Help()
+	if !strings.Contains(stdout(), "StorHub CLI") {
 		t.Fatalf("unexpected root help output: %q", stdout())
 	}
 }
@@ -185,7 +172,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
-	restListenAndServeFn = func(addr string, handler http.Handler) error {
+	restListenAndServeFn = func(server *http.Server) error {
 		return nil
 	}
 	checks := [][]string{
@@ -249,9 +236,12 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 		}
 		return http.NewServeMux(), nil
 	}
-	restListenAndServeFn = func(addr string, handler http.Handler) error {
-		if addr != "127.0.0.1:9090" || handler == nil {
-			t.Fatalf("unexpected serve args: addr=%q handler=%v", addr, handler)
+	restListenAndServeFn = func(server *http.Server) error {
+		if server.Addr != "127.0.0.1:9090" || server.Handler == nil {
+			t.Fatalf("unexpected serve args: addr=%q handler=%v", server.Addr, server.Handler)
+		}
+		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
+			t.Fatalf("expected REST server timeouts, got %+v", server)
 		}
 		return errors.New("stop")
 	}
@@ -286,6 +276,132 @@ func TestListAcceptsAbsolutePath(t *testing.T) {
 	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
 		t.Fatalf("run ls with absolute path: %v", err)
 	}
+}
+
+func TestHelpAndCompletionWorkWithoutToken(t *testing.T) {
+	t.Run("root --help", func(t *testing.T) {
+		app, stdout, _ := newTestApp(t)
+		if err := app.Run([]string{}); err != nil {
+			t.Fatalf("root with no args should show help: %v", err)
+		}
+		if !strings.Contains(stdout(), "StorHub CLI") {
+			t.Fatalf("expected help output, got %q", stdout())
+		}
+	})
+
+	t.Run("help subcommand", func(t *testing.T) {
+		app, stdout, _ := newTestApp(t)
+		if err := app.Run([]string{"help"}); err != nil {
+			t.Fatalf("help subcommand: %v", err)
+		}
+		if !strings.Contains(stdout(), "StorHub CLI") {
+			t.Fatalf("expected help output, got %q", stdout())
+		}
+	})
+
+	t.Run("command --help", func(t *testing.T) {
+		app, stdout, _ := newTestApp(t)
+		if err := app.Run([]string{"upload", "--help"}); err != nil {
+			t.Fatalf("command --help: %v", err)
+		}
+		if !strings.Contains(stdout(), "Upload") {
+			t.Fatalf("expected upload help output, got %q", stdout())
+		}
+	})
+
+	t.Run("completion subcommand", func(t *testing.T) {
+		app, stdout, _ := newTestApp(t)
+		if err := app.Run([]string{"completion", "bash"}); err != nil {
+			t.Fatalf("completion subcommand: %v", err)
+		}
+		if !strings.Contains(stdout(), "#") {
+			t.Fatalf("expected bash completion output, got %q", stdout())
+		}
+	})
+}
+
+func TestFlagParsingAcrossCommands(t *testing.T) {
+	t.Run("flags before subcommand", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "env-token")
+		app, _, _ := newTestApp(t)
+		oldFactory := newHubFromFlagsFn
+		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+			if token != "env-token" {
+				t.Fatalf("expected token env-token, got %q", token)
+			}
+			if apiBase != "" {
+				t.Fatalf("expected empty api-base, got %q", apiBase)
+			}
+			return &fakeHub{t: t}, nil
+		}
+		if err := app.Run([]string{"ls", "demo"}); err != nil {
+			t.Fatalf("ls with env token: %v", err)
+		}
+	})
+
+	t.Run("persistent flag overrides env", func(t *testing.T) {
+		app, _, _ := newTestApp(t)
+		oldFactory := newHubFromFlagsFn
+		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+			if token != "override" {
+				t.Fatalf("expected token override, got %q", token)
+			}
+			return &fakeHub{t: t}, nil
+		}
+		t.Setenv("GITHUB_TOKEN", "env-token")
+		if err := app.Run([]string{"ls", "--token", "override", "demo"}); err != nil {
+			t.Fatalf("ls with override token: %v", err)
+		}
+	})
+
+	t.Run("local flags", func(t *testing.T) {
+		app, stdout, _ := newTestApp(t)
+		oldFactory := newHubFromFlagsFn
+		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+			return &fakeHub{t: t}, nil
+		}
+		if err := app.Run([]string{"ls", "--token", "x", "-l", "demo"}); err != nil {
+			t.Fatalf("ls -l with token: %v", err)
+		}
+		if !strings.Contains(stdout(), "file") {
+			t.Fatalf("expected long listing, got %q", stdout())
+		}
+	})
+}
+
+func TestArgValidationErrors(t *testing.T) {
+	app, _, _ := newTestApp(t)
+
+	t.Run("exact args", func(t *testing.T) {
+		err := app.Run([]string{"upload"})
+		if err == nil || !strings.Contains(err.Error(), "accepts 3 arg(s), received 0") {
+			t.Fatalf("expected arg count error, got %v", err)
+		}
+	})
+
+	t.Run("range args", func(t *testing.T) {
+		err := app.Run([]string{"ls"})
+		if err == nil || !strings.Contains(err.Error(), "accepts between 1 and 2 arg(s), received 0") {
+			t.Fatalf("expected arg range error, got %v", err)
+		}
+	})
+
+	t.Run("no args", func(t *testing.T) {
+		err := app.Run([]string{"serve-rest", "extra"})
+		if err == nil || !strings.Contains(err.Error(), "unknown command") {
+			t.Fatalf("expected unknown command error, got %v", err)
+		}
+	})
+
+	t.Run("unknown flag", func(t *testing.T) {
+		err := app.Run([]string{"upload", "--bogus"})
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Fatalf("expected unknown flag error, got %v", err)
+		}
+	})
 }
 
 type fakeHub struct {

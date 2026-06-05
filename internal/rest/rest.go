@@ -2,24 +2,27 @@ package rest
 
 import (
 	"bytes"
-	"crypto/hmac"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
+	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
 )
@@ -56,8 +59,8 @@ const (
 )
 
 var (
-	ErrProjectNotFound = storage.ErrProjectNotFound
-	ErrFileNotFound    = storage.ErrFileNotFound
+	ErrNotFound    = shfs.ErrNotFound
+	ErrFileNotFound = shfs.ErrNotFound
 )
 
 type Client interface {
@@ -92,6 +95,54 @@ type Client interface {
 type restHandler struct {
 	client Client
 	opts   Options
+	shares *shareRegistry
+	logger *slog.Logger
+}
+
+type contextKey string
+
+const clientCtxKey contextKey = "rest-client"
+
+func (h *restHandler) clientFor(r *http.Request) Client {
+	if client, ok := r.Context().Value(clientCtxKey).(Client); ok {
+		return client
+	}
+	return h.client
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += n
+	return n, err
+}
+
+type shareRegistry struct {
+	mu    sync.RWMutex
+	items map[string]*shareRecord
+}
+
+type shareRecord struct {
+	ID        string
+	Project   string
+	Path      string
+	Download  bool
+	IsDir     bool
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // restrictedClient wraps a Client and restricts access to a specific project and path
@@ -102,10 +153,14 @@ type restrictedClient struct {
 }
 
 func newRestrictedClient(underlying Client, project, path string) *restrictedClient {
+	allowedPath, err := canonicalSharePath(path)
+	if err != nil {
+		allowedPath = strings.Trim(strings.TrimSpace(path), "/")
+	}
 	return &restrictedClient{
 		underlying:     underlying,
 		allowedProject: project,
-		allowedPath:    path,
+		allowedPath:    allowedPath,
 	}
 }
 
@@ -113,7 +168,11 @@ func (c *restrictedClient) checkAccess(project, targetPath string) error {
 	if project != c.allowedProject {
 		return errForbidden("access denied: project not shared")
 	}
-	if hasPathPrefix(targetPath, c.allowedPath) {
+	canonicalTargetPath, err := canonicalSharePath(targetPath)
+	if err != nil {
+		return errForbidden("access denied: path not shared")
+	}
+	if hasPathPrefix(canonicalTargetPath, c.allowedPath) {
 		return nil
 	}
 	return errForbidden("access denied: path not shared")
@@ -328,20 +387,29 @@ type shareRequest struct {
 }
 
 type shareResponse struct {
-	Project   string `json:"project"`
-	Path      string `json:"path"`
-	URL       string `json:"url"`
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
-	Download  bool   `json:"download"`
+	ID          string `json:"id"`
+	Project     string `json:"project"`
+	Path        string `json:"path"`
+	URL         string `json:"url"`
+	DownloadURL string `json:"download_url,omitempty"`
+	Token       string `json:"token"`
+	ExpiresAt   string `json:"expires_at"`
+	Download    bool   `json:"download"`
+	IsDir       bool   `json:"is_dir"`
 }
 
 type shareClaims struct {
-	Kind     string `json:"kind"`
+	ID       string `json:"id"`
 	Project  string `json:"project"`
 	Path     string `json:"path"`
 	Download bool   `json:"download,omitempty"`
+	IsDir    bool   `json:"is_dir,omitempty"`
 	Expires  int64  `json:"exp"`
+}
+
+type sharesResponse struct {
+	Project string          `json:"project"`
+	Shares  []shareResponse `json:"shares"`
 }
 
 func DefaultOptions() Options {
@@ -362,15 +430,59 @@ func NewHandler(hub *storage.StorHub, opts Options) (http.Handler, error) {
 
 func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	opts = opts.withDefaults()
-	base := &restHandler{client: client, opts: opts}
-	if opts.Auth == nil {
-		return base, nil
+	logger := logging.WithComponent(nil, "rest")
+	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
+		logger = logging.WithComponent(provider.Logger(), "rest")
 	}
-	auth, err := newAuthenticator(*opts.Auth)
-	if err != nil {
-		return nil, err
+	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}}, logger: logger}
+	r := chi.NewRouter()
+
+	r.Use(h.requestLogging)
+
+	r.Get("/", h.serveUIRoot)
+	r.Get("/styles.css", h.serveStyles)
+	r.Get("/app.js", h.serveAppJS)
+	r.Get("/config.js", h.serveConfigJS)
+
+	r.Get("/shares/{id}/download", h.serveShareDownload)
+
+	basePath := strings.TrimRight(opts.BasePath, "/")
+
+	r.Get(basePath, h.serveAPIInfo)
+	r.Get(basePath+"/shares/{id}", h.serveShareInfo)
+
+	if opts.Auth != nil {
+		auth, err := newAuthenticator(*opts.Auth)
+		if err != nil {
+			return nil, err
+		}
+		r.Post(basePath+"/auth/login", func(w http.ResponseWriter, r *http.Request) {
+			var req restLoginRequest
+			if err := h.decodeJSON(r, &req); err != nil {
+				h.writeMappedError(w, err)
+				return
+			}
+			principal, token, ttl, err := auth.login(req.Username, req.Password)
+			if err != nil {
+				h.writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
+				return
+			}
+			h.writeJSON(w, http.StatusOK, restLoginResponse{Token: token, TokenType: "Bearer", ExpiresIn: int64(ttl.Seconds()), Principal: principal})
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(h.authMiddleware(auth, basePath))
+			r.Route(basePath+"/projects/{project}", func(r chi.Router) {
+				h.registerProjectRoutes(r)
+			})
+		})
+	} else {
+		r.Route(basePath+"/projects/{project}", func(r chi.Router) {
+			h.registerProjectRoutes(r)
+		})
 	}
-	return &restAuthHandler{base: base, auth: auth, basePath: base.opts.BasePath}, nil
+
+	return r, nil
 }
 
 func (o Options) withDefaults() Options {
@@ -390,148 +502,146 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-func (h *restHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.serveUI(w, r) {
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/shares/") {
-		h.handleShareAccess(w, r)
-		return
-	}
-	if r.URL.Path == strings.TrimRight(h.opts.BasePath, "/") {
-		h.writeJSON(w, http.StatusOK, map[string]any{
-			"service":   "storhub-rest",
-			"version":   "v1",
-			"base_path": h.opts.BasePath,
-		})
-		return
-	}
-
-	project, resource, ok := h.parseRoute(r.URL.Path)
-	if !ok {
-		h.writeError(w, http.StatusNotFound, "not_found", "route not found")
-		return
-	}
-
-	switch resource {
-	case "":
-		h.handleProject(w, r, project)
-	case "nodes":
-		h.handleNodes(w, r, project)
-	case "children":
-		h.handleChildren(w, r, project)
-	case "content":
-		h.handleContent(w, r, project)
-	case "xattrs":
-		h.handleXAttrs(w, r, project)
-	case "xattrs/value":
-		h.handleXAttrValue(w, r, project)
-	case "revisions":
-		h.handleRevisions(w, r, project)
-	case "ops/create-file":
-		h.handleCreateFile(w, r, project)
-	case "ops/mkdir":
-		h.handleMkdir(w, r, project)
-	case "ops/rmdir":
-		h.handleRmdir(w, r, project)
-	case "ops/unlink":
-		h.handleUnlink(w, r, project)
-	case "ops/rename":
-		h.handleRename(w, r, project)
-	case "ops/link":
-		h.handleLink(w, r, project)
-	case "ops/symlink":
-		h.handleSymlink(w, r, project)
-	case "ops/chmod":
-		h.handleChmod(w, r, project)
-	case "ops/chown":
-		h.handleChown(w, r, project)
-	case "ops/utimes":
-		h.handleUtimes(w, r, project)
-	case "ops/rollback":
-		h.handleRollback(w, r, project)
-	case "ops/share":
-		h.handleShare(w, r, project)
-	default:
-		h.writeError(w, http.StatusNotFound, "not_found", "route not found")
-	}
+func (h *restHandler) registerProjectRoutes(r chi.Router) {
+	r.Get("/", h.handleProject)
+	r.Delete("/", h.handleProject)
+	r.Get("/nodes", h.handleNodes)
+	r.Head("/nodes", h.handleNodes)
+	r.Delete("/nodes", h.handleNodes)
+	r.Get("/children", h.handleChildren)
+	r.Get("/content", h.handleContentRead)
+	r.Head("/content", h.handleContentRead)
+	r.Put("/content", h.handleContentReplace)
+	r.Patch("/content", h.handleContentPatch)
+	r.Get("/xattrs", h.handleXAttrs)
+	r.Get("/xattrs/value", h.handleXAttrValue)
+	r.Put("/xattrs/value", h.handleXAttrValue)
+	r.Delete("/xattrs/value", h.handleXAttrValue)
+	r.Get("/revisions", h.handleRevisions)
+	r.Post("/ops/create-file", h.handleCreateFile)
+	r.Post("/ops/mkdir", h.handleMkdir)
+	r.Post("/ops/rmdir", h.handleRmdir)
+	r.Post("/ops/unlink", h.handleUnlink)
+	r.Post("/ops/rename", h.handleRename)
+	r.Post("/ops/link", h.handleLink)
+	r.Post("/ops/symlink", h.handleSymlink)
+	r.Post("/ops/chmod", h.handleChmod)
+	r.Post("/ops/chown", h.handleChown)
+	r.Post("/ops/utimes", h.handleUtimes)
+	r.Post("/ops/rollback", h.handleRollback)
+	r.Get("/shares", h.handleProjectShares)
+	r.Post("/shares", h.handleProjectShares)
+	r.Get("/shares/{shareID}", h.handleProjectShare)
+	r.Delete("/shares/{shareID}", h.handleProjectShare)
 }
 
-func (h *restHandler) shareKey() []byte {
-	if len(h.opts.ShareSigningKey) != 0 {
-		return h.opts.ShareSigningKey
-	}
-	if h.opts.Auth != nil && len(h.opts.Auth.TokenSigningKey) != 0 {
-		return h.opts.Auth.TokenSigningKey
-	}
-	key := make([]byte, 32)
-	_, _ = rand.Read(key)
-	h.opts.ShareSigningKey = key
-	return h.opts.ShareSigningKey
-}
-
-func (h *restHandler) serveUI(w http.ResponseWriter, r *http.Request) bool {
-	switch r.URL.Path {
-	case "/":
-		h.writeHTML(w, http.StatusOK, uiDocument)
-		return true
-	case "/ui":
-		h.writeHTML(w, http.StatusOK, uiDocument)
-		return true
-	case "/ui/styles.css":
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		_, _ = io.WriteString(w, uiStyles)
-		return true
-	case "/ui/app.js":
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		_, _ = io.WriteString(w, uiScript)
-		return true
-	case "/ui/config.js":
-		payload, err := json.Marshal(map[string]any{
-			"basePath":    h.opts.BasePath,
-			"authEnabled": h.opts.Auth != nil,
-			"sharePath":   "/shares/",
-		})
-		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return true
+func (h *restHandler) requestLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now().UTC()
+		sw := &statusWriter{ResponseWriter: w}
+		logging.Info(h.logger, "http request start", "method", r.Method, "path", r.URL.Path, "query", r.URL.RawQuery, "remote", r.RemoteAddr)
+		next.ServeHTTP(sw, r)
+		status := sw.status
+		if status == 0 {
+			status = http.StatusOK
 		}
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "window.STORHUB_UI_CONFIG = %s;", payload)
-		return true
-	default:
-		return false
+		logging.Info(h.logger, "http request complete", "method", r.Method, "path", r.URL.Path, "status", status, "bytes", sw.bytes, "elapsed", time.Since(started))
+	})
+}
+
+func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
+				h.writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
+				return
+			}
+			token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+
+			principal, err := auth.parseToken(token)
+			if err == nil {
+				ctx := context.WithValue(r.Context(), clientCtxKey, &authorizedClient{base: h.client, principal: principal})
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			claims, err := h.parseShareToken(token)
+			if err == nil {
+				project := chi.URLParam(r, "project")
+				if project == claims.Project && strings.HasPrefix(r.URL.Path, basePath+"/projects/"+project+"/shares") {
+					h.writeError(w, http.StatusForbidden, "forbidden", "share links cannot manage shares")
+					return
+				}
+				ctx := context.WithValue(r.Context(), clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
+			h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
+		})
 	}
 }
 
-func (h *restHandler) parseRoute(requestPath string) (project, resource string, ok bool) {
-	base := strings.TrimRight(h.opts.BasePath, "/")
-	if !strings.HasPrefix(requestPath, base+"/") {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(requestPath, base+"/")
-	parts := strings.Split(rest, "/")
-	if len(parts) < 2 || parts[0] != "projects" || strings.TrimSpace(parts[1]) == "" {
-		return "", "", false
-	}
-	project = parts[1]
-	if len(parts) == 2 {
-		return project, "", true
-	}
-	return project, strings.Join(parts[2:], "/"), true
+func (h *restHandler) serveUIRoot(w http.ResponseWriter, r *http.Request) {
+	h.writeHTML(w, http.StatusOK, uiDocument)
 }
 
-func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request, project string) {
+func (h *restHandler) serveStyles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	_, _ = io.WriteString(w, uiStyles)
+}
+
+func (h *restHandler) serveAppJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = io.WriteString(w, uiScript)
+}
+
+func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
+	payload, err := json.Marshal(map[string]any{
+		"basePath":    h.opts.BasePath,
+		"authEnabled": h.opts.Auth != nil,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "window.STORHUB_UI_CONFIG = %s;", payload)
+}
+
+func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"service":   "storhub-rest",
+		"version":   "v1",
+		"base_path": h.opts.BasePath,
+	})
+}
+
+func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
+	shareID := chi.URLParam(r, "id")
+	record, ok := h.lookupShare(shareID)
+	if !ok {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
+}
+
+func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	switch r.Method {
 	case http.MethodGet:
-		stats, err := h.client.StatFS(project)
+		stats, err := h.clientFor(r).StatFS(project)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 		h.writeJSON(w, http.StatusOK, projectResponse{Project: project, Stats: stats})
 	case http.MethodDelete:
-		if err := h.client.DeleteProject(project); err != nil {
+		if err := h.clientFor(r).DeleteProject(project); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -541,11 +651,12 @@ func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request, proj
 	}
 }
 
-func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request, project string) {
+func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		entry, err := h.client.StatPath(project, targetPath)
+		entry, err := h.clientFor(r).StatPath(project, targetPath)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -562,7 +673,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request, projec
 		}
 		h.writeJSON(w, http.StatusOK, nodeResponse{Project: project, Entry: entry, ETag: eTag})
 	case http.MethodDelete:
-		entry, err := h.client.StatPath(project, targetPath)
+		entry, err := h.clientFor(r).StatPath(project, targetPath)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -579,9 +690,9 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request, projec
 				h.writeError(w, http.StatusNotImplemented, "recursive_delete_unsupported", "recursive directory deletion is not supported")
 				return
 			}
-			err = h.client.Rmdir(project, targetPath)
+			err = h.clientFor(r).Rmdir(project, targetPath)
 		} else {
-			err = h.client.DeleteFile(project, targetPath)
+			err = h.clientFor(r).DeleteFile(project, targetPath)
 		}
 		if err != nil {
 			h.writeMappedError(w, err)
@@ -593,13 +704,10 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request, projec
 	}
 }
 
-func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodGet {
-		h.methodNotAllowed(w, http.MethodGet)
-		return
-	}
+func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	dirPath := r.URL.Query().Get("path")
-	entries, err := h.client.ReadDir(project, dirPath)
+	entries, err := h.clientFor(r).ReadDir(project, dirPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -607,22 +715,10 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request, pro
 	h.writeJSON(w, http.StatusOK, entriesResponse{Project: project, Path: dirPath, Entries: entries})
 }
 
-func (h *restHandler) handleContent(w http.ResponseWriter, r *http.Request, project string) {
+func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.handleContentRead(w, r, project, filePath)
-	case http.MethodPut:
-		h.handleContentReplace(w, r, project, filePath)
-	case http.MethodPatch:
-		h.handleContentPatch(w, r, project, filePath)
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch)
-	}
-}
-
-func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request, project, filePath string) {
-	entry, err := h.client.StatPath(project, filePath)
+	entry, err := h.clientFor(r).StatPath(project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -632,7 +728,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if entry.IsSymlink {
-		target, readErr := h.client.Readlink(project, filePath)
+		target, readErr := h.clientFor(r).Readlink(project, filePath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return
@@ -679,7 +775,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request, 
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
-		chunk, readErr := h.client.ReadFileAt(project, filePath, offset, readLen)
+		chunk, readErr := h.clientFor(r).ReadFileAt(project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return
 		}
@@ -692,8 +788,10 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Request, project, filePath string) {
-	entry, exists, err := h.lookupOptional(project, filePath)
+func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	filePath := r.URL.Query().Get("path")
+	entry, exists, err := h.lookupOptional(r, project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -720,33 +818,35 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 
 	created := !exists
 	if !exists {
-		if _, err := h.client.CreateFile(project, filePath); err != nil {
+		if _, err := h.clientFor(r).CreateFile(project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 	} else if entry.IsSymlink {
-		if err := h.client.DeleteFile(project, filePath); err != nil {
+		if err := h.clientFor(r).DeleteFile(project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
-		if _, err := h.client.CreateFile(project, filePath); err != nil {
+		if _, err := h.clientFor(r).CreateFile(project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
-	} else if _, err := h.client.TruncateFile(project, filePath, 0); err != nil {
+	} else if _, err := h.clientFor(r).TruncateFile(project, filePath, 0); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 
-	if err := h.streamWriteBody(project, filePath, r.Body, 0); err != nil {
+	if err := h.streamWriteBody(r, project, filePath, r.Body, 0); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, filePath, ternaryStatus(created, http.StatusCreated, http.StatusOK))
+	h.respondWithNode(w, r, project, filePath, ternaryStatus(created, http.StatusCreated, http.StatusOK))
 }
 
-func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request, project, filePath string) {
-	entry, err := h.client.StatPath(project, filePath)
+func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	filePath := r.URL.Query().Get("path")
+	entry, err := h.clientFor(r).StatPath(project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -760,7 +860,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request,
 	op := strings.TrimSpace(r.URL.Query().Get("op"))
 	switch op {
 	case "append":
-		if err := h.streamAppendBody(project, filePath, r.Body); err != nil {
+		if err := h.streamAppendBody(r, project, filePath, r.Body); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -770,7 +870,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request,
 			h.writeMappedError(w, parseErr)
 			return
 		}
-		if err := h.streamWriteBody(project, filePath, r.Body, offset); err != nil {
+		if err := h.streamWriteBody(r, project, filePath, r.Body, offset); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -790,7 +890,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request,
 			h.writeMappedError(w, readErr)
 			return
 		}
-		if _, err := h.client.PatchFile(project, filePath, offset, deleteSize, edit); err != nil {
+		if _, err := h.clientFor(r).PatchFile(project, filePath, offset, deleteSize, edit); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -800,7 +900,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request,
 			h.writeMappedError(w, parseErr)
 			return
 		}
-		if _, err := h.client.TruncateFile(project, filePath, size); err != nil {
+		if _, err := h.clientFor(r).TruncateFile(project, filePath, size); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -808,16 +908,12 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request,
 		h.writeError(w, http.StatusBadRequest, "invalid_patch_op", "query parameter op must be one of append, write, patch, truncate")
 		return
 	}
-	h.respondWithNode(w, project, filePath, http.StatusOK)
 }
 
-func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodGet {
-		h.methodNotAllowed(w, http.MethodGet)
-		return
-	}
+func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	names, err := h.client.ListXAttr(project, targetPath)
+	names, err := h.clientFor(r).ListXAttr(project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -825,12 +921,13 @@ func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request, proje
 	h.writeJSON(w, http.StatusOK, xattrListResponse{Project: project, Path: targetPath, Names: names})
 }
 
-func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request, project string) {
+func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
 	name := r.URL.Query().Get("name")
 	switch r.Method {
 	case http.MethodGet:
-		value, err := h.client.GetXAttr(project, targetPath, name)
+		value, err := h.clientFor(r).GetXAttr(project, targetPath, name)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -849,13 +946,13 @@ func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request, p
 			h.writeError(w, http.StatusRequestEntityTooLarge, "xattr_too_large", "xattr value exceeds the configured limit")
 			return
 		}
-		if err := h.client.SetXAttr(project, targetPath, name, payload); err != nil {
+		if err := h.clientFor(r).SetXAttr(project, targetPath, name, payload); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
-		if err := h.client.RemoveXAttr(project, targetPath, name); err != nil {
+		if err := h.clientFor(r).RemoveXAttr(project, targetPath, name); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -865,12 +962,9 @@ func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request, p
 	}
 }
 
-func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodGet {
-		h.methodNotAllowed(w, http.MethodGet)
-		return
-	}
-	revisions, err := h.client.ListMetadataRevisions(project)
+func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	revisions, err := h.clientFor(r).ListMetadataRevisions(project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -878,204 +972,197 @@ func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request, pr
 	h.writeJSON(w, http.StatusOK, revisionsResponse{Project: project, Revisions: revisions})
 }
 
-func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req pathRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.client.CreateFile(project, req.Path); err != nil {
+	if _, err := h.clientFor(r).CreateFile(project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.Path, http.StatusCreated)
+	h.respondWithNode(w, r, project, req.Path, http.StatusCreated)
 }
 
-func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req pathRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Mkdir(project, req.Path); err != nil {
+	if err := h.clientFor(r).Mkdir(project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.Path, http.StatusCreated)
+	h.respondWithNode(w, r, project, req.Path, http.StatusCreated)
 }
 
-func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req pathRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Rmdir(project, req.Path); err != nil {
+	if err := h.clientFor(r).Rmdir(project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req pathRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.DeleteFile(project, req.Path); err != nil {
+	if err := h.clientFor(r).DeleteFile(project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req renameRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Rename(project, req.OldPath, req.NewPath); err != nil {
+	if err := h.clientFor(r).Rename(project, req.OldPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.NewPath, http.StatusOK)
+	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
 }
 
-func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req linkRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.client.Link(project, req.ExistingPath, req.NewPath); err != nil {
+	if _, err := h.clientFor(r).Link(project, req.ExistingPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.NewPath, http.StatusCreated)
+	h.respondWithNode(w, r, project, req.NewPath, http.StatusCreated)
 }
 
-func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req symlinkRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.client.Symlink(project, req.Target, req.LinkPath); err != nil {
+	if _, err := h.clientFor(r).Symlink(project, req.Target, req.LinkPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.LinkPath, http.StatusCreated)
+	h.respondWithNode(w, r, project, req.LinkPath, http.StatusCreated)
 }
 
-func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req chmodRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Chmod(project, req.Path, req.Mode); err != nil {
+	if err := h.clientFor(r).Chmod(project, req.Path, req.Mode); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.Path, http.StatusOK)
+	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
-func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req chownRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Chown(project, req.Path, req.UID, req.GID); err != nil {
+	if err := h.clientFor(r).Chown(project, req.Path, req.UID, req.GID); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.Path, http.StatusOK)
+	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
-func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req utimesRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.Chtimes(project, req.Path, req.Atime, req.Mtime); err != nil {
+	if err := h.clientFor(r).Chtimes(project, req.Path, req.Atime, req.Mtime); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, project, req.Path, http.StatusOK)
+	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
-func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
-	}
+func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
 	var req rollbackRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.client.RollbackMetadata(project, req.CommitSHA); err != nil {
+	if err := h.clientFor(r).RollbackMetadata(project, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
 }
 
-func (h *restHandler) handleShare(w http.ResponseWriter, r *http.Request, project string) {
-	if r.Method != http.MethodPost {
-		h.methodNotAllowed(w, http.MethodPost)
-		return
+func (h *restHandler) handleProjectShares(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	switch r.Method {
+	case http.MethodGet:
+		h.listProjectShares(w, r, project)
+	case http.MethodPost:
+		h.createProjectShare(w, r, project)
+	default:
+		h.methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+func (h *restHandler) handleProjectShare(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	shareID := chi.URLParam(r, "shareID")
+	switch r.Method {
+	case http.MethodDelete:
+		h.deleteProjectShare(w, r, project, shareID)
+	case http.MethodGet:
+		h.getProjectShare(w, r, project, shareID)
+	default:
+		h.methodNotAllowed(w, http.MethodGet, http.MethodDelete)
+	}
+}
+
+func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request, project string) {
 	var req shareRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	_, err := h.client.StatPath(project, req.Path)
+	sharePath, err := canonicalSharePath(req.Path)
+	if err != nil {
+		h.writeMappedError(w, errBadRequest("invalid share path"))
+		return
+	}
+	entry, err := h.clientFor(r).StatPath(project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1088,66 +1175,97 @@ func (h *restHandler) handleShare(w http.ResponseWriter, r *http.Request, projec
 	if req.Download != nil {
 		download = *req.Download
 	}
-	claims := shareClaims{Kind: "share", Project: project, Path: req.Path, Download: download, Expires: time.Now().Add(expiresIn).Unix()}
-	token, err := h.signShareToken(claims)
+	record, err := h.newShareRecord(project, sharePath, download, entry.IsDir, expiresIn)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	url := "/shares/" + token
-	h.writeJSON(w, http.StatusOK, shareResponse{Project: project, Path: req.Path, URL: url, Token: token, ExpiresAt: time.Unix(claims.Expires, 0).UTC().Format(time.RFC3339), Download: download})
+	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
 }
 
-func (h *restHandler) handleShareAccess(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		h.methodNotAllowed(w, http.MethodGet, http.MethodHead)
-		return
-	}
-
-	// Check if this is a download request
-	pathAfterShares := strings.TrimPrefix(r.URL.Path, "/shares/")
-	isDownload := strings.HasSuffix(pathAfterShares, "/download")
-
-	var token string
-	if isDownload {
-		token = strings.TrimSuffix(pathAfterShares, "/download")
-	} else {
-		token = pathAfterShares
-	}
-
-	claims, err := h.parseShareToken(token)
-	if err != nil {
+func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
+	if _, err := h.clientFor(r).StatFS(project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
+	shares := h.projectShareResponses(project)
+	h.writeJSON(w, http.StatusOK, sharesResponse{Project: project, Shares: shares})
+}
 
-	// If not a download request, redirect to UI
-	if !isDownload {
-		http.Redirect(w, r, "/ui?share="+token, http.StatusFound)
+func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	record, ok := h.lookupShare(shareID)
+	if !ok || record.Project != project {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	if _, err := h.clientFor(r).StatFS(project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
+}
+
+func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	record, ok := h.lookupShare(shareID)
+	if !ok || record.Project != project {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	if _, err := h.clientFor(r).StatFS(project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.removeShare(record.ID)
+	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})
+}
+
+func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
+	shareID := chi.URLParam(r, "id")
+	claims, err := h.parseShareToken(shareID)
+	if err != nil {
+		h.writeMappedError(w, err)
 		return
 	}
 	if !claims.Download {
 		h.writeError(w, http.StatusForbidden, "forbidden", "download is disabled for this share")
 		return
 	}
-
-	// Download request - serve the content
-	entry, err := h.client.StatPath(claims.Project, claims.Path)
+	targetPath, err := h.resolveSharePath(claims, r.URL.Query().Get("path"))
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
+	h.serveDownloadPath(w, r, claims.Project, targetPath)
+}
 
-	// For directories, we could create a zip in the future, but for now return an error
+func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (string, error) {
+	targetPath := claims.Path
+	if strings.TrimSpace(rawPath) != "" {
+		canonicalPath, err := canonicalSharePath(rawPath)
+		if err != nil {
+			return "", err
+		}
+		targetPath = canonicalPath
+	}
+	if !hasPathPrefix(targetPath, claims.Path) {
+		return "", errForbidden("access denied: path not shared")
+	}
+	return targetPath, nil
+}
+
+func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, project, targetPath string) {
+	entry, err := h.clientFor(r).StatPath(project, targetPath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if entry.IsDir {
 		h.writeError(w, http.StatusNotImplemented, "directory_download", "directory download not yet implemented")
 		return
 	}
-
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(claims.Path)))
-
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
 	if entry.IsSymlink {
-		target, readErr := h.client.Readlink(claims.Project, claims.Path)
+		target, readErr := h.clientFor(r).Readlink(project, targetPath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return
@@ -1161,11 +1279,10 @@ func (h *restHandler) handleShareAccess(w http.ResponseWriter, r *http.Request) 
 		_, _ = io.WriteString(w, target)
 		return
 	}
-
 	eTag := restEntryETag(entry)
 	w.Header().Set("ETag", eTag)
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Type", detectContentType(claims.Path))
+	w.Header().Set("Content-Type", detectContentType(targetPath))
 	start, end, partial, rangeErr := parseByteRange(r.Header.Get("Range"), entry.Size)
 	if rangeErr != nil {
 		if strings.TrimSpace(r.Header.Get("Range")) != "" {
@@ -1191,7 +1308,7 @@ func (h *restHandler) handleShareAccess(w http.ResponseWriter, r *http.Request) 
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
-		chunk, readErr := h.client.ReadFileAt(claims.Project, claims.Path, offset, readLen)
+		chunk, readErr := h.clientFor(r).ReadFileAt(project, targetPath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return
 		}
@@ -1205,52 +1322,108 @@ func (h *restHandler) handleShareAccess(w http.ResponseWriter, r *http.Request) 
 }
 
 func hasPathPrefix(targetPath, allowedPath string) bool {
-	targetPath = strings.Trim(strings.TrimSpace(targetPath), "/")
-	allowedPath = strings.Trim(strings.TrimSpace(allowedPath), "/")
+	targetPath, err := canonicalSharePath(targetPath)
+	if err != nil {
+		return false
+	}
+	allowedPath, err = canonicalSharePath(allowedPath)
+	if err != nil {
+		return false
+	}
 	if allowedPath == "" {
 		return true
 	}
 	return targetPath == allowedPath || strings.HasPrefix(targetPath, allowedPath+"/")
 }
 
-func (h *restHandler) signShareToken(claims shareClaims) (string, error) {
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
+func canonicalSharePath(raw string) (string, error) {
+	clean := path.Clean("/" + strings.TrimSpace(raw))
+	clean = strings.TrimPrefix(clean, "/")
+	if clean == "." {
+		return "", nil
 	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, h.shareKey())
-	_, _ = mac.Write([]byte(payloadPart))
-	return payloadPart + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+	if strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", errBadRequest("path traversal is not allowed")
+	}
+	return clean, nil
 }
 
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return nil, errBadRequest("invalid share token")
-	}
-	mac := hmac.New(sha256.New, h.shareKey())
-	_, _ = mac.Write([]byte(parts[0]))
-	expected := mac.Sum(nil)
-	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || !hmac.Equal(actual, expected) {
+	record, ok := h.lookupShare(strings.TrimSpace(token))
+	if !ok {
 		return nil, errForbidden("invalid share token")
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	return &shareClaims{ID: record.ID, Project: record.Project, Path: record.Path, Download: record.Download, IsDir: record.IsDir, Expires: record.ExpiresAt.Unix()}, nil
+}
+
+func (h *restHandler) newShareRecord(project, sharePath string, download, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
+	id, err := newShareID()
 	if err != nil {
-		return nil, errBadRequest("invalid share token")
+		return nil, err
 	}
-	var claims shareClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, errBadRequest("invalid share token")
+	now := time.Now().UTC()
+	record := &shareRecord{ID: id, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: now.Add(expiresIn)}
+	h.shares.mu.Lock()
+	h.shares.items[id] = record
+	h.shares.mu.Unlock()
+	return record, nil
+}
+
+func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
+	h.shares.mu.RLock()
+	record, ok := h.shares.items[shareID]
+	h.shares.mu.RUnlock()
+	if !ok {
+		return nil, false
 	}
-	if claims.Kind != "share" {
-		return nil, errForbidden("invalid share token")
+	if !record.ExpiresAt.After(time.Now()) {
+		h.removeShare(shareID)
+		return nil, false
 	}
-	if claims.Expires <= time.Now().Unix() {
-		return nil, errForbidden("share token expired")
+	copy := *record
+	return &copy, true
+}
+
+func (h *restHandler) removeShare(shareID string) {
+	h.shares.mu.Lock()
+	delete(h.shares.items, shareID)
+	h.shares.mu.Unlock()
+}
+
+func (h *restHandler) projectShareResponses(project string) []shareResponse {
+	now := time.Now()
+	h.shares.mu.Lock()
+	defer h.shares.mu.Unlock()
+	shares := make([]shareResponse, 0)
+	for shareID, record := range h.shares.items {
+		if !record.ExpiresAt.After(now) {
+			delete(h.shares.items, shareID)
+			continue
+		}
+		if record.Project != project {
+			continue
+		}
+		copy := *record
+		shares = append(shares, h.shareResponse(&copy))
 	}
-	return &claims, nil
+	return shares
+}
+
+func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
+	url := "/shares/" + record.ID
+	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, URL: url, Token: record.ID, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
+	if record.Download && !record.IsDir {
+		resp.DownloadURL = url + "/download"
+	}
+	return resp
+}
+
+func newShareID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
@@ -1268,8 +1441,8 @@ func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
 	return nil
 }
 
-func (h *restHandler) respondWithNode(w http.ResponseWriter, project, targetPath string, status int) {
-	entry, err := h.client.StatPath(project, targetPath)
+func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, project, targetPath string, status int) {
+	entry, err := h.clientFor(r).StatPath(project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1277,8 +1450,8 @@ func (h *restHandler) respondWithNode(w http.ResponseWriter, project, targetPath
 	h.writeJSON(w, status, nodeResponse{Project: project, Entry: entry, ETag: restEntryETag(entry)})
 }
 
-func (h *restHandler) lookupOptional(project, targetPath string) (*shfs.EntryInfo, bool, error) {
-	entry, err := h.client.StatPath(project, targetPath)
+func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string) (*shfs.EntryInfo, bool, error) {
+	entry, err := h.clientFor(r).StatPath(project, targetPath)
 	if err == nil {
 		return entry, true, nil
 	}
@@ -1288,12 +1461,12 @@ func (h *restHandler) lookupOptional(project, targetPath string) (*shfs.EntryInf
 	return nil, false, err
 }
 
-func (h *restHandler) streamWriteBody(project, filePath string, body io.Reader, offset int64) error {
+func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
 	buf := make([]byte, h.opts.StreamChunkSize)
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, writeErr := h.client.WriteFileAt(project, filePath, offset, append([]byte(nil), buf[:n]...)); writeErr != nil {
+			if _, writeErr := h.clientFor(r).WriteFileAt(project, filePath, offset, append([]byte(nil), buf[:n]...)); writeErr != nil {
 				return writeErr
 			}
 			offset += int64(n)
@@ -1307,12 +1480,12 @@ func (h *restHandler) streamWriteBody(project, filePath string, body io.Reader, 
 	}
 }
 
-func (h *restHandler) streamAppendBody(project, filePath string, body io.Reader) error {
+func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
 	buf := make([]byte, h.opts.StreamChunkSize)
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, appendErr := h.client.AppendFile(project, filePath, append([]byte(nil), buf[:n]...)); appendErr != nil {
+			if _, appendErr := h.clientFor(r).AppendFile(project, filePath, append([]byte(nil), buf[:n]...)); appendErr != nil {
 				return appendErr
 			}
 		}
@@ -1414,19 +1587,15 @@ func mappedStatus(err error) int {
 	if errors.As(err, &rerr) {
 		return rerr.status
 	}
-	if errors.Is(err, storage.ErrProjectNotFound) || errors.Is(err, storage.ErrFileNotFound) {
+	if errors.Is(err, shfs.ErrNotFound) {
 		return http.StatusNotFound
 	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	switch {
-	case strings.Contains(message, "not found"):
-		return http.StatusNotFound
-	case strings.Contains(message, "already exists"), strings.Contains(message, "not empty"), strings.Contains(message, "destination already exists"), strings.Contains(message, "is a directory"), strings.Contains(message, "not a directory"):
+	case errors.Is(err, shfs.ErrAlreadyExists),
+		errors.Is(err, shfs.ErrNotEmpty),
+		errors.Is(err, shfs.ErrIsDirectory),
+		errors.Is(err, shfs.ErrNotDirectory):
 		return http.StatusConflict
-	case strings.Contains(message, "parent directory does not exist"):
-		return http.StatusConflict
-	case strings.Contains(message, "required"), strings.Contains(message, "must be"), strings.Contains(message, "cannot"), strings.Contains(message, "invalid"):
-		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}

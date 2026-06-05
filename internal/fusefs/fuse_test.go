@@ -97,24 +97,22 @@ func TestReadCacheAndCleanupHelpers(t *testing.T) {
 		t.Fatalf("expected cache reuse, got %d reads", reads)
 	}
 	fsys.mu.Lock()
-	for _, elem := range fsys.pageCache {
-		entry := elem.Value.(*pageCacheEntry)
-		entry.expires = time.Now().Add(-time.Minute)
-	}
+	fsys.pageCache.Purge()
+	fsys.inodePages = make(map[uint64]map[int64]struct{})
 	fsys.mu.Unlock()
 	stale := filepath.Join(cacheDir, "stale.tmp")
 	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write stale cache file: %v", err)
 	}
 	fsys.cleanupExpiredCache()
-	if len(fsys.pageCache) != 0 {
+	if fsys.pageCache.Len() != 0 {
 		t.Fatal("expected expired cache to be cleared")
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("expected stale file cleanup, got %v", err)
 	}
 	fsys.evictInodeCache(7)
-	if len(fsys.pageCache) != 0 {
+	if fsys.pageCache.Len() != 0 {
 		t.Fatal("expected inode cache eviction")
 	}
 }
@@ -412,28 +410,23 @@ func TestSequentialReadHandleExpandsWindow(t *testing.T) {
 	}
 }
 
-func TestSequentialWriteCommitStreamsChunks(t *testing.T) {
-	var uploads []meta.ChunkInfo
-	var finalized bool
+func TestSequentialWriteCommitUsesWritebackReplace(t *testing.T) {
+	var replaced bool
 	fsys, err := New(&stubHub{
 		chunkSize: 4,
-		prepareReplace: func(_ context.Context, _ string, target string, required int) (string, string, error) {
-			if target != "demo.bin" || required != 1 {
-				t.Fatalf("unexpected prepare args target=%q required=%d", target, required)
+		replaceFile: func(_ context.Context, _ string, target, inputPath string) (*meta.FileMetadata, error) {
+			replaced = true
+			if target != "demo.bin" {
+				t.Fatalf("unexpected replace target=%q", target)
 			}
-			return "v1", "upload", nil
-		},
-		uploadChunk: func(_ context.Context, _ string, releaseTag, uploadURL string, index int, offset int64, data []byte) (meta.ChunkInfo, error) {
-			chunk := meta.ChunkInfo{Name: string(data), Index: index, Offset: offset, Size: int64(len(data)), Release: releaseTag, AssetID: int64(index + 1)}
-			uploads = append(uploads, chunk)
-			return chunk, nil
-		},
-		finalizeChunks: func(_ context.Context, _ string, target, releaseTag string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
-			finalized = true
-			if target != "demo.bin" || size != 10 || len(chunks) != 3 {
-				t.Fatalf("unexpected finalize args target=%q size=%d chunks=%d", target, size, len(chunks))
+			data, err := os.ReadFile(inputPath)
+			if err != nil {
+				t.Fatalf("read replace input: %v", err)
 			}
-			return &meta.FileMetadata{Name: target, Size: size, Release: releaseTag, Chunks: chunks}, nil
+			if string(data) != "abcdefghij" {
+				t.Fatalf("unexpected replace input data: %q", data)
+			}
+			return &meta.FileMetadata{Name: target, Size: int64(len(data))}, nil
 		},
 	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -445,16 +438,13 @@ func TestSequentialWriteCommitStreamsChunks(t *testing.T) {
 		t.Fatalf("new handle: %v", err)
 	}
 	if n, errno := h.Write(context.Background(), []byte("abcdefghij"), 0); errno != 0 || n != 10 {
-		t.Fatalf("stream write: n=%d errno=%v", n, errno)
+		t.Fatalf("write: n=%d errno=%v", n, errno)
 	}
 	if errno := h.Release(context.Background()); errno != 0 {
-		t.Fatalf("release stream handle: %v", errno)
+		t.Fatalf("release handle: %v", errno)
 	}
-	if !finalized {
-		t.Fatal("expected streamed commit finalization")
-	}
-	if len(uploads) != 3 || uploads[0].Offset != 0 || uploads[1].Offset != 4 || uploads[2].Offset != 8 {
-		t.Fatalf("unexpected uploaded chunks: %+v", uploads)
+	if !replaced {
+		t.Fatal("expected writeback replace")
 	}
 }
 
@@ -487,8 +477,8 @@ func TestLockAndErrorHelpers(t *testing.T) {
 	if errnoFromError(nil) != 0 || errnoFromError(context.Canceled) != syscall.EINTR || errnoFromError(context.DeadlineExceeded) != syscall.ETIMEDOUT {
 		t.Fatal("unexpected context error mapping")
 	}
-	if errnoFromError(errors.New("already exists")) != syscall.EEXIST || errnoFromError(errors.New("xattr not found")) != syscall.ENODATA {
-		t.Fatal("unexpected message-based errno mapping")
+	if errnoFromError(shfs.ErrAlreadyExists) != syscall.EEXIST || errnoFromError(shfs.ErrXAttrNotFound) != syscall.ENODATA {
+		t.Fatal("unexpected sentinel errno mapping")
 	}
 	if errnoFromError(errors.New("some other issue")) != syscall.EIO {
 		t.Fatal("expected default errno mapping")
@@ -530,7 +520,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 		},
 		getXAttr: func(context.Context, string, string, string) ([]byte, error) {
 			if setCalls == 0 {
-				return nil, errors.New("xattr not found")
+				return nil, shfs.ErrXAttrNotFound
 			}
 			return []byte("value"), nil
 		},

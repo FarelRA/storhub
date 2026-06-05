@@ -86,7 +86,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		return nil, err
 	}
 	if repoMeta.FindFile(cleanPath) != nil {
-		return nil, fmt.Errorf("file already exists: %s", cleanPath)
+		return nil, AlreadyExists(cleanPath)
 	}
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
@@ -114,7 +114,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 			return err
 		}
 		if repo.FindFile(cleanPath) != nil {
-			return fmt.Errorf("file already exists: %s", cleanPath)
+			return AlreadyExists(cleanPath)
 		}
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repo, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 		fileMeta.Inode = repo.AllocateInode()
@@ -150,13 +150,13 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 			return err
 		}
 		if repo.HasDirectory(cleanPath) {
-			return fmt.Errorf("directory already exists: %s", cleanPath)
+			return AlreadyExists(cleanPath)
 		}
 		if repo.FindFile(cleanPath) != nil {
-			return fmt.Errorf("file already exists at path: %s", cleanPath)
+			return AlreadyExists(cleanPath)
 		}
 		if parent := ParentPath(cleanPath); parent != "" && !repo.HasDirectory(parent) {
-			return fmt.Errorf("parent directory does not exist: %s", parent)
+			return NotFound(parent)
 		}
 		repo.EnsureDirectory(cleanPath, s.backend.Now().UTC())
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
@@ -189,14 +189,14 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 			return err
 		}
 		if repo.FindFile(cleanPath) != nil {
-			return fmt.Errorf("not a directory: %s", cleanPath)
+			return NotDirectory(cleanPath)
 		}
 		if !repo.HasDirectory(cleanPath) {
-			return fmt.Errorf("directory not found: %s", cleanPath)
+			return NotFound(cleanPath)
 		}
 		childDirs, childFiles := repo.DirectoryChildren(cleanPath)
 		if len(childDirs) > 0 || len(childFiles) > 0 {
-			return fmt.Errorf("directory not empty: %s", cleanPath)
+			return NotEmpty(cleanPath)
 		}
 		repo.RemoveDirectory(cleanPath)
 		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
@@ -231,7 +231,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return err
 		}
 		if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
-			return fmt.Errorf("parent directory does not exist: %s", parent)
+			return NotFound(parent)
 		}
 		if file := repo.FindFile(oldClean); file != nil {
 			if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
@@ -243,7 +243,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 				}
 			}
 			if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
-				return fmt.Errorf("destination already exists: %s", newClean)
+				return AlreadyExists(newClean)
 			}
 			renamed := file.Clone()
 			renamed.Name = newClean
@@ -255,7 +255,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return nil
 		}
 		if !repo.HasDirectory(oldClean) {
-			return fmt.Errorf("path not found: %s", oldClean)
+			return NotFound(oldClean)
 		}
 		if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
 			return err
@@ -270,7 +270,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return fmt.Errorf("cannot move directory %s into itself %s", oldClean, newClean)
 		}
 		if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
-			return fmt.Errorf("destination already exists: %s", newClean)
+			return AlreadyExists(newClean)
 		}
 		now := s.backend.Now().UTC()
 		for i := range repo.Directories {
@@ -500,7 +500,7 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 		result = EntryInfoFromDirectory(dir)
 		return result, nil
 	}
-	return nil, fmt.Errorf("path not found: %s", cleanPath)
+	return nil, NotFound(cleanPath)
 }
 
 func (s *Service) StatFSContext(ctx context.Context, project string) (result *FSStats, err error) {
@@ -539,10 +539,10 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 		return nil, err
 	}
 	if cleanPath != "" && repo.FindFile(cleanPath) != nil {
-		return nil, fmt.Errorf("not a directory: %s", cleanPath)
+		return nil, NotDirectory(cleanPath)
 	}
 	if cleanPath != "" && !repo.HasDirectory(cleanPath) {
-		return nil, fmt.Errorf("directory not found: %s", cleanPath)
+		return nil, NotFound(cleanPath)
 	}
 	dirs, files := repo.DirectoryChildren(cleanPath)
 	entries := make([]DirEntry, 0, len(dirs)+len(files))
@@ -560,7 +560,7 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 
 func RequireParentDirectory(repo *meta.RepoMetadata, filePath string) error {
 	if parent := ParentPath(filePath); parent != "" && !repo.HasDirectory(parent) {
-		return fmt.Errorf("parent directory does not exist: %s", parent)
+		return fmt.Errorf("%w: parent directory does not exist: %s", ErrNotFound, parent)
 	}
 	return nil
 }

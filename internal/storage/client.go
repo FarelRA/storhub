@@ -47,7 +47,7 @@ const (
 	NodeKindSymlink = metadata.NodeKindSymlink
 )
 
-var ErrFileNotFound = errors.New("file not found")
+var ErrFileNotFound = shfs.ErrNotFound
 
 func DefaultConfig() Config {
 	return storcfg.Default()
@@ -208,22 +208,13 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 				// Commit metadata to GitHub
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
 					logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
-					// Release lock before reloading to avoid deadlock (loadRepoMetadataFresh acquires the lock internally)
 					pm.mu.Unlock()
-					// Reload fresh metadata from GitHub to clear dirty data
 					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after commit failure, clearing to empty", "err", loadErr)
-						// If reload fails, clear dirty data by initializing empty metadata
-						pm.mu.Lock()
-						pm.meta = NewRepoMetadata(project)
-						pm.sha = ""
-						pm.dirty = false
-						pm.mu.Unlock()
+						logging.Error(logger, "failed to reload metadata after commit failure; preserving dirty metadata for retry", "err", loadErr)
 					} else {
 						logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
-						// Note: loadRepoMetadataFresh already updated pm via storeRepoMetadata
 					}
-					continue // Skip the unlock at the end since we already unlocked
+					continue
 				} else {
 					pm.dirty = false
 					pm.lastCommit = h.config.Now()
@@ -238,15 +229,9 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			if pm.dirty {
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
 					logging.Error(logger, "final metadata commit failed, reloading from github", "err", err)
-					// Release lock before reloading to avoid deadlock
 					pm.mu.Unlock()
 					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after final commit failure, clearing to empty", "err", loadErr)
-						pm.mu.Lock()
-						pm.meta = NewRepoMetadata(project)
-						pm.sha = ""
-						pm.dirty = false
-						pm.mu.Unlock()
+						logging.Error(logger, "failed to reload metadata after final commit failure; preserving dirty metadata", "err", loadErr)
 					} else {
 						logging.Info(logger, "metadata reloaded from github on shutdown, in-memory changes discarded")
 					}
@@ -264,15 +249,9 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			if pm.dirty {
 				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
 					logging.Error(logger, "shutdown metadata commit failed, reloading from github", "err", err)
-					// Release lock before reloading to avoid deadlock
 					pm.mu.Unlock()
 					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after shutdown commit failure, clearing to empty", "err", loadErr)
-						pm.mu.Lock()
-						pm.meta = NewRepoMetadata(project)
-						pm.sha = ""
-						pm.dirty = false
-						pm.mu.Unlock()
+						logging.Error(logger, "failed to reload metadata after shutdown commit failure; preserving dirty metadata", "err", loadErr)
 					} else {
 						logging.Info(logger, "metadata reloaded from github on shutdown, in-memory changes discarded")
 					}
@@ -331,6 +310,20 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(metaBytes))
 
+	return nil
+}
+
+func (h *StorHub) commitDirtyProjectMetadataLocked(ctx context.Context, project string, pm *projectMetadata, rollback *metadata.RepoMetadata) error {
+	pm.dirty = true
+	if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
+		if rollback != nil {
+			pm.meta = rollback
+			pm.dirty = false
+		}
+		return err
+	}
+	pm.dirty = false
+	pm.lastCommit = h.config.Now()
 	return nil
 }
 
@@ -497,6 +490,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
@@ -504,7 +498,9 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}
 	implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, latest, fileMeta, now)
-	pm.dirty = true
+	if err := h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback); err != nil {
+		return nil, err
+	}
 
 	result = &fileMeta
 	return result, nil
@@ -582,6 +578,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
@@ -589,7 +586,9 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	implposix.ApplyUpdatedFileIdentity(&patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, current, patched, now)
-	pm.dirty = true
+	if err := h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback); err != nil {
+		return nil, err
+	}
 
 	return &patched, nil
 }
@@ -613,6 +612,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
@@ -620,7 +620,9 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	implposix.ApplyUpdatedFileIdentity(&rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, current, rewritten, now)
-	pm.dirty = true
+	if err := h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback); err != nil {
+		return nil, err
+	}
 
 	return &rewritten, nil
 }
@@ -648,7 +650,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, fmt.Errorf("stat input file: %w", err)
 	}
 	if fileInfo.IsDir() {
-		return nil, fmt.Errorf("input path %q is a directory", inputPath)
+		return nil, shfs.IsDirectory(inputPath)
 	}
 
 	if err := h.ensureRepo(ctx, project); err != nil {
@@ -671,7 +673,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		preferredRelease = existing.Release
 	}
 	if !replace && existing != nil {
-		return nil, fmt.Errorf("file already exists: %s", cleanName)
+		return nil, shfs.AlreadyExists(cleanName)
 	}
 
 	planner, err := chunking.NewStreamingChunker(inputPath, cleanName, h.config.ChunkSize)
@@ -719,6 +721,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		return nil, err
@@ -727,7 +730,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, err
 	}
 	if !replace && pm.meta.FindFile(cleanName) != nil {
-		return nil, fmt.Errorf("file already exists: %s", cleanName)
+		return nil, shfs.AlreadyExists(cleanName)
 	}
 	current := pm.meta.FindFile(cleanName)
 	if current != nil {
@@ -739,7 +742,9 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.meta.UpsertFile(fileMeta, h.config.Now().UTC())
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
-	pm.dirty = true
+	if err := h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback); err != nil {
+		return nil, err
+	}
 
 	result = &fileMeta
 	return result, nil
@@ -1154,6 +1159,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 
 	started := h.config.Now().UTC()
 	h.debugf("metadata update start project=%s message=%q", project, message)
+	rollback := pm.meta.Clone()
 
 	// Apply mutation to in-memory metadata
 	if err := fn(pm.meta); err != nil {
@@ -1162,8 +1168,11 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
-	// Mark as dirty for periodic commit
-	pm.dirty = true
+	if err := h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback); err != nil {
+		h.debugf("metadata update failed project=%s step=commit elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, err
+	}
 
 	h.debugf("metadata update complete project=%s elapsed=%s", project, h.config.Now().UTC().Sub(started))
 	logging.Debug(h.projectLogger(project), "metadata update complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started))
@@ -1204,7 +1213,7 @@ func (h *StorHub) FillAssetRangeContext(ctx context.Context, project string, seg
 }
 
 func (h *StorHub) FileNotFound(path string) error {
-	return fmt.Errorf("%w: %s", ErrFileNotFound, path)
+	return shfs.NotFound(path)
 }
 
 func (h *StorHub) DefaultFileMode(kind metadata.NodeKind) uint32 {
@@ -1296,66 +1305,80 @@ func (h *StorHub) ReadFileAt(project, filePath string, offset, length int64) ([]
 }
 
 func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
-	if err := validateProject(project); err != nil {
-		return nil, err
-	}
-	cleanPath, err := shfs.NormalizePath(filePath)
-	if err != nil {
-		return nil, err
-	}
-	if cleanPath == "" {
-		return nil, errors.New("file name is required")
-	}
-	if offset < 0 || length < 0 {
-		return nil, errors.New("read offset and length must be non-negative")
-	}
-	repo, _, err := h.loadRepoMetadataReadonly(ctx, project)
-	if err != nil {
-		return nil, err
-	}
-	file := repo.FindFile(cleanPath)
-	if file == nil {
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
-	}
-	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
-		return nil, err
-	}
-	if file.Kind == NodeKindSymlink {
-		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
-	}
-	if offset > file.Size {
-		return nil, io.EOF
-	}
 	if length == 0 {
 		return []byte{}, nil
 	}
-	end := offset + length
+	if length < 0 {
+		return nil, errors.New("read offset and length must be non-negative")
+	}
+	result := make([]byte, length)
+	n, err := h.ReadFileAtBufferContext(ctx, project, filePath, offset, result)
+	if err != nil {
+		return nil, err
+	}
+	return result[:n], nil
+}
+
+func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath string, offset int64, result []byte) (int, error) {
+	if err := validateProject(project); err != nil {
+		return 0, err
+	}
+	cleanPath, err := shfs.NormalizePath(filePath)
+	if err != nil {
+		return 0, err
+	}
+	if cleanPath == "" {
+		return 0, errors.New("file name is required")
+	}
+	if offset < 0 {
+		return 0, errors.New("read offset and length must be non-negative")
+	}
+	repo, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return 0, err
+	}
+	file := repo.FindFile(cleanPath)
+	if file == nil {
+		return 0, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+	}
+	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
+		return 0, err
+	}
+	if file.Kind == NodeKindSymlink {
+		return 0, shfs.InvalidSymlink(cleanPath)
+	}
+	if offset > file.Size {
+		return 0, io.EOF
+	}
+	if len(result) == 0 {
+		return 0, nil
+	}
+	end := offset + int64(len(result))
 	if end > file.Size {
 		end = file.Size
 	}
-	result := make([]byte, end-offset)
 	segments := overlappingFileSegments(file, offset, end)
 	if len(segments) == 0 {
 		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
-		return result, nil
+		return int(end - offset), nil
 	}
 	if len(segments) == 1 || h.config.MaxConcurrentTransfers <= 1 {
 		for _, segment := range segments {
 			if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
-				return nil, err
+				return 0, err
 			}
 		}
 		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
-		return result, nil
+		return int(end - offset), nil
 	}
 	if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(segments), func(i int) error {
 		segment := segments[i]
 		return h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end])
 	}); err != nil {
-		return nil, err
+		return 0, err
 	}
 	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
-	return result, nil
+	return int(end - offset), nil
 }
 
 type fileReadSegment struct {

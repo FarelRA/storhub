@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	implfuse "github.com/FarelRA/storhub/internal/fusefs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	meta "github.com/FarelRA/storhub/internal/metadata"
@@ -31,7 +32,7 @@ func TestPublicAliasesAndConstants(t *testing.T) {
 	if NodeKindFile != meta.NodeKindFile || NodeKindSymlink != meta.NodeKindSymlink {
 		t.Fatal("node kind constants mismatch")
 	}
-	if ErrFileNotFound.Error() != "file not found" || ErrProjectNotFound.Error() != "project not found" {
+	if ErrFileNotFound.Error() != shfs.ErrNotFound.Error() || ErrNotFound.Error() != shfs.ErrNotFound.Error() {
 		t.Fatal("public errors mismatch")
 	}
 }

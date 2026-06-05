@@ -69,7 +69,7 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 	decodeJSONBody(t, loginResp, &login)
 
 	shareReq := bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: ""}))
-	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/share", shareReq, map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareReq, map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 
@@ -85,6 +85,44 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 
 	forbiddenCreate := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/create-file", bytes.NewBuffer(mustJSONMarshal(t, pathRequest{Path: "new.txt"})), map[string]string{"Authorization": "Bearer " + share.Token, "Content-Type": "application/json"}, http.StatusForbidden)
 	assertErrorCode(t, forbiddenCreate, "forbidden")
+}
+
+func TestRESTShareBearerCannotEscapeSharedPath(t *testing.T) {
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	var login restLoginResponse
+	decodeJSONBody(t, loginResp, &login)
+
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+
+	forbiddenContent := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=shared/../private/secret.txt", nil, map[string]string{"Authorization": "Bearer " + share.Token}, http.StatusForbidden)
+	assertErrorCode(t, forbiddenContent, "forbidden")
+
+	forbiddenNode := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=shared/../private/secret.txt", nil, map[string]string{"Authorization": "Bearer " + share.Token}, http.StatusForbidden)
+	assertErrorCode(t, forbiddenNode, "forbidden")
+}
+
+func TestRESTShareBearerCannotCreateNestedShares(t *testing.T) {
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	var login restLoginResponse
+	decodeJSONBody(t, loginResp, &login)
+
+	download := false
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: &download})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	var share shareResponse
+	decodeJSONBody(t, shareResp, &share)
+
+	forbiddenReshare := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: boolPtr(true)})), map[string]string{"Authorization": "Bearer " + share.Token, "Content-Type": "application/json"}, http.StatusForbidden)
+	assertErrorCode(t, forbiddenReshare, "forbidden")
 }
 
 func TestHashPasswordAndTokenExpiry(t *testing.T) {
@@ -125,6 +163,10 @@ func newAuthedTestHandler(t *testing.T, client *fakeRESTClient) http.Handler {
 		t.Fatalf("new handler: %v", err)
 	}
 	return handler
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func seedProjectForAuth(t *testing.T, client *fakeRESTClient) {

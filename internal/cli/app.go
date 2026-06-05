@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,11 +17,13 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
+	"github.com/spf13/cobra"
 )
 
 type App struct {
-	stdout *os.File
-	stderr *os.File
+	stdout  *os.File
+	stderr  *os.File
+	rootCmd *cobra.Command
 }
 
 type fuseMount interface {
@@ -61,42 +62,6 @@ var (
 	cliLogColor  = parseEnvBool("STORHUB_LOG_COLOR", true)
 )
 
-type stringFlagSink struct{ target *string }
-
-func (s stringFlagSink) String() string {
-	if s.target == nil {
-		return ""
-	}
-	return *s.target
-}
-
-func (s stringFlagSink) Set(value string) error {
-	if s.target != nil {
-		*s.target = value
-	}
-	return nil
-}
-
-type boolFlagSink struct{ target *bool }
-
-func (b boolFlagSink) String() string {
-	if b.target == nil {
-		return "false"
-	}
-	return strconv.FormatBool(*b.target)
-}
-
-func (b boolFlagSink) Set(value string) error {
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return err
-	}
-	if b.target != nil {
-		*b.target = parsed
-	}
-	return nil
-}
-
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return c.StorHub.NewFUSE(project, opts)
 }
@@ -120,77 +85,248 @@ var newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
 var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
 	return shrest.New(hub, opts)
 }
-var restListenAndServeFn = func(addr string, handler http.Handler) error {
-	return http.ListenAndServe(addr, handler)
+var restListenAndServeFn = func(server *http.Server) error {
+	return server.ListenAndServe()
+}
+
+const minCLIChunkSize int64 = 32 * 1024 * 1024
+
+func normalizeCLIChunkSize(size int64) int64 {
+	if size <= 0 {
+		return size
+	}
+	if size < minCLIChunkSize {
+		return minCLIChunkSize
+	}
+	return size
 }
 
 func New() *App {
-	return &App{stdout: os.Stdout, stderr: os.Stderr}
+	a := &App{stdout: os.Stdout, stderr: os.Stderr}
+	a.buildRootCmd()
+	return a
 }
 
-func addLoggingFlags(fs *flag.FlagSet) {
-	cliLogLevel = envOrDefault("STORHUB_LOG_LEVEL", cliLogLevel)
-	cliLogFormat = envOrDefault("STORHUB_LOG_FORMAT", cliLogFormat)
-	cliLogColor = parseEnvBool("STORHUB_LOG_COLOR", cliLogColor)
-	fs.Var(stringFlagSink{target: &cliLogLevel}, "log-level", "Log level: debug, info, warn, error")
-	fs.Var(stringFlagSink{target: &cliLogFormat}, "log-format", "Log format: pretty, text")
-	fs.Var(boolFlagSink{target: &cliLogColor}, "log-color", "Enable ANSI colors in logs")
+func (a *App) buildRootCmd() {
+	rootCmd := &cobra.Command{
+		Use:   "storhub",
+		Short: "StorHub CLI - GitHub-backed chunked storage",
+		Long: `StorHub CLI
+
+Friendly commands for GitHub-backed chunked storage, REST serving, and FUSE mounting.
+
+Authentication:
+  Set GITHUB_TOKEN or pass --token.
+
+Examples:
+  storhub upload docs-project docs/readme.txt ./README.md
+  storhub ls docs-project docs
+  storhub stat docs-project docs/readme.txt
+  storhub serve-rest --listen :8080
+  storhub mount docs-project ./mnt`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+
+	rootCmd.PersistentFlags().String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
+	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
+	rootCmd.PersistentFlags().StringVar(&cliLogLevel, "log-level", cliLogLevel, "Log level: debug, info, warn, error")
+	rootCmd.PersistentFlags().StringVar(&cliLogFormat, "log-format", cliLogFormat, "Log format: pretty, text")
+	rootCmd.PersistentFlags().BoolVar(&cliLogColor, "log-color", cliLogColor, "Enable ANSI colors in logs")
+
+	rootCmd.AddCommand(a.newUploadCmd())
+	rootCmd.AddCommand(a.newReplaceCmd())
+	rootCmd.AddCommand(a.newDownloadCmd())
+	rootCmd.AddCommand(a.newListCmd())
+	rootCmd.AddCommand(a.newStatCmd())
+	rootCmd.AddCommand(a.newCatCmd())
+	rootCmd.AddCommand(a.newMkdirCmd())
+	rootCmd.AddCommand(a.newRemoveCmd())
+	rootCmd.AddCommand(a.newMoveCmd())
+	rootCmd.AddCommand(a.newAppendCmd())
+	rootCmd.AddCommand(a.newWriteCmd())
+	rootCmd.AddCommand(a.newPatchCmd())
+	rootCmd.AddCommand(a.newRevisionsCmd())
+	rootCmd.AddCommand(a.newRollbackCmd())
+	rootCmd.AddCommand(a.newMountCmd())
+	rootCmd.AddCommand(a.newServeRESTCmd())
+
+	a.rootCmd = rootCmd
+}
+
+func (a *App) newUploadCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "upload [flags] <project> <remote-path> <local-path>",
+		Short: "Upload a file",
+		Args:  cobra.ExactArgs(3),
+		RunE:  a.runUploadOrReplace,
+	}
+	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
+	cmd.Flags().Int("concurrency", 0, "Max concurrent transfers")
+	cmd.Flags().Bool("public", false, "Create public repos instead of private")
+	return cmd
+}
+
+func (a *App) newReplaceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "replace [flags] <project> <remote-path> <local-path>",
+		Short: "Replace an existing file",
+		Args:  cobra.ExactArgs(3),
+		RunE:  a.runUploadOrReplace,
+	}
+	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
+	cmd.Flags().Int("concurrency", 0, "Max concurrent transfers")
+	cmd.Flags().Bool("public", false, "Create public repos instead of private")
+	return cmd
+}
+
+func (a *App) newDownloadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "download [flags] <project> <remote-path> <local-path>",
+		Short: "Download a file",
+		Args:  cobra.ExactArgs(3),
+		RunE:  a.runDownload,
+	}
+}
+
+func (a *App) newListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ls [flags] <project> [path]",
+		Short: "List directory contents",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE:  a.runList,
+	}
+	cmd.Flags().BoolP("long", "l", false, "Show detailed listing")
+	return cmd
+}
+
+func (a *App) newStatCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stat [flags] <project> <path>",
+		Short: "Show file/directory metadata",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runStat,
+	}
+}
+
+func (a *App) newCatCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cat [flags] <project> <path>",
+		Short: "Print file contents to stdout",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runCat,
+	}
+}
+
+func (a *App) newMkdirCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mkdir [flags] <project> <path>",
+		Short: "Create a directory",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runMkdir,
+	}
+}
+
+func (a *App) newRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rm [flags] <project> <path>",
+		Short: "Remove a file or directory",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runRemove,
+	}
+	cmd.Flags().BoolP("recursive", "r", false, "Remove directory instead of file")
+	return cmd
+}
+
+func (a *App) newMoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mv [flags] <project> <old-path> <new-path>",
+		Short: "Move or rename a file/directory",
+		Args:  cobra.ExactArgs(3),
+		RunE:  a.runMove,
+	}
+}
+
+func (a *App) newAppendCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "append [flags] <project> <path> <text>",
+		Short: "Append text to a file",
+		Args:  cobra.ExactArgs(3),
+		RunE:  a.runAppend,
+	}
+}
+
+func (a *App) newWriteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "write [flags] <project> <path> <offset> <text>",
+		Short: "Write data at a byte offset",
+		Args:  cobra.ExactArgs(4),
+		RunE:  a.runWrite,
+	}
+}
+
+func (a *App) newPatchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "patch [flags] <project> <path> <offset> <delete-size> <text>",
+		Short: "Delete and insert at an offset",
+		Args:  cobra.ExactArgs(5),
+		RunE:  a.runPatch,
+	}
+}
+
+func (a *App) newRevisionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "revisions [flags] <project>",
+		Short: "List metadata revision history",
+		Args:  cobra.ExactArgs(1),
+		RunE:  a.runRevisions,
+	}
+}
+
+func (a *App) newRollbackCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rollback [flags] <project> <commit-sha>",
+		Short: "Rollback metadata to a commit",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runRollback,
+	}
+}
+
+func (a *App) newMountCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mount [flags] <project> <mount-point>",
+		Short: "FUSE mount a project",
+		Args:  cobra.ExactArgs(2),
+		RunE:  a.runMount,
+	}
+	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
+	cmd.Flags().Bool("debug", true, "Enable FUSE debug logging")
+	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+	return cmd
+}
+
+func (a *App) newServeRESTCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve-rest [flags]",
+		Short: "Start the REST API server",
+		Args:  cobra.NoArgs,
+		RunE:  a.runServeREST,
+	}
+	cmd.Flags().String("listen", ":8080", "Listen address")
+	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
+	cmd.Flags().String("auth-file", os.Getenv("STORHUB_REST_AUTH_FILE"), "Optional JSON auth config file")
+	return cmd
 }
 
 func (a *App) Run(args []string) error {
-	if len(args) == 0 {
-		a.printRootHelp()
-		return nil
+	if args == nil {
+		args = []string{}
 	}
-	cmd := args[0]
-	rest := args[1:]
-	a.logf("command start: %s %s", cmd, strings.Join(rest, " "))
-	var err error
-	switch cmd {
-	case "help", "-h", "--help":
-		a.printRootHelp()
-		return nil
-	case "upload":
-		err = a.runUpload(rest, false)
-	case "replace":
-		err = a.runUpload(rest, true)
-	case "download":
-		err = a.runDownload(rest)
-	case "ls":
-		err = a.runList(rest)
-	case "stat":
-		err = a.runStat(rest)
-	case "cat":
-		err = a.runCat(rest)
-	case "mkdir":
-		err = a.runMkdir(rest)
-	case "rm":
-		err = a.runRemove(rest)
-	case "mv":
-		err = a.runMove(rest)
-	case "append":
-		err = a.runAppend(rest)
-	case "write":
-		err = a.runWrite(rest)
-	case "patch":
-		err = a.runPatch(rest)
-	case "revisions":
-		err = a.runRevisions(rest)
-	case "rollback":
-		err = a.runRollback(rest)
-	case "mount":
-		err = a.runMount(rest)
-	case "serve-rest":
-		err = a.runServeREST(rest)
-	default:
-		err = fmt.Errorf("unknown command %q\n\n%s", cmd, rootHelp)
-	}
-	if err != nil {
-		a.logf("command failed: %s err=%v", cmd, err)
-		return err
-	}
-	a.logf("command complete: %s", cmd)
-	return nil
+	a.rootCmd.SetArgs(args)
+	a.rootCmd.SetOut(a.stdout)
+	a.rootCmd.SetErr(a.stderr)
+	_, err := a.rootCmd.ExecuteC()
+	return err
 }
 
 func (a *App) logf(format string, args ...any) {
@@ -208,88 +344,20 @@ type restAuthFile struct {
 	Users           []shrest.User `json:"users"`
 }
 
-const minCLIChunkSize int64 = 32 * 1024 * 1024
+func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	public, _ := cmd.Flags().GetBool("public")
 
-func normalizeCLIChunkSize(size int64) int64 {
-	if size <= 0 {
-		return size
-	}
-	if size < minCLIChunkSize {
-		return minCLIChunkSize
-	}
-	return size
-}
-
-func (a *App) newHub(fs *flag.FlagSet) (hubClient, error) {
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token; defaults to GITHUB_TOKEN")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	chunkSize := fs.Int64("chunk-size", 0, "Chunk size in bytes")
-	concurrency := fs.Int("concurrency", 0, "Max concurrent transfers")
-	public := fs.Bool("public", false, "Create public repos instead of private")
-	addLoggingFlags(fs)
-	fs.SetOutput(a.stderr)
-	fs.Usage = func() {
-		fmt.Fprintln(a.stderr, fs.Name()+" usage:")
-		fs.PrintDefaults()
-	}
-	parse := func(args []string) error { return fs.Parse(args) }
-	_ = parse
-	if strings.TrimSpace(*token) == "" {
-		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
-	}
-	cfg := storhub.DefaultConfig()
-	if strings.TrimSpace(*apiBase) != "" {
-		cfg.APIBaseURL = *apiBase
-	}
-	if normalized := normalizeCLIChunkSize(*chunkSize); normalized > 0 {
-		cfg.ChunkSize = normalized
-	}
-	if *concurrency > 0 {
-		cfg.MaxConcurrentTransfers = *concurrency
-	}
-	cfg.CreatePublicRepo = *public
-	cfg.LogLevel = cliLogLevel
-	cfg.LogFormat = cliLogFormat
-	cfg.LogColor = cliLogColor
-	hub, err := storhub.NewStorHubWithConfig(*token, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return storhubClient{StorHub: hub}, nil
-}
-
-func (a *App) parseCommand(name, usage string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	addLoggingFlags(fs)
-	fs.SetOutput(a.stderr)
-	fs.Usage = func() {
-		fmt.Fprintf(a.stderr, "Usage: %s\n\n", usage)
-		fs.PrintDefaults()
-	}
-	return fs
-}
-
-func (a *App) runUpload(args []string, replace bool) error {
-	usage := "storhub " + ternary(replace, "replace", "upload") + " [flags] <project> <remote-path> <local-path>"
-	fs := flag.NewFlagSet(ternary(replace, "replace", "upload"), flag.ContinueOnError)
-	fs.SetOutput(a.stderr)
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	chunkSize := fs.Int64("chunk-size", 0, "Chunk size in bytes")
-	concurrency := fs.Int("concurrency", 0, "Max concurrent transfers")
-	public := fs.Bool("public", false, "Create public repos")
-	addLoggingFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 3 {
-		return fmt.Errorf("usage: %s", usage)
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, *chunkSize, *concurrency, *public)
+	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, concurrency, public)
 	if err != nil {
 		return err
 	}
-	project, remotePath, localPath := fs.Arg(0), fs.Arg(1), fs.Arg(2)
+
+	replace := cmd.Name() == "replace"
+	project, remotePath, localPath := args[0], args[1], args[2]
 	var meta *storhub.FileMetadata
 	if replace {
 		meta, err = hub.ReplaceFile(project, remotePath, localPath)
@@ -303,76 +371,52 @@ func (a *App) runUpload(args []string, replace bool) error {
 	return nil
 }
 
-func (a *App) runDownload(args []string) error {
-	fs := a.parseCommand("download", "storhub download [flags] <project> <remote-path> <local-path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 3 {
-		return fmt.Errorf("usage: storhub download [flags] <project> <remote-path> <local-path>")
-	}
-	hub, err := newMountHubFromFlagsFn(*token, *apiBase)
+func (a *App) runDownload(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newMountHubFromFlagsFn(token, apiBase)
 	if err != nil {
 		return err
 	}
-	if err := hub.DownloadFile(rest[0], rest[1], rest[2]); err != nil {
+	if err := hub.DownloadFile(args[0], args[1], args[2]); err != nil {
 		return err
 	}
-	info, err := os.Stat(rest[2])
+	info, err := os.Stat(args[2])
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "downloaded %s to %s (%d bytes)\n", rest[1], rest[2], info.Size())
+	fmt.Fprintf(a.stdout, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
 	return nil
 }
 
-func (a *App) runList(args []string) error {
-	fs := a.parseCommand("ls", "storhub ls [flags] <project> [path]")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	long := fs.Bool("l", false, "Show detailed listing")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) < 1 || len(rest) > 2 {
-		return fmt.Errorf("usage: storhub ls [flags] <project> [path]")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runList(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	long, _ := cmd.Flags().GetBool("long")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
 	dir := ""
-	if len(rest) == 2 {
-		dir = rest[1]
+	if len(args) == 2 {
+		dir = args[1]
 	}
-	entries, err := hub.ReadDir(rest[0], dir)
+	entries, err := hub.ReadDir(args[0], dir)
 	if err != nil {
 		return err
 	}
-	printDirEntries(a.stdout, entries, *long)
+	printDirEntries(a.stdout, entries, long)
 	return nil
 }
 
-func (a *App) runStat(args []string) error {
-	fs := a.parseCommand("stat", "storhub stat [flags] <project> <path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub stat [flags] <project> <path>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runStat(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	entry, err := hub.StatPath(rest[0], rest[1])
+	entry, err := hub.StatPath(args[0], args[1])
 	if err != nil {
 		return err
 	}
@@ -380,26 +424,18 @@ func (a *App) runStat(args []string) error {
 	return nil
 }
 
-func (a *App) runCat(args []string) error {
-	fs := a.parseCommand("cat", "storhub cat [flags] <project> <path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub cat [flags] <project> <path>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runCat(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	entry, err := hub.StatPath(rest[0], rest[1])
+	entry, err := hub.StatPath(args[0], args[1])
 	if err != nil {
 		return err
 	}
-	data, err := hub.ReadFileAt(rest[0], rest[1], 0, entry.Size)
+	data, err := hub.ReadFileAt(args[0], args[1], 0, entry.Size)
 	if err != nil {
 		return err
 	}
@@ -407,94 +443,62 @@ func (a *App) runCat(args []string) error {
 	return err
 }
 
-func (a *App) runMkdir(args []string) error {
-	fs := a.parseCommand("mkdir", "storhub mkdir [flags] <project> <path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub mkdir [flags] <project> <path>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	if err := hub.Mkdir(rest[0], rest[1]); err != nil {
+	if err := hub.Mkdir(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "created directory %s\n", rest[1])
+	fmt.Fprintf(a.stdout, "created directory %s\n", args[1])
 	return nil
 }
 
-func (a *App) runRemove(args []string) error {
-	fs := a.parseCommand("rm", "storhub rm [flags] <project> <path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	recursive := fs.Bool("r", false, "Remove directory instead of file")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub rm [flags] <project> <path>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runRemove(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	recursive, _ := cmd.Flags().GetBool("recursive")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	if *recursive {
-		err = hub.Rmdir(rest[0], rest[1])
+	if recursive {
+		err = hub.Rmdir(args[0], args[1])
 	} else {
-		err = hub.DeleteFile(rest[0], rest[1])
+		err = hub.DeleteFile(args[0], args[1])
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "removed %s\n", rest[1])
+	fmt.Fprintf(a.stdout, "removed %s\n", args[1])
 	return nil
 }
 
-func (a *App) runMove(args []string) error {
-	fs := a.parseCommand("mv", "storhub mv [flags] <project> <old-path> <new-path>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 3 {
-		return fmt.Errorf("usage: storhub mv [flags] <project> <old-path> <new-path>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runMove(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	if err := hub.Rename(rest[0], rest[1], rest[2]); err != nil {
+	if err := hub.Rename(args[0], args[1], args[2]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "moved %s -> %s\n", rest[1], rest[2])
+	fmt.Fprintf(a.stdout, "moved %s -> %s\n", args[1], args[2])
 	return nil
 }
 
-func (a *App) runAppend(args []string) error {
-	fs := a.parseCommand("append", "storhub append [flags] <project> <path> <text>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 3 {
-		return fmt.Errorf("usage: storhub append [flags] <project> <path> <text>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runAppend(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	meta, err := hub.AppendFile(rest[0], rest[1], []byte(rest[2]))
+	meta, err := hub.AppendFile(args[0], args[1], []byte(args[2]))
 	if err != nil {
 		return err
 	}
@@ -502,26 +506,18 @@ func (a *App) runAppend(args []string) error {
 	return nil
 }
 
-func (a *App) runWrite(args []string) error {
-	fs := a.parseCommand("write", "storhub write [flags] <project> <path> <offset> <text>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 4 {
-		return fmt.Errorf("usage: storhub write [flags] <project> <path> <offset> <text>")
-	}
-	offset, err := strconv.ParseInt(rest[2], 10, 64)
+func (a *App) runWrite(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid offset %q: %w", rest[2], err)
+		return fmt.Errorf("invalid offset %q: %w", args[2], err)
 	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	meta, err := hub.WriteFileAt(rest[0], rest[1], offset, []byte(rest[3]))
+	meta, err := hub.WriteFileAt(args[0], args[1], offset, []byte(args[3]))
 	if err != nil {
 		return err
 	}
@@ -529,30 +525,22 @@ func (a *App) runWrite(args []string) error {
 	return nil
 }
 
-func (a *App) runPatch(args []string) error {
-	fs := a.parseCommand("patch", "storhub patch [flags] <project> <path> <offset> <delete-size> <text>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 5 {
-		return fmt.Errorf("usage: storhub patch [flags] <project> <path> <offset> <delete-size> <text>")
-	}
-	offset, err := strconv.ParseInt(rest[2], 10, 64)
+func (a *App) runPatch(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid offset %q: %w", rest[2], err)
+		return fmt.Errorf("invalid offset %q: %w", args[2], err)
 	}
-	deleteSize, err := strconv.ParseInt(rest[3], 10, 64)
+	deleteSize, err := strconv.ParseInt(args[3], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid delete-size %q: %w", rest[3], err)
+		return fmt.Errorf("invalid delete-size %q: %w", args[3], err)
 	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	meta, err := hub.PatchFile(rest[0], rest[1], offset, deleteSize, []byte(rest[4]))
+	meta, err := hub.PatchFile(args[0], args[1], offset, deleteSize, []byte(args[4]))
 	if err != nil {
 		return err
 	}
@@ -560,22 +548,14 @@ func (a *App) runPatch(args []string) error {
 	return nil
 }
 
-func (a *App) runRevisions(args []string) error {
-	fs := a.parseCommand("revisions", "storhub revisions [flags] <project>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("usage: storhub revisions [flags] <project>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	revs, err := hub.ListMetadataRevisions(rest[0])
+	revs, err := hub.ListMetadataRevisions(args[0])
 	if err != nil {
 		return err
 	}
@@ -583,63 +563,46 @@ func (a *App) runRevisions(args []string) error {
 	return nil
 }
 
-func (a *App) runRollback(args []string) error {
-	fs := a.parseCommand("rollback", "storhub rollback [flags] <project> <commit-sha>")
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub rollback [flags] <project> <commit-sha>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runRollback(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
-	if err := hub.RollbackMetadata(rest[0], rest[1]); err != nil {
+	if err := hub.RollbackMetadata(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "rolled back %s to %s\n", rest[0], rest[1])
+	fmt.Fprintf(a.stdout, "rolled back %s to %s\n", args[0], args[1])
 	return nil
 }
 
-func (a *App) runMount(args []string) error {
-	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
-	fs.SetOutput(a.stderr)
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	allowOther := fs.Bool("allow-other", false, "Enable allow_other on the FUSE mount")
-	debug := fs.Bool("debug", true, "Enable FUSE debug logging")
-	cacheDir := fs.String("cache-dir", "", "Optional cache directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("usage: storhub mount [flags] <project> <mount-point>")
-	}
-	hub, err := newHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runMount(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	allowOther, _ := cmd.Flags().GetBool("allow-other")
+	debug, _ := cmd.Flags().GetBool("debug")
+	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
 	opts := storhub.DefaultFUSEOptions()
-	opts.AllowOther = *allowOther
-	opts.Debug = *debug
-	opts.CacheDir = *cacheDir
-	fsys, err := hub.NewFUSE(rest[0], opts)
+	opts.AllowOther = allowOther
+	opts.Debug = debug
+	opts.CacheDir = cacheDir
+	fsys, err := hub.NewFUSE(args[0], opts)
 	if err != nil {
 		return err
 	}
 	defer fsys.Close()
-	if err := os.MkdirAll(rest[1], 0o755); err != nil {
+	if err := os.MkdirAll(args[1], 0o755); err != nil {
 		return err
 	}
-	if err := fsys.Mount(rest[1]); err != nil {
+	if err := fsys.Mount(args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "mounted %s at %s\n", rest[0], rest[1])
+	fmt.Fprintf(a.stdout, "mounted %s at %s\n", args[0], args[1])
 	fmt.Fprintln(a.stdout, "press Ctrl+C to unmount")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -651,28 +614,20 @@ func (a *App) runMount(args []string) error {
 	return nil
 }
 
-func (a *App) runServeREST(args []string) error {
-	fs := flag.NewFlagSet("serve-rest", flag.ContinueOnError)
-	fs.SetOutput(a.stderr)
-	token := fs.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
-	apiBase := fs.String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	listen := fs.String("listen", ":8080", "Listen address")
-	basePath := fs.String("base-path", "/api/v1", "REST API base path")
-	authFile := fs.String("auth-file", os.Getenv("STORHUB_REST_AUTH_FILE"), "Optional JSON auth config file")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: storhub serve-rest [flags]")
-	}
-	hub, err := newRESTHubFromFlagsFn(*token, *apiBase, 0, 0, false)
+func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	listen, _ := cmd.Flags().GetString("listen")
+	basePath, _ := cmd.Flags().GetString("base-path")
+	authFile, _ := cmd.Flags().GetString("auth-file")
+	hub, err := newRESTHubFromFlagsFn(token, apiBase, 0, 0, false)
 	if err != nil {
 		return err
 	}
 	opts := shrest.DefaultOptions()
-	opts.BasePath = *basePath
-	if strings.TrimSpace(*authFile) != "" {
-		auth, err := loadRESTAuthOptions(*authFile)
+	opts.BasePath = basePath
+	if strings.TrimSpace(authFile) != "" {
+		auth, err := loadRESTAuthOptions(authFile)
 		if err != nil {
 			return err
 		}
@@ -687,8 +642,16 @@ func (a *App) runServeREST(args []string) error {
 	if opts.Auth != nil {
 		mode = "with auth"
 	}
-	fmt.Fprintf(a.stdout, "serving REST API on %s%s %s\n", *listen, opts.BasePath, mode)
-	return restListenAndServeFn(*listen, handler)
+	fmt.Fprintf(a.stdout, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
+	server := &http.Server{
+		Addr:              listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	return restListenAndServeFn(server)
 }
 
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
@@ -793,41 +756,6 @@ func ternary[T any](cond bool, left, right T) T {
 		return left
 	}
 	return right
-}
-
-const rootHelp = `StorHub CLI
-
-Friendly commands for GitHub-backed chunked storage, REST serving, and FUSE mounting.
-
-Common commands:
-  storhub upload <project> <remote-path> <local-path>
-  storhub download <project> <remote-path> <local-path>
-  storhub ls <project> [path]
-  storhub stat <project> <path>
-  storhub mkdir <project> <path>
-  storhub mv <project> <old-path> <new-path>
-  storhub rm <project> <path>
-  storhub append <project> <path> <text>
-  storhub write <project> <path> <offset> <text>
-  storhub patch <project> <path> <offset> <delete-size> <text>
-  storhub revisions <project>
-  storhub rollback <project> <commit-sha>
-  storhub serve-rest [flags]
-  storhub mount <project> <mount-point>
-
-Authentication:
-  Set GITHUB_TOKEN or pass --token.
-
-Examples:
-  storhub upload docs-project docs/readme.txt ./README.md
-  storhub ls docs-project docs
-  storhub stat docs-project docs/readme.txt
-  storhub serve-rest --listen :8080
-  storhub mount docs-project ./mnt
-`
-
-func (a *App) printRootHelp() {
-	fmt.Fprint(a.stdout, rootHelp)
 }
 
 func defaultDownloadPath(remotePath string) string {

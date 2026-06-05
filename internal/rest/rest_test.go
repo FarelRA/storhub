@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
 func TestRESTFilesystemWorkflow(t *testing.T) {
@@ -221,7 +224,7 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusOK)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
-	if share.ID == "" || share.URL != "/?share="+share.ID {
+	if share.ID == "" || share.URL != "/shares/"+share.ID || share.DownloadURL != "/shares/"+share.ID+"/download" {
 		t.Fatalf("unexpected share response: %+v", share)
 	}
 	info := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusOK)
@@ -250,7 +253,7 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	if share.Download {
 		t.Fatalf("expected disabled download in response: %+v", share)
 	}
-	resp := mustRequest(t, handler, http.MethodGet, share.URL+"&download=1", nil, nil, http.StatusForbidden)
+	resp := mustRequest(t, handler, http.MethodGet, share.URL+"/download", nil, nil, http.StatusForbidden)
 	assertErrorCode(t, resp, "forbidden")
 }
 
@@ -424,14 +427,14 @@ func (c *fakeRESTClient) Mkdir(project, dirPath string) error {
 		return nil
 	}
 	if _, ok := p.dirs[clean]; ok {
-		return errors.New("directory already exists: " + clean)
+		return shfs.AlreadyExists(clean)
 	}
 	if _, ok := p.files[clean]; ok {
-		return errors.New("file already exists at path: " + clean)
+		return shfs.AlreadyExists(clean)
 	}
 	if parent := parentPath(clean); parent != "" {
 		if _, ok := p.dirs[parent]; !ok {
-			return errors.New("parent directory does not exist: " + parent)
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
 		}
 	}
 	now := c.tick()
@@ -454,9 +457,9 @@ func (c *fakeRESTClient) DeleteFile(project, filePath string) error {
 	node, ok := p.files[clean]
 	if !ok {
 		if _, ok := p.dirs[clean]; ok {
-			return errors.New("is a directory: " + clean)
+			return shfs.IsDirectory(clean)
 		}
-		return errors.New("file not found: " + clean)
+		return shfs.NotFound(clean)
 	}
 	delete(p.files, clean)
 	if node.data != nil && node.data.nlink > 0 {
@@ -479,22 +482,22 @@ func (c *fakeRESTClient) Rmdir(project, dirPath string) error {
 		return err
 	}
 	if clean == "" {
-		return errors.New("cannot remove root directory")
+		return fmt.Errorf("cannot remove root directory")
 	}
 	if _, ok := p.files[clean]; ok {
-		return errors.New("not a directory: " + clean)
+		return shfs.NotDirectory(clean)
 	}
 	if _, ok := p.dirs[clean]; !ok {
-		return errors.New("directory not found: " + clean)
+		return shfs.NotFound(clean)
 	}
 	for name := range p.dirs {
 		if parentPath(name) == clean {
-			return errors.New("directory not empty: " + clean)
+			return shfs.NotEmpty(clean)
 		}
 	}
 	for name := range p.files {
 		if parentPath(name) == clean {
-			return errors.New("directory not empty: " + clean)
+			return shfs.NotEmpty(clean)
 		}
 	}
 	delete(p.dirs, clean)
@@ -518,14 +521,14 @@ func (c *fakeRESTClient) Rename(project, oldPath, newPath string) error {
 		return err
 	}
 	if _, ok := p.files[newClean]; ok {
-		return errors.New("destination already exists: " + newClean)
+		return shfs.AlreadyExists(newClean)
 	}
 	if _, ok := p.dirs[newClean]; ok {
-		return errors.New("destination already exists: " + newClean)
+		return shfs.AlreadyExists(newClean)
 	}
 	if parent := parentPath(newClean); parent != "" {
 		if _, ok := p.dirs[parent]; !ok {
-			return errors.New("parent directory does not exist: " + parent)
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
 		}
 	}
 	if node, ok := p.files[oldClean]; ok {
@@ -539,7 +542,7 @@ func (c *fakeRESTClient) Rename(project, oldPath, newPath string) error {
 		return nil
 	}
 	if _, ok := p.dirs[oldClean]; !ok {
-		return errors.New("path not found: " + oldClean)
+		return shfs.NotFound(oldClean)
 	}
 	now := c.tick()
 	updatedDirs := make(map[string]*fakeRESTNode, len(p.dirs))
@@ -717,7 +720,7 @@ func (c *fakeRESTClient) StatPath(project, targetPath string) (*EntryInfo, error
 		entry := *node.entry
 		return &entry, nil
 	}
-	return nil, errors.New("path not found: " + clean)
+	return nil, shfs.NotFound(clean)
 }
 
 func (c *fakeRESTClient) ReadDir(project, dirPath string) ([]DirEntry, error) {
@@ -732,10 +735,10 @@ func (c *fakeRESTClient) ReadDir(project, dirPath string) ([]DirEntry, error) {
 		return nil, err
 	}
 	if _, ok := p.files[clean]; ok {
-		return nil, errors.New("not a directory: " + clean)
+		return nil, shfs.NotDirectory(clean)
 	}
 	if _, ok := p.dirs[clean]; !ok {
-		return nil, errors.New("directory not found: " + clean)
+		return nil, shfs.NotFound(clean)
 	}
 	entries := []DirEntry{}
 	for name, node := range p.dirs {
@@ -802,7 +805,7 @@ func (c *fakeRESTClient) Readlink(project, linkPath string) (string, error) {
 		return "", err
 	}
 	if node.data.kind != NodeKindSymlink {
-		return "", errors.New("path is not a symlink: " + linkPath)
+		return "", shfs.InvalidSymlink(linkPath)
 	}
 	return node.data.target, nil
 }
@@ -891,9 +894,23 @@ func (c *fakeRESTClient) GetXAttr(project, targetPath, attr string) ([]byte, err
 	}
 	value, ok := node.xattr[attr]
 	if !ok {
-		return nil, errors.New("xattr not found: " + targetPath)
+		return nil, shfs.XAttrNotFound(targetPath)
 	}
 	return append([]byte(nil), value...), nil
+}
+
+func (c *fakeRESTClient) RemoveXAttr(project, targetPath, attr string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	node, err := c.lookupNode(project, targetPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := node.xattr[attr]; !ok {
+		return shfs.XAttrNotFound(targetPath)
+	}
+	delete(node.xattr, attr)
+	return nil
 }
 
 func (c *fakeRESTClient) ListXAttr(project, targetPath string) ([]string, error) {
@@ -909,20 +926,6 @@ func (c *fakeRESTClient) ListXAttr(project, targetPath string) ([]string, error)
 	}
 	sort.Strings(names)
 	return names, nil
-}
-
-func (c *fakeRESTClient) RemoveXAttr(project, targetPath, attr string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	node, err := c.lookupNode(project, targetPath)
-	if err != nil {
-		return err
-	}
-	if _, ok := node.xattr[attr]; !ok {
-		return errors.New("xattr not found: " + targetPath)
-	}
-	delete(node.xattr, attr)
-	return nil
 }
 
 func (c *fakeRESTClient) ListMetadataRevisions(project string) ([]MetadataRevision, error) {
@@ -948,14 +951,14 @@ func (c *fakeRESTClient) RollbackMetadata(project, commitSHA string) error {
 			return nil
 		}
 	}
-	return errors.New("revision not found: " + commitSHA)
+	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
 }
 
 func (c *fakeRESTClient) DeleteProject(project string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.projects[project]; !ok {
-		return ErrProjectNotFound
+		return ErrNotFound
 	}
 	delete(c.projects, project)
 	c.deleted[project] = true
@@ -975,7 +978,7 @@ func (c *fakeRESTClient) project(project string) *fakeRESTProject {
 func (c *fakeRESTClient) getExistingProject(project string) (*fakeRESTProject, error) {
 	p, ok := c.projects[project]
 	if !ok {
-		return nil, ErrProjectNotFound
+		return nil, ErrNotFound
 	}
 	return p, nil
 }
@@ -987,14 +990,14 @@ func (c *fakeRESTClient) prepareFileCreate(project, filePath string) (*fakeRESTP
 		return nil, "", err
 	}
 	if _, ok := p.files[clean]; ok {
-		return nil, "", errors.New("file already exists: " + clean)
+		return nil, "", shfs.AlreadyExists(clean)
 	}
 	if _, ok := p.dirs[clean]; ok {
-		return nil, "", errors.New("path already exists: " + clean)
+		return nil, "", shfs.AlreadyExists(clean)
 	}
 	if parent := parentPath(clean); parent != "" {
 		if _, ok := p.dirs[parent]; !ok {
-			return nil, "", errors.New("parent directory does not exist: " + parent)
+			return nil, "", fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
 		}
 	}
 	return p, clean, nil
@@ -1014,7 +1017,7 @@ func (c *fakeRESTClient) requireWritableFileLocked(p *fakeRESTProject, filePath 
 		return nil, "", err
 	}
 	if node.data.kind == NodeKindSymlink {
-		return nil, "", errors.New("cannot write symlink: " + clean)
+		return nil, "", shfs.InvalidSymlink(clean)
 	}
 	return node, clean, nil
 }
@@ -1034,7 +1037,7 @@ func (c *fakeRESTClient) requireReadableFileLocked(p *fakeRESTProject, filePath 
 	}
 	node, ok := p.files[clean]
 	if !ok {
-		return nil, "", errors.New("file not found: " + clean)
+		return nil, "", shfs.NotFound(clean)
 	}
 	return node, clean, nil
 }
@@ -1054,7 +1057,7 @@ func (c *fakeRESTClient) lookupNode(project, targetPath string) (*fakeRESTNode, 
 	if node, ok := p.dirs[clean]; ok {
 		return node, nil
 	}
-	return nil, errors.New("path not found: " + clean)
+	return nil, shfs.NotFound(clean)
 }
 
 func (c *fakeRESTClient) syncLinksLocked(p *fakeRESTProject, data *fakeRESTData) {

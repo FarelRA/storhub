@@ -1,7 +1,6 @@
 package fusefs
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 const (
@@ -67,8 +67,8 @@ type Filesystem struct {
 	mu          sync.RWMutex
 	nodes       map[uint64]*storhubNode
 	inodePaths  map[uint64]string
-	pageCache   map[pageCacheKey]*list.Element
-	pageOrder   *list.List
+	pageCache   *expirable.LRU[pageCacheKey, []byte]
+	inodePages  map[uint64]map[int64]struct{}
 	lockTable   map[uint64][]lockRecord
 	writeStates map[uint64]*inodeWriteState
 	handles     map[uint64]*storhubHandle
@@ -83,12 +83,6 @@ type Filesystem struct {
 type pageCacheKey struct {
 	inode uint64
 	page  int64
-}
-
-type pageCacheEntry struct {
-	key     pageCacheKey
-	data    []byte
-	expires time.Time
 }
 
 type lockRecord struct {
@@ -237,6 +231,10 @@ type Hub interface {
 	ChunkSize() int64
 }
 
+type bufferReadHub interface {
+	ReadFileAtBufferContext(context.Context, string, string, int64, []byte) (int, error)
+}
+
 func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
@@ -285,8 +283,8 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		opts:        opts,
 		nodes:       make(map[uint64]*storhubNode),
 		inodePaths:  map[uint64]string{1: ""},
-		pageCache:   make(map[pageCacheKey]*list.Element),
-		pageOrder:   list.New(),
+		pageCache:   expirable.NewLRU[pageCacheKey, []byte](opts.MaxCachedPages, nil, opts.CacheTTL),
+		inodePages:  make(map[uint64]map[int64]struct{}),
 		lockTable:   make(map[uint64][]lockRecord),
 		writeStates: make(map[uint64]*inodeWriteState),
 		handles:     make(map[uint64]*storhubHandle),
@@ -393,8 +391,8 @@ func (s *Filesystem) debugf(format string, args ...any) {
 func (s *Filesystem) Invalidate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pageCache = make(map[pageCacheKey]*list.Element)
-	s.pageOrder.Init()
+	s.pageCache.Purge()
+	s.inodePages = make(map[uint64]map[int64]struct{})
 	for ino, node := range s.nodes {
 		if ino == 1 {
 			continue
@@ -1524,33 +1522,8 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 	return nil
 }
 
-func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte, off int64, hasOtherWriter bool) (uint32, bool, error) {
-	if w.stream == nil {
-		if hasOtherWriter || off != w.logicalSize || !w.canStreamSequentialWriteLocked() {
-			return 0, false, nil
-		}
-		w.stream = &streamingUploadState{}
-		if w.temp != nil {
-			_ = w.temp.Close()
-			w.temp = nil
-		}
-		if w.tempPath != "" {
-			_ = os.Remove(w.tempPath)
-			w.tempPath = ""
-		}
-	}
-	if hasOtherWriter || off != w.logicalSize {
-		if err := w.materializeStreamToTempLocked(ctx); err != nil {
-			return 0, true, err
-		}
-		return 0, false, nil
-	}
-	w.stream.tail = append(w.stream.tail, data...)
-	w.logicalSize += int64(len(data))
-	if err := w.flushStreamingChunksLocked(ctx, false); err != nil {
-		return 0, true, err
-	}
-	return uint32(len(data)), true, nil
+func (w *inodeWriteState) tryStreamWriteLocked(context.Context, []byte, int64, bool) (uint32, bool, error) {
+	return 0, false, nil
 }
 
 func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) error {
@@ -2611,18 +2584,11 @@ func (s *Filesystem) readCached(ctx context.Context, inode uint64, offset, lengt
 
 func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]byte, error) {
 	key := pageCacheKey{inode: inode, page: page}
-	now := time.Now()
 	s.mu.Lock()
-	if elem := s.pageCache[key]; elem != nil {
-		entry := elem.Value.(*pageCacheEntry)
-		if entry.expires.After(now) {
-			s.pageOrder.MoveToFront(elem)
-			data := append([]byte(nil), entry.data...)
-			s.mu.Unlock()
-			return data, nil
-		}
-		s.pageOrder.Remove(elem)
-		delete(s.pageCache, key)
+	if data, ok := s.pageCache.Get(key); ok {
+		data = append([]byte(nil), data...)
+		s.mu.Unlock()
+		return data, nil
 	}
 	s.mu.Unlock()
 	startPage := page
@@ -2632,9 +2598,21 @@ func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]b
 	}
 	readOffset := startPage * s.opts.PageSize
 	readLength := s.opts.PageSize * readAhead
-	data, err := s.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), s.project, s.pathForInode(inode), readOffset, readLength)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	readCtx := shfs.WithSuppressedAtime(ctx)
+	var data []byte
+	if buffered, ok := s.hub.(bufferReadHub); ok {
+		data = make([]byte, readLength)
+		n, err := buffered.ReadFileAtBufferContext(readCtx, s.project, s.pathForInode(inode), readOffset, data)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		data = data[:n]
+	} else {
+		var err error
+		data, err = s.hub.ReadFileAtContext(readCtx, s.project, s.pathForInode(inode), readOffset, readLength)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2646,28 +2624,17 @@ func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]b
 		}
 		end := minInt64(start+s.opts.PageSize, int64(len(data)))
 		pageData := append([]byte(nil), data[start:end]...)
-		if elem := s.pageCache[pageKey]; elem != nil {
-			s.pageOrder.Remove(elem)
-			delete(s.pageCache, pageKey)
+		s.pageCache.Add(pageKey, pageData)
+		if s.inodePages[pageKey.inode] == nil {
+			s.inodePages[pageKey.inode] = make(map[int64]struct{})
 		}
-		entry := &pageCacheEntry{key: pageKey, data: pageData, expires: now.Add(s.opts.CacheTTL)}
-		elem := s.pageOrder.PushFront(entry)
-		s.pageCache[pageKey] = elem
+		s.inodePages[pageKey.inode][pageKey.page] = struct{}{}
 		if end == int64(len(data)) && len(pageData) < int(s.opts.PageSize) {
 			break
 		}
 	}
-	for s.pageOrder.Len() > s.opts.MaxCachedPages {
-		last := s.pageOrder.Back()
-		if last == nil {
-			break
-		}
-		old := last.Value.(*pageCacheEntry)
-		delete(s.pageCache, old.key)
-		s.pageOrder.Remove(last)
-	}
-	if elem := s.pageCache[key]; elem != nil {
-		return append([]byte(nil), elem.Value.(*pageCacheEntry).data...), nil
+	if data, ok := s.pageCache.Get(key); ok {
+		return append([]byte(nil), data...), nil
 	}
 	return []byte{}, nil
 }
@@ -2675,13 +2642,10 @@ func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]b
 func (s *Filesystem) evictInodeCache(inode uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for key, elem := range s.pageCache {
-		if key.inode != inode {
-			continue
-		}
-		s.pageOrder.Remove(elem)
-		delete(s.pageCache, key)
+	for page := range s.inodePages[inode] {
+		s.pageCache.Remove(pageCacheKey{inode: inode, page: page})
 	}
+	delete(s.inodePages, inode)
 	if node := s.nodes[inode]; node != nil {
 		safeNotifyContent(node)
 	}
@@ -2743,16 +2707,7 @@ func (s *Filesystem) runJanitor() {
 }
 
 func (s *Filesystem) cleanupExpiredCache() {
-	now := time.Now()
 	s.mu.Lock()
-	for key, elem := range s.pageCache {
-		entry := elem.Value.(*pageCacheEntry)
-		if entry.expires.After(now) {
-			continue
-		}
-		delete(s.pageCache, key)
-		s.pageOrder.Remove(elem)
-	}
 	openTemps := make(map[string]struct{}, len(s.handles)+len(s.writeStates))
 	for _, handle := range s.handles {
 		handle.mu.Lock()
@@ -2804,14 +2759,14 @@ func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath str
 			return err
 		}
 		if parent := shfs.ParentPath(newPath); parent != "" && !meta.HasDirectory(parent) {
-			return fmt.Errorf("parent directory does not exist: %s", parent)
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
 		}
 		if flags&renameNoReplace != 0 && (meta.FindFile(newPath) != nil || meta.HasDirectory(newPath)) {
-			return fmt.Errorf("destination already exists: %s", newPath)
+			return shfs.AlreadyExists(newPath)
 		}
 		if file := meta.FindFile(oldPath); file != nil {
 			if existingDir := meta.GetDirectory(newPath); existingDir != nil {
-				return fmt.Errorf("destination already exists: %s", newPath)
+				return shfs.AlreadyExists(newPath)
 			}
 			meta.RemoveFile(newPath)
 			renamed := file.Clone()
@@ -2822,18 +2777,18 @@ func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath str
 			return nil
 		}
 		if !meta.HasDirectory(oldPath) {
-			return fmt.Errorf("path not found: %s", oldPath)
+			return shfs.NotFound(oldPath)
 		}
 		if shfs.IsParentOrSame(oldPath, newPath) {
 			return fmt.Errorf("cannot move directory %s into itself %s", oldPath, newPath)
 		}
 		if file := meta.FindFile(newPath); file != nil {
-			return fmt.Errorf("destination already exists: %s", newPath)
+			return shfs.AlreadyExists(newPath)
 		}
 		if dir := meta.GetDirectory(newPath); dir != nil {
 			childDirs, childFiles := meta.DirectoryChildren(newPath)
 			if len(childDirs) > 0 || len(childFiles) > 0 {
-				return fmt.Errorf("destination directory not empty: %s", newPath)
+				return shfs.NotEmpty(newPath)
 			}
 			meta.RemoveDirectory(dir.Path)
 		}
@@ -2903,37 +2858,27 @@ func errnoFromError(err error) syscall.Errno {
 	if errno, ok := err.(syscall.Errno); ok {
 		return errno
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "file not found") || strings.Contains(strings.ToLower(err.Error()), "project not found") {
-		return syscall.ENOENT
-	}
 	if errors.Is(err, context.Canceled) {
 		return syscall.EINTR
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return syscall.ETIMEDOUT
 	}
-	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "already exists"):
+	case errors.Is(err, shfs.ErrAlreadyExists):
 		return syscall.EEXIST
-	case strings.Contains(msg, "not empty"):
+	case errors.Is(err, shfs.ErrNotEmpty):
 		return syscall.ENOTEMPTY
-	case strings.Contains(msg, "is a directory"):
+	case errors.Is(err, shfs.ErrIsDirectory):
 		return syscall.EISDIR
-	case strings.Contains(msg, "not a directory"):
+	case errors.Is(err, shfs.ErrNotDirectory):
 		return syscall.ENOTDIR
-	case strings.Contains(msg, "parent directory does not exist"):
+	case errors.Is(err, shfs.ErrNotFound):
 		return syscall.ENOENT
-	case strings.Contains(msg, "path not found"):
-		return syscall.ENOENT
-	case strings.Contains(msg, "directory not found"):
-		return syscall.ENOENT
-	case strings.Contains(msg, "not a symlink"):
+	case errors.Is(err, shfs.ErrInvalidSymlink):
 		return syscall.EINVAL
-	case strings.Contains(msg, "xattr not found"):
+	case errors.Is(err, shfs.ErrXAttrNotFound):
 		return syscall.ENODATA
-	case strings.Contains(msg, "cannot"):
-		return syscall.EPERM
 	default:
 		return syscall.EIO
 	}

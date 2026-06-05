@@ -36,6 +36,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		return err
@@ -44,14 +45,14 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		return err
 	}
 	if pm.meta.HasDirectory(cleanName) {
-		return fmt.Errorf("is a directory: %s", cleanName)
+		return shfs.IsDirectory(cleanName)
 	}
 	existing := pm.meta.FindFile(cleanName)
 	if existing == nil {
-		return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return shfs.NotFound(cleanName)
 	}
 	if !pm.meta.RemoveFile(cleanName) {
-		return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return shfs.NotFound(cleanName)
 	}
 	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
 		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
@@ -61,9 +62,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	} else {
 		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
 	}
-	pm.dirty = true
-
-	return nil
+	return h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback)
 }
 
 func (h *StorHub) DeleteRelease(project, tag string) error {
@@ -82,6 +81,7 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	rollback := pm.meta.Clone()
 
 	for _, release := range pm.meta.Releases {
 		for _, file := range release.Files {
@@ -96,11 +96,9 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		}
 	}
 	if !pm.meta.RemoveRelease(tag) {
-		return fmt.Errorf("release not found: %s", tag)
+		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	pm.dirty = true
-
-	return nil
+	return h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback)
 }
 
 func (h *StorHub) CleanupProject(project string) error {

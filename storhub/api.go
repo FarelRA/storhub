@@ -42,8 +42,8 @@ const (
 )
 
 var (
-	ErrFileNotFound    = impl.ErrFileNotFound
-	ErrProjectNotFound = impl.ErrProjectNotFound
+	ErrFileNotFound = impl.ErrFileNotFound
+	ErrNotFound     = shfs.ErrNotFound
 )
 
 func NewStorHub(token string) (*StorHub, error) {

@@ -11,8 +11,6 @@ import (
 	ghapi "github.com/FarelRA/storhub/internal/github"
 )
 
-var ErrProjectNotFound = errors.New("project not found")
-
 func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration {
 	if apiErr != nil {
 		if apiErr.RetryAfter > 0 {

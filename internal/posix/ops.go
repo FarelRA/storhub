@@ -81,7 +81,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		return nil, err
 	}
 	if repo.FindFile(cleanPath) != nil || repo.HasDirectory(cleanPath) {
-		return nil, fmt.Errorf("path already exists: %s", cleanPath)
+		return nil, shfs.AlreadyExists(cleanPath)
 	}
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
@@ -110,7 +110,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 			return err
 		}
 		if current.FindFile(cleanPath) != nil || current.HasDirectory(cleanPath) {
-			return fmt.Errorf("path already exists: %s", cleanPath)
+			return shfs.AlreadyExists(cleanPath)
 		}
 		symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(current, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 		symlink.Inode = current.AllocateInode()
@@ -144,7 +144,7 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 		return "", s.backend.FileNotFound(cleanPath)
 	}
 	if file.Kind != meta.NodeKindSymlink {
-		return "", fmt.Errorf("path is not a symlink: %s", cleanPath)
+		return "", shfs.InvalidSymlink(cleanPath)
 	}
 	shfs.TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
 	target = file.SymlinkTarget
@@ -182,7 +182,7 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 			return err
 		}
 		if repo.FindFile(linkPath) != nil || repo.HasDirectory(linkPath) {
-			return fmt.Errorf("path already exists: %s", linkPath)
+			return shfs.AlreadyExists(linkPath)
 		}
 		source := repo.FindFile(sourcePath)
 		if source == nil {
@@ -350,7 +350,7 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 		value, ok = dir.XAttrs[attr]
 	}
 	if !ok {
-		return nil, fmt.Errorf("xattr not found: %s", cleanPath)
+		return nil, shfs.XAttrNotFound(cleanPath)
 	}
 	result = []byte(value)
 	return result, nil
@@ -402,10 +402,10 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	}
 	if file != nil {
 		if _, ok := file.XAttrs[attr]; !ok {
-			return fmt.Errorf("xattr not found: %s", cleanPath)
+			return shfs.XAttrNotFound(cleanPath)
 		}
 	} else if _, ok := dir.XAttrs[attr]; !ok {
-		return fmt.Errorf("xattr not found: %s", cleanPath)
+		return shfs.XAttrNotFound(cleanPath)
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
 		now := s.backend.Now().UTC()
@@ -605,7 +605,7 @@ func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath 
 func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.FileMetadata)) error {
 	files := repo.FindFilesByInode(inode)
 	if len(files) == 0 {
-		return fmt.Errorf("inode family not found: %d", inode)
+		return fmt.Errorf("%w: inode family %d", shfs.ErrNotFound, inode)
 	}
 	updated := make([]meta.FileMetadata, 0, len(files))
 	for _, file := range files {

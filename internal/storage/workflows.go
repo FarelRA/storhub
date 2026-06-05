@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
@@ -117,7 +118,7 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 				return nil, "", existsErr
 			}
 			if !exists {
-				return nil, "", fmt.Errorf("%w: %s", ErrProjectNotFound, project)
+				return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
 			}
 			meta := NewRepoMetadata(project)
 			h.storeRepoMetadata(project, *meta, "")
@@ -177,7 +178,7 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 	if err != nil {
 		var apiErr *ghapi.APIError
 		if errors.As(err, &apiErr) && apiErr.NotFound() {
-			return nil, fmt.Errorf("%w: %s", ErrProjectNotFound, project)
+			return nil, shfs.NotFound(fmt.Sprintf("project %s", project))
 		}
 		return nil, err
 	}
@@ -307,7 +308,7 @@ func (h *StorHub) listReleases(ctx context.Context, project string) ([]ghapi.Rel
 	if err != nil {
 		var apiErr *ghapi.APIError
 		if errors.As(err, &apiErr) && apiErr.NotFound() {
-			return nil, fmt.Errorf("%w: %s", ErrProjectNotFound, project)
+			return nil, shfs.NotFound(fmt.Sprintf("project %s", project))
 		}
 		return nil, err
 	}
