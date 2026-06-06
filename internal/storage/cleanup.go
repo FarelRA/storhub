@@ -35,34 +35,46 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	rollback := pm.meta.Clone()
 
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
+		pm.mu.Unlock()
 		return err
 	}
 	if err := shfs.CheckStickyDelete(ctx, pm.meta, shfs.ParentPath(cleanName), cleanName); err != nil {
+		pm.mu.Unlock()
 		return err
 	}
 	if pm.meta.HasDirectory(cleanName) {
+		pm.mu.Unlock()
 		return shfs.IsDirectory(cleanName)
 	}
 	existing := pm.meta.FindFile(cleanName)
 	if existing == nil {
+		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
 	if !pm.meta.RemoveFile(cleanName) {
+		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
 	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
 		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
 		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, h.config.Now().UTC()); err != nil {
+			pm.mu.Unlock()
 			return err
 		}
 	} else {
 		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
 	}
-	return h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback)
+	pm.dirty = true
+	pm.mu.Unlock()
+
+	select {
+	case pm.triggerCh <- struct{}{}:
+	default:
+	}
+
+	return nil
 }
 
 func (h *StorHub) DeleteRelease(project, tag string) error {
@@ -80,8 +92,6 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	rollback := pm.meta.Clone()
 
 	for _, release := range pm.meta.Releases {
 		for _, file := range release.Files {
@@ -90,15 +100,25 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 			}
 			for _, chunk := range file.Chunks {
 				if chunk.Release == tag {
+					pm.mu.Unlock()
 					return fmt.Errorf("release %s is still referenced by active file %s", tag, file.Name)
 				}
 			}
 		}
 	}
 	if !pm.meta.RemoveRelease(tag) {
+		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	return h.commitDirtyProjectMetadataLocked(ctx, project, pm, &rollback)
+	pm.dirty = true
+	pm.mu.Unlock()
+
+	select {
+	case pm.triggerCh <- struct{}{}:
+	default:
+	}
+
+	return nil
 }
 
 func (h *StorHub) CleanupProject(project string) error {

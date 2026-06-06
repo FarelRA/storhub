@@ -216,7 +216,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 
 func TestRESTShareCreateAndAccess(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 
 func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 
 func TestRESTShareCanonicalizesPath(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestRESTShareCanonicalizesPath(t *testing.T) {
 
 func TestRESTProjectShareListAndDelete(t *testing.T) {
 	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("0123456789abcdef0123456789abcdef")})
+	handler, err := newHandlerForClient(client, Options{ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}

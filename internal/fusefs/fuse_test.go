@@ -104,6 +104,9 @@ func TestReadCacheAndCleanupHelpers(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write stale cache file: %v", err)
 	}
+	if err := os.Chtimes(stale, time.Now().Add(-10*time.Minute), time.Now().Add(-10*time.Minute)); err != nil {
+		t.Fatalf("chtimes stale file: %v", err)
+	}
 	fsys.cleanupExpiredCache()
 	if fsys.pageCache.Len() != 0 {
 		t.Fatal("expected expired cache to be cleared")

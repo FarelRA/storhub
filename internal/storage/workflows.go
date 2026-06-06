@@ -428,11 +428,13 @@ func (h *StorHub) setRepoState(project string, exists bool) {
 
 func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, bool) {
 	h.metaMu.RLock()
-	defer h.metaMu.RUnlock()
 	entry, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
 	if !ok {
 		return nil, "", false
 	}
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	meta := entry.meta.Clone()
 	meta.RebuildIndexes()
 	return &meta, entry.sha, true
@@ -447,7 +449,8 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 	}
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	return pm.meta, pm.sha, true
+	meta := pm.meta.Clone()
+	return &meta, pm.sha, true
 }
 
 func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string) {

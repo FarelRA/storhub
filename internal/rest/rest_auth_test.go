@@ -151,7 +151,7 @@ func TestHashPasswordAndTokenExpiry(t *testing.T) {
 func newAuthedTestHandler(t *testing.T, client *fakeRESTClient) http.Handler {
 	t.Helper()
 	opts := DefaultOptions()
-	opts.ShareSigningKey = []byte("0123456789abcdef0123456789abcdef")
+	opts.ShareSigningKey = []byte("abcdef0123456789abcdef0123456789")
 	opts.Auth = &AuthOptions{
 		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
 		Users: []User{

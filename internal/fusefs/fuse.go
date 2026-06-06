@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,7 +68,7 @@ type Filesystem struct {
 
 	mu          sync.RWMutex
 	nodes       map[uint64]*storhubNode
-	inodePaths  map[uint64]string
+	inodePaths  map[uint64]map[string]struct{}
 	pathToInode map[string]uint64
 	pageCache   *expirable.LRU[pageCacheKey, []byte]
 	inodePages  map[uint64]map[int64]struct{}
@@ -139,12 +140,16 @@ type inodeWriteState struct {
 	streamCh          chan uploadTask
 	streamDone        chan struct{}
 	streamErr         atomic.Value
+	streamDraining    bool
+	streamCtx         context.Context
+	streamCancel      context.CancelFunc
 	pending           shfs.MetadataPatch
 }
 
 type streamingUploadState struct {
 	releaseTag string
 	uploadURL  string
+	path       string
 	prepared   bool
 	prepareMu  sync.Mutex
 	chunks     []metadata.ChunkInfo
@@ -298,7 +303,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		project:     project,
 		opts:        opts,
 		nodes:       make(map[uint64]*storhubNode),
-		inodePaths:  map[uint64]string{1: ""},
+		inodePaths:  map[uint64]map[string]struct{}{1: {"": {}}},
 		pathToInode: map[string]uint64{"": 1},
 		pageCache:   expirable.NewLRU[pageCacheKey, []byte](opts.MaxCachedPages, nil, opts.CacheTTL),
 		inodePages:  make(map[uint64]map[int64]struct{}),
@@ -422,7 +427,10 @@ func (s *Filesystem) Invalidate() {
 func (s *Filesystem) pathForInode(inode uint64) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.inodePaths[inode]
+	for p := range s.inodePaths[inode] {
+		return p
+	}
+	return ""
 }
 
 func (s *Filesystem) writeStateForInode(inode uint64) *inodeWriteState {
@@ -473,33 +481,37 @@ func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
 func (s *Filesystem) rememberPath(inode uint64, targetPath string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.inodePaths[inode]; ok && prev != "" {
-		delete(s.pathToInode, prev)
+	if s.inodePaths[inode] == nil {
+		s.inodePaths[inode] = make(map[string]struct{})
 	}
-	s.inodePaths[inode] = targetPath
+	s.inodePaths[inode][targetPath] = struct{}{}
 	s.pathToInode[targetPath] = inode
 }
 
 func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
 	s.mu.Lock()
-	if s.inodePaths[inode] != targetPath {
-		remaining := s.inodePaths[inode]
-		s.mu.Unlock()
-		return remaining
-	}
-	delete(s.pathToInode, targetPath)
-	s.mu.Unlock()
-	meta, _, err := s.hub.LoadRepoMetadataReadonlyContext(context.Background(), s.project)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err == nil {
-		for _, file := range meta.FindFilesByInode(inode) {
-			s.inodePaths[inode] = file.Name
-			s.pathToInode[file.Name] = inode
-			return file.Name
+	paths := s.inodePaths[inode]
+	if _, ok := paths[targetPath]; !ok {
+		for p := range paths {
+			s.mu.Unlock()
+			return p
 		}
+		s.mu.Unlock()
+		return ""
 	}
-	delete(s.inodePaths, inode)
+	if len(paths) == 1 {
+		delete(s.pathToInode, targetPath)
+		delete(s.inodePaths, inode)
+		s.mu.Unlock()
+		return ""
+	}
+	delete(paths, targetPath)
+	delete(s.pathToInode, targetPath)
+	for p := range paths {
+		s.mu.Unlock()
+		return p
+	}
+	s.mu.Unlock()
 	return ""
 }
 
@@ -533,12 +545,15 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 
 func (s *Filesystem) remapPaths(oldPath, newPath string) {
 	s.mu.Lock()
-	for inode, current := range s.inodePaths {
-		if shfs.IsParentOrSame(oldPath, current) {
-			remapped := shfs.RemapPath(oldPath, newPath, current)
-			delete(s.pathToInode, current)
-			s.inodePaths[inode] = remapped
-			s.pathToInode[remapped] = inode
+	for inode, paths := range s.inodePaths {
+		for current := range paths {
+			if shfs.IsParentOrSame(oldPath, current) {
+				remapped := shfs.RemapPath(oldPath, newPath, current)
+				delete(paths, current)
+				delete(s.pathToInode, current)
+				paths[remapped] = struct{}{}
+				s.pathToInode[remapped] = inode
+			}
 		}
 	}
 	handles := make([]*storhubHandle, 0, len(s.handles))
@@ -623,16 +638,16 @@ func (s *Filesystem) ensureNode(ctx context.Context, entry *shfs.EntryInfo) *sto
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if node := s.nodes[entry.Inode]; node != nil {
-		if prev, ok := s.inodePaths[entry.Inode]; ok && prev != entry.Path && prev != "" {
-			delete(s.pathToInode, prev)
+		if s.inodePaths[entry.Inode] == nil {
+			s.inodePaths[entry.Inode] = make(map[string]struct{})
 		}
-		s.inodePaths[entry.Inode] = entry.Path
+		s.inodePaths[entry.Inode][entry.Path] = struct{}{}
 		s.pathToInode[entry.Path] = entry.Inode
 		return node
 	}
 	node := &storhubNode{fs: s, inode: entry.Inode, kind: entry.Kind, isDir: entry.IsDir}
 	s.nodes[entry.Inode] = node
-	s.inodePaths[entry.Inode] = entry.Path
+	s.inodePaths[entry.Inode] = map[string]struct{}{entry.Path: {}}
 	s.pathToInode[entry.Path] = entry.Inode
 	return node
 }
@@ -923,12 +938,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		if state != nil {
 			state.opMu.Lock()
 			state.mu.Lock()
-			err := state.setSizeLocked(int64(size))
-			if err == nil {
-				state.path = targetPath
-				usedLocalSize = true
-				localSize = state.logicalSize
-			}
+		err := state.setSizeLocked(int64(size))
+		if err == nil {
+			usedLocalSize = true
+			localSize = state.logicalSize
+		}
 			state.mu.Unlock()
 			state.opMu.Unlock()
 			if err != nil {
@@ -1191,25 +1205,42 @@ func (h *storhubHandle) materialize(ctx context.Context) error {
 
 func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.temp != nil {
+		h.mu.Unlock()
 		return nil
 	}
 	temp, err := os.CreateTemp(h.fs.cacheDir, "handle-*")
 	if err != nil {
+		h.mu.Unlock()
 		return err
 	}
 	h.temp = temp
 	h.tempPath = temp.Name()
 	h.path = targetPath
+	h.mu.Unlock()
+
+	// Network calls without lock
 	entry, err := h.fs.hub.StatPathContext(ctx, h.fs.project, targetPath)
 	if err == nil && entry.Size > 0 {
-		if dlErr := h.fs.hub.DownloadFileContext(ctx, h.fs.project, targetPath, h.tempPath); dlErr != nil {
+		if dlErr := h.fs.hub.DownloadFileContext(ctx, h.fs.project, targetPath, temp.Name()); dlErr != nil {
+			if err := temp.Close(); err != nil {
+				logging.Error(nil, "failed to close temp file after download error", "path", temp.Name(), "err", err)
+			}
+			if err := os.Remove(temp.Name()); err != nil {
+				logging.Error(nil, "failed to remove temp file after download error", "path", temp.Name(), "err", err)
+			}
+			h.mu.Lock()
+			h.temp = nil
+			h.tempPath = ""
+			h.mu.Unlock()
 			return dlErr
 		}
-		if _, err := h.temp.Seek(0, 0); err != nil {
-			return err
+		h.mu.Lock()
+		if _, seekErr := h.temp.Seek(0, 0); seekErr != nil {
+			h.mu.Unlock()
+			return seekErr
 		}
+		h.mu.Unlock()
 	}
 	return nil
 }
@@ -1217,7 +1248,6 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, targetPath string, bootstrap *writeBootstrap) (*inodeWriteState, error) {
 	s.mu.Lock()
 	if existing := s.writeStates[inode]; existing != nil {
-		existing.path = targetPath
 		existing.refs++
 		s.mu.Unlock()
 		return existing, nil
@@ -1284,13 +1314,19 @@ func (s *Filesystem) releaseWriteState(state *inodeWriteState) {
 }
 
 func (s *Filesystem) hasOtherWriteHandle(inode uint64, excludeID uint64) bool {
+	type entry struct {
+		id    uint64
+		inode uint64
+		ws    bool
+	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	entries := make([]entry, 0, len(s.handles))
 	for id, handle := range s.handles {
-		if id == excludeID {
-			continue
-		}
-		if handle.inode == inode && handle.writeState != nil {
+		entries = append(entries, entry{id, handle.inode, handle.writeState != nil})
+	}
+	s.mu.RUnlock()
+	for _, e := range entries {
+		if e.id != excludeID && e.inode == inode && e.ws {
 			return true
 		}
 	}
@@ -1299,23 +1335,31 @@ func (s *Filesystem) hasOtherWriteHandle(inode uint64, excludeID uint64) bool {
 
 func (w *inodeWriteState) materialize(ctx context.Context) error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.temp != nil {
+		w.mu.Unlock()
 		return nil
 	}
+	path := w.path
 	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
 	if err != nil {
+		w.mu.Unlock()
 		return err
 	}
 	w.temp = temp
 	w.tempPath = temp.Name()
-	entry, err := w.fs.hub.StatPathContext(ctx, w.fs.project, w.path)
+	w.mu.Unlock()
+
+	// Network call without lock
+	entry, err := w.fs.hub.StatPathContext(ctx, w.fs.project, path)
 	if err == nil {
+		w.mu.Lock()
 		w.baseSize = entry.Size
 		w.logicalSize = entry.Size
-		if err := w.temp.Truncate(entry.Size); err != nil {
-			return err
+		if truncErr := w.temp.Truncate(entry.Size); truncErr != nil {
+			w.mu.Unlock()
+			return truncErr
 		}
+		w.mu.Unlock()
 	}
 	return nil
 }
@@ -1328,26 +1372,46 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 	if err != nil {
 		return err
 	}
+	baseTempPath := baseTemp.Name()
+
+	// Release lock before network calls
+	w.mu.Unlock()
 	entry, statErr := w.fs.hub.StatPathContext(ctx, w.fs.project, targetPath)
 	if statErr == nil && entry.Size > 0 {
-		if dlErr := w.fs.hub.DownloadFileContext(ctx, w.fs.project, targetPath, baseTemp.Name()); dlErr != nil {
+		if dlErr := w.fs.hub.DownloadFileContext(ctx, w.fs.project, targetPath, baseTempPath); dlErr != nil {
 			_ = baseTemp.Close()
-			_ = os.Remove(baseTemp.Name())
+			_ = os.Remove(baseTempPath)
+			w.mu.Lock()
 			return dlErr
 		}
 	}
+	w.mu.Lock()
+	// Re-check: another goroutine may have already set this
+	if w.baseTemp != nil {
+		if err := baseTemp.Close(); err != nil {
+			logging.Error(nil, "failed to close base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
+		}
+		if err := os.Remove(baseTempPath); err != nil {
+			logging.Error(nil, "failed to remove base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
+		}
+		return nil
+	}
 	w.baseTemp = baseTemp
-	w.baseTempPath = baseTemp.Name()
+	w.baseTempPath = baseTempPath
 	return nil
 }
 
 func (w *inodeWriteState) clearBaseSnapshotLocked() {
 	if w.baseTemp != nil {
-		_ = w.baseTemp.Close()
+		if err := w.baseTemp.Close(); err != nil {
+			logging.Error(nil, "failed to close base snapshot temp", "err", err)
+		}
 		w.baseTemp = nil
 	}
 	if w.baseTempPath != "" {
-		_ = os.Remove(w.baseTempPath)
+		if err := os.Remove(w.baseTempPath); err != nil {
+			logging.Error(nil, "failed to remove base snapshot temp", "path", w.baseTempPath, "err", err)
+		}
 		w.baseTempPath = ""
 	}
 }
@@ -1513,35 +1577,59 @@ func (w *inodeWriteState) canStreamSequentialWriteLocked() bool {
 
 func (w *inodeWriteState) releaseTempFile() {
 	if w.temp != nil {
-		_ = w.temp.Close()
+		if err := w.temp.Close(); err != nil {
+			logging.Error(nil, "failed to close temp file", "path", w.tempPath, "err", err)
+		}
 		w.temp = nil
 	}
 	if w.tempPath != "" {
-		_ = os.Remove(w.tempPath)
+		if err := os.Remove(w.tempPath); err != nil {
+			logging.Error(nil, "failed to remove temp file", "path", w.tempPath, "err", err)
+		}
 		w.tempPath = ""
 	}
 	if w.baseTemp != nil {
-		_ = w.baseTemp.Close()
+		if err := w.baseTemp.Close(); err != nil {
+			logging.Error(nil, "failed to close base temp file", "err", err)
+		}
 		w.baseTemp = nil
 	}
 	if w.baseTempPath != "" {
-		_ = os.Remove(w.baseTempPath)
+		if err := os.Remove(w.baseTempPath); err != nil {
+			logging.Error(nil, "failed to remove base temp file", "path", w.baseTempPath, "err", err)
+		}
 		w.baseTempPath = ""
 	}
 	w.tempAuthoritative = false
 }
 
 func (w *inodeWriteState) fallbackStreamToTempLocked(ctx context.Context) {
-	if w.stream == nil {
+	if w.stream == nil || w.streamDraining {
 		return
 	}
-	if w.streamCh != nil {
-		close(w.streamCh)
-		<-w.streamDone
+	if w.streamCh == nil {
+		w.stream = nil
+		return
 	}
+	w.streamDraining = true
+	ch := w.streamCh
+	done := w.streamDone
+	cancel := w.streamCancel
+	w.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	if cancel != nil {
+		cancel()
+	}
+	<-done
+	w.mu.Lock()
 	w.streamCh = nil
 	w.streamDone = nil
+	w.streamCancel = nil
+	w.streamCtx = nil
 	w.stream = nil
+	w.streamDraining = false
 }
 
 func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte, off int64, handleID uint64) (uint32, bool, error) {
@@ -1570,13 +1658,15 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		w.stream = &streamingUploadState{
 			chunkSize:  chunkSize,
 			tailOffset: off,
+			path:       w.path,
 		}
 		if cap(data) <= int(chunkSize) {
 			w.stream.tail = data[:0]
 		}
 		w.streamCh = make(chan uploadTask, capacity)
 		w.streamDone = make(chan struct{})
-		go w.uploadLoop(context.Background())
+		w.streamCtx, w.streamCancel = context.WithCancel(context.Background())
+		go w.uploadLoop(w.streamCtx)
 		w.releaseTempFile()
 		// Re-check: another writer may have appeared during init.
 		if w.fs.hasOtherWriteHandle(w.inode, handleID) {
@@ -1584,7 +1674,7 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 			return 0, false, nil
 		}
 	}
-	if w.streamCh == nil {
+	if w.streamCh == nil || w.streamDraining {
 		return 0, false, nil
 	}
 	if err := w.streamErr.Load(); err != nil {
@@ -1648,7 +1738,7 @@ func (w *inodeWriteState) uploadLoop(ctx context.Context) {
 		}
 		w.stream.prepareMu.Lock()
 		if !w.stream.prepared {
-			releaseTag, uploadURL, err := w.fs.hub.PrepareReplaceContext(ctx, w.fs.project, w.path, 1)
+			releaseTag, uploadURL, err := w.fs.hub.PrepareReplaceContext(ctx, w.fs.project, w.stream.path, 1)
 			if err != nil {
 				w.streamErr.Store(err)
 				w.stream.prepareMu.Unlock()
@@ -1675,7 +1765,7 @@ func (w *inodeWriteState) uploadLoop(ctx context.Context) {
 }
 
 func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force bool) error {
-	if w.stream == nil {
+	if w.stream == nil || w.streamDraining {
 		return nil
 	}
 	if force && len(w.stream.tail) > 0 && w.streamCh != nil {
@@ -1693,17 +1783,25 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 			w.stream.tail = nil
 		default:
 			// Channel full — materialise everything to temp to avoid data loss.
+			// materializeStreamToTempLocked releases w.mu during the wait
+			// and re-acquires it before returning.
 			return w.materializeStreamToTempLocked(ctx)
 		}
 	}
 	if w.streamCh != nil {
-		close(w.streamCh)
-		<-w.streamDone
-	}
-	w.streamCh = nil
-	w.streamDone = nil
-	if err := w.streamErr.Load(); err != nil {
-		return err.(error)
+		w.streamDraining = true
+		ch := w.streamCh
+		done := w.streamDone
+		w.mu.Unlock()
+		close(ch)
+		<-done
+		w.mu.Lock()
+		w.streamCh = nil
+		w.streamDone = nil
+		w.streamDraining = false
+		if err := w.streamErr.Load(); err != nil {
+			return err.(error)
+		}
 	}
 	// NOTE: w.stream is intentionally kept non-nil here so that the caller
 	// (commit) can still read releaseTag and chunks for finalization.
@@ -1712,41 +1810,89 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 }
 
 func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) error {
-	if w.stream == nil {
+	if w.stream == nil || w.streamDraining {
 		return nil
 	}
-	if w.streamCh != nil {
-		close(w.streamCh)
-		<-w.streamDone
+	if w.streamCh == nil {
+		return nil
 	}
+	w.streamDraining = true
+	ch := w.streamCh
+	done := w.streamDone
+	cancel := w.streamCancel
+	w.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	if cancel != nil {
+		cancel()
+	}
+	<-done
+	// materializeStreamToTemp will acquire w.mu internally
+	err := w.materializeStreamToTemp(ctx)
+	w.mu.Lock()
+	return err
+}
+
+// materializeStreamToTemp downloads all uploaded chunks and finalizes
+// the stream into the temp file. w.mu must NOT be held.
+func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
+	w.mu.Lock()
+
 	w.streamCh = nil
 	w.streamDone = nil
+	w.streamCancel = nil
+	w.streamCtx = nil
+	w.streamDraining = false
+
+	if w.stream == nil {
+		w.mu.Unlock()
+		return nil
+	}
 	if err := w.streamErr.Load(); err != nil {
+		w.mu.Unlock()
 		return err.(error)
 	}
 	if err := w.ensureTempLocked(); err != nil {
+		w.mu.Unlock()
 		return err
 	}
 	if err := w.temp.Truncate(w.logicalSize); err != nil {
+		w.mu.Unlock()
 		return err
 	}
-	for _, chunk := range w.stream.chunks {
+
+	// Snapshot all needed state under lock, then release before network I/O
+	chunks := append([]metadata.ChunkInfo(nil), w.stream.chunks...)
+	tail := append([]byte(nil), w.stream.tail...)
+	tailOff := w.stream.tailOffset
+	logicalSize := w.logicalSize
+	project := w.fs.project
+	hub := w.fs.hub
+	temp := w.temp
+
+	w.mu.Unlock()
+
+	for _, chunk := range chunks {
 		buf := make([]byte, chunk.Size)
-		if err := w.fs.hub.FillChunkRangeContext(ctx, w.fs.project, chunk, buf); err != nil {
+		if err := hub.FillChunkRangeContext(ctx, project, chunk, buf); err != nil {
 			return err
 		}
-		if _, err := w.temp.WriteAt(buf, chunk.Offset); err != nil {
-			return err
-		}
-	}
-	if len(w.stream.tail) > 0 {
-		if _, err := w.temp.WriteAt(w.stream.tail, w.stream.tailOffset); err != nil {
+		if _, err := temp.WriteAt(buf, chunk.Offset); err != nil {
 			return err
 		}
 	}
-	w.dirtyRanges = []ByteRange{{Start: 0, End: w.logicalSize}}
+	if len(tail) > 0 {
+		if _, err := temp.WriteAt(tail, tailOff); err != nil {
+			return err
+		}
+	}
+
+	w.mu.Lock()
+	w.dirtyRanges = []ByteRange{{Start: 0, End: logicalSize}}
 	w.tempAuthoritative = true
 	w.stream = nil
+	w.mu.Unlock()
 	return nil
 }
 
@@ -1838,7 +1984,11 @@ func (w *inodeWriteState) readBaseRangeLocked(ctx context.Context, offset, lengt
 		return []byte{}, nil
 	}
 	if exact {
-		return w.fs.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), w.fs.project, w.path, offset, length)
+		path := w.path
+		w.mu.Unlock()
+		data, err := w.fs.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), w.fs.project, path, offset, length)
+		w.mu.Lock()
+		return data, err
 	}
 	return w.fs.readCached(ctx, w.inode, offset, length)
 }
@@ -2060,23 +2210,37 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		return "", err
 	}
 	if err := temp.Truncate(w.logicalSize); err != nil {
-		_ = temp.Close()
-		_ = os.Remove(temp.Name())
+		if closeErr := temp.Close(); closeErr != nil {
+			logging.Error(nil, "failed to close commit snapshot temp after truncate error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+		}
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove commit snapshot temp after truncate error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
 		return "", err
 	}
 	if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
 		if err := w.writeWorkingRangeToLocked(temp, 0, w.logicalSize); err != nil {
-			_ = temp.Close()
-			_ = os.Remove(temp.Name())
+			if closeErr := temp.Close(); closeErr != nil {
+				logging.Error(nil, "failed to close commit snapshot temp after write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+			}
+			if removeErr := os.Remove(temp.Name()); removeErr != nil {
+				logging.Error(nil, "failed to remove commit snapshot temp after write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+			}
 			return "", err
 		}
 	} else if err := w.writeRangeToLocked(ctx, temp, 0, w.logicalSize); err != nil {
-		_ = temp.Close()
-		_ = os.Remove(temp.Name())
+		if closeErr := temp.Close(); closeErr != nil {
+			logging.Error(nil, "failed to close commit snapshot temp after range write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+		}
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove commit snapshot temp after range write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
 		return "", err
 	}
 	if err := temp.Close(); err != nil {
-		_ = os.Remove(temp.Name())
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove commit snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
 		return "", err
 	}
 	return temp.Name(), nil
@@ -2102,8 +2266,12 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 		return "", err
 	}
 	if err := temp.Truncate(w.logicalSize); err != nil {
-		_ = temp.Close()
-		_ = os.Remove(temp.Name())
+		if closeErr := temp.Close(); closeErr != nil {
+			logging.Error(nil, "failed to close range snapshot temp after truncate error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+		}
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove range snapshot temp after truncate error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
 		return "", err
 	}
 	buf := make([]byte, normalizedChunkSize(w.fs.hub.ChunkSize()))
@@ -2118,23 +2286,33 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 			}
 			n, err := w.readIntoExactLocked(ctx, buf[:want], offset)
 			if err != nil {
-				_ = temp.Close()
-				_ = os.Remove(temp.Name())
+				if closeErr := temp.Close(); closeErr != nil {
+					logging.Error(nil, "failed to close range snapshot temp after read error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+				}
+				if removeErr := os.Remove(temp.Name()); removeErr != nil {
+					logging.Error(nil, "failed to remove range snapshot temp after read error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+				}
 				return "", err
 			}
 			if n == 0 {
 				break
 			}
 			if _, err := temp.WriteAt(buf[:n], offset); err != nil {
-				_ = temp.Close()
-				_ = os.Remove(temp.Name())
+				if closeErr := temp.Close(); closeErr != nil {
+					logging.Error(nil, "failed to close range snapshot temp after write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+				}
+				if removeErr := os.Remove(temp.Name()); removeErr != nil {
+					logging.Error(nil, "failed to remove range snapshot temp after write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+				}
 				return "", err
 			}
 			offset += int64(n)
 		}
 	}
 	if err := temp.Close(); err != nil {
-		_ = os.Remove(temp.Name())
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove range snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
 		return "", err
 	}
 	return temp.Name(), nil
@@ -2142,8 +2320,8 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 
 func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]byte, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if length <= 0 {
+		h.mu.Unlock()
 		return []byte{}, nil
 	}
 	if h.readSeq == nil {
@@ -2159,7 +2337,9 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 	state.lastLength = length
 	if off >= state.start && off+length <= state.start+int64(len(state.data)) {
 		start := off - state.start
-		return append([]byte(nil), state.data[start:start+length]...), nil
+		data := append([]byte(nil), state.data[start:start+length]...)
+		h.mu.Unlock()
+		return data, nil
 	}
 	window := h.fs.opts.PageSize * h.fs.opts.ReadAheadPages
 	if state.sequentialHits >= 2 {
@@ -2170,8 +2350,13 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 	}
 	windowEnd := off + window
 
-	// Break window into chunk-aligned sub-ranges.
+	// Snapshot required state under lock before releasing
 	chunkSize := h.fs.hub.ChunkSize()
+	path := h.path
+	project := h.fs.project
+	hub := h.fs.hub
+	maxConcurrent := h.fs.opts.MaxConcurrentTransfers
+
 	var ranges []struct{ off, length int64 }
 	for pos := off; pos < windowEnd; {
 		chunkEnd := (pos/chunkSize + 1) * chunkSize
@@ -2182,9 +2367,11 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 		pos = chunkEnd
 	}
 
-	if len(ranges) >= 2 && h.fs.opts.MaxConcurrentTransfers > 1 {
+	if len(ranges) >= 2 && maxConcurrent > 1 {
+		h.mu.Unlock()
+
 		results := make([][]byte, len(ranges))
-		sem := make(chan struct{}, h.fs.opts.MaxConcurrentTransfers)
+		sem := make(chan struct{}, maxConcurrent)
 		fetchCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		var wg sync.WaitGroup
@@ -2197,7 +2384,7 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 			go func(idx int, rOff, rLen int64) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				d, err := h.fs.hub.ReadFileAtContext(fetchCtx, h.fs.project, h.path, rOff, rLen)
+				d, err := hub.ReadFileAtContext(fetchCtx, project, path, rOff, rLen)
 				if err != nil && !errors.Is(err, io.EOF) {
 					setErr.Do(func() {
 						firstErr = err
@@ -2220,52 +2407,87 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 		for _, d := range results {
 			merged = append(merged, d...)
 		}
+
+		h.mu.Lock()
 		state.start = off
 		state.data = append(state.data[:0], merged...)
-		if int64(len(state.data)) < length {
-			length = int64(len(state.data))
+		h.mu.Unlock()
+
+		if int64(len(merged)) < length {
+			length = int64(len(merged))
 		}
-		return append([]byte(nil), state.data[:length]...), nil
+		return append([]byte(nil), merged[:length]...), nil
 	}
 
-	data, err := h.fs.hub.ReadFileAtContext(ctx, h.fs.project, h.path, off, window)
+	h.mu.Unlock()
+
+	data, err := hub.ReadFileAtContext(ctx, project, path, off, window)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+
+	h.mu.Lock()
 	state.start = off
 	state.data = append(state.data[:0], data...)
+	h.mu.Unlock()
+
 	if int64(len(data)) < length {
 		length = int64(len(data))
 	}
-	return append([]byte(nil), state.data[:length]...), nil
+	return append([]byte(nil), data[:length]...), nil
 }
 
 func (w *inodeWriteState) closeTemp() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.closed {
+		w.mu.Unlock()
 		return
 	}
 	w.closed = true
-	if w.streamCh != nil {
-		close(w.streamCh)
-		<-w.streamDone
+	if w.streamCh != nil && !w.streamDraining {
+		w.streamDraining = true
+		ch := w.streamCh
+		done := w.streamDone
+		cancel := w.streamCancel
+		w.mu.Unlock()
+		close(ch)
+		if cancel != nil {
+			cancel()
+		}
+		<-done
+		w.mu.Lock()
+		w.streamCh = nil
+		w.streamDone = nil
+		w.streamCancel = nil
+		w.streamCtx = nil
+		w.stream = nil
+		w.streamDraining = false
+	} else if w.streamCancel != nil {
+		w.streamCancel()
+		w.streamCancel = nil
+		w.streamCtx = nil
 	}
-	w.stream = nil
-	w.streamCh = nil
-	w.streamDone = nil
 	if w.temp != nil {
-		_ = w.temp.Close()
+		if err := w.temp.Close(); err != nil {
+			logging.Error(nil, "failed to close write state temp file", "err", err)
+		}
 	}
 	if w.tempPath != "" {
-		_ = os.Remove(w.tempPath)
+		if err := os.Remove(w.tempPath); err != nil {
+			logging.Error(nil, "failed to remove write state temp file", "path", w.tempPath, "err", err)
+		}
 	}
 	if w.baseTemp != nil {
-		_ = w.baseTemp.Close()
+		if err := w.baseTemp.Close(); err != nil {
+			logging.Error(nil, "failed to close write state base temp file", "err", err)
+		}
 	}
 	if w.baseTempPath != "" {
-		_ = os.Remove(w.baseTempPath)
+		if err := os.Remove(w.baseTempPath); err != nil {
+			logging.Error(nil, "failed to remove write state base temp file", "path", w.baseTempPath, "err", err)
+		}
 	}
+	w.mu.Unlock()
 }
 
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -2412,235 +2634,236 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
-	if h.writeState != nil {
-		h.writeState.opMu.Lock()
-		defer h.writeState.opMu.Unlock()
-		h.writeState.mu.Lock()
-		if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() {
-			if h.writeState.stream == nil {
-				h.writeState.mu.Unlock()
-				return 0
-			}
-		}
-		if h.writeState.deleted || strings.TrimSpace(h.writeState.path) == "" {
-			h.writeState.mu.Unlock()
+	if h.writeState == nil {
+		h.mu.Lock()
+		if h.temp == nil || h.deleted || strings.TrimSpace(h.path) == "" {
+			h.mu.Unlock()
 			return 0
 		}
-		targetPath := h.writeState.path
-		baseSize := h.writeState.baseSize
-		logicalSize := h.writeState.logicalSize
-		pending := h.writeState.pending
-		if h.writeState.stream != nil {
-			if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
-				h.writeState.mu.Unlock()
-				h.fs.debugf("commit failed path=%s inode=%d step=stream-flush err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			// flushStreamingChunksLocked may have fallen back to temp
-			// (materializeStreamToTempLocked), which sets dirtyRanges.
-			if len(h.writeState.dirtyRanges) > 0 {
-				goto commitTemp
-			}
-			releaseTag := h.writeState.stream.releaseTag
-			chunks := append([]metadata.ChunkInfo(nil), h.writeState.stream.chunks...)
-			h.writeState.mu.Unlock()
-			h.fs.debugf("commit stream-replace path=%s inode=%d base=%d size=%d chunks=%d", targetPath, h.inode, baseSize, logicalSize, len(chunks))
-			if _, err := h.fs.hub.FinalizeReplaceChunksContext(ctx, h.fs.project, targetPath, releaseTag, logicalSize, chunks); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=stream-replace err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			h.writeState.mu.Lock()
-			h.writeState.baseSize = logicalSize
-			h.writeState.dirtyRanges = nil
-			h.writeState.tempAuthoritative = false
-			h.writeState.stream = nil
-			h.writeState.mu.Unlock()
-			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
-				return errno
-			}
-			h.writeState.mu.Lock()
-			h.writeState.pending = shfs.MetadataPatch{}
-			h.writeState.mu.Unlock()
-			h.fs.evictInodeCache(h.inode)
-			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
-			return 0
-		}
-	commitTemp:
-		if len(h.writeState.dirtyRanges) == 0 {
-			h.writeState.mu.Unlock()
-			if logicalSize != baseSize {
-				h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
-				if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-					h.fs.debugf("commit failed path=%s inode=%d step=truncate err=%v", targetPath, h.inode, err)
-					return errnoFromError(err)
-				}
-			}
-			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
-				return errno
-			}
-			h.writeState.mu.Lock()
-			if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
-				h.fs.debugf("commit cache refresh failed path=%s inode=%d step=truncate-cache err=%v", targetPath, h.inode, err)
-				h.writeState.clearBaseSnapshotLocked()
-			}
-			h.writeState.baseSize = logicalSize
-			h.writeState.tempAuthoritative = false
-			h.writeState.mu.Unlock()
-			h.fs.evictInodeCache(h.inode)
-			h.writeState.mu.Lock()
-			h.writeState.pending = shfs.MetadataPatch{}
-			h.writeState.mu.Unlock()
-			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
-			return 0
-		}
-		planned := h.writeState.plannedRangesLocked()
-		if h.writeState.shouldChunkRewriteLocked(planned) {
-			snapshotPath, err := h.writeState.createRangeSnapshotLocked(ctx, planned)
-			h.writeState.mu.Unlock()
-			if err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			defer os.Remove(snapshotPath)
-			h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
-			repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
-			if err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=load-metadata err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			fileMeta := repoMeta.FindFile(targetPath)
-			if fileMeta == nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=find-file err=not found", targetPath, h.inode)
-				return syscall.ENOENT
-			}
-			if _, err := h.fs.hub.RewriteFileRangesWithMetadataContext(ctx, h.fs.project, targetPath, snapshotPath, repoMeta, fileMeta, logicalSize, planned); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=chunk-rewrite err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			h.writeState.mu.Lock()
-			if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
-				h.fs.debugf("commit cache refresh failed path=%s inode=%d step=chunk-cache err=%v", targetPath, h.inode, err)
-				h.writeState.clearBaseSnapshotLocked()
-			}
-			h.writeState.baseSize = logicalSize
-			h.writeState.dirtyRanges = nil
-			h.writeState.tempAuthoritative = false
-			h.writeState.mu.Unlock()
-			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
-				return errno
-			}
-			h.writeState.mu.Lock()
-			h.writeState.pending = shfs.MetadataPatch{}
-			h.writeState.mu.Unlock()
-			h.fs.evictInodeCache(h.inode)
-			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
-			return 0
-		}
-		if h.writeState.shouldReplaceLocked(planned) {
-			snapshotPath, cleanupSnapshot, err := h.writeState.replaceInputPathLocked(ctx)
-			h.writeState.mu.Unlock()
-			if err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			if cleanupSnapshot {
-				defer os.Remove(snapshotPath)
-			}
-			h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(h.writeState.dirtyRanges))
-			if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=replace err=%v", targetPath, h.inode, err)
-				return errnoFromError(err)
-			}
-			h.writeState.mu.Lock()
-			if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
-				h.fs.debugf("commit cache refresh failed path=%s inode=%d step=replace-cache err=%v", targetPath, h.inode, err)
-				h.writeState.clearBaseSnapshotLocked()
-			}
-			h.writeState.baseSize = logicalSize
-			h.writeState.dirtyRanges = nil
-			h.writeState.tempAuthoritative = false
-			h.writeState.mu.Unlock()
-			if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
-				return errno
-			}
-			h.writeState.mu.Lock()
-			h.writeState.pending = shfs.MetadataPatch{}
-			h.writeState.mu.Unlock()
-			h.fs.evictInodeCache(h.inode)
-			h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
-			return 0
-		}
-		edits := make([][]byte, len(planned))
-		for i, dirty := range planned {
-			buf := make([]byte, dirty.End-dirty.Start)
-			n, err := h.writeState.readIntoLocked(ctx, buf, dirty.Start)
-			if err != nil {
-				h.writeState.mu.Unlock()
-				return errnoFromError(err)
-			}
-			for j := n; j < len(buf); j++ {
-				buf[j] = 0
-			}
-			edits[i] = buf
-		}
+		h.mu.Unlock()
+		return 0
+	}
+	h.mu.Lock()
+	handlePath := h.path
+	h.mu.Unlock()
+	h.writeState.opMu.Lock()
+	defer h.writeState.opMu.Unlock()
+	h.writeState.mu.Lock()
+	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() && h.writeState.stream == nil {
 		h.writeState.mu.Unlock()
-		h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
-		for i := len(planned) - 1; i >= 0; i-- {
-			dirty := planned[i]
-			deleteSize := dirty.End - dirty.Start
-			if dirty.Start >= baseSize {
-				deleteSize = 0
-			} else if maxDelete := baseSize - dirty.Start; deleteSize > maxDelete {
-				deleteSize = maxDelete
-			}
-			if _, err := h.fs.hub.PatchFileContext(ctx, h.fs.project, targetPath, dirty.Start, deleteSize, edits[i]); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=patch offset=%d err=%v", targetPath, h.inode, dirty.Start, err)
-				return errnoFromError(err)
-			}
-		}
-		if logicalSize != baseSize {
-			appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
-			if !appendOnly {
-				if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-					h.fs.debugf("commit failed path=%s inode=%d step=post-patch-truncate err=%v", targetPath, h.inode, err)
-					return errnoFromError(err)
-				}
-			}
-		}
-		h.writeState.mu.Lock()
-		if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
-			h.fs.debugf("commit cache refresh failed path=%s inode=%d step=patch-cache err=%v", targetPath, h.inode, err)
-			h.writeState.clearBaseSnapshotLocked()
-		}
-		h.writeState.baseSize = logicalSize
-		h.writeState.dirtyRanges = nil
-		h.writeState.tempAuthoritative = false
-		if err := h.writeState.temp.Truncate(logicalSize); err != nil {
-			h.fs.debugf("commit failed path=%s inode=%d step=local-truncate err=%v", targetPath, h.inode, err)
+		return 0
+	}
+	if h.writeState.deleted || strings.TrimSpace(handlePath) == "" {
+		h.writeState.mu.Unlock()
+		return 0
+	}
+	targetPath := handlePath
+	baseSize := h.writeState.baseSize
+	logicalSize := h.writeState.logicalSize
+	pending := h.writeState.pending
+	if h.writeState.stream != nil {
+		if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
 			h.writeState.mu.Unlock()
+			h.fs.debugf("commit failed path=%s inode=%d step=stream-flush err=%v", targetPath, h.inode, err)
 			return errnoFromError(err)
 		}
-		h.fs.evictInodeCache(h.inode)
+		if len(h.writeState.dirtyRanges) > 0 {
+			return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
+		}
+		return h.commitStreamReplace(ctx, targetPath, logicalSize, pending)
+	}
+	return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
+}
+
+// commitStreamReplace handles the streaming-chunks path.
+// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
+func (h *storhubHandle) commitStreamReplace(ctx context.Context, targetPath string, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
+	releaseTag := h.writeState.stream.releaseTag
+	chunks := append([]metadata.ChunkInfo(nil), h.writeState.stream.chunks...)
+	h.writeState.mu.Unlock()
+	h.fs.debugf("commit stream-replace path=%s inode=%d base=%d size=%d chunks=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(chunks))
+	if _, err := h.fs.hub.FinalizeReplaceChunksContext(ctx, h.fs.project, targetPath, releaseTag, logicalSize, chunks); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=stream-replace err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	h.writeState.mu.Lock()
+	h.writeState.baseSize = logicalSize
+	h.writeState.dirtyRanges = nil
+	h.writeState.tempAuthoritative = false
+	h.writeState.stream = nil
+	h.writeState.mu.Unlock()
+	return h.commitPostUpdate(ctx, targetPath, pending)
+}
+
+// commitTemp handles all temp-based commit paths (truncate, chunk-rewrite, replace, patch).
+// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu as needed.
+func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseSize, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
+	if len(h.writeState.dirtyRanges) == 0 {
 		h.writeState.mu.Unlock()
+		if logicalSize != baseSize {
+			h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
+			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
+				h.fs.debugf("commit failed path=%s inode=%d step=truncate err=%v", targetPath, h.inode, err)
+				return errnoFromError(err)
+			}
+		}
 		if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
 			return errno
 		}
+		h.writeState.mu.Lock()
+		h.writeState.commitCacheRefreshLocked(logicalSize)
+		h.writeState.mu.Unlock()
+		h.fs.evictInodeCache(h.inode)
 		h.writeState.mu.Lock()
 		h.writeState.pending = shfs.MetadataPatch{}
 		h.writeState.mu.Unlock()
 		h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 		return 0
 	}
-	h.mu.Lock()
-	if h.temp == nil {
-		h.mu.Unlock()
-		return 0
+	planned := h.writeState.plannedRangesLocked()
+	if h.writeState.shouldChunkRewriteLocked(planned) {
+		return h.commitChunkRewrite(ctx, targetPath, logicalSize, planned, pending)
 	}
-	if h.deleted || strings.TrimSpace(h.path) == "" {
-		h.mu.Unlock()
-		return 0
+	if h.writeState.shouldReplaceLocked(planned) {
+		return h.commitReplace(ctx, targetPath, logicalSize, planned, pending)
 	}
-	h.mu.Unlock()
+	return h.commitPatch(ctx, targetPath, baseSize, logicalSize, planned, pending)
+}
+
+// commitChunkRewrite handles the chunk-rewrite path.
+// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
+func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+	snapshotPath, err := h.writeState.createRangeSnapshotLocked(ctx, planned)
+	h.writeState.mu.Unlock()
+	if err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	defer os.Remove(snapshotPath)
+	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(planned))
+	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
+	if err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=load-metadata err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	fileMeta := repoMeta.FindFile(targetPath)
+	if fileMeta == nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=find-file err=not found", targetPath, h.inode)
+		return syscall.ENOENT
+	}
+	if _, err := h.fs.hub.RewriteFileRangesWithMetadataContext(ctx, h.fs.project, targetPath, snapshotPath, repoMeta, fileMeta, logicalSize, planned); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=chunk-rewrite err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	h.writeState.mu.Lock()
+	h.writeState.commitCacheRefreshLocked(logicalSize)
+	h.writeState.mu.Unlock()
+	return h.commitPostUpdate(ctx, targetPath, pending)
+}
+
+// commitReplace handles the full-file replace path.
+// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
+func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+	snapshotPath, cleanupSnapshot, err := h.writeState.replaceInputPathLocked(ctx)
+	h.writeState.mu.Unlock()
+	if err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	if cleanupSnapshot {
+		defer os.Remove(snapshotPath)
+	}
+	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(h.writeState.dirtyRanges))
+	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=replace err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	h.writeState.mu.Lock()
+	h.writeState.commitCacheRefreshLocked(logicalSize)
+	h.writeState.mu.Unlock()
+	return h.commitPostUpdate(ctx, targetPath, pending)
+}
+
+// commitPatch handles the partial patch path.
+// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
+func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+	edits := make([][]byte, len(planned))
+	for i, dirty := range planned {
+		buf := make([]byte, dirty.End-dirty.Start)
+		n, err := h.writeState.readIntoLocked(ctx, buf, dirty.Start)
+		if err != nil {
+			h.writeState.mu.Unlock()
+			return errnoFromError(err)
+		}
+		for j := n; j < len(buf); j++ {
+			buf[j] = 0
+		}
+		edits[i] = buf
+	}
+	h.writeState.mu.Unlock()
+	h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
+	for i := len(planned) - 1; i >= 0; i-- {
+		dirty := planned[i]
+		deleteSize := dirty.End - dirty.Start
+		if dirty.Start >= baseSize {
+			deleteSize = 0
+		} else if maxDelete := baseSize - dirty.Start; deleteSize > maxDelete {
+			deleteSize = maxDelete
+		}
+		if _, err := h.fs.hub.PatchFileContext(ctx, h.fs.project, targetPath, dirty.Start, deleteSize, edits[i]); err != nil {
+			h.fs.debugf("commit failed path=%s inode=%d step=patch offset=%d err=%v", targetPath, h.inode, dirty.Start, err)
+			return errnoFromError(err)
+		}
+	}
+	if logicalSize != baseSize {
+		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
+		if !appendOnly {
+			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
+				h.fs.debugf("commit failed path=%s inode=%d step=post-patch-truncate err=%v", targetPath, h.inode, err)
+				return errnoFromError(err)
+			}
+		}
+	}
+	h.writeState.mu.Lock()
+	if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
+		h.fs.debugf("commit cache refresh failed path=%s inode=%d step=patch-cache err=%v", targetPath, h.inode, err)
+		h.writeState.clearBaseSnapshotLocked()
+	}
+	h.writeState.baseSize = logicalSize
+	h.writeState.dirtyRanges = nil
+	h.writeState.tempAuthoritative = false
+	if err := h.writeState.temp.Truncate(logicalSize); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=local-truncate err=%v", targetPath, h.inode, err)
+		h.writeState.mu.Unlock()
+		return errnoFromError(err)
+	}
+	h.fs.evictInodeCache(h.inode)
+	h.writeState.mu.Unlock()
+	return h.commitPostUpdate(ctx, targetPath, pending)
+}
+
+// commitCacheRefreshLocked updates the cached write state after a successful remote write.
+// Caller must hold h.writeState.mu.
+func (w *inodeWriteState) commitCacheRefreshLocked(logicalSize int64) {
+	if err := w.refreshBaseSnapshotLocked(); err != nil {
+		w.clearBaseSnapshotLocked()
+	}
+	w.baseSize = logicalSize
+	w.dirtyRanges = nil
+	w.tempAuthoritative = false
+}
+
+// commitPostUpdate applies pending metadata, clears it, evicts inode cache, and notifies.
+// Caller must NOT hold h.writeState.mu.
+func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string, pending shfs.MetadataPatch) syscall.Errno {
+	if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
+		return errno
+	}
+	h.writeState.mu.Lock()
+	h.writeState.pending = shfs.MetadataPatch{}
+	h.writeState.mu.Unlock()
+	h.fs.evictInodeCache(h.inode)
+	h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 	return 0
 }
 
@@ -2652,10 +2875,14 @@ func (h *storhubHandle) closeTemp() {
 	}
 	h.closed = true
 	if h.temp != nil {
-		_ = h.temp.Close()
+		if err := h.temp.Close(); err != nil {
+			logging.Error(nil, "failed to close handle temp file", "err", err)
+		}
 	}
 	if h.tempPath != "" {
-		_ = os.Remove(h.tempPath)
+		if err := os.Remove(h.tempPath); err != nil {
+			logging.Error(nil, "failed to remove handle temp file", "path", h.tempPath, "err", err)
+		}
 	}
 }
 
@@ -2920,7 +3147,11 @@ func (s *Filesystem) evictInodeCache(inode uint64) {
 
 func safeNotifyContent(node *storhubNode) {
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil {
+			buf := make([]byte, 4096)
+			n := runtime.Stack(buf, false)
+			logging.Error(nil, "panic in NotifyContent", "panic", r, "stack", string(buf[:n]))
+		}
 	}()
 	if node == nil {
 		return
@@ -2935,7 +3166,11 @@ func safeNotifyEntry(node *storhubNode, name string) {
 	entryFn := notifyEntryFunc
 	go func() {
 		defer func() {
-			_ = recover()
+			if r := recover(); r != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				logging.Error(nil, "panic in NotifyEntry", "panic", r, "stack", string(buf[:n]))
+			}
 		}()
 		entryFn(node, name)
 	}()
@@ -2949,7 +3184,11 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	deleteFn := notifyDeleteFunc
 	go func() {
 		defer func() {
-			_ = recover()
+			if r := recover(); r != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				logging.Error(nil, "panic in NotifyDelete", "panic", r, "stack", string(buf[:n]))
+			}
 		}()
 		if child == nil {
 			entryFn(parent, name)
@@ -2974,7 +3213,7 @@ func (s *Filesystem) runJanitor() {
 }
 
 func (s *Filesystem) cleanupExpiredCache() {
-	s.mu.Lock()
+	s.mu.RLock()
 	openTemps := make(map[string]struct{}, len(s.handles)+len(s.writeStates))
 	for _, handle := range s.handles {
 		handle.mu.Lock()
@@ -2990,7 +3229,8 @@ func (s *Filesystem) cleanupExpiredCache() {
 		}
 		writeState.mu.Unlock()
 	}
-	s.mu.Unlock()
+	s.mu.RUnlock()
+	graceThreshold := time.Now().Add(-5 * time.Minute)
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
 		return
@@ -3000,7 +3240,13 @@ func (s *Filesystem) cleanupExpiredCache() {
 		if _, ok := openTemps[fullPath]; ok {
 			continue
 		}
-		_ = os.Remove(fullPath)
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(graceThreshold) {
+			_ = os.Remove(fullPath)
+		}
 	}
 }
 

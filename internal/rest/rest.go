@@ -3,6 +3,7 @@ package rest
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -95,10 +96,11 @@ type Client interface {
 }
 
 type restHandler struct {
-	client Client
-	opts   Options
-	shares *shareRegistry
-	logger *slog.Logger
+	client       Client
+	opts         Options
+	shares       *shareRegistry
+	logger       *slog.Logger
+	shareSignKey ed25519.PrivateKey
 }
 
 type contextKey string
@@ -440,7 +442,23 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
 		logger = logging.WithComponent(provider.Logger(), "rest")
 	}
+	if len(opts.ShareSigningKey) > 0 {
+		if len(opts.ShareSigningKey) < 32 {
+			return nil, errors.New("security constraint: share signing key must be at least 32 bytes")
+		}
+		if isWeakShareKey(opts.ShareSigningKey) {
+			return nil, errors.New("security constraint: share signing key is a known weak/default key")
+		}
+	}
 	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}}, logger: logger}
+	if len(opts.ShareSigningKey) > 0 {
+		seed := opts.ShareSigningKey
+		if len(seed) > 32 {
+			hash := sha256.Sum256(seed)
+			seed = hash[:]
+		}
+		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+	}
 	r := chi.NewRouter()
 
 	r.Use(h.requestLogging)
@@ -1352,16 +1370,16 @@ func canonicalSharePath(raw string) (string, error) {
 }
 
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
-	if len(h.opts.ShareSigningKey) == 0 {
+	if h.shareSignKey == nil {
 		return nil, errForbidden("share signing key not configured")
 	}
 	claims := &shareClaims{}
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), claims, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if _, ok := token.Method.(*jwt.SigningMethodEd25519); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return h.opts.ShareSigningKey, nil
-	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithTimeFunc(time.Now))
+		return h.shareSignKey.Public(), nil
+	}, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(time.Now))
 	if err != nil || !parsed.Valid {
 		return nil, errForbidden("invalid or expired share token")
 	}
@@ -1369,7 +1387,7 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 }
 
 func (h *restHandler) newShareRecord(project, sharePath string, download, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
-	if len(h.opts.ShareSigningKey) == 0 {
+	if h.shareSignKey == nil {
 		return nil, errors.New("share signing key not configured")
 	}
 	id, err := newShareID()
@@ -1389,8 +1407,8 @@ func (h *restHandler) newShareRecord(project, sharePath string, download, isDir 
 		Download: download,
 		IsDir:    isDir,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString(h.opts.ShareSigningKey)
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	signedToken, err := token.SignedString(h.shareSignKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1768,6 +1786,29 @@ func errPayloadTooLarge(message string) error {
 
 func errForbidden(message string) error {
 	return &restStatusError{status: http.StatusForbidden, message: message}
+}
+
+var weakShareKeys = [][]byte{
+	[]byte("replace-me"),
+	[]byte("0123456789abcdef0123456789abcdef"),
+}
+
+func isWeakShareKey(key []byte) bool {
+	for _, weak := range weakShareKeys {
+		if len(key) == len(weak) {
+			match := true
+			for i := range key {
+				if key[i] != weak[i] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ternaryStatus(cond bool, yes, no int) int {

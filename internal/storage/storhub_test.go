@@ -178,7 +178,9 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 
-	time.Sleep(150 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 
 	files, err := hub.ListFiles("project-a")
 	if err != nil {
@@ -203,7 +205,7 @@ func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
 	backend := newMockGitHub(t)
 	var active atomic.Int32
 	var maxActive atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			current := active.Add(1)
 			for {
@@ -216,7 +218,7 @@ func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
 			active.Add(-1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 3, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
@@ -323,12 +325,12 @@ func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 func TestCreateFileStoresEmptyMetadataWithoutAssetUpload(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	if err := hub.Mkdir("project-empty-upload", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
@@ -441,7 +443,9 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("upload first: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for first commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata after upload: %v", err)
+	}
 
 	inputB := writeTempFile(t, t.TempDir(), "v2.txt", []byte("version-b-better"))
 	_, err = hub.ReplaceFile("project-history", "artifact.txt", inputB)
@@ -449,7 +453,9 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("replace file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for second commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata after replace: %v", err)
+	}
 
 	revisions, err := hub.ListMetadataRevisions("project-history")
 	if err != nil {
@@ -539,12 +545,12 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 		t.Fatalf("patch file: %v", err)
 	}
 	var sawRange atomic.Bool
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") && r.Header.Get("Range") != "" {
 			sawRange.Store(true)
 		}
 		return false
-	}
+	})
 	output := filepath.Join(t.TempDir(), "ranges.out")
 	if err := hub.DownloadFile("project-range-patch", "ranges.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
@@ -572,9 +578,12 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	if len(patched.Chunks) != 3 {
 		t.Fatalf("expected three logical chunks after patch, got %+v", patched.Chunks)
 	}
-	time.Sleep(150 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 	rangeByAsset := make(map[int64][]string)
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	var rangeMu sync.Mutex
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/releases/assets/") {
 			return false
 		}
@@ -582,9 +591,11 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 		if err != nil {
 			return false
 		}
+		rangeMu.Lock()
 		rangeByAsset[assetID] = append(rangeByAsset[assetID], r.Header.Get("Range"))
+		rangeMu.Unlock()
 		return false
-	}
+	})
 	output := filepath.Join(t.TempDir(), "exact-ranges.out")
 	if err := hub.DownloadFile("project-exact-ranges", "exact-ranges.bin", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
@@ -795,12 +806,12 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 		commitsByPath: make(map[string][]mockCommit),
 	}
 	createCalls := 0
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" {
 			createCalls++
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, defaultTestConfig())
 	if err := hub.ensureRepo(context.Background(), "existing-project"); err != nil {
 		t.Fatalf("ensure existing repo: %v", err)
@@ -820,7 +831,9 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("upload tracked file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata after first upload: %v", err)
+	}
 
 	inputB := writeTempFile(t, t.TempDir(), "orphan.txt", []byte("orphan payload"))
 	orphan, err := hub.UploadFile("project-purge", "orphan.txt", inputB)
@@ -828,13 +841,17 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("upload orphan file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata after second upload: %v", err)
+	}
 
 	if err := hub.DeleteFile("project-purge", "orphan.txt"); err != nil {
 		t.Fatalf("hide orphan file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata after delete: %v", err)
+	}
 
 	repo := backend.repo("project-purge")
 	if repo == nil {
@@ -890,13 +907,17 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 
 	if err := hub.DeleteFile("project-missing-data", "missing-data.txt"); err != nil {
 		t.Fatalf("hide file: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond) // Wait for commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 
 	backend.removeAsset(t, "project-missing-data", meta.Chunks[0].AssetID)
 	// Get the oldest metadata revision to test rollback failure when data is missing
@@ -979,7 +1000,9 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	if len(meta.Chunks) < 2 {
 		t.Fatalf("expected multiple chunks, got %+v", meta)
 	}
-	time.Sleep(150 * time.Millisecond) // Wait for commit
+	if err := uploader.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 	downloader := backend.newClient(t, singleChunkTestConfig())
 	output := filepath.Join(t.TempDir(), "offsets.out")
 	if err := downloader.DownloadFile("project-offsets", "offsets.bin", output); err != nil {
@@ -1044,7 +1067,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", meta.Chunks[0].AssetID)) || failures.Load() != 0 {
 			return false
 		}
@@ -1063,7 +1086,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		_, _ = rw.Write(payload[:len(payload)/2])
 		_ = rw.Flush()
 		return true
-	}
+	})
 	output := filepath.Join(t.TempDir(), "retry-download.out")
 	if err := hub.DownloadFile("project-download-retry", "retry-download.bin", output); err != nil {
 		t.Fatalf("download with retry: %v", err)
@@ -1077,7 +1100,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 func TestRetryOnTransientServerError(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" && failures.Load() == 0 {
 			failures.Add(1)
 			w.WriteHeader(http.StatusBadGateway)
@@ -1085,7 +1108,7 @@ func TestRetryOnTransientServerError(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, retryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry.txt", []byte("retry payload"))
 	if _, err := hub.UploadFile("project-retry", "retry.txt", input); err != nil {
@@ -1099,7 +1122,7 @@ func TestRetryOnTransientServerError(t *testing.T) {
 func TestConstructorDefersAuthentication(t *testing.T) {
 	backend := newMockGitHub(t)
 	var hits atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && r.URL.Path == "/user" {
 			hits.Add(1)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -1107,7 +1130,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	cfg := smallTransferTestConfig()
 	cfg.APIBaseURL = backend.server.URL
 	cfg.HTTPClient = backend.server.Client()
@@ -1130,7 +1153,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") && failures.Load() == 0 {
 			failures.Add(1)
 			w.WriteHeader(http.StatusBadGateway)
@@ -1138,7 +1161,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallRetryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", []byte("retry upload payload"))
 	if _, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input); err != nil {
@@ -1153,7 +1176,7 @@ func TestRateLimitAwareRetry(t *testing.T) {
 	backend := newMockGitHub(t)
 	var hits atomic.Int32
 	var slept atomic.Int64
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && r.URL.Path == "/user" && hits.Load() == 0 {
 			hits.Add(1)
 			w.Header().Set("Retry-After", "1")
@@ -1164,7 +1187,7 @@ func TestRateLimitAwareRetry(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, rateLimitTestConfig(func(_ context.Context, d time.Duration) error {
 		slept.Store(int64(d))
 		return nil
@@ -1215,12 +1238,12 @@ func TestListFilesUsesMetadataCache(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var metadataGets atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
 			metadataGets.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	if _, err := hub.ListFiles("project-cache"); err != nil {
 		t.Fatalf("first list files: %v", err)
@@ -1241,12 +1264,12 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	var metadataGets atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
 			metadataGets.Add(1)
 		}
 		return false
-	}
+	})
 	if _, err := hub.ListFiles("project-cache-mutate"); err != nil {
 		t.Fatalf("list files from warm cache: %v", err)
 	}
@@ -1311,7 +1334,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", meta.Chunks[0].AssetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
 			return false
 		}
@@ -1330,7 +1353,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		_, _ = rw.Write(payload[:3])
 		_ = rw.Flush()
 		return true
-	}
+	})
 	data, err := hub.ReadFileAt("project-range-read", "range-read.txt", 2, 6)
 	if err != nil {
 		t.Fatalf("read file at with retry: %v", err)
@@ -1352,7 +1375,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", meta.Chunks[0].AssetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
 			return false
 		}
@@ -1371,7 +1394,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		_, _ = rw.Write(payload[:1])
 		_ = rw.Flush()
 		return true
-	}
+	})
 	if _, err := hub.PatchFile("project-patch-range-retry", "patch-retry.txt", 2, 3, []byte("XYZ")); err != nil {
 		t.Fatalf("patch file with retry: %v", err)
 	}
@@ -1388,7 +1411,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 func TestUploadHonorsCanceledContext(t *testing.T) {
 	backend := newMockGitHub(t)
 	uploadStarted := make(chan struct{}, 1)
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			hijacker, ok := w.(http.Hijacker)
 			if !ok {
@@ -1407,7 +1430,7 @@ func TestUploadHonorsCanceledContext(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "upload-cancel.txt", []byte("upload cancel payload"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1438,7 +1461,7 @@ func TestValidateProjectRejectsInvalidNames(t *testing.T) {
 func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failed atomic.Bool
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") && !failed.Load() {
 			failed.Store(true)
 			w.WriteHeader(http.StatusBadGateway)
@@ -1446,12 +1469,16 @@ func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "rollback.txt", []byte("rollback payload"))
-	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err == nil {
-		t.Fatal("expected upload to fail when metadata commit fails")
+	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err != nil {
+		t.Fatalf("upload should succeed (metadata commit is async): %v", err)
 	}
+	// Wait for the background commit loop to attempt the commit and reload
+	time.Sleep(100 * time.Millisecond)
+	// After the failed commit, metadata was reloaded from GitHub (empty),
+	// so the data appears hidden (no metadata references it) but assets remain
 	files, err := hub.ListFiles("project-hidden")
 	if err != nil {
 		t.Fatalf("list files after failed upload: %v", err)
@@ -1469,11 +1496,10 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	backend := newMockGitHub(t)
 	var conflicts atomic.Int32
 	var commitCount atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
-			commitCount.Add(1)
-			// Return conflict on the second commit attempt (after initial metadata exists)
-			if commitCount.Load() == 2 && conflicts.Load() == 0 {
+		commitCount.Add(1)
+		if commitCount.Load() == 2 && conflicts.Load() == 0 {
 				conflicts.Add(1)
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
@@ -1481,7 +1507,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 			}
 		}
 		return false
-	}
+	})
 	cfg := smallTransferTestConfig()
 	cfg.MaxRetries = 2
 	cfg.BaseRetryDelay = time.Millisecond
@@ -1493,17 +1519,22 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	if _, err := hub.UploadFile("project-conflict", "initial.txt", input1); err != nil {
 		t.Fatalf("upload initial file: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond) // Wait for first commit to complete
-
-	// Second upload - this commit will get a conflict and fail before reporting success.
-	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
-	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err == nil {
-		t.Fatal("expected upload to fail on metadata conflict")
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush first metadata: %v", err)
 	}
+
+	// Second upload - its async commit will hit a conflict, triggering reload and retry.
+	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
+	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
+		t.Fatalf("upload should succeed (commit is async): %v", err)
+	}
+	// Wait for the background commit loop to process the conflict recovery
+	time.Sleep(100 * time.Millisecond)
 	if conflicts.Load() != 1 {
 		t.Fatalf("expected one metadata conflict, got %d", conflicts.Load())
 	}
-	// After conflict, only committed data is visible.
+	// After conflict, the background commit loop reloaded from GitHub and discarded
+	// the conflict.txt changes. Only the committed data is visible.
 	files, err := hub.ListFiles("project-conflict")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
@@ -1516,7 +1547,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") && failures.Load() == 0 {
 			failures.Add(1)
 			w.WriteHeader(http.StatusBadGateway)
@@ -1524,7 +1555,7 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	cfg := smallTransferTestConfig()
 	cfg.MaxRetries = 2
 	cfg.BaseRetryDelay = time.Millisecond
@@ -1544,7 +1575,7 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 func TestDownloadHonorsContextCancellation(t *testing.T) {
 	backend := newMockGitHub(t)
 	assetStarted := make(chan struct{}, 1)
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			select {
 			case assetStarted <- struct{}{}:
@@ -1554,7 +1585,7 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cancel.txt", []byte("cancel payload"))
 	if _, err := hub.UploadFile("project-cancel", "cancel.txt", input); err != nil {
@@ -1572,11 +1603,11 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestMetadataCommitsSynchronously(t *testing.T) {
+func TestMetadataBatchesAndFlushes(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
-	// Upload multiple files - each successful call commits metadata before returning.
+	// Upload multiple files - metadata commits happen asynchronously.
 	for i := 0; i < 3; i++ {
 		name := fmt.Sprintf("file-%d.txt", i)
 		input := writeTempFile(t, t.TempDir(), name, []byte(name))
@@ -1585,12 +1616,9 @@ func TestMetadataCommitsSynchronously(t *testing.T) {
 		}
 	}
 
-	revisions, err := hub.ListMetadataRevisions("project-batching")
-	if err != nil {
-		t.Fatalf("list metadata revisions: %v", err)
-	}
-	if len(revisions) != 3 {
-		t.Fatalf("expected 3 synchronous metadata revisions, got %d", len(revisions))
+	// Wait for all background commit operations to complete
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
 	}
 
 	// Verify all 3 files are in the metadata
@@ -1629,8 +1657,9 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 	if _, err := hub.UploadFile("project-invalid-metadata", "invalid.bin", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	// Wait for metadata to be committed (batching system commits at 100ms interval)
-	time.Sleep(150 * time.Millisecond)
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 	meta := mustLoadMetadata(t, backend.repo("project-invalid-metadata"))
 	meta.Releases[0].Files[0].Chunks[0].Offset = 99
 	backend.setMetadata(t, "project-invalid-metadata", meta)
@@ -1647,12 +1676,19 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 	if _, err := hub.UploadFile("project-cleanup", "cleanup.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repo := backend.repo("project-cleanup")
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
+	backend.mu.Lock()
+	repo := backend.repos["project-cleanup"]
 	before := len(repo.commitsByPath[metadataFilePath])
+	backend.mu.Unlock()
 	if err := hub.CleanupProject("project-cleanup"); err != nil {
 		t.Fatalf("cleanup project: %v", err)
 	}
+	backend.mu.Lock()
 	after := len(repo.commitsByPath[metadataFilePath])
+	backend.mu.Unlock()
 	if after != before {
 		t.Fatalf("expected cleanup noop commit count to stay %d, got %d", before, after)
 	}
@@ -2358,7 +2394,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2366,7 +2402,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 			assetDownloadCalls.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "large.txt", []byte("abcdefghijklmnopqrstuvwx"))
@@ -2415,7 +2451,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2423,7 +2459,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 			assetDownloadCalls.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "append.txt", []byte("abcdefgh"))
@@ -2471,12 +2507,12 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "truncate.txt", []byte("abcdefghijklmnop"))
@@ -2665,7 +2701,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	var uploadCalls atomic.Int32
 	var metadataWrites atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept = func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2676,7 +2712,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 			assetDownloadCalls.Add(1)
 		}
 		return false
-	}
+	})
 	hub := backend.newClient(t, Config{
 		ChunkSize:              8,
 		BufferSize:             testSingleBufferSize,
@@ -2689,7 +2725,9 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	if _, err := hub.UploadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", input); err != nil {
 		t.Fatalf("upload fragmented file: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond) // Wait for initial commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 	baselineUploads := uploadCalls.Load()
 	baselineMetadataWrites := metadataWrites.Load()
 	fsys, err := hub.NewFUSE("project-fuse-fragmented-writeback", fusefs.DefaultOptions())
@@ -2715,7 +2753,9 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	if errno := h.Fsync(ctx, 0); errno != 0 {
 		t.Fatalf("fsync fragmented writes: %v", errno)
 	}
-	time.Sleep(150 * time.Millisecond) // Wait for FUSE writeback commit
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
 	if delta := uploadCalls.Load() - baselineUploads; delta != 6 {
 		t.Fatalf("expected six uploaded touched chunks, got %d", delta)
 	}
@@ -2852,7 +2892,7 @@ type mockGitHub struct {
 	mu        sync.Mutex
 	owner     string
 	repos     map[string]*mockRepo
-	intercept func(http.ResponseWriter, *http.Request) bool
+	intercept atomic.Value
 }
 
 type mockRepo struct {
@@ -2934,7 +2974,7 @@ func computeGitBlobSHA(data []byte) string {
 }
 
 func (m *mockGitHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if m.intercept != nil && m.intercept(w, r) {
+	if fn, ok := m.intercept.Load().(func(http.ResponseWriter, *http.Request) bool); ok && fn(w, r) {
 		return
 	}
 	switch {
@@ -3284,21 +3324,23 @@ func (m *mockGitHub) handleDownloadAsset(w http.ResponseWriter, r *http.Request,
 	}
 	m.mu.Lock()
 	asset := repo.assets[assetID]
-	m.mu.Unlock()
 	if asset == nil {
+		m.mu.Unlock()
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
 		return
 	}
-	start, end, partial, err := resolveByteRange(r.Header.Get("Range"), int64(len(asset.data)))
+	data := append([]byte(nil), asset.data...)
+	m.mu.Unlock()
+	start, end, partial, err := resolveByteRange(r.Header.Get("Range"), int64(len(data)))
 	if err != nil {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-	body := asset.data
+	body := data
 	status := http.StatusOK
 	if partial {
-		body = asset.data[start : end+1]
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(asset.data)))
+		body = data[start : end+1]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
 		status = http.StatusPartialContent
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
