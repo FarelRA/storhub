@@ -27,7 +27,10 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
-const maxMetadataBytes = 8 << 20
+const (
+	maxMetadataBytes       = 8 << 20
+	minParallelSegmentSize = 1 << 20 // 1 MiB — minimum segment size to parallelize
+)
 
 var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -1456,20 +1459,32 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 		return int(end - offset), nil
 	}
-	if len(segments) == 1 || h.config.MaxConcurrentTransfers <= 1 {
-		for _, segment := range segments {
-			if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
-				return 0, err
+	// Flatten two-tier parallelism: sub-split every large segment, then
+	// dispatch all sub-segments through a single runConcurrent pool.
+	if h.config.MaxConcurrentTransfers > 1 {
+		all := make([]fileReadSegment, 0, len(segments)*2)
+		for _, seg := range segments {
+			if seg.end-seg.start >= minParallelSegmentSize {
+				all = append(all, splitSegment(seg, h.config.MaxConcurrentTransfers)...)
+			} else {
+				all = append(all, seg)
 			}
 		}
-		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
-		return int(end - offset), nil
+		if len(all) > 1 {
+			if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(all), func(i int) error {
+				sub := all[i]
+				return h.fillAssetRange(ctx, project, sub.chunk, result[sub.start:sub.end])
+			}); err != nil {
+				return 0, err
+			}
+			shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
+			return int(end - offset), nil
+		}
 	}
-	if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(segments), func(i int) error {
-		segment := segments[i]
-		return h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end])
-	}); err != nil {
-		return 0, err
+	for _, segment := range segments {
+		if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
+			return 0, err
+		}
 	}
 	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 	return int(end - offset), nil
@@ -1479,6 +1494,36 @@ type fileReadSegment struct {
 	chunk metadata.ChunkInfo
 	start int
 	end   int
+}
+
+func splitSegment(seg fileReadSegment, maxParts int) []fileReadSegment {
+	size := seg.end - seg.start
+	if maxParts > size {
+		maxParts = size
+	}
+	partSize := (size + maxParts - 1) / maxParts
+	subs := make([]fileReadSegment, 0, maxParts)
+	for off := 0; off < size; off += partSize {
+		end := off + partSize
+		if end > size {
+			end = size
+		}
+		partLen := end - off
+		subs = append(subs, fileReadSegment{
+			chunk: metadata.ChunkInfo{
+				Name:        seg.chunk.Name,
+				Size:        int64(partLen),
+				Index:       seg.chunk.Index,
+				Offset:      seg.chunk.Offset + int64(off),
+				Release:     seg.chunk.Release,
+				AssetOffset: seg.chunk.AssetOffset + int64(off),
+				AssetID:     seg.chunk.AssetID,
+			},
+			start: seg.start + off,
+			end:   seg.start + end,
+		})
+	}
+	return subs
 }
 
 func overlappingFileSegments(file *metadata.FileMetadata, offset, end int64) []fileReadSegment {

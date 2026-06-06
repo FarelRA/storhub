@@ -41,19 +41,20 @@ var (
 )
 
 type Options struct {
-	EntryTimeout    time.Duration
-	AttrTimeout     time.Duration
-	NegativeTimeout time.Duration
-	CacheTTL        time.Duration
-	CleanupInterval time.Duration
-	PageSize        int64
-	ReadAheadPages  int64
-	MaxCachedPages  int
-	ExtraMountOpts  []string
-	CacheDir        string
-	AllowOther      bool
-	Debug           bool
-	Logger          *slog.Logger
+	EntryTimeout          time.Duration
+	AttrTimeout           time.Duration
+	NegativeTimeout       time.Duration
+	CacheTTL              time.Duration
+	CleanupInterval       time.Duration
+	PageSize              int64
+	ReadAheadPages        int64
+	MaxCachedPages        int
+	MaxConcurrentTransfers int
+	ExtraMountOpts        []string
+	CacheDir              string
+	AllowOther            bool
+	Debug                 bool
+	Logger                *slog.Logger
 }
 
 type Filesystem struct {
@@ -190,11 +191,12 @@ func DefaultOptions() Options {
 		NegativeTimeout: 1 * time.Second,
 		CacheTTL:        5 * time.Second,
 		CleanupInterval: 30 * time.Second,
-		PageSize:        128 * 1024,
-		ReadAheadPages:  4,
-		MaxCachedPages:  256,
-		ExtraMountOpts:  []string{"lazytime", "noatime"},
-		Debug:           true,
+		PageSize:               128 * 1024,
+		ReadAheadPages:         4,
+		MaxCachedPages:         256,
+		MaxConcurrentTransfers: 8,
+		ExtraMountOpts:         []string{"lazytime", "noatime"},
+		Debug:                  true,
 	}
 }
 
@@ -326,6 +328,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.Debug = s.opts.Debug
 	options.MountOptions.AllowOther = s.opts.AllowOther
 	options.MountOptions.MaxWrite = mountMaxIOSize
+	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
@@ -2165,6 +2168,66 @@ func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]by
 	if window < length {
 		window = length
 	}
+	windowEnd := off + window
+
+	// Break window into chunk-aligned sub-ranges.
+	chunkSize := h.fs.hub.ChunkSize()
+	var ranges []struct{ off, length int64 }
+	for pos := off; pos < windowEnd; {
+		chunkEnd := (pos/chunkSize + 1) * chunkSize
+		if chunkEnd > windowEnd {
+			chunkEnd = windowEnd
+		}
+		ranges = append(ranges, struct{ off, length int64 }{pos, chunkEnd - pos})
+		pos = chunkEnd
+	}
+
+	if len(ranges) >= 2 && h.fs.opts.MaxConcurrentTransfers > 1 {
+		results := make([][]byte, len(ranges))
+		sem := make(chan struct{}, h.fs.opts.MaxConcurrentTransfers)
+		fetchCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		var wg sync.WaitGroup
+		var firstErr error
+		var setErr sync.Once
+
+		for i, r := range ranges {
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(idx int, rOff, rLen int64) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				d, err := h.fs.hub.ReadFileAtContext(fetchCtx, h.fs.project, h.path, rOff, rLen)
+				if err != nil && !errors.Is(err, io.EOF) {
+					setErr.Do(func() {
+						firstErr = err
+						cancel()
+					})
+					return
+				}
+				results[idx] = d
+			}(i, r.off, r.length)
+		}
+		wg.Wait()
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		totalLen := int64(0)
+		for _, d := range results {
+			totalLen += int64(len(d))
+		}
+		merged := make([]byte, 0, totalLen)
+		for _, d := range results {
+			merged = append(merged, d...)
+		}
+		state.start = off
+		state.data = append(state.data[:0], merged...)
+		if int64(len(state.data)) < length {
+			length = int64(len(state.data))
+		}
+		return append([]byte(nil), state.data[:length]...), nil
+	}
+
 	data, err := h.fs.hub.ReadFileAtContext(ctx, h.fs.project, h.path, off, window)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
