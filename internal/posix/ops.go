@@ -331,7 +331,14 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr string) (result []byte, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "getxattr start", "path", targetPath, "attr", attr)
-	defer func() { s.logFinish(project, "getxattr", started, err, "path", targetPath, "attr", attr) }()
+	defer func() {
+		if err != nil && !errors.Is(err, shfs.ErrXAttrNotFound) {
+			s.logFinish(project, "getxattr", started, err, "path", targetPath, "attr", attr)
+		}
+		if err == nil {
+			s.logFinish(project, "getxattr", started, nil, "path", targetPath, "attr", attr)
+		}
+	}()
 	if strings.TrimSpace(attr) == "" {
 		return nil, errors.New("xattr name is required")
 	}
