@@ -154,7 +154,7 @@ func (m RepoMetadata) Clone() RepoMetadata {
 }
 
 func (m *RepoMetadata) ToJSON() ([]byte, error) {
-	data, err := json.Marshal(m)
+	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
