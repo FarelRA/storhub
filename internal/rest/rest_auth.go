@@ -3,6 +3,7 @@ package rest
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -257,6 +258,12 @@ func (c *authorizedClient) PatchFile(project, filePath string, offset, deleteSiz
 		return nil, err
 	}
 	return c.base.PatchFile(project, filePath, offset, deleteSize, edit)
+}
+func (c *authorizedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
+	if err := c.requireNodeWrite(project, filePath); err != nil {
+		return nil, err
+	}
+	return c.base.ReplaceFileFromReader(project, filePath, body)
 }
 func (c *authorizedClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
 	if err := c.requireNodeRead(project, filePath); err != nil {

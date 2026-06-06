@@ -645,6 +645,14 @@ func (c *fakeRESTClient) WriteFileAt(project, filePath string, offset int64, dat
 	return &FileMetadata{Name: clean, Size: int64(len(content)), Inode: node.entry.Inode}, nil
 }
 
+func (c *fakeRESTClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*FileMetadata, error) {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	return c.WriteFileAt(project, filePath, 0, data)
+}
+
 func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

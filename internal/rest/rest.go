@@ -91,6 +91,7 @@ type Client interface {
 	ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadata(project, commitSHA string) error
 	DeleteProject(project string) error
+	ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error)
 }
 
 type restHandler struct {
@@ -212,6 +213,10 @@ func (c *restrictedClient) WriteFileAt(project, filePath string, offset int64, d
 }
 
 func (c *restrictedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error) {
+	return nil, errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
@@ -832,12 +837,9 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 			h.writeMappedError(w, err)
 			return
 		}
-	} else if _, err := h.clientFor(r).TruncateFile(project, filePath, 0); err != nil {
-		h.writeMappedError(w, err)
-		return
 	}
 
-	if err := h.streamWriteBody(r, project, filePath, r.Body, 0); err != nil {
+	if _, err := h.clientFor(r).ReplaceFileFromReader(project, filePath, r.Body); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -548,6 +549,55 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 
 	result = &fileMeta
 	return result, nil
+}
+
+func (h *StorHub) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
+	return h.ReplaceFileFromReaderContext(context.Background(), project, filePath, body)
+}
+
+func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (result *metadata.FileMetadata, err error) {
+	if body == nil {
+		return nil, fmt.Errorf("request body is nil")
+	}
+	chunkSize := h.ChunkSize()
+
+	releaseTag, uploadURL, err := h.PrepareReplaceContext(ctx, project, filePath, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var chunks []ChunkInfo
+	var uploaded int64
+	var index int
+	buf := h.getBuffer()
+	defer h.putBuffer(buf)
+
+	// Wrap in bufio for efficiency on small-read bodies (e.g. HTTP).
+	reader := body
+	if _, ok := body.(*bufio.Reader); !ok {
+		reader = bufio.NewReaderSize(body, int(chunkSize))
+	}
+
+	for {
+		n, readErr := reader.Read(*buf)
+		if n > 0 {
+			chunk, uploadErr := h.UploadChunkDataContext(ctx, project, releaseTag, uploadURL, index, uploaded, (*buf)[:n])
+			if uploadErr != nil {
+				return nil, uploadErr
+			}
+			chunks = append(chunks, chunk)
+			uploaded += int64(n)
+			index++
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, readErr
+		}
+	}
+
+	return h.FinalizeReplaceChunksContext(ctx, project, filePath, releaseTag, uploaded, chunks)
 }
 
 func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chunk metadata.ChunkInfo, dst []byte) error {

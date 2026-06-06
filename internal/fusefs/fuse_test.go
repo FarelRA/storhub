@@ -410,23 +410,24 @@ func TestSequentialReadHandleExpandsWindow(t *testing.T) {
 	}
 }
 
-func TestSequentialWriteCommitUsesWritebackReplace(t *testing.T) {
-	var replaced bool
+func TestSequentialWriteCommitUsesStreamReplace(t *testing.T) {
+	var finalized bool
+	var finalSize int64
 	fsys, err := New(&stubHub{
 		chunkSize: 4,
-		replaceFile: func(_ context.Context, _ string, target, inputPath string) (*meta.FileMetadata, error) {
-			replaced = true
+		finalizeChunks: func(_ context.Context, _, target, releaseTag string, size int64, chunks []meta.ChunkInfo) (*meta.FileMetadata, error) {
+			finalized = true
+			finalSize = size
 			if target != "demo.bin" {
-				t.Fatalf("unexpected replace target=%q", target)
+				t.Fatalf("unexpected finalize target=%q", target)
 			}
-			data, err := os.ReadFile(inputPath)
-			if err != nil {
-				t.Fatalf("read replace input: %v", err)
+			if size != 10 {
+				t.Fatalf("unexpected finalize size=%d", size)
 			}
-			if string(data) != "abcdefghij" {
-				t.Fatalf("unexpected replace input data: %q", data)
+			if len(chunks) == 0 {
+				t.Fatal("expected at least one chunk")
 			}
-			return &meta.FileMetadata{Name: target, Size: int64(len(data))}, nil
+			return &meta.FileMetadata{Name: target, Size: size}, nil
 		},
 	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -443,8 +444,11 @@ func TestSequentialWriteCommitUsesWritebackReplace(t *testing.T) {
 	if errno := h.Release(context.Background()); errno != 0 {
 		t.Fatalf("release handle: %v", errno)
 	}
-	if !replaced {
-		t.Fatal("expected writeback replace")
+	if !finalized {
+		t.Fatal("expected stream replace")
+	}
+	if finalSize != 10 {
+		t.Fatalf("expected final size 10, got %d", finalSize)
 	}
 }
 
