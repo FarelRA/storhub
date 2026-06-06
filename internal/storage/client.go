@@ -87,14 +87,21 @@ type StorHub struct {
 // projectMetadata holds metadata for a single project with batched commit support
 type projectMetadata struct {
 	mu         sync.RWMutex
+	commitMu   sync.Mutex
 	meta       *metadata.RepoMetadata
 	sha        string
 	dirty      bool
+	version    uint64
 	lastCommit time.Time
 	lastAccess time.Time
 	stopCh     chan struct{}
 	stoppedCh  chan struct{}
 	triggerCh  chan struct{}
+}
+
+func markProjectDirtyLocked(pm *projectMetadata) {
+	pm.dirty = true
+	pm.version++
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
@@ -152,15 +159,22 @@ func (h *StorHub) Owner() string { return h.owner }
 
 func (h *StorHub) ensureOwner(ctx context.Context) error {
 	h.ownerMu.Lock()
-	defer h.ownerMu.Unlock()
 	if strings.TrimSpace(h.owner) != "" {
+		h.ownerMu.Unlock()
 		return nil
 	}
+	h.ownerMu.Unlock()
+
 	owner, err := h.getAuthenticatedUser(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve authenticated user: %w", err)
 	}
-	h.owner = owner
+
+	h.ownerMu.Lock()
+	if strings.TrimSpace(h.owner) == "" {
+		h.owner = owner
+	}
+	h.ownerMu.Unlock()
 	return nil
 }
 
@@ -225,90 +239,70 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			// Project evicted, stop the commit loop
 			return
 		case <-ticker.C:
-			pm.mu.Lock()
-			if pm.dirty {
-				// Commit metadata to GitHub
-				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
-					pm.mu.Unlock()
-					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after commit failure; preserving dirty metadata for retry", "err", loadErr)
-					} else {
-						logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
-					}
-					continue
-				} else {
-					pm.dirty = false
-					pm.lastCommit = h.config.Now()
-					logging.Debug(logger, "metadata committed", "interval", h.config.MetadataCommitInterval)
-				}
+			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+				h.recoverMetadataCommitFailure(project, err)
+				continue
 			}
-			pm.mu.Unlock()
 
 		case <-pm.triggerCh:
-			// Wake up and commit if dirty, then continue loop
-			pm.mu.Lock()
-			if pm.dirty {
-				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
-					pm.mu.Unlock()
-					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after commit failure; preserving dirty metadata for retry", "err", loadErr)
-					} else {
-						logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
-					}
-					continue
-				} else {
-					pm.dirty = false
-					pm.lastCommit = h.config.Now()
-					logging.Debug(logger, "metadata committed", "interval", h.config.MetadataCommitInterval)
-				}
+			// Wake up and commit if dirty, then continue loop.
+			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+				h.recoverMetadataCommitFailure(project, err)
+				continue
 			}
-			pm.mu.Unlock()
 
 		case <-h.shutdownCh:
 			// Shutdown requested
-			pm.mu.Lock()
-			if pm.dirty {
-				if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-					logging.Error(logger, "shutdown metadata commit failed, reloading from github", "err", err)
-					pm.mu.Unlock()
-					if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-						logging.Error(logger, "failed to reload metadata after shutdown commit failure; preserving dirty metadata", "err", loadErr)
-					} else {
-						logging.Info(logger, "metadata reloaded from github on shutdown, in-memory changes discarded")
-					}
-					return
-				} else {
-					logging.Info(logger, "shutdown metadata committed")
-				}
+			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
+				logging.Error(logger, "shutdown metadata commit failed", "err", err)
+				return
 			}
-			pm.mu.Unlock()
 			return
 		}
 	}
 }
 
-// commitProjectMetadata commits the metadata to GitHub (caller must hold pm.mu lock)
+func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
+	logger := h.projectLogger(project)
+	logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
+	if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
+		logging.Error(logger, "failed to reload metadata after commit failure; preserving dirty metadata for retry", "err", loadErr)
+		return
+	}
+	logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
+}
+
+// commitProjectMetadata commits dirty metadata without holding pm.mu during GitHub I/O.
 func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm *projectMetadata) error {
+	pm.commitMu.Lock()
+	defer pm.commitMu.Unlock()
+
 	started := h.config.Now().UTC()
-	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(pm.sha))
+	pm.mu.Lock()
+	if !pm.dirty {
+		pm.mu.Unlock()
+		return nil
+	}
+	pm.meta.Normalize(project, h.config.Now())
+	pm.meta.LastModified = h.config.Now().UTC()
+	pm.meta.RecomputeStats()
+	meta := pm.meta.Clone()
+	previousSHA := pm.sha
+	version := pm.version
+	pm.mu.Unlock()
+
+	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA))
 
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
 	}
 
-	// Normalize and validate metadata
-	pm.meta.Normalize(project, h.config.Now())
-	pm.meta.LastModified = h.config.Now().UTC()
-	pm.meta.RecomputeStats()
-	if err := pm.meta.Validate(); err != nil {
+	if err := meta.Validate(); err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "validate", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return fmt.Errorf("invalid metadata: %w", err)
 	}
 
-	// Serialize to JSON
-	metaBytes, err := pm.meta.ToJSON()
+	metaBytes, err := meta.ToJSON()
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "serialize", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return fmt.Errorf("marshal metadata: %w", err)
@@ -322,14 +316,19 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	// Commit to GitHub with optimistic locking
 	message := "storhub: update metadata"
-	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, ".storhub/metadata.json", metaBytes, pm.sha, message)
+	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, ".storhub/metadata.json", metaBytes, previousSHA, message)
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "github_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return fmt.Errorf("commit metadata: %w", err)
 	}
 
-	// Update SHA for next commit
+	pm.mu.Lock()
 	pm.sha = contentSHA
+	if pm.version == version {
+		pm.dirty = false
+		pm.lastCommit = h.config.Now()
+	}
+	pm.mu.Unlock()
 
 	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(metaBytes))
 
@@ -411,18 +410,11 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 
 	var firstErr error
 	for _, p := range projects {
-		p.meta.mu.Lock()
-		if p.meta.dirty {
-			if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-			} else {
-				p.meta.dirty = false
-				p.meta.lastCommit = h.config.Now()
+		if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
+			if firstErr == nil {
+				firstErr = err
 			}
 		}
-		p.meta.mu.Unlock()
 	}
 
 	return firstErr
@@ -537,7 +529,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}
 	implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, latest, fileMeta, now)
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
@@ -677,7 +669,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	implposix.ApplyUpdatedFileIdentity(&patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, current, patched, now)
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
@@ -714,7 +706,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	implposix.ApplyUpdatedFileIdentity(&rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, current, rewritten, now)
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
@@ -841,7 +833,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.meta.UpsertFile(fileMeta, h.config.Now().UTC())
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
@@ -988,15 +980,9 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	}
 	// Flush any dirty metadata first so cached SHA matches GitHub
 	pm := h.getOrCreateProjectMeta(project)
-	pm.mu.Lock()
-	if pm.dirty {
-		if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
-			pm.mu.Unlock()
-			return err
-		}
-		pm.dirty = false
+	if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
+		return err
 	}
-	pm.mu.Unlock()
 
 	currentMeta, currentSHA, err := h.loadRepoMetadata(ctx, project)
 	if err != nil {
@@ -1282,7 +1268,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	// Trigger the commit loop to wake up immediately

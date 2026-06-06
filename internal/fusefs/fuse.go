@@ -32,6 +32,9 @@ const (
 	renameExchange  = 0x2
 	renameWhiteout  = 0x4
 	mountMaxIOSize  = 256 * 1024 * 1024
+	// Keep metadata operations responsive if slow readers fill the kernel's
+	// asynchronous FUSE request queue. go-fuse defaults this to 12.
+	mountMaxBackground = 256
 )
 
 var (
@@ -42,20 +45,20 @@ var (
 )
 
 type Options struct {
-	EntryTimeout          time.Duration
-	AttrTimeout           time.Duration
-	NegativeTimeout       time.Duration
-	CacheTTL              time.Duration
-	CleanupInterval       time.Duration
-	PageSize              int64
-	ReadAheadPages        int64
-	MaxCachedPages        int
+	EntryTimeout           time.Duration
+	AttrTimeout            time.Duration
+	NegativeTimeout        time.Duration
+	CacheTTL               time.Duration
+	CleanupInterval        time.Duration
+	PageSize               int64
+	ReadAheadPages         int64
+	MaxCachedPages         int
 	MaxConcurrentTransfers int
-	ExtraMountOpts        []string
-	CacheDir              string
-	AllowOther            bool
-	Debug                 bool
-	Logger                *slog.Logger
+	ExtraMountOpts         []string
+	CacheDir               string
+	AllowOther             bool
+	Debug                  bool
+	Logger                 *slog.Logger
 }
 
 type Filesystem struct {
@@ -191,11 +194,11 @@ type (
 
 func DefaultOptions() Options {
 	return Options{
-		EntryTimeout:    2 * time.Second,
-		AttrTimeout:     2 * time.Second,
-		NegativeTimeout: 1 * time.Second,
-		CacheTTL:        5 * time.Second,
-		CleanupInterval: 30 * time.Second,
+		EntryTimeout:           2 * time.Second,
+		AttrTimeout:            2 * time.Second,
+		NegativeTimeout:        1 * time.Second,
+		CacheTTL:               5 * time.Second,
+		CleanupInterval:        30 * time.Second,
 		PageSize:               128 * 1024,
 		ReadAheadPages:         4,
 		MaxCachedPages:         256,
@@ -332,6 +335,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	}
 	options.MountOptions.Debug = s.opts.Debug
 	options.MountOptions.AllowOther = s.opts.AllowOther
+	options.MountOptions.MaxBackground = mountMaxBackground
 	options.MountOptions.MaxWrite = mountMaxIOSize
 	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
@@ -569,14 +573,18 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 		handle.mu.Unlock()
 	}
 	s.mu.RLock()
+	writeStates := make([]*inodeWriteState, 0, len(s.writeStates))
 	for _, writeState := range s.writeStates {
+		writeStates = append(writeStates, writeState)
+	}
+	s.mu.RUnlock()
+	for _, writeState := range writeStates {
 		writeState.mu.Lock()
 		if shfs.IsParentOrSame(oldPath, writeState.path) {
 			writeState.path = shfs.RemapPath(oldPath, newPath, writeState.path)
 		}
 		writeState.mu.Unlock()
 	}
-	s.mu.RUnlock()
 }
 
 func (s *Filesystem) materializeHandlesForPath(ctx context.Context, inode uint64, targetPath string) error {
@@ -784,7 +792,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	n.fs.debugf("open path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
-	return h, 0, 0
+	return h, fuse.FOPEN_DIRECT_IO, 0
 }
 
 func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
@@ -833,7 +841,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		return nil, nil, 0, errnoFromError(err)
 	}
 	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
-	return ino, h, 0, 0
+	return ino, h, fuse.FOPEN_DIRECT_IO, 0
 }
 
 func (n *storhubNode) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
@@ -938,11 +946,11 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 		if state != nil {
 			state.opMu.Lock()
 			state.mu.Lock()
-		err := state.setSizeLocked(int64(size))
-		if err == nil {
-			usedLocalSize = true
-			localSize = state.logicalSize
-		}
+			err := state.setSizeLocked(int64(size))
+			if err == nil {
+				usedLocalSize = true
+				localSize = state.logicalSize
+			}
 			state.mu.Unlock()
 			state.opMu.Unlock()
 			if err != nil {
@@ -3135,14 +3143,13 @@ func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]b
 
 func (s *Filesystem) evictInodeCache(inode uint64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for page := range s.inodePages[inode] {
 		s.pageCache.Remove(pageCacheKey{inode: inode, page: page})
 	}
 	delete(s.inodePages, inode)
-	if node := s.nodes[inode]; node != nil {
-		safeNotifyContent(node)
-	}
+	node := s.nodes[inode]
+	s.mu.Unlock()
+	safeNotifyContent(node)
 }
 
 func safeNotifyContent(node *storhubNode) {
@@ -3214,22 +3221,30 @@ func (s *Filesystem) runJanitor() {
 
 func (s *Filesystem) cleanupExpiredCache() {
 	s.mu.RLock()
-	openTemps := make(map[string]struct{}, len(s.handles)+len(s.writeStates))
+	handles := make([]*storhubHandle, 0, len(s.handles))
 	for _, handle := range s.handles {
+		handles = append(handles, handle)
+	}
+	writeStates := make([]*inodeWriteState, 0, len(s.writeStates))
+	for _, writeState := range s.writeStates {
+		writeStates = append(writeStates, writeState)
+	}
+	s.mu.RUnlock()
+	openTemps := make(map[string]struct{}, len(handles)+len(writeStates))
+	for _, handle := range handles {
 		handle.mu.Lock()
 		if handle.tempPath != "" {
 			openTemps[handle.tempPath] = struct{}{}
 		}
 		handle.mu.Unlock()
 	}
-	for _, writeState := range s.writeStates {
+	for _, writeState := range writeStates {
 		writeState.mu.Lock()
 		if writeState.tempPath != "" {
 			openTemps[writeState.tempPath] = struct{}{}
 		}
 		writeState.mu.Unlock()
 	}
-	s.mu.RUnlock()
 	graceThreshold := time.Now().Add(-5 * time.Minute)
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {

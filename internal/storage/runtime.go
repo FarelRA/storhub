@@ -37,14 +37,14 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			// Root directory
 			if shfs.ShouldUpdateAtime(h.config.AtimePolicy, pm.meta.Root.AccessedAt, pm.meta.Root.ModifiedAt, pm.meta.Root.ChangedAt, now) {
 				pm.meta.Root.AccessedAt = now.UTC()
-				pm.dirty = true
+				markProjectDirtyLocked(pm)
 			}
 		} else {
 			// Subdirectory
 			dir := pm.meta.GetDirectory(targetPath)
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
 				dir.AccessedAt = now.UTC()
-				pm.dirty = true
+				markProjectDirtyLocked(pm)
 			}
 		}
 	} else {
@@ -52,7 +52,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		file := pm.meta.FindFile(targetPath)
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
 			file.AccessedAt = now.UTC()
-			pm.dirty = true
+			markProjectDirtyLocked(pm)
 		}
 	}
 }

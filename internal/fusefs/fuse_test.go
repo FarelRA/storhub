@@ -933,6 +933,34 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 	}
 }
 
+func TestOpenUsesDirectIO(t *testing.T) {
+	now := time.Unix(36, 0).UTC()
+	fake := &stubHub{
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if target == "docs/file.txt" {
+				return &shfs.EntryInfo{Path: target, Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+			}
+			return nil, syscall.ENOENT
+		},
+	}
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	h, flags, errno := node.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("open: %v", errno)
+	}
+	if flags&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Fatalf("expected direct io open flag, got %#x", flags)
+	}
+	if errno := h.(*storhubHandle).Release(context.Background()); errno != 0 {
+		t.Fatalf("release: %v", errno)
+	}
+}
+
 func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
 	oldNotifyDelete := notifyDeleteFunc
 	t.Cleanup(func() { notifyDeleteFunc = oldNotifyDelete })

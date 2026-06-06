@@ -66,7 +66,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	} else {
 		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
 	}
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
@@ -110,7 +110,7 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	pm.dirty = true
+	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
 	select {
