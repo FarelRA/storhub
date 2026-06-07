@@ -109,6 +109,42 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, "", err
 	}
+
+	// Try go-git backend first
+	if repo := h.getGitRepo(project); repo != nil {
+		data, err := repo.readFileHead(ctx, metadataFilePath)
+		if err != nil {
+			if isMetadataNotFound(err) {
+				exists, existsErr := h.repoExists(ctx, project)
+				if existsErr != nil {
+					return nil, "", existsErr
+				}
+				if !exists {
+					return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
+				}
+				meta := NewRepoMetadata(project)
+				h.storeRepoMetadata(project, *meta, "")
+				logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
+				return meta, "", nil
+			}
+			logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			return nil, "", err
+		}
+		meta := NewRepoMetadata(project)
+		if err := meta.FromJSON(data); err != nil {
+			return nil, "", fmt.Errorf("parse metadata: %w", err)
+		}
+		meta.Normalize(project, h.config.Now())
+		if err := meta.Validate(); err != nil {
+			return nil, "", fmt.Errorf("validate metadata: %w", err)
+		}
+		sha := repo.headCommitSHA()
+		h.storeRepoMetadata(project, *meta, sha)
+		logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
+		return meta, sha, nil
+	}
+
+	// Fall back to GitHub REST API
 	data, sha, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, "")
 	if err != nil {
 		var apiErr *ghapi.APIError
@@ -160,6 +196,16 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	if len(payload) > maxMetadataBytes {
 		return "", "", fmt.Errorf("metadata too large: %d bytes exceeds %d", len(payload), maxMetadataBytes)
 	}
+	if repo := h.getGitRepo(project); repo != nil {
+		commitSHA, contentSHA, err := repo.writeCommitPush(ctx, metadataFilePath, payload, message)
+		if err != nil {
+			logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			return "", "", err
+		}
+		h.storeRepoMetadata(project, metadata, contentSHA)
+		logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
+		return commitSHA, contentSHA, nil
+	}
 	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, payload, previousSHA, message)
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
@@ -173,6 +219,13 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]MetadataRevision, error) {
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
+	}
+	if repo := h.getGitRepo(project); repo != nil {
+		revisions, err := repo.listFileCommits(ctx, metadataFilePath)
+		if err != nil {
+			return nil, shfs.NotFound(fmt.Sprintf("project %s", project))
+		}
+		return revisions, nil
 	}
 	commits, err := h.gh.ListFileCommits(ctx, h.owner, project, metadataFilePath)
 	if err != nil {
@@ -193,7 +246,13 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
-	data, _, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
+	var data []byte
+	var err error
+	if repo := h.getGitRepo(project); repo != nil {
+		data, err = repo.readFileRef(ctx, commitSHA, metadataFilePath)
+	} else {
+		data, _, err = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -469,6 +528,20 @@ func (h *StorHub) invalidateRepoMetadata(project string) {
 	h.metaMu.Lock()
 	delete(h.metaCache, project)
 	h.metaMu.Unlock()
+}
+
+func isMetadataNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "file not found") {
+		return true
+	}
+	var apiErr *ghapi.APIError
+	if errors.As(err, &apiErr) && apiErr.NotFound() {
+		return true
+	}
+	return false
 }
 
 func isRepoAlreadyExistsError(apiErr *ghapi.APIError) bool {

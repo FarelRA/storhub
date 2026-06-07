@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/FarelRA/storhub/internal/logging"
@@ -48,6 +49,8 @@ type Config struct {
 	LogColor               bool
 	AtimePolicy            AtimePolicy
 	MetadataCommitInterval time.Duration
+	GitCacheDir            string
+	DisableGitBackend      bool
 	Now                    func() time.Time
 	Sleep                  func(context.Context, time.Duration) error
 }
@@ -71,6 +74,7 @@ func Default() Config {
 		LogColor:               true,
 		AtimePolicy:            AtimeNo,
 		MetadataCommitInterval: 10 * time.Second,
+		GitCacheDir:            defaultGitCacheDir(),
 		Now:                    time.Now,
 		Sleep:                  sleepWithContext,
 	}
@@ -136,6 +140,9 @@ func (c Config) WithDefaults() Config {
 	if c.MetadataCommitInterval <= 0 {
 		c.MetadataCommitInterval = defaults.MetadataCommitInterval
 	}
+	if c.GitCacheDir == "" {
+		c.GitCacheDir = defaults.GitCacheDir
+	}
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
@@ -165,6 +172,10 @@ func isZeroConfig(c Config) bool {
 		c.AtimePolicy == "" &&
 		c.Now == nil &&
 		c.Sleep == nil
+}
+
+func defaultGitCacheDir() string {
+	return filepath.Join(os.TempDir(), "storhub", "repos")
 }
 
 func newDefaultHTTPClient() *http.Client {

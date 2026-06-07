@@ -76,6 +76,10 @@ type StorHub struct {
 	metaMu    sync.RWMutex
 	metaCache map[string]*projectMetadata
 
+	// Git repository cache for metadata operations
+	gitMu     sync.Mutex
+	gitRepos  map[string]*gitRepo
+
 	// Shutdown coordination
 	shutdownOnce  sync.Once
 	shutdownCh    chan struct{}
@@ -143,6 +147,7 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 		config:     cfg,
 		repoState:  make(map[string]bool),
 		metaCache:  make(map[string]*projectMetadata),
+		gitRepos:   make(map[string]*gitRepo),
 		logger:     logging.WithComponent(cfg.Logger, "storage"),
 		shutdownCh: make(chan struct{}),
 		bufferPool: sync.Pool{New: func() any {
@@ -153,6 +158,20 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	hub.janitorCtx, hub.janitorCancel = context.WithCancel(ctx)
 	go hub.startJanitor(hub.janitorCtx, 30*time.Minute)
 	return hub, nil
+}
+
+func (h *StorHub) getGitRepo(project string) *gitRepo {
+	if h.config.DisableGitBackend {
+		return nil
+	}
+	h.gitMu.Lock()
+	defer h.gitMu.Unlock()
+	if r, ok := h.gitRepos[project]; ok {
+		return r
+	}
+	r := newGitRepo(h.config.GitCacheDir, h.owner, project, h.token)
+	h.gitRepos[project] = r
+	return r
 }
 
 func (h *StorHub) Owner() string { return h.owner }
@@ -314,11 +333,16 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		return err
 	}
 
-	// Commit to GitHub with optimistic locking
+	// Commit metadata
 	message := "storhub: update metadata"
-	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, ".storhub/metadata.json", metaBytes, previousSHA, message)
+	var commitSHA, contentSHA string
+	if repo := h.getGitRepo(project); repo != nil {
+		commitSHA, contentSHA, err = repo.writeCommitPush(ctx, metadataFilePath, metaBytes, message)
+	} else {
+		commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, metaBytes, previousSHA, message)
+	}
 	if err != nil {
-		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "github_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return fmt.Errorf("commit metadata: %w", err)
 	}
 

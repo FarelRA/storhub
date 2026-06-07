@@ -202,5 +202,18 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 			result.DeletedAssets++
 		}
 	}
+
+	// Squash the entire metadata git history into a single orphan commit.
+	// Since we cannot roll back individual files (content-addressed storage),
+	// the commit history serves no purpose other than consuming space.
+	if repo := h.getGitRepo(project); repo != nil {
+		if err := h.ensureOwner(ctx); err != nil {
+			return nil, err
+		}
+		if err := repo.squashHistory(ctx, metadataFilePath, "storhub: squash metadata history"); err != nil {
+			return nil, fmt.Errorf("squash metadata history: %w", err)
+		}
+	}
+
 	return result, nil
 }
