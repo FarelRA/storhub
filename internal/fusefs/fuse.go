@@ -2514,6 +2514,45 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	return uint32(n), 0
 }
 
+// retrieveKernelCache pulls dirty/cached data from the kernel page cache
+// (e.g. from mmap) that was not yet received via FUSE_WRITE, and writes it
+// to the temp file so commit can upload it. Uses FUSE notify-retrieve.
+func (h *storhubHandle) retrieveKernelCache() error {
+	h.writeState.mu.Lock()
+	size := h.writeState.logicalSize
+	temp := h.writeState.temp
+	stream := h.writeState.stream
+	h.writeState.mu.Unlock()
+
+	if size <= 0 || temp == nil || stream != nil || h.fs.server == nil {
+		return nil
+	}
+
+	chunkSize := int64(1 << 20) // 1 MiB
+	buf := make([]byte, chunkSize)
+
+	for offset := int64(0); offset < size; offset += chunkSize {
+		want := chunkSize
+		if remain := size - offset; remain < want {
+			want = remain
+		}
+		n, status := h.fs.server.InodeRetrieveCache(h.inode, offset, buf[:want])
+		if status != fuse.OK || n <= 0 {
+			continue
+		}
+		h.writeState.mu.Lock()
+		if h.writeState.temp != nil {
+			if _, err := h.writeState.temp.WriteAt(buf[:n], offset); err != nil {
+				h.writeState.mu.Unlock()
+				return err
+			}
+			h.writeState.markDirtyLocked(offset, offset+int64(n))
+		}
+		h.writeState.mu.Unlock()
+	}
+	return nil
+}
+
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 	if h.writeState != nil {
 		h.writeState.opMu.Lock()
@@ -2570,6 +2609,16 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	h.writeState.opMu.Lock()
 	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
+	// Retrieve kernel page cache data (e.g. from mmap) that wasn't written
+	// back via FUSE_WRITE before Release. Must drop mu during the call since
+	// InodeRetrieveCache is a synchronous notify-retrieve round-trip.
+	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize > 0 {
+		h.writeState.mu.Unlock()
+		if err := h.retrieveKernelCache(); err != nil {
+			h.fs.debugf("commit retrieve-kernel-cache failed inode=%d err=%v", h.inode, err)
+		}
+		h.writeState.mu.Lock()
+	}
 	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() && h.writeState.stream == nil {
 		h.writeState.mu.Unlock()
 		return 0
