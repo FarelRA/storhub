@@ -66,6 +66,7 @@ func (r *gitRepo) ensure(ctx context.Context) error {
 	repo, err = git.PlainCloneContext(ctx, r.dir, &git.CloneOptions{
 		URL:           r.remoteURL(),
 		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
+		Depth:         1,
 	})
 	if err != nil {
 		return fmt.Errorf("clone %s: %w", r.project, err)
