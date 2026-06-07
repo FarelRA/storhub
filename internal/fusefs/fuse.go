@@ -179,7 +179,7 @@ func DefaultOptions() Options {
 		CleanupInterval:        30 * time.Second,
 		PageSize:               128 * 1024,
 		MaxConcurrentTransfers: 8,
-		ExtraMountOpts:         []string{"writeback_cache", "noatime", "max_pages=65536"},
+		ExtraMountOpts:         []string{"noatime"},
 		Debug:                  true,
 	}
 }

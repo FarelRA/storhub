@@ -29,7 +29,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 	if fsys.Options().PageSize != DefaultOptions().PageSize {
 		t.Fatalf("expected defaults to be applied: %+v", fsys.Options())
 	}
-	if got := strings.Join(fsys.Options().ExtraMountOpts, ","); got != "writeback_cache,noatime,max_pages=65536" {
+	if got := strings.Join(fsys.Options().ExtraMountOpts, ","); got != "noatime" {
 		t.Fatalf("unexpected default mount opts: %q", got)
 	}
 	if fsys.RootNode() == nil || fsys.RootNode().inode != 1 {
