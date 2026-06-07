@@ -339,6 +339,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.MaxWrite = mountMaxIOSize
 	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
+	options.MountOptions.ExtraCapabilities = fuse.CAP_DIRECT_IO_ALLOW_MMAP
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
