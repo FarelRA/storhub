@@ -90,7 +90,7 @@ func TestNewStorHubAndFUSEDefaults(t *testing.T) {
 		t.Fatalf("expected lazy owner resolution, got %q", hub.Owner())
 	}
 	defaults := fusefs.DefaultOptions()
-	if defaults.PageSize == 0 || defaults.MaxCachedPages == 0 {
+	if defaults.PageSize == 0 {
 		t.Fatalf("unexpected fuse defaults: %+v", defaults)
 	}
 	fs, err := hub.NewFUSE("valid-project", fusefs.Options{})

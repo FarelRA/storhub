@@ -29,7 +29,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 	if fsys.Options().PageSize != DefaultOptions().PageSize {
 		t.Fatalf("expected defaults to be applied: %+v", fsys.Options())
 	}
-	if got := strings.Join(fsys.Options().ExtraMountOpts, ","); got != "lazytime,noatime" {
+	if got := strings.Join(fsys.Options().ExtraMountOpts, ","); got != "writeback_cache,noatime,max_pages=65536" {
 		t.Fatalf("unexpected default mount opts: %q", got)
 	}
 	if fsys.RootNode() == nil || fsys.RootNode().inode != 1 {
@@ -63,62 +63,7 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 	}
 }
 
-func TestReadCacheAndCleanupHelpers(t *testing.T) {
-	var reads int
-	fake := &stubHub{
-		readFileAt: func(_ context.Context, _ string, _ string, offset, length int64) ([]byte, error) {
-			reads++
-			data := []byte("abcdefgh")
-			if offset >= int64(len(data)) {
-				return []byte{}, nil
-			}
-			end := offset + length
-			if end > int64(len(data)) {
-				end = int64(len(data))
-			}
-			return append([]byte(nil), data[offset:end]...), nil
-		},
-	}
-	cacheDir := filepath.Join(t.TempDir(), "cache")
-	fsys, err := New(fake, "demo", Options{CacheDir: cacheDir, PageSize: 4, ReadAheadPages: 2, MaxCachedPages: 2, CacheTTL: time.Hour, CleanupInterval: time.Hour})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer fsys.Close()
-	fsys.rememberPath(7, "docs/file.txt")
-	got, err := fsys.readCached(context.Background(), 7, 1, 5)
-	if err != nil || string(got) != "bcdef" {
-		t.Fatalf("unexpected cached read: %q %v", got, err)
-	}
-	if _, err := fsys.readCached(context.Background(), 7, 0, 4); err != nil {
-		t.Fatalf("second cached read: %v", err)
-	}
-	if reads != 1 {
-		t.Fatalf("expected cache reuse, got %d reads", reads)
-	}
-	fsys.mu.Lock()
-	fsys.pageCache.Purge()
-	fsys.inodePages = make(map[uint64]map[int64]struct{})
-	fsys.mu.Unlock()
-	stale := filepath.Join(cacheDir, "stale.tmp")
-	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
-		t.Fatalf("write stale cache file: %v", err)
-	}
-	if err := os.Chtimes(stale, time.Now().Add(-10*time.Minute), time.Now().Add(-10*time.Minute)); err != nil {
-		t.Fatalf("chtimes stale file: %v", err)
-	}
-	fsys.cleanupExpiredCache()
-	if fsys.pageCache.Len() != 0 {
-		t.Fatal("expected expired cache to be cleared")
-	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("expected stale file cleanup, got %v", err)
-	}
-	fsys.evictInodeCache(7)
-	if fsys.pageCache.Len() != 0 {
-		t.Fatal("expected inode cache eviction")
-	}
-}
+
 
 func TestWriteStateAndRangeHelpers(t *testing.T) {
 	cacheDir := t.TempDir()
@@ -373,7 +318,7 @@ func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.
 	state.closeTemp()
 }
 
-func TestSequentialReadHandleExpandsWindow(t *testing.T) {
+func TestReadFromHubConcurrentWithinChunks(t *testing.T) {
 	var lengths []int64
 	fsys, err := New(&stubHub{
 		chunkSize: 16,
@@ -389,7 +334,7 @@ func TestSequentialReadHandleExpandsWindow(t *testing.T) {
 			}
 			return append([]byte(nil), data[off:end]...), nil
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, ReadAheadPages: 1, CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -405,11 +350,9 @@ func TestSequentialReadHandleExpandsWindow(t *testing.T) {
 			t.Fatalf("read result offset %d: %q %v", off, buf, status)
 		}
 	}
-	if len(lengths) != 2 {
-		t.Fatalf("expected 2 backend reads, got %v", lengths)
-	}
-	if lengths[1] != 16 {
-		t.Fatalf("expected sequential window fetch of 16 bytes, got %d", lengths[1])
+	// Each read is within a single chunk, so each is a direct hub call
+	if len(lengths) != 3 {
+		t.Fatalf("expected 3 backend reads, got %v", lengths)
 	}
 }
 
@@ -953,8 +896,8 @@ func TestOpenUsesDirectIO(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("open: %v", errno)
 	}
-	if flags&fuse.FOPEN_DIRECT_IO == 0 {
-		t.Fatalf("expected direct io open flag, got %#x", flags)
+	if flags != 0 {
+		t.Fatalf("expected zero open flag, got %#x", flags)
 	}
 	if errno := h.(*storhubHandle).Release(context.Background()); errno != 0 {
 		t.Fatalf("release: %v", errno)

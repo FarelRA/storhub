@@ -22,7 +22,6 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 const (
@@ -48,11 +47,8 @@ type Options struct {
 	EntryTimeout           time.Duration
 	AttrTimeout            time.Duration
 	NegativeTimeout        time.Duration
-	CacheTTL               time.Duration
 	CleanupInterval        time.Duration
 	PageSize               int64
-	ReadAheadPages         int64
-	MaxCachedPages         int
 	MaxConcurrentTransfers int
 	ExtraMountOpts         []string
 	CacheDir               string
@@ -73,8 +69,6 @@ type Filesystem struct {
 	nodes       map[uint64]*storhubNode
 	inodePaths  map[uint64]map[string]struct{}
 	pathToInode map[string]uint64
-	pageCache   *expirable.LRU[pageCacheKey, []byte]
-	inodePages  map[uint64]map[int64]struct{}
 	lockTable   map[uint64][]lockRecord
 	writeStates map[uint64]*inodeWriteState
 	handles     map[uint64]*storhubHandle
@@ -84,11 +78,6 @@ type Filesystem struct {
 	janitorDone chan struct{}
 	closing     bool
 	unmounted   bool
-}
-
-type pageCacheKey struct {
-	inode uint64
-	page  int64
 }
 
 type lockRecord struct {
@@ -118,7 +107,6 @@ type storhubHandle struct {
 	deleted    bool
 	owners     map[uint64]struct{}
 	writeState *inodeWriteState
-	readSeq    *sequentialReadState
 }
 
 type inodeWriteState struct {
@@ -163,15 +151,6 @@ type streamingUploadState struct {
 	chunkSize  int64
 }
 
-type sequentialReadState struct {
-	start          int64
-	data           []byte
-	window         int64
-	lastOffset     int64
-	lastLength     int64
-	sequentialHits int
-}
-
 type ByteRange struct {
 	Start int64
 	End   int64
@@ -194,16 +173,13 @@ type (
 
 func DefaultOptions() Options {
 	return Options{
-		EntryTimeout:           2 * time.Second,
-		AttrTimeout:            2 * time.Second,
-		NegativeTimeout:        1 * time.Second,
-		CacheTTL:               5 * time.Second,
+		EntryTimeout:           60 * time.Second,
+		AttrTimeout:            60 * time.Second,
+		NegativeTimeout:        10 * time.Second,
 		CleanupInterval:        30 * time.Second,
 		PageSize:               128 * 1024,
-		ReadAheadPages:         4,
-		MaxCachedPages:         256,
 		MaxConcurrentTransfers: 8,
-		ExtraMountOpts:         []string{"lazytime", "noatime"},
+		ExtraMountOpts:         []string{"writeback_cache", "noatime", "max_pages=65536"},
 		Debug:                  true,
 	}
 }
@@ -255,10 +231,6 @@ type Hub interface {
 	ChunkSize() int64
 }
 
-type bufferReadHub interface {
-	ReadFileAtBufferContext(context.Context, string, string, int64, []byte) (int, error)
-}
-
 func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
@@ -273,20 +245,11 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if opts.NegativeTimeout <= 0 {
 		opts.NegativeTimeout = defaults.NegativeTimeout
 	}
-	if opts.CacheTTL <= 0 {
-		opts.CacheTTL = defaults.CacheTTL
-	}
 	if opts.CleanupInterval <= 0 {
 		opts.CleanupInterval = defaults.CleanupInterval
 	}
 	if opts.PageSize <= 0 {
 		opts.PageSize = defaults.PageSize
-	}
-	if opts.ReadAheadPages <= 0 {
-		opts.ReadAheadPages = defaults.ReadAheadPages
-	}
-	if opts.MaxCachedPages <= 0 {
-		opts.MaxCachedPages = defaults.MaxCachedPages
 	}
 	if len(opts.ExtraMountOpts) == 0 {
 		opts.ExtraMountOpts = append([]string(nil), defaults.ExtraMountOpts...)
@@ -308,8 +271,6 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		nodes:       make(map[uint64]*storhubNode),
 		inodePaths:  map[uint64]map[string]struct{}{1: {"": {}}},
 		pathToInode: map[string]uint64{"": 1},
-		pageCache:   expirable.NewLRU[pageCacheKey, []byte](opts.MaxCachedPages, nil, opts.CacheTTL),
-		inodePages:  make(map[uint64]map[int64]struct{}),
 		lockTable:   make(map[uint64][]lockRecord),
 		writeStates: make(map[uint64]*inodeWriteState),
 		handles:     make(map[uint64]*storhubHandle),
@@ -339,7 +300,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.MaxWrite = mountMaxIOSize
 	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
-	options.MountOptions.ExtraCapabilities = fuse.CAP_DIRECT_IO_ALLOW_MMAP
+	options.MountOptions.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
@@ -419,8 +380,6 @@ func (s *Filesystem) debugf(format string, args ...any) {
 func (s *Filesystem) Invalidate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pageCache.Purge()
-	s.inodePages = make(map[uint64]map[int64]struct{})
 	for ino, node := range s.nodes {
 		if ino == 1 {
 			continue
@@ -793,7 +752,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	n.fs.debugf("open path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
-	return h, fuse.FOPEN_DIRECT_IO, 0
+	return h, 0, 0
 }
 
 func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
@@ -842,7 +801,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		return nil, nil, 0, errnoFromError(err)
 	}
 	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
-	return ino, h, fuse.FOPEN_DIRECT_IO, 0
+	return ino, h, 0, 0
 }
 
 func (n *storhubNode) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
@@ -1906,14 +1865,14 @@ func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
 }
 
 func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off int64) (int, error) {
-	return w.readIntoInternalLocked(ctx, dest, off, false)
+	return w.readIntoInternalLocked(ctx, dest, off)
 }
 
 func (w *inodeWriteState) readIntoExactLocked(ctx context.Context, dest []byte, off int64) (int, error) {
-	return w.readIntoInternalLocked(ctx, dest, off, true)
+	return w.readIntoInternalLocked(ctx, dest, off)
 }
 
-func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byte, off int64, exactBase bool) (int, error) {
+func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byte, off int64) (int, error) {
 	if off >= w.logicalSize || len(dest) == 0 {
 		return 0, nil
 	}
@@ -1975,7 +1934,7 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 			filled += int64(n)
 			continue
 		}
-		data, err := w.readBaseRangeLocked(ctx, segmentStart, readEnd-segmentStart, exactBase)
+		data, err := w.readBaseRangeLocked(ctx, segmentStart, readEnd-segmentStart)
 		if err != nil {
 			return int(filled), err
 		}
@@ -1988,18 +1947,15 @@ func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byt
 	return int(filled), nil
 }
 
-func (w *inodeWriteState) readBaseRangeLocked(ctx context.Context, offset, length int64, exact bool) ([]byte, error) {
+func (w *inodeWriteState) readBaseRangeLocked(ctx context.Context, offset, length int64) ([]byte, error) {
 	if length <= 0 {
 		return []byte{}, nil
 	}
-	if exact {
-		path := w.path
-		w.mu.Unlock()
-		data, err := w.fs.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), w.fs.project, path, offset, length)
-		w.mu.Lock()
-		return data, err
-	}
-	return w.fs.readCached(ctx, w.inode, offset, length)
+	path := w.path
+	w.mu.Unlock()
+	data, err := w.fs.hub.ReadFileAtContext(shfs.WithSuppressedAtime(ctx), w.fs.project, path, offset, length)
+	w.mu.Lock()
+	return data, err
 }
 
 func (w *inodeWriteState) nextDirtyRangeLocked(offset int64) (bool, ByteRange) {
@@ -2327,123 +2283,78 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 	return temp.Name(), nil
 }
 
-func (h *storhubHandle) readCached(ctx context.Context, off, length int64) ([]byte, error) {
+func (h *storhubHandle) readFromHub(ctx context.Context, off, length int64) ([]byte, error) {
 	h.mu.Lock()
 	if length <= 0 {
 		h.mu.Unlock()
 		return []byte{}, nil
 	}
-	if h.readSeq == nil {
-		h.readSeq = &sequentialReadState{window: h.fs.sequentialReadWindow()}
-	}
-	state := h.readSeq
-	if off == state.lastOffset+state.lastLength {
-		state.sequentialHits++
-	} else if off != state.lastOffset {
-		state.sequentialHits = 0
-	}
-	state.lastOffset = off
-	state.lastLength = length
-	if off >= state.start && off+length <= state.start+int64(len(state.data)) {
-		start := off - state.start
-		data := append([]byte(nil), state.data[start:start+length]...)
-		h.mu.Unlock()
-		return data, nil
-	}
-	window := h.fs.opts.PageSize * h.fs.opts.ReadAheadPages
-	if state.sequentialHits >= 2 {
-		window = state.window
-	}
-	if window < length {
-		window = length
-	}
-	windowEnd := off + window
-
-	// Snapshot required state under lock before releasing
-	chunkSize := h.fs.hub.ChunkSize()
 	path := h.path
 	project := h.fs.project
 	hub := h.fs.hub
 	maxConcurrent := h.fs.opts.MaxConcurrentTransfers
+	chunkSize := h.fs.hub.ChunkSize()
+	h.mu.Unlock()
 
 	var ranges []struct{ off, length int64 }
-	for pos := off; pos < windowEnd; {
+	for pos := off; pos < off+length; {
 		chunkEnd := (pos/chunkSize + 1) * chunkSize
-		if chunkEnd > windowEnd {
-			chunkEnd = windowEnd
+		if chunkEnd > off+length {
+			chunkEnd = off + length
 		}
 		ranges = append(ranges, struct{ off, length int64 }{pos, chunkEnd - pos})
 		pos = chunkEnd
 	}
 
-	if len(ranges) >= 2 && maxConcurrent > 1 {
-		h.mu.Unlock()
-
-		results := make([][]byte, len(ranges))
-		sem := make(chan struct{}, maxConcurrent)
-		fetchCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		var wg sync.WaitGroup
-		var firstErr error
-		var setErr sync.Once
-
-		for i, r := range ranges {
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(idx int, rOff, rLen int64) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				d, err := hub.ReadFileAtContext(fetchCtx, project, path, rOff, rLen)
-				if err != nil && !errors.Is(err, io.EOF) {
-					setErr.Do(func() {
-						firstErr = err
-						cancel()
-					})
-					return
-				}
-				results[idx] = d
-			}(i, r.off, r.length)
+	if len(ranges) == 1 || maxConcurrent <= 1 {
+		data, err := hub.ReadFileAtContext(ctx, project, path, off, length)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
 		}
-		wg.Wait()
-		if firstErr != nil {
-			return nil, firstErr
-		}
-		totalLen := int64(0)
-		for _, d := range results {
-			totalLen += int64(len(d))
-		}
-		merged := make([]byte, 0, totalLen)
-		for _, d := range results {
-			merged = append(merged, d...)
-		}
-
-		h.mu.Lock()
-		state.start = off
-		state.data = append(state.data[:0], merged...)
-		h.mu.Unlock()
-
-		if int64(len(merged)) < length {
-			length = int64(len(merged))
-		}
-		return append([]byte(nil), merged[:length]...), nil
+		return data, nil
 	}
 
-	h.mu.Unlock()
+	results := make([][]byte, len(ranges))
+	sem := make(chan struct{}, maxConcurrent)
+	fetchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var firstErr error
+	var setErr sync.Once
 
-	data, err := hub.ReadFileAtContext(ctx, project, path, off, window)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	for i, r := range ranges {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx int, rOff, rLen int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d, err := hub.ReadFileAtContext(fetchCtx, project, path, rOff, rLen)
+			if err != nil && !errors.Is(err, io.EOF) {
+				setErr.Do(func() {
+					firstErr = err
+					cancel()
+				})
+				return
+			}
+			results[idx] = d
+		}(i, r.off, r.length)
 	}
-
-	h.mu.Lock()
-	state.start = off
-	state.data = append(state.data[:0], data...)
-	h.mu.Unlock()
-
-	if int64(len(data)) < length {
-		length = int64(len(data))
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
-	return append([]byte(nil), data[:length]...), nil
+	totalLen := int64(0)
+	for _, d := range results {
+		totalLen += int64(len(d))
+	}
+	merged := make([]byte, 0, totalLen)
+	for _, d := range results {
+		merged = append(merged, d...)
+	}
+	if int64(len(merged)) < length {
+		length = int64(len(merged))
+	}
+	return merged[:length], nil
 }
 
 func (w *inodeWriteState) closeTemp() {
@@ -2527,7 +2438,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		}
 		return fuse.ReadResultData(buf[:n]), 0
 	}
-	data, err := h.readCached(ctx, off, int64(len(dest)))
+	data, err := h.readFromHub(ctx, off, int64(len(dest)))
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
@@ -2722,7 +2633,7 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 		h.writeState.mu.Lock()
 		h.writeState.commitCacheRefreshLocked(logicalSize)
 		h.writeState.mu.Unlock()
-		h.fs.evictInodeCache(h.inode)
+		h.fs.notifyKernelContentChanged(h.inode)
 		h.writeState.mu.Lock()
 		h.writeState.pending = shfs.MetadataPatch{}
 		h.writeState.mu.Unlock()
@@ -2846,7 +2757,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		h.writeState.mu.Unlock()
 		return errnoFromError(err)
 	}
-	h.fs.evictInodeCache(h.inode)
+	h.fs.notifyKernelContentChanged(h.inode)
 	h.writeState.mu.Unlock()
 	return h.commitPostUpdate(ctx, targetPath, pending)
 }
@@ -2871,7 +2782,7 @@ func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string,
 	h.writeState.mu.Lock()
 	h.writeState.pending = shfs.MetadataPatch{}
 	h.writeState.mu.Unlock()
-	h.fs.evictInodeCache(h.inode)
+	h.fs.notifyKernelContentChanged(h.inode)
 	h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 	return 0
 }
@@ -3059,95 +2970,8 @@ func subtractLock(existing, cut fuse.FileLock) []fuse.FileLock {
 	return segments
 }
 
-func (s *Filesystem) readCached(ctx context.Context, inode uint64, offset, length int64) ([]byte, error) {
-	if length <= 0 {
-		return []byte{}, nil
-	}
-	result := make([]byte, length)
-	pageSize := s.opts.PageSize
-	for copied := int64(0); copied < length; {
-		page := (offset + copied) / pageSize
-		pageOffset := (offset + copied) % pageSize
-		entry, err := s.getPage(ctx, inode, page)
-		if err != nil {
-			return nil, err
-		}
-		if len(entry) == 0 {
-			return result[:copied], nil
-		}
-		n := minInt64(int64(len(entry))-pageOffset, length-copied)
-		copy(result[copied:copied+n], entry[pageOffset:pageOffset+n])
-		copied += n
-		if int64(len(entry)) < pageSize {
-			return result[:copied], nil
-		}
-	}
-	return result, nil
-}
-
-func (s *Filesystem) getPage(ctx context.Context, inode uint64, page int64) ([]byte, error) {
-	key := pageCacheKey{inode: inode, page: page}
+func (s *Filesystem) notifyKernelContentChanged(inode uint64) {
 	s.mu.Lock()
-	if data, ok := s.pageCache.Get(key); ok {
-		data = append([]byte(nil), data...)
-		s.mu.Unlock()
-		return data, nil
-	}
-	s.mu.Unlock()
-	startPage := page
-	readAhead := s.opts.ReadAheadPages
-	if readAhead <= 0 {
-		readAhead = 1
-	}
-	readOffset := startPage * s.opts.PageSize
-	readLength := s.opts.PageSize * readAhead
-	readCtx := shfs.WithSuppressedAtime(ctx)
-	var data []byte
-	if buffered, ok := s.hub.(bufferReadHub); ok {
-		data = make([]byte, readLength)
-		n, err := buffered.ReadFileAtBufferContext(readCtx, s.project, s.pathForInode(inode), readOffset, data)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		data = data[:n]
-	} else {
-		var err error
-		data, err = s.hub.ReadFileAtContext(readCtx, s.project, s.pathForInode(inode), readOffset, readLength)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := int64(0); i < readAhead; i++ {
-		pageKey := pageCacheKey{inode: inode, page: startPage + i}
-		start := i * s.opts.PageSize
-		if start > int64(len(data)) {
-			start = int64(len(data))
-		}
-		end := minInt64(start+s.opts.PageSize, int64(len(data)))
-		pageData := append([]byte(nil), data[start:end]...)
-		s.pageCache.Add(pageKey, pageData)
-		if s.inodePages[pageKey.inode] == nil {
-			s.inodePages[pageKey.inode] = make(map[int64]struct{})
-		}
-		s.inodePages[pageKey.inode][pageKey.page] = struct{}{}
-		if end == int64(len(data)) && len(pageData) < int(s.opts.PageSize) {
-			break
-		}
-	}
-	if data, ok := s.pageCache.Get(key); ok {
-		return append([]byte(nil), data...), nil
-	}
-	return []byte{}, nil
-}
-
-func (s *Filesystem) evictInodeCache(inode uint64) {
-	s.mu.Lock()
-	for page := range s.inodePages[inode] {
-		s.pageCache.Remove(pageCacheKey{inode: inode, page: page})
-	}
-	delete(s.inodePages, inode)
 	node := s.nodes[inode]
 	s.mu.Unlock()
 	safeNotifyContent(node)
@@ -3463,17 +3287,6 @@ func normalizedChunkSize(chunkSize int64) int64 {
 		return maxReleaseAssetSize
 	}
 	return chunkSize
-}
-
-func (s *Filesystem) sequentialReadWindow() int64 {
-	window := normalizedChunkSize(s.hub.ChunkSize())
-	if window < s.opts.PageSize*s.opts.ReadAheadPages {
-		window = s.opts.PageSize * s.opts.ReadAheadPages
-	}
-	if window > mountMaxIOSize {
-		window = mountMaxIOSize
-	}
-	return window
 }
 
 func minInt64(a, b int64) int64 {
