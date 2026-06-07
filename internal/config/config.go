@@ -175,7 +175,7 @@ func isZeroConfig(c Config) bool {
 }
 
 func defaultGitCacheDir() string {
-	return filepath.Join(os.TempDir(), "storhub", "repos")
+	return filepath.Join(os.TempDir(), "storhub")
 }
 
 func newDefaultHTTPClient() *http.Client {
