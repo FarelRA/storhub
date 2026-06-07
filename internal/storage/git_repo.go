@@ -266,14 +266,34 @@ func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error
 	if err != nil {
 		return fmt.Errorf("store blob: %w", err)
 	}
-	// 2. Create tree
-	treeHash, err := storeTree(storer, []object.TreeEntry{{
-		Name: path,
+	// 2. Create nested trees for path like ".storhub/metadata.json"
+	dir, file := filepath.Split(path)
+	entries := []object.TreeEntry{{
+		Name: file,
 		Hash: blobHash,
 		Mode: 0o100644,
-	}})
+	}}
+	treeHash, err := storeTree(storer, entries)
 	if err != nil {
-		return fmt.Errorf("store tree: %w", err)
+		return fmt.Errorf("store leaf tree: %w", err)
+	}
+	// Walk up the directory chain to build parent trees
+	dir = filepath.Clean(dir)
+	if dir == "." || dir == "" {
+		// File is in the root — treeHash is already the root tree
+	} else {
+		parts := strings.Split(dir, string(filepath.Separator))
+		for i := len(parts) - 1; i >= 0; i-- {
+			entries = []object.TreeEntry{{
+				Name: parts[i],
+				Hash: treeHash,
+				Mode: 0o040000,
+			}}
+			treeHash, err = storeTree(storer, entries)
+			if err != nil {
+				return fmt.Errorf("store tree for %s: %w", parts[i], err)
+			}
+		}
 	}
 	// 3. Create commit with no parents
 	commit := &object.Commit{
