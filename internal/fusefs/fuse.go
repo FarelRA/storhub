@@ -30,7 +30,7 @@ const (
 	renameNoReplace = 0x1
 	renameExchange  = 0x2
 	renameWhiteout  = 0x4
-	mountMaxIOSize  = 256 * 1024 * 1024
+	mountMaxIOSize  = 1 * 1024 * 1024
 	// Keep metadata operations responsive if slow readers fill the kernel's
 	// asynchronous FUSE request queue. go-fuse defaults this to 12.
 	mountMaxBackground = 256
@@ -300,6 +300,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.MaxWrite = mountMaxIOSize
 	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
+	options.MountOptions.ExplicitDataCacheControl = true
 	options.MountOptions.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
