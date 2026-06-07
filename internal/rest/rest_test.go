@@ -17,6 +17,7 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	storage "github.com/FarelRA/storhub/internal/storage"
 )
 
 func TestRESTFilesystemWorkflow(t *testing.T) {
@@ -960,6 +961,10 @@ func (c *fakeRESTClient) RollbackMetadata(project, commitSHA string) error {
 		}
 	}
 	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
+}
+
+func (c *fakeRESTClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+	return &storage.PurgeResult{}, nil
 }
 
 func (c *fakeRESTClient) DeleteProject(project string) error {

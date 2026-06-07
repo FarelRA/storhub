@@ -91,6 +91,7 @@ type Client interface {
 	RemoveXAttr(project, targetPath, attr string) error
 	ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadata(project, commitSHA string) error
+	PurgeUntracked(project string) (*storage.PurgeResult, error)
 	DeleteProject(project string) error
 	ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error)
 }
@@ -302,6 +303,10 @@ func (c *restrictedClient) ListMetadataRevisions(project string) ([]metadata.Met
 
 func (c *restrictedClient) RollbackMetadata(project, commitSHA string) error {
 	return errForbidden("access denied: read-only share")
+}
+
+func (c *restrictedClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+	return nil, errForbidden("access denied: read-only share")
 }
 
 func (c *restrictedClient) DeleteProject(project string) error {
@@ -553,6 +558,7 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/chown", h.handleChown)
 	r.Post("/ops/utimes", h.handleUtimes)
 	r.Post("/ops/rollback", h.handleRollback)
+	r.Post("/ops/purge", h.handlePurge)
 	r.Get("/shares", h.handleProjectShares)
 	r.Post("/shares", h.handleProjectShares)
 	r.Get("/shares/{shareID}", h.handleProjectShare)
@@ -1145,6 +1151,21 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
+}
+
+func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	result, err := h.clientFor(r).PurgeUntracked(project)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"project":         project,
+		"status":          "purged",
+		"deleted_releases": result.DeletedReleases,
+		"deleted_assets":   result.DeletedAssets,
+	})
 }
 
 func (h *restHandler) handleProjectShares(w http.ResponseWriter, r *http.Request) {

@@ -463,6 +463,9 @@ func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevis
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: time.Unix(1, 0)}}, nil
 }
 func (h *fakeHub) RollbackMetadata(project, commitSHA string) error { return nil }
+func (h *fakeHub) PurgeUntracked(project string) (*storhub.PurgeResult, error) {
+	return &storhub.PurgeResult{}, nil
+}
 func (h *fakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return fakeMount{}, nil
 }

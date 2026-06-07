@@ -49,6 +49,7 @@ type hubClient interface {
 	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
 	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
 	RollbackMetadata(project, commitSHA string) error
+	PurgeUntracked(project string) (*storhub.PurgeResult, error)
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 }
 
@@ -148,6 +149,7 @@ Examples:
 	rootCmd.AddCommand(a.newPatchCmd())
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
+	rootCmd.AddCommand(a.newPurgeCmd())
 	rootCmd.AddCommand(a.newMountCmd())
 	rootCmd.AddCommand(a.newServeRESTCmd())
 
@@ -289,6 +291,18 @@ func (a *App) newRollbackCmd() *cobra.Command {
 		Short: "Rollback metadata to a commit",
 		Args:  cobra.ExactArgs(2),
 		RunE:  a.runRollback,
+	}
+}
+
+func (a *App) newPurgeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "purge <project>",
+		Short: "Delete untracked releases and assets",
+		Long: `Purge deletes GitHub releases and assets that are not tracked in the project metadata.
+
+This cleans up orphaned releases and assets (e.g. from interrupted writes or manual interference).`,
+		Args: cobra.ExactArgs(1),
+		RunE: a.runPurge,
 	}
 }
 
@@ -574,6 +588,22 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "rolled back %s to %s\n", args[0], args[1])
+	return nil
+}
+
+func (a *App) runPurge(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	if err != nil {
+		return err
+	}
+	result, err := hub.PurgeUntracked(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "purged %s: %d releases, %d assets deleted\n",
+		args[0], result.DeletedReleases, result.DeletedAssets)
 	return nil
 }
 

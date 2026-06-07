@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
+	storage "github.com/FarelRA/storhub/internal/storage"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -400,6 +401,12 @@ func (c *authorizedClient) RollbackMetadata(project, commitSHA string) error {
 		return errForbidden("permission denied")
 	}
 	return c.base.RollbackMetadata(project, commitSHA)
+}
+func (c *authorizedClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+	if !c.principal.Admin {
+		return nil, errForbidden("permission denied")
+	}
+	return c.base.PurgeUntracked(project)
 }
 func (c *authorizedClient) DeleteProject(project string) error {
 	if !c.principal.Admin {
