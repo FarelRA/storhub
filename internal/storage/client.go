@@ -512,6 +512,32 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 	}, nil
 }
 
+// trimChunks drops chunks at or beyond size and re-sorts/re-indexes them.
+func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
+	if len(chunks) == 0 {
+		return chunks
+	}
+	filtered := make([]ChunkInfo, 0, len(chunks))
+	for _, c := range chunks {
+		if c.Offset < size {
+			if c.Offset+c.Size > size {
+				c.Size = size - c.Offset
+			}
+			filtered = append(filtered, c)
+		}
+	}
+	if len(filtered) == 0 {
+		return filtered
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Offset < filtered[j].Offset
+	})
+	for i := range filtered {
+		filtered[i].Index = i
+	}
+	return filtered
+}
+
 func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (result *FileMetadata, err error) {
 	started := h.logOpStart(project, "finalize-replace", "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
 	defer func() {
@@ -535,6 +561,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	if current == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
+	// Trim chunks beyond the logical file size.
+	// Kernel writeback cache may flush stale dirty pages from the previous
+	// file content (before truncation), producing chunks past the new EOF.
+	chunks = trimChunks(chunks, size)
+
 	now := h.config.Now().UTC()
 	fileMeta := current.Clone()
 	fileMeta.Chunks = append([]ChunkInfo(nil), chunks...)
