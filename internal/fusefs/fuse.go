@@ -1619,11 +1619,6 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		if off > w.logicalSize {
 			w.logicalSize = off
 		}
-		capacity := 8
-		tailCap := chunkSize * int64(capacity+1)
-		if int64(len(data)) > tailCap {
-			return 0, false, nil
-		}
 		w.stream = &streamingUploadState{
 			chunkSize:  chunkSize,
 			tailOffset: off,
@@ -1632,7 +1627,7 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		if cap(data) <= int(chunkSize) {
 			w.stream.tail = data[:0]
 		}
-		w.streamCh = make(chan uploadTask, capacity)
+		w.streamCh = make(chan uploadTask, 8)
 		w.streamDone = make(chan struct{})
 		w.streamCtx, w.streamCancel = context.WithCancel(context.Background())
 		go w.uploadLoop(w.streamCtx)
@@ -1650,28 +1645,25 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		w.fallbackStreamToTempLocked(ctx)
 		return 0, false, nil
 	}
-	capacity := cap(w.streamCh)
-	tailCap := w.stream.chunkSize * int64(capacity+1)
-	if int64(len(w.stream.tail)+len(data)) > tailCap {
-		w.materializeStreamToTempLocked(ctx)
-		return 0, false, nil
-	}
 	if off != w.logicalSize {
 		if w.streamCh != nil {
 			if len(w.stream.tail) > 0 {
+				w.mu.Unlock()
 				select {
 				case w.streamCh <- uploadTask{
 					index:  w.stream.nextIndex,
 					offset: w.stream.tailOffset,
 					data:   w.stream.tail,
 				}:
-					w.stream.nextIndex++
-					w.stream.uploaded += int64(len(w.stream.tail))
-					w.stream.tail = nil
-				default:
+				case <-w.streamDone:
+					w.mu.Lock()
 					w.materializeStreamToTempLocked(ctx)
 					return 0, false, nil
 				}
+				w.mu.Lock()
+				w.stream.nextIndex++
+				w.stream.uploaded += int64(len(w.stream.tail))
+				w.stream.tail = nil
 			}
 		}
 		w.logicalSize = off
@@ -1689,12 +1681,20 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		w.stream.uploaded += w.stream.chunkSize
 		w.stream.tailOffset += w.stream.chunkSize
 		w.stream.tail = w.stream.tail[w.stream.chunkSize:]
+
+		w.mu.Unlock()
 		select {
 		case w.streamCh <- task:
-		default:
+		case <-w.streamDone:
+			w.mu.Lock()
+			w.stream.tail = append(task.data, w.stream.tail...)
+			w.stream.tailOffset -= int64(len(task.data))
+			w.stream.uploaded -= int64(len(task.data))
+			w.stream.nextIndex--
 			w.materializeStreamToTempLocked(ctx)
 			return 0, false, nil
 		}
+		w.mu.Lock()
 	}
 	return uint32(len(data)), true, nil
 }
@@ -1741,21 +1741,21 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 		if err := w.streamErr.Load(); err != nil {
 			return err.(error)
 		}
+		w.mu.Unlock()
 		select {
 		case w.streamCh <- uploadTask{
 			index:  w.stream.nextIndex,
 			offset: w.stream.tailOffset,
 			data:   w.stream.tail,
 		}:
-			w.stream.nextIndex++
-			w.stream.uploaded += int64(len(w.stream.tail))
-			w.stream.tail = nil
-		default:
-			// Channel full — materialise everything to temp to avoid data loss.
-			// materializeStreamToTempLocked releases w.mu during the wait
-			// and re-acquires it before returning.
+		case <-w.streamDone:
+			w.mu.Lock()
 			return w.materializeStreamToTempLocked(ctx)
 		}
+		w.mu.Lock()
+		w.stream.nextIndex++
+		w.stream.uploaded += int64(len(w.stream.tail))
+		w.stream.tail = nil
 	}
 	if w.streamCh != nil {
 		w.streamDraining = true
