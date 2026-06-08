@@ -493,23 +493,32 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 }
 
 func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, index int, offset int64, data []byte) (ChunkInfo, error) {
-	assetName, err := randomAssetName()
-	if err != nil {
+	const maxNameRetries = 5
+	for attempt := 0; attempt < maxNameRetries; attempt++ {
+		assetName, err := randomAssetName()
+		if err != nil {
+			return ChunkInfo{}, err
+		}
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
+		if err == nil {
+			return ChunkInfo{
+				Name:        assetName,
+				Size:        int64(len(data)),
+				Index:       index,
+				Offset:      offset,
+				Release:     releaseTag,
+				AssetID:     assetID,
+				AssetOffset: 0,
+			}, nil
+		}
+		var apiErr *ghapi.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 422 {
+			h.debugf("upload chunk asset name collision, retry=%d asset=%s", attempt+1, assetName)
+			continue
+		}
 		return ChunkInfo{}, err
 	}
-	assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return ChunkInfo{}, err
-	}
-	return ChunkInfo{
-		Name:        assetName,
-		Size:        int64(len(data)),
-		Index:       index,
-		Offset:      offset,
-		Release:     releaseTag,
-		AssetID:     assetID,
-		AssetOffset: 0,
-	}, nil
+	return ChunkInfo{}, fmt.Errorf("upload chunk data failed after %d name retries", maxNameRetries)
 }
 
 // trimChunks drops chunks at or beyond size and re-sorts/re-indexes them.

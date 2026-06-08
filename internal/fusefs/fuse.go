@@ -1572,35 +1572,6 @@ func (w *inodeWriteState) releaseTempFile() {
 	w.tempAuthoritative = false
 }
 
-func (w *inodeWriteState) fallbackStreamToTempLocked(ctx context.Context) {
-	if w.stream == nil || w.streamDraining {
-		return
-	}
-	if w.streamCh == nil {
-		w.stream = nil
-		return
-	}
-	w.streamDraining = true
-	ch := w.streamCh
-	done := w.streamDone
-	cancel := w.streamCancel
-	w.mu.Unlock()
-	if ch != nil {
-		close(ch)
-	}
-	if cancel != nil {
-		cancel()
-	}
-	<-done
-	w.mu.Lock()
-	w.streamCh = nil
-	w.streamDone = nil
-	w.streamCancel = nil
-	w.streamCtx = nil
-	w.stream = nil
-	w.streamDraining = false
-}
-
 func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte, off int64, handleID uint64) (uint32, bool, error) {
 	if len(data) == 0 {
 		return 0, false, nil
@@ -1642,7 +1613,7 @@ func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte,
 		return 0, false, nil
 	}
 	if err := w.streamErr.Load(); err != nil {
-		w.fallbackStreamToTempLocked(ctx)
+		w.materializeStreamToTempLocked(ctx)
 		return 0, false, nil
 	}
 	if off != w.logicalSize {
@@ -1737,10 +1708,12 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 	if w.stream == nil || w.streamDraining {
 		return nil
 	}
+	// If the stream has errored (e.g. upload failure), recover any uploaded
+	// data to the temp file so the caller sees a clean shutdown.
+	if err := w.streamErr.Load(); err != nil {
+		return w.materializeStreamToTempLocked(ctx)
+	}
 	if force && len(w.stream.tail) > 0 && w.streamCh != nil {
-		if err := w.streamErr.Load(); err != nil {
-			return err.(error)
-		}
 		w.mu.Unlock()
 		select {
 		case w.streamCh <- uploadTask{
@@ -1768,9 +1741,6 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 		w.streamCh = nil
 		w.streamDone = nil
 		w.streamDraining = false
-		if err := w.streamErr.Load(); err != nil {
-			return err.(error)
-		}
 	}
 	// NOTE: w.stream is intentionally kept non-nil here so that the caller
 	// (commit) can still read releaseTag and chunks for finalization.
@@ -1780,9 +1750,6 @@ func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force 
 
 func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) error {
 	if w.stream == nil || w.streamDraining {
-		return nil
-	}
-	if w.streamCh == nil {
 		return nil
 	}
 	w.streamDraining = true
@@ -1796,7 +1763,9 @@ func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) err
 	if cancel != nil {
 		cancel()
 	}
-	<-done
+	if done != nil {
+		<-done
+	}
 	// materializeStreamToTemp will acquire w.mu internally
 	err := w.materializeStreamToTemp(ctx)
 	w.mu.Lock()
@@ -1818,18 +1787,6 @@ func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
 		w.mu.Unlock()
 		return nil
 	}
-	if err := w.streamErr.Load(); err != nil {
-		w.mu.Unlock()
-		return err.(error)
-	}
-	if err := w.ensureTempLocked(); err != nil {
-		w.mu.Unlock()
-		return err
-	}
-	if err := w.temp.Truncate(w.logicalSize); err != nil {
-		w.mu.Unlock()
-		return err
-	}
 
 	// Snapshot all needed state under lock, then release before network I/O
 	chunks := append([]metadata.ChunkInfo(nil), w.stream.chunks...)
@@ -1838,8 +1795,24 @@ func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
 	logicalSize := w.logicalSize
 	project := w.fs.project
 	hub := w.fs.hub
-	temp := w.temp
 
+	if len(chunks) == 0 && len(tail) == 0 {
+		w.stream = nil
+		w.mu.Unlock()
+		return nil
+	}
+
+	if err := w.ensureTempLocked(); err != nil {
+		w.stream = nil
+		w.mu.Unlock()
+		return err
+	}
+	if err := w.temp.Truncate(logicalSize); err != nil {
+		w.stream = nil
+		w.mu.Unlock()
+		return err
+	}
+	temp := w.temp
 	w.mu.Unlock()
 
 	for _, chunk := range chunks {
@@ -1862,6 +1835,7 @@ func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
 	w.tempAuthoritative = true
 	w.stream = nil
 	w.mu.Unlock()
+
 	return nil
 }
 
