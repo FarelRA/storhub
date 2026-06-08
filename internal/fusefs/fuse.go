@@ -2517,6 +2517,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 // retrieveKernelCache pulls dirty/cached data from the kernel page cache
 // (e.g. from mmap) that was not yet received via FUSE_WRITE, and writes it
 // to the temp file so commit can upload it. Uses FUSE notify-retrieve.
+// Scans multiple offset ranges concurrently for better throughput.
 func (h *storhubHandle) retrieveKernelCache() error {
 	h.writeState.mu.Lock()
 	size := h.writeState.logicalSize
@@ -2528,29 +2529,106 @@ func (h *storhubHandle) retrieveKernelCache() error {
 		return nil
 	}
 
-	chunkSize := int64(1 << 20) // 1 MiB
-	buf := make([]byte, chunkSize)
+	const chunkSize = 1 << 20 // 1 MiB
+	const concurrency = 8
 
-	for offset := int64(0); offset < size; offset += chunkSize {
-		want := chunkSize
-		if remain := size - offset; remain < want {
-			want = remain
-		}
-		n, status := h.fs.server.InodeRetrieveCache(h.inode, offset, buf[:want])
-		if status != fuse.OK || n <= 0 {
-			continue
-		}
-		h.writeState.mu.Lock()
-		if h.writeState.temp != nil {
-			if _, err := h.writeState.temp.WriteAt(buf[:n], offset); err != nil {
-				h.writeState.mu.Unlock()
-				return err
-			}
-			h.writeState.markDirtyLocked(offset, offset+int64(n))
-		}
-		h.writeState.mu.Unlock()
+	type chunkResult struct {
+		offset int64
+		data   []byte
 	}
-	return nil
+
+	work := make(chan int64)
+	results := make(chan chunkResult, concurrency*2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		firstErr error
+		errMu    sync.Mutex
+	)
+	storeErr := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+
+	// Collector goroutine: writes retrieved data to temp file sequentially.
+	var collectorDone sync.WaitGroup
+	collectorDone.Add(1)
+	go func() {
+		defer collectorDone.Done()
+		for {
+			select {
+			case res, ok := <-results:
+				if !ok {
+					return
+				}
+				h.writeState.mu.Lock()
+				if h.writeState.temp != nil {
+					if _, err := h.writeState.temp.WriteAt(res.data, res.offset); err != nil {
+						h.writeState.mu.Unlock()
+						storeErr(err)
+						return
+					}
+					h.writeState.markDirtyLocked(res.offset, res.offset+int64(len(res.data)))
+				}
+				h.writeState.mu.Unlock()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Workers: retrieve kernel cache pages concurrently.
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, chunkSize)
+			for offset := range work {
+				if ctx.Err() != nil {
+					return
+				}
+				want := chunkSize
+				if remain := size - offset; int64(want) > remain {
+					want = int(remain)
+				}
+				n, status := h.fs.server.InodeRetrieveCache(h.inode, offset, buf[:want])
+				if status != fuse.OK || n <= 0 {
+					continue
+				}
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				select {
+				case results <- chunkResult{offset: offset, data: data}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Feed work and stop on first error.
+	go func() {
+		defer close(work)
+		for offset := int64(0); offset < size; offset += chunkSize {
+			select {
+			case work <- offset:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(results)
+	collectorDone.Wait()
+	return firstErr
 }
 
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
