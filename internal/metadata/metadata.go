@@ -11,9 +11,9 @@ import (
 
 type ChunkInfo struct {
 	Size        int64  `json:"s"`
-	Offset      int64  `json:"o"`
+	Offset      int64  `json:"o,omitempty"`
 	Release     string `json:"r"`
-	AssetOffset int64  `json:"ao"`
+	AssetOffset int64  `json:"ao,omitempty"`
 	AssetID     int64  `json:"a"`
 }
 
