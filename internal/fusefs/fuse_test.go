@@ -544,9 +544,9 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 	now := int64(10)
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
-	metaState.Chunks["chunk-1"] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
+	metaState.Chunks[1] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
 	metaState.EnsureRelease("v1", now)
-	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []string{"chunk-1"}}, now)
+	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []int64{1}}, now)
 	fake := &stubHub{
 		now: now,
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
@@ -1221,11 +1221,11 @@ func (s *stubHub) FinalizeReplaceChunksContext(ctx context.Context, project, tar
 	if s.finalizeChunks != nil {
 		return s.finalizeChunks(ctx, project, target, releaseTag, size, chunks)
 	}
-	chunkNames := make([]string, len(chunks))
+	chunkIDs := make([]int64, len(chunks))
 	for i := range chunks {
-		chunkNames[i] = fmt.Sprintf("%s/chunk/%d", target, i)
+		chunkIDs[i] = chunks[i].AssetID
 	}
-	return &meta.FileMeta{Size: size, Chunks: chunkNames}, nil
+	return &meta.FileMeta{Size: size, Chunks: chunkIDs}, nil
 }
 func (s *stubHub) FillChunkRangeContext(ctx context.Context, project string, chunk meta.ChunkInfo, dst []byte) error {
 	if s.fillChunk != nil {

@@ -145,18 +145,17 @@ func (b *testBackend) storeFile(file *meta.FileMeta, data []byte) {
 	b.assetBytes[assetID] = append([]byte(nil), data...)
 	file.Size = int64(len(data))
 	if len(data) == 0 {
-		file.Chunks = []string{}
+		file.Chunks = []int64{}
 		return
 	}
-	chunkName := fmt.Sprintf("chunk_%d", assetID)
 	release := "v1"
 	if len(file.Chunks) > 0 {
 		if c, ok := b.repo.Chunks[file.Chunks[0]]; ok {
 			release = c.Release
 		}
 	}
-	b.repo.Chunks[chunkName] = meta.ChunkInfo{Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: release}
-	file.Chunks = []string{chunkName}
+	b.repo.Chunks[assetID] = meta.ChunkInfo{Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: release}
+	file.Chunks = []int64{assetID}
 }
 
 func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {

@@ -88,7 +88,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	uid, gid := shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	symlink := meta.FileMeta{
 		Size:          int64(len([]byte(target))),
-		Chunks:        []string{},
+		Chunks:        []int64{},
 		UploadedAt:    now,
 		ModifiedAt:    now,
 		AccessedAt:    now,

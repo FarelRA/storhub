@@ -93,7 +93,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	uid, gid := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	fileMeta := meta.FileMeta{
 		Size:       0,
-		Chunks:     []string{},
+		Chunks:     []int64{},
 		UploadedAt: now,
 		ModifiedAt: now,
 		AccessedAt: now,

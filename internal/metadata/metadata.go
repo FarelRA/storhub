@@ -18,7 +18,7 @@ type ChunkInfo struct {
 }
 
 type FileMeta struct {
-	Chunks     []string          `json:"cs,omitempty"`
+	Chunks     []int64           `json:"cs,omitempty"`
 	Size       int64             `json:"s"`
 	Symlink    string            `json:"sl,omitempty"`
 	UploadedAt int64             `json:"ua"`
@@ -35,7 +35,7 @@ type FileMeta struct {
 func (f FileMeta) Clone() FileMeta {
 	clone := f
 	if f.Chunks != nil {
-		clone.Chunks = append([]string(nil), f.Chunks...)
+		clone.Chunks = append([]int64(nil), f.Chunks...)
 	}
 	clone.XAttrs = cloneStringMap(f.XAttrs)
 	return clone
@@ -77,10 +77,11 @@ type RepoMetadata struct {
 	Root       DirMeta               `json:"rt"`
 	Dirs       map[string]DirMeta    `json:"d"`
 	Files      map[string]FileMeta   `json:"f"`
-	Chunks     map[string]ChunkInfo  `json:"c"`
+	Chunks     map[int64]ChunkInfo `json:"c"`
 	Releases   map[string]ReleaseRef `json:"r"`
 
 	NextInode    uint64              `json:"-"`
+	NextChunkID  int64               `json:"-"`
 	filesByInode map[uint64][]string `json:"-"`
 	childDirs    map[string][]string `json:"-"`
 	childFiles   map[string][]string `json:"-"`
@@ -98,14 +99,15 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	return &RepoMetadata{
 		Version:   2,
 		Project:   project,
-		NextInode: 2,
+		NextInode:   2,
+		NextChunkID: 1,
 		Root: DirMeta{
 			Inode: 1, Mode: defaultDirMode(), UID: uid, GID: gid,
 			CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
 		},
 		Dirs:     make(map[string]DirMeta),
 		Files:    make(map[string]FileMeta),
-		Chunks:   make(map[string]ChunkInfo),
+		Chunks:   make(map[int64]ChunkInfo),
 		Releases: make(map[string]ReleaseRef),
 	}
 }
@@ -145,11 +147,11 @@ func cloneFileMetaMap(src map[string]FileMeta) map[string]FileMeta {
 	return dst
 }
 
-func cloneChunkInfoMap(src map[string]ChunkInfo) map[string]ChunkInfo {
+func cloneChunkInfoMap(src map[int64]ChunkInfo) map[int64]ChunkInfo {
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]ChunkInfo, len(src))
+	dst := make(map[int64]ChunkInfo, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
@@ -199,7 +201,7 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 		m.Files = make(map[string]FileMeta)
 	}
 	if m.Chunks == nil {
-		m.Chunks = make(map[string]ChunkInfo)
+		m.Chunks = make(map[int64]ChunkInfo)
 	}
 	if m.Releases == nil {
 		m.Releases = make(map[string]ReleaseRef)
@@ -310,11 +312,11 @@ func (f *FileMeta) Normalize(now int64) {
 		f.Inode = 0
 	}
 	if f.Chunks == nil {
-		f.Chunks = make([]string, 0)
+		f.Chunks = make([]int64, 0)
 	}
-	stableSortChunkNames(f.Chunks)
+	sort.Slice(f.Chunks, func(i, j int) bool { return f.Chunks[i] < f.Chunks[j] })
 	if f.Symlink != "" {
-		f.Chunks = make([]string, 0)
+		f.Chunks = make([]int64, 0)
 		f.Size = int64(len([]byte(f.Symlink)))
 	}
 	f.XAttrs = normalizeXAttrs(f.XAttrs)
@@ -456,8 +458,8 @@ func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
 		return nil
 	}
 	chunks := make([]ChunkInfo, 0, len(file.Chunks))
-	for _, cname := range file.Chunks {
-		if c, ok := m.Chunks[cname]; ok {
+	for _, id := range file.Chunks {
+		if c, ok := m.Chunks[id]; ok {
 			chunks = append(chunks, c)
 		}
 	}
@@ -626,6 +628,16 @@ func (m *RepoMetadata) normalizeRoot(now int64) {
 	if m.NextInode <= maxInode {
 		m.NextInode = maxInode + 1
 	}
+
+	maxChunkID := int64(0)
+	for id := range m.Chunks {
+		if id > maxChunkID {
+			maxChunkID = id
+		}
+	}
+	if m.NextChunkID <= maxChunkID {
+		m.NextChunkID = maxChunkID + 1
+	}
 }
 
 func (m *RepoMetadata) allocateInode() uint64 {
@@ -633,6 +645,13 @@ func (m *RepoMetadata) allocateInode() uint64 {
 	ino := m.NextInode
 	m.NextInode++
 	return ino
+}
+
+func (m *RepoMetadata) allocateChunkID() int64 {
+	m.normalizeRoot(time.Now().Unix())
+	id := m.NextChunkID
+	m.NextChunkID++
+	return id
 }
 
 func (m *RepoMetadata) Validate() error {
@@ -695,19 +714,19 @@ func (m *RepoMetadata) Validate() error {
 			totalFiles++
 			totalSize += file.Size
 		}
-		seenChunk := map[string]struct{}{}
-		for _, chunkName := range file.Chunks {
-			if _, ok := m.Chunks[chunkName]; !ok {
-				return fmt.Errorf("file %s references missing chunk %s", path, chunkName)
+		seenChunk := map[int64]struct{}{}
+		for _, id := range file.Chunks {
+			if _, ok := m.Chunks[id]; !ok {
+				return fmt.Errorf("file %s references missing chunk %d", path, id)
 			}
-			if _, ok := seenChunk[chunkName]; ok {
-				return fmt.Errorf("file %s: duplicate chunk reference: %s", path, chunkName)
+			if _, ok := seenChunk[id]; ok {
+				return fmt.Errorf("file %s: duplicate chunk reference: %d", path, id)
 			}
-			seenChunk[chunkName] = struct{}{}
+			seenChunk[id] = struct{}{}
 		}
 		chunks := make([]ChunkInfo, 0, len(file.Chunks))
-		for _, name := range file.Chunks {
-			chunks = append(chunks, m.Chunks[name])
+		for _, id := range file.Chunks {
+			chunks = append(chunks, m.Chunks[id])
 		}
 		sort.Slice(chunks, func(i, j int) bool {
 			return chunks[i].Offset < chunks[j].Offset
@@ -772,12 +791,12 @@ func (f FileMeta) Validate() error {
 	if len(f.Chunks) == 0 && f.Size > 0 {
 		return fmt.Errorf("file must contain at least one chunk reference")
 	}
-	seen := make(map[string]struct{}, len(f.Chunks))
-	for _, name := range f.Chunks {
-		if _, ok := seen[name]; ok {
-			return fmt.Errorf("duplicate chunk reference: %s", name)
+	seen := make(map[int64]struct{}, len(f.Chunks))
+	for _, id := range f.Chunks {
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("duplicate chunk reference: %d", id)
 		}
-		seen[name] = struct{}{}
+		seen[id] = struct{}{}
 	}
 	return nil
 }
@@ -876,7 +895,7 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	}
 
 	m.Files = make(map[string]FileMeta)
-	m.Chunks = make(map[string]ChunkInfo)
+	m.Chunks = make(map[int64]ChunkInfo)
 	m.Releases = make(map[string]ReleaseRef)
 
 	for _, r := range v1.Releases {
@@ -892,22 +911,19 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 				symlink = f.SymlinkTarget
 			}
 
-			chunkNames := make([]string, 0, len(f.Chunks))
+			chunkIDs := make([]int64, 0, len(f.Chunks))
 			for _, c := range f.Chunks {
-				chunkName := c.Name
-				if _, exists := m.Chunks[chunkName]; exists {
-					chunkName = fmt.Sprintf("%s_%s", c.Name, r.Tag)
-				}
-				chunkNames = append(chunkNames, chunkName)
+				chunkID := m.allocateChunkID()
+				chunkIDs = append(chunkIDs, chunkID)
 				ci := ChunkInfo{
 					Size: c.Size, Offset: c.Offset, Release: chooseNonEmpty(c.Release, f.Release, r.Tag),
 					AssetOffset: c.AssetOffset, AssetID: c.AssetID,
 				}
-				m.Chunks[chunkName] = ci
+				m.Chunks[chunkID] = ci
 			}
 
 			fileMeta := FileMeta{
-				Chunks:     chunkNames,
+				Chunks:     chunkIDs,
 				Size:       f.Size,
 				Symlink:    symlink,
 				UploadedAt: timeToUnix(f.UploadedAt),

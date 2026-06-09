@@ -4,6 +4,10 @@ func (m *RepoMetadata) AllocateInode() uint64 {
 	return m.allocateInode()
 }
 
+func (m *RepoMetadata) AllocateChunkID() int64 {
+	return m.allocateChunkID()
+}
+
 func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	initializeNewFileIdentity(meta, file, now)
 }

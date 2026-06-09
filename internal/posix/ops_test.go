@@ -100,7 +100,7 @@ func (b *testBackend) seedDir(path string) {
 }
 
 func (b *testBackend) seedFile(path string) *meta.FileMeta {
-	file := meta.FileMeta{Mode: 0o644, UID: 1, GID: 2, Chunks: []string{}, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
+	file := meta.FileMeta{Mode: 0o644, UID: 1, GID: 2, Chunks: []int64{}, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
 	b.repo.UpsertFile(path, file, b.now)
 	stored := b.repo.FindFile(path)
 	clone := stored.Clone()

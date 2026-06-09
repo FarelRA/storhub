@@ -9,13 +9,13 @@ import (
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	now := int64(100)
 	repo := meta.NewRepoMetadata("demo")
-	file := &meta.FileMeta{Chunks: []string{}}
+	file := &meta.FileMeta{Chunks: []int64{}}
 	ApplyUploadIdentity(repo, "docs/file.txt", nil, file, now)
 	if file.Inode == 0 || file.Mode == 0 {
 		t.Fatalf("unexpected initialized file identity: %+v", file)
 	}
 	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
-	updated := &meta.FileMeta{Chunks: []string{}}
+	updated := &meta.FileMeta{Chunks: []int64{}}
 	ApplyUpdatedFileIdentity("", updated, existing, now+60)
 	if updated.Inode != 9 || updated.Symlink != "" {
 		t.Fatalf("unexpected updated identity: %+v", updated)
@@ -31,17 +31,17 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	repo.EnsureDirectory("docs", now)
 
 	chunk1 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
-	repo.Chunks["chunk_1"] = chunk1
-	base := meta.FileMeta{Size: 1, Chunks: []string{"chunk_1"}}
+	repo.Chunks[1] = chunk1
+	base := meta.FileMeta{Size: 1, Chunks: []int64{1}}
 	repo.UpsertFile("docs/a.txt", base, now)
 	first := repo.FindFile("docs/a.txt")
 	clone := first.Clone()
 	repo.UpsertFile("docs/b.txt", clone, now)
 
 	chunk2 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v2", AssetID: 2}
-	repo.Chunks["chunk_2"] = chunk2
+	repo.Chunks[2] = chunk2
 	updated := first.Clone()
-	updated.Chunks = []string{"chunk_2"}
+	updated.Chunks = []int64{2}
 	ReplaceInodeFamily(repo, "docs/a.txt", first, updated, now+60)
 	got := repo.FindFilesByInode(first.Inode)
 	if len(got) != 2 {
@@ -49,14 +49,14 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	}
 	for _, name := range got {
 		f := repo.FindFile(name)
-		if f == nil || len(f.Chunks) != 1 || f.Chunks[0] != "chunk_2" {
+		if f == nil || len(f.Chunks) != 1 || f.Chunks[0] != 2 {
 			t.Fatalf("expected chunk_2 on %s, got %+v", name, f)
 		}
 	}
 
 	missing := &meta.FileMeta{Inode: 99}
 	updated2 := first.Clone()
-	updated2.Chunks = []string{"chunk_2"}
+	updated2.Chunks = []int64{2}
 	ReplaceInodeFamily(repo, "docs/missing.txt", missing, updated2, now)
 	if repo.FindFile("docs/missing.txt") == nil {
 		t.Fatal("expected missing inode family to fall back to upsert")

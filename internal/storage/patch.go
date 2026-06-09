@@ -216,13 +216,13 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	return results, err
 }
 
-func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[string]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
+func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[int64]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
 	if end <= start {
 		return nil, nil
 	}
 	assembled := make([]ChunkInfo, 0, len(file.Chunks))
-	for _, name := range file.Chunks {
-		chunk, ok := repoChunks[name]
+	for _, id := range file.Chunks {
+		chunk, ok := repoChunks[id]
 		if !ok {
 			continue
 		}

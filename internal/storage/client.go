@@ -572,13 +572,13 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	fileMeta := current.Clone()
 
 	// Add new chunks to the repo's Chunks map
-	chunkNames := make([]string, len(chunks))
+	chunkIDs := make([]int64, len(chunks))
 	for i, chunk := range chunks {
-		name := fmt.Sprintf("%s/chunk/%d", cleanName, i)
-		repoMeta.Chunks[name] = chunk
-		chunkNames[i] = name
+		id := repoMeta.AllocateChunkID()
+		repoMeta.Chunks[id] = chunk
+		chunkIDs[i] = id
 	}
-	fileMeta.Chunks = chunkNames
+	fileMeta.Chunks = chunkIDs
 	fileMeta.Size = size
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, now)
 
@@ -586,8 +586,8 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	for i, name := range chunkNames {
-		pm.meta.Chunks[name] = chunks[i]
+	for i, id := range chunkIDs {
+		pm.meta.Chunks[id] = chunks[i]
 	}
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
@@ -717,13 +717,13 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	now := h.config.Now().Unix()
 	patched := fileMeta.Clone()
-	chunkNames := make([]string, len(newChunks))
+	chunkIDs := make([]int64, len(newChunks))
 	for i, chunk := range newChunks {
-		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now, i)
-		repoMeta.Chunks[name] = chunk
-		chunkNames[i] = name
+		id := repoMeta.AllocateChunkID()
+		repoMeta.Chunks[id] = chunk
+		chunkIDs[i] = id
 	}
-	patched.Chunks = chunkNames
+	patched.Chunks = chunkIDs
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
 	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
 	patched.ModifiedAt = now
@@ -734,8 +734,8 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	for i, name := range chunkNames {
-		pm.meta.Chunks[name] = newChunks[i]
+	for i, id := range chunkIDs {
+		pm.meta.Chunks[id] = newChunks[i]
 	}
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
@@ -762,13 +762,13 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	now := h.config.Now().Unix()
 	rewritten := fileMeta.Clone()
-	chunkNames := make([]string, len(newChunks))
+	chunkIDs := make([]int64, len(newChunks))
 	for i, chunk := range newChunks {
-		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now, i)
-		repoMeta.Chunks[name] = chunk
-		chunkNames[i] = name
+		id := repoMeta.AllocateChunkID()
+		repoMeta.Chunks[id] = chunk
+		chunkIDs[i] = id
 	}
-	rewritten.Chunks = chunkNames
+	rewritten.Chunks = chunkIDs
 	rewritten.Size = finalSize
 	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
 	rewritten.ModifiedAt = now
@@ -779,8 +779,8 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	for i, name := range chunkNames {
-		pm.meta.Chunks[name] = newChunks[i]
+	for i, id := range chunkIDs {
+		pm.meta.Chunks[id] = newChunks[i]
 	}
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
@@ -870,15 +870,15 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 			return nil, err
 		}
 	}
-	chunkNames := make([]string, len(results))
+	chunkIDs := make([]int64, len(results))
 	for i, chunk := range results {
-		name := fmt.Sprintf("%s/chunk/%d", cleanName, i)
-		workingMeta.Chunks[name] = chunk
-		chunkNames[i] = name
+		id := workingMeta.AllocateChunkID()
+		workingMeta.Chunks[id] = chunk
+		chunkIDs[i] = id
 	}
 	fileMeta := FileMeta{
 		Size:    fileInfo.Size(),
-		Chunks:  chunkNames,
+		Chunks:  chunkIDs,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().Unix())
 	if existing == nil {
@@ -907,8 +907,8 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, shfs.AlreadyExists(cleanName)
 	}
 	pm.meta.EnsureRelease(releaseTag, h.config.Now().Unix())
-	for i, name := range chunkNames {
-		pm.meta.Chunks[name] = results[i]
+	for i, id := range chunkIDs {
+		pm.meta.Chunks[id] = results[i]
 	}
 	current := pm.meta.FindFile(cleanName)
 	if current != nil {
@@ -984,7 +984,7 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 		chunkName := fileMeta.Chunks[i]
 		chunk, ok := repoMeta.Chunks[chunkName]
 		if !ok {
-			return fmt.Errorf("chunk %s not found", chunkName)
+			return fmt.Errorf("chunk %d not found", chunkName)
 		}
 		return h.downloadChunkWithRetry(ctx, project, outFile, chunk)
 	})
@@ -1619,14 +1619,14 @@ func splitSegment(seg fileReadSegment, maxParts int) []fileReadSegment {
 	return subs
 }
 
-func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[string]metadata.ChunkInfo, offset, end int64) []fileReadSegment {
+func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[int64]metadata.ChunkInfo, offset, end int64) []fileReadSegment {
 	if file == nil || end <= offset {
 		return nil
 	}
 	segments := make([]fileReadSegment, 0, len(file.Chunks))
 	chunks := make([]metadata.ChunkInfo, 0, len(file.Chunks))
-	for _, name := range file.Chunks {
-		if chunk, ok := repoChunks[name]; ok {
+	for _, id := range file.Chunks {
+		if chunk, ok := repoChunks[id]; ok {
 			chunks = append(chunks, chunk)
 		}
 	}

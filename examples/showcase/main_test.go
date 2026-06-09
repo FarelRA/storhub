@@ -203,7 +203,7 @@ func fileMeta(path string, data []byte) *storhub.FileMetadata {
 		Size:  int64(len(data)),
 		Inode: 1,
 		Mode:  0o644,
-		Chunks: []string{path + "/chunk0"},
+		Chunks: []int64{1},
 	}
 }
 
