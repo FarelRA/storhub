@@ -178,3 +178,124 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	}
 	_ = chooseNonEmpty("", "  ", "x")
 }
+
+func TestMigrateV1ChunkNameCollision(t *testing.T) {
+	v1JSON := `{
+		"version": 1,
+		"project": "demo",
+		"next_inode": 10,
+		"total_files": 2,
+		"total_size": 100,
+		"last_modified": "2024-01-01T00:00:00Z",
+		"root": {
+			"inode": 1, "mode": 755, "uid": 1000, "gid": 1000,
+			"nlink": 2, "created_at": "2024-01-01T00:00:00Z",
+			"modified_at": "2024-01-01T00:00:00Z"
+		},
+		"directories": [],
+		"releases": [
+			{
+				"tag": "v1",
+				"asset_count": 1,
+				"created_at": "2024-01-01T00:00:00Z",
+				"files": [
+					{
+						"name": "bigfile.bin",
+						"kind": "file",
+						"size": 100,
+						"mode": 644, "uid": 1000, "gid": 1000,
+						"inode": 5, "nlink": 1,
+						"uploaded_at": "2024-01-01T00:00:00Z",
+						"chunks": [
+							{"name": "shared.chunk", "size": 50, "index": 0, "offset": 0, "release": "v1", "asset_offset": 0, "asset_id": 100},
+							{"name": "bigfile.unique", "size": 50, "index": 1, "offset": 50, "release": "v1", "asset_offset": 0, "asset_id": 101}
+						]
+					}
+				]
+			},
+			{
+				"tag": "v2",
+				"asset_count": 1,
+				"created_at": "2024-02-01T00:00:00Z",
+				"files": [
+					{
+						"name": "small.txt",
+						"kind": "file",
+						"size": 30,
+						"mode": 644, "uid": 1000, "gid": 1000,
+						"inode": 6, "nlink": 1,
+						"uploaded_at": "2024-02-01T00:00:00Z",
+						"chunks": [
+							{"name": "shared.chunk", "size": 30, "index": 0, "offset": 0, "release": "v2", "asset_offset": 0, "asset_id": 200}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	var meta RepoMetadata
+	if err := meta.FromJSON([]byte(v1JSON)); err != nil {
+		t.Fatalf("FromJSON (migrateV1): %v", err)
+	}
+
+	meta.Normalize("demo", 100)
+	if err := meta.Validate(); err != nil {
+		t.Fatalf("Validate after migration+normalize: %v", err)
+	}
+
+	bigFile := meta.FindFile("bigfile.bin")
+	if bigFile == nil {
+		t.Fatal("bigfile.bin not found after migration")
+	}
+	smallFile := meta.FindFile("small.txt")
+	if smallFile == nil {
+		t.Fatal("small.txt not found after migration")
+	}
+
+	sharedChunkName := ""
+	for _, cn := range bigFile.Chunks {
+		if cn != "bigfile.unique" {
+			sharedChunkName = cn
+			break
+		}
+	}
+	if sharedChunkName == "" {
+		t.Fatal("expected shared.chunk variant in bigfile.bin")
+	}
+
+	bigChunk, ok := meta.Chunks[sharedChunkName]
+	if !ok {
+		t.Fatalf("bigfile's shared chunk %q not in meta.Chunks", sharedChunkName)
+	}
+	if bigChunk.AssetID != 100 || bigChunk.Offset != 0 || bigChunk.Size != 50 {
+		t.Fatalf("bigfile shared chunk has wrong data: %+v", bigChunk)
+	}
+
+	smallChunkName := smallFile.Chunks[0]
+	_ = smallChunkName
+	smallChunk, ok := meta.Chunks[smallChunkName]
+	if !ok {
+		t.Fatalf("small.txt chunk %q not in meta.Chunks", smallChunkName)
+	}
+	if smallChunk.AssetID != 200 || smallChunk.Offset != 0 || smallChunk.Size != 30 {
+		t.Fatalf("small.txt chunk has wrong data: %+v", smallChunk)
+	}
+
+	if sharedChunkName == smallChunkName {
+		t.Fatalf("expected disambiguated chunk names, got same: %q", sharedChunkName)
+	}
+
+	encoded, err := meta.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON: %v", err)
+	}
+	var decoded RepoMetadata
+	if err := decoded.FromJSON(encoded); err != nil {
+		t.Fatalf("FromJSON round-trip: %v", err)
+	}
+	decoded.Normalize("demo", 100)
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("Validate after round-trip: %v", err)
+	}
+}

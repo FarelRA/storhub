@@ -894,12 +894,16 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 
 			chunkNames := make([]string, 0, len(f.Chunks))
 			for _, c := range f.Chunks {
-				chunkNames = append(chunkNames, c.Name)
+				chunkName := c.Name
+				if _, exists := m.Chunks[chunkName]; exists {
+					chunkName = fmt.Sprintf("%s_%s", c.Name, r.Tag)
+				}
+				chunkNames = append(chunkNames, chunkName)
 				ci := ChunkInfo{
 					Size: c.Size, Offset: c.Offset, Release: chooseNonEmpty(c.Release, f.Release, r.Tag),
 					AssetOffset: c.AssetOffset, AssetID: c.AssetID,
 				}
-				m.Chunks[c.Name] = ci
+				m.Chunks[chunkName] = ci
 			}
 
 			fileMeta := FileMeta{
