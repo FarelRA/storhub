@@ -2650,7 +2650,7 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 	if h.writeState.shouldReplaceLocked(planned) {
 		return h.commitReplace(ctx, targetPath, logicalSize, planned, pending)
 	}
-	return h.commitPatch(ctx, targetPath, baseSize, logicalSize, planned, pending)
+	return h.commitPatch(ctx, targetPath, baseSize, logicalSize, h.writeState.dirtyRanges, pending)
 }
 
 // commitChunkRewrite handles the chunk-rewrite path.
