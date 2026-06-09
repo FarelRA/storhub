@@ -3299,9 +3299,8 @@ func normalizedChunkSize(chunkSize int64) int64 {
 	if chunkSize <= 0 {
 		chunkSize = chunking.DefaultChunkSize
 	}
-	const maxReleaseAssetSize = int64(2 * 1024 * 1024 * 1024)
-	if chunkSize > maxReleaseAssetSize {
-		return maxReleaseAssetSize
+	if chunkSize > chunking.MaxReleaseAssetSize {
+		return chunking.MaxReleaseAssetSize
 	}
 	return chunkSize
 }

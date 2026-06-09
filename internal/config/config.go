@@ -17,7 +17,7 @@ const (
 	defaultAPIVersion      = "2022-11-28"
 	defaultRequestTimeout  = 5 * time.Minute
 	defaultRepoDescription = "StorHub storage project"
-	DefaultChunkSize       = int64(32 * 1024 * 1024)
+	DefaultChunkSize       = int64(2*1024*1024*1024) - 1
 	DefaultBufferSize      = 1 * 1024 * 1024
 	DefaultMaxTransfers    = 8
 )
