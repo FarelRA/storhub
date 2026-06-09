@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/FarelRA/storhub/storhub"
 )
@@ -85,7 +84,7 @@ func captureStdout(t *testing.T, fn func()) string {
 
 func TestPrintStatFormatsEntry(t *testing.T) {
 	output := captureStdout(t, func() {
-		printStat("stat", &storhub.EntryInfo{Path: "x", Inode: 9, Size: 2, Mode: 0o644, UID: 1, GID: 2, NLink: 1, IsDir: true, Kind: storhub.NodeKindFile, ModifiedAt: time.Unix(1, 0)})
+		printStat("stat", &storhub.EntryInfo{Path: "x", Inode: 9, Size: 2, Mode: 0o644, UID: 1, GID: 2, NLink: 1, IsDir: true, Kind: storhub.NodeKindFile, ModifiedAt: 1})
 	})
 	if !strings.Contains(output, fmt.Sprintf("- inode: %d", 9)) {
 		t.Fatalf("unexpected stat output: %q", output)
@@ -150,12 +149,12 @@ func (f *fakeShowcaseHub) ListReleases(project string) ([]storhub.ReleaseMetadat
 	return []storhub.ReleaseMetadata{{AssetCount: 1}}, nil
 }
 func (f *fakeShowcaseHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
-	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "new", CommittedAt: time.Unix(2, 0)}, {CommitSHA: "facefeedcafebabe", Message: "old", CommittedAt: time.Unix(1, 0)}}, nil
+	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "new", CommittedAt: 2}, {CommitSHA: "facefeedcafebabe", Message: "old", CommittedAt: 1}}, nil
 }
 func (f *fakeShowcaseHub) RollbackMetadata(project, commitSHA string) error        { return nil }
 func (f *fakeShowcaseHub) Chmod(project, targetPath string, mode uint32) error     { return nil }
 func (f *fakeShowcaseHub) Chown(project, targetPath string, uid, gid uint32) error { return nil }
-func (f *fakeShowcaseHub) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+func (f *fakeShowcaseHub) Chtimes(project, targetPath string, atime, mtime int64) error {
 	return nil
 }
 func (f *fakeShowcaseHub) SetXAttr(project, targetPath, attr string, data []byte) error { return nil }

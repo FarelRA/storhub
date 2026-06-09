@@ -71,7 +71,8 @@ func printRevisions(w io.Writer, revisions []storhub.MetadataRevision) {
 		if len(sha) > 10 {
 			sha = sha[:10]
 		}
-		fmt.Fprintf(w, "%s  %s  %s\n", sha, formatTime(rev.CommittedAt), rev.Message)
+		committedAt := rev.CommittedAt
+		fmt.Fprintf(w, "%s  %s  %s\n", sha, formatTime(committedAt), rev.Message)
 	}
 }
 

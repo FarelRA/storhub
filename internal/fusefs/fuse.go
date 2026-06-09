@@ -207,7 +207,7 @@ type Hub interface {
 	TruncateFileContext(context.Context, string, string, int64) (*metadata.FileMeta, error)
 	ChmodContext(context.Context, string, string, uint32) error
 	ChownContext(context.Context, string, string, uint32, uint32) error
-	ChtimesContext(context.Context, string, string, time.Time, time.Time) error
+	ChtimesContext(context.Context, string, string, int64, int64) error
 	SymlinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	ReadlinkContext(context.Context, string, string) (string, error)
 	LinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
@@ -227,7 +227,7 @@ type Hub interface {
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
-	Now() time.Time
+	Now() int64
 	ChunkSize() int64
 }
 
@@ -984,20 +984,20 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 			return errnoFromError(err)
 		}
 		if !atimeOK {
-			atime = entry.AccessedAt
+			atime = time.Unix(entry.AccessedAt, 0)
 		}
 		if !mtimeOK {
-			mtime = entry.ModifiedAt
+			mtime = time.Unix(entry.ModifiedAt, 0)
 		}
 		if state != nil && !n.isDir {
 			state.opMu.Lock()
 			state.mu.Lock()
 			state.overlayEntryLocked(entry)
 			if !atimeOK {
-				atime = entry.AccessedAt
+				atime = time.Unix(entry.AccessedAt, 0)
 			}
 			if !mtimeOK {
-				mtime = entry.ModifiedAt
+				mtime = time.Unix(entry.ModifiedAt, 0)
 			}
 			state.pending.HasTimes = true
 			state.pending.ATime = atime
@@ -1005,7 +1005,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 			state.mu.Unlock()
 			state.opMu.Unlock()
 		} else {
-			if err := n.fs.hub.ChtimesContext(ctx, n.fs.project, targetPath, atime, mtime); err != nil {
+			if err := n.fs.hub.ChtimesContext(ctx, n.fs.project, targetPath, atime.Unix(), mtime.Unix()); err != nil {
 				return errnoFromError(err)
 			}
 		}
@@ -1985,18 +1985,11 @@ func (w *inodeWriteState) overlayEntryLocked(entry *shfs.EntryInfo) {
 		entry.GID = w.pending.GID
 	}
 	if w.pending.HasTimes {
-		entry.AccessedAt = w.pending.ATime
-		entry.ModifiedAt = w.pending.MTime
+		entry.AccessedAt = w.pending.ATime.Unix()
+		entry.ModifiedAt = w.pending.MTime.Unix()
 	}
 	entry.Size = w.logicalSize
-	entry.ChangedAt = maxTime(entry.ChangedAt, w.fs.hub.Now())
-}
-
-func maxTime(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
+	entry.ChangedAt = max(entry.ChangedAt, w.fs.hub.Now())
 }
 
 func (w *inodeWriteState) plannedRangesLocked() []ByteRange {
@@ -3196,7 +3189,10 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	attr.Owner = fuse.Owner{Uid: entry.UID, Gid: entry.GID}
 	attr.Nlink = entry.NLink
 	attr.Blksize = 4096
-	attr.SetTimes(&entry.AccessedAt, &entry.ModifiedAt, &entry.ChangedAt)
+	atime := time.Unix(entry.AccessedAt, 0)
+	mtime := time.Unix(entry.ModifiedAt, 0)
+	ctime := time.Unix(entry.ChangedAt, 0)
+	attr.SetTimes(&atime, &mtime, &ctime)
 	mode := entry.Mode & 0o7777
 	if entry.IsDir {
 		mode |= syscall.S_IFDIR

@@ -442,7 +442,7 @@ func TestLockAndErrorHelpers(t *testing.T) {
 }
 
 func TestFillAndNodeAttributeHelpers(t *testing.T) {
-	now := time.Unix(20, 0).UTC()
+	now := int64(20)
 	entry := &shfs.EntryInfo{Path: "docs/file.txt", Inode: 4, Size: 7, UID: 1, GID: 2, NLink: 3, Mode: 0o640, ModifiedAt: now, AccessedAt: now, ChangedAt: now, IsSymlink: true}
 	var attr fuse.Attr
 	fillAttr(&attr, entry)
@@ -541,7 +541,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 }
 
 func TestRenameWithReplaceFilePath(t *testing.T) {
-	now := time.Unix(10, 0).UTC()
+	now := int64(10)
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
 	metaState.Chunks["chunk-1"] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
@@ -594,7 +594,7 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 }
 
 func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
-	now := time.Unix(30, 0).UTC()
+	now := int64(30)
 	var replacedPath string
 	var replacedBytes []byte
 	type uploadedChunk struct {
@@ -678,7 +678,7 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 }
 
 func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
-	now := time.Unix(31, 0).UTC()
+	now := int64(31)
 	chmodCalled := false
 	fake := &stubHub{
 		createFile: func(_ context.Context, _ string, target string) (*meta.FileMeta, error) {
@@ -731,7 +731,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 }
 
 func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
-	now := time.Unix(32, 0).UTC()
+	now := int64(32)
 	var seenIdentity shfs.Identity
 	var seenMode uint32
 	fake := &stubHub{
@@ -775,7 +775,7 @@ func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
 }
 
 func TestAccessChecksCallerPermissions(t *testing.T) {
-	now := time.Unix(33, 0).UTC()
+	now := int64(33)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
@@ -801,7 +801,7 @@ func TestAccessChecksCallerPermissions(t *testing.T) {
 }
 
 func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
-	now := time.Unix(34, 0).UTC()
+	now := int64(34)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs" {
@@ -823,7 +823,7 @@ func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
 }
 
 func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
-	now := time.Unix(35, 0).UTC()
+	now := int64(35)
 	patchCalls := 0
 	chmodCalls := 0
 	fake := &stubHub{
@@ -859,10 +859,10 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 	var attr fuse.SetAttrIn
 	attr.Valid = fuse.FATTR_MODE | fuse.FATTR_MTIME | fuse.FATTR_ATIME
 	attr.Mode = 0o644
-	attr.Atime = uint64(now.Add(-time.Hour).Unix())
-	attr.Atimensec = uint32(now.Add(-time.Hour).Nanosecond())
-	attr.Mtime = uint64(now.Add(-2 * time.Hour).Unix())
-	attr.Mtimensec = uint32(now.Add(-2 * time.Hour).Nanosecond())
+	attr.Atime = uint64(now - 3600)
+	attr.Atimensec = 0
+	attr.Mtime = uint64(now - 7200)
+	attr.Mtimensec = 0
 	var out fuse.AttrOut
 	if errno := node.Setattr(context.Background(), h, &attr, &out); errno != 0 {
 		t.Fatalf("setattr with handle: %v", errno)
@@ -879,7 +879,7 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 }
 
 func TestOpenUsesDirectIO(t *testing.T) {
-	now := time.Unix(36, 0).UTC()
+	now := int64(36)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
@@ -982,7 +982,7 @@ func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
 }
 
 func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
-	now := time.Unix(40, 0).UTC()
+	now := int64(40)
 	var truncates int
 	var replaced []byte
 	type uploadedChunk struct {
@@ -1106,7 +1106,7 @@ type stubHub struct {
 	uploadChunk    func(context.Context, string, string, string, int, int64, []byte) (meta.ChunkInfo, error)
 	finalizeChunks func(context.Context, string, string, string, int64, []meta.ChunkInfo) (*meta.FileMeta, error)
 	fillChunk      func(context.Context, string, meta.ChunkInfo, []byte) error
-	now            time.Time
+	now            int64
 	chunkSize      int64
 }
 
@@ -1159,7 +1159,7 @@ func (s *stubHub) ApplyMetadataPatchContext(ctx context.Context, project, target
 	return nil
 }
 func (*stubHub) ChownContext(context.Context, string, string, uint32, uint32) error { return nil }
-func (*stubHub) ChtimesContext(context.Context, string, string, time.Time, time.Time) error {
+func (*stubHub) ChtimesContext(context.Context, string, string, int64, int64) error {
 	return nil
 }
 func (*stubHub) SymlinkContext(context.Context, string, string, string) (*meta.FileMeta, error) {
@@ -1264,9 +1264,9 @@ func (s *stubHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 func (*stubHub) RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *meta.RepoMetadata, *meta.FileMeta, int64, []ByteRange) (*meta.FileMeta, error) {
 	return nil, nil
 }
-func (s *stubHub) Now() time.Time {
-	if s.now.IsZero() {
-		return time.Now().UTC()
+func (s *stubHub) Now() int64 {
+	if s.now == 0 {
+		return time.Now().Unix()
 	}
 	return s.now
 }

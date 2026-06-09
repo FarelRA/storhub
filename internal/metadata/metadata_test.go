@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestHelpersAndPOSIXUtilities(t *testing.T) {
@@ -28,8 +27,8 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 	if len(attrs) != 1 || attrs["user.a"] != "1" {
 		t.Fatalf("unexpected xattrs: %+v", attrs)
 	}
-	when := chooseNonZeroTime(time.Time{}, time.Unix(5, 0))
-	if when.IsZero() || when.Location() != time.UTC {
+	when := chooseNonZeroTime(0, 5)
+	if when == 0 {
 		t.Fatalf("unexpected chosen time: %v", when)
 	}
 	if got, ok := ParseNumericReleaseTag("v12"); !ok || got != 12 {
@@ -41,7 +40,7 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 }
 
 func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
+	now := int64(100)
 	repo := NewRepoMetadata("demo")
 
 	repo.EnsureDirectory("docs", now)
@@ -113,7 +112,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 }
 
 func TestRepoMetadataMutationFlows(t *testing.T) {
-	now := time.Unix(200, 0).UTC()
+	now := int64(200)
 	repo := NewRepoMetadata("mutations")
 	repo.EnsureDirectory("docs/specs", now)
 	if !repo.HasDirectory("docs") || !repo.HasDirectory("docs/specs") {
@@ -137,7 +136,7 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 	if n := repo.FileNLink("docs/specs/readme.txt"); n != 1 {
 		t.Fatalf("expected nlink=1, got %d", n)
 	}
-	repo.UpsertFile("docs/specs/readme.txt", FileMeta{Size: 4, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []string{"c2"}}, now.Add(time.Minute))
+	repo.UpsertFile("docs/specs/readme.txt", FileMeta{Size: 4, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []string{"c2"}}, now+60)
 	repo.Chunks["c2"] = ChunkInfo{Offset: 0, Size: 4, AssetID: 2}
 	updated := repo.FindFile("docs/specs/readme.txt")
 	if updated == nil || updated.Inode != first.Inode || updated.Size != 4 {
@@ -164,12 +163,12 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 }
 
 func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
-	now := time.Unix(300, 0).UTC()
+	now := int64(300)
 	repo := NewRepoMetadata("validate")
 	InitializeNewFileIdentity(repo, &FileMeta{}, now)
 	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
 	incoming := &FileMeta{}
-	PreserveFileIdentity(incoming, existing, now.Add(time.Minute))
+	PreserveFileIdentity(incoming, existing, now+60)
 	if incoming.Inode != existing.Inode || incoming.Symlink != "target" || incoming.XAttrs["user.demo"] != "1" {
 		t.Fatalf("unexpected preserved identity: %+v", incoming)
 	}

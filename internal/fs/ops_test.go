@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"syscall"
 	"testing"
-	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	meta "github.com/FarelRA/storhub/internal/metadata"
@@ -16,12 +15,12 @@ import (
 
 type testBackend struct {
 	repo       *meta.RepoMetadata
-	now        time.Time
+	now        int64
 	nextAsset  int64
 	assetBytes map[int64][]byte
 }
 
-func newTestBackend(now time.Time) *testBackend {
+func newTestBackend(now int64) *testBackend {
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureRelease("v1", now)
 	return &testBackend{repo: repo, now: now, nextAsset: 1, assetBytes: map[int64][]byte{}}
@@ -57,7 +56,7 @@ func (b *testBackend) UpdateRepoMetadataContext(_ context.Context, _ string, fn 
 	return &clone, nil
 }
 
-func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time) {
+func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64) {
 	_, _ = b.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if isDir {
 			if targetPath == "" {
@@ -114,7 +113,7 @@ func (b *testBackend) FillAssetRangeContext(_ context.Context, _ string, segment
 	return nil
 }
 
-func (b *testBackend) Now() time.Time { return b.now }
+func (b *testBackend) Now() int64 { return b.now }
 
 func (b *testBackend) FileNotFound(path string) error { return fmt.Errorf("not found: %s", path) }
 
@@ -177,7 +176,7 @@ func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {
 }
 
 func TestServiceWorkflowAndHelpers(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
+	now := int64(100)
 	backend := newTestBackend(now)
 	svc := NewService(backend)
 	backend.seedDir("docs")
@@ -245,7 +244,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 }
 
 func TestServiceErrors(t *testing.T) {
-	backend := newTestBackend(time.Unix(200, 0).UTC())
+	backend := newTestBackend(200)
 	svc := NewService(backend)
 	backend.seedDir("docs")
 	backend.seedFile("docs/link", []byte("abc"))
@@ -287,7 +286,7 @@ func TestServiceErrors(t *testing.T) {
 }
 
 func TestServicePermissionEnforcement(t *testing.T) {
-	backend := newTestBackend(time.Unix(250, 0).UTC())
+	backend := newTestBackend(250)
 	backend.seedDir("private")
 	file := backend.seedFile("private/note.txt", []byte("secret"))
 	file.Mode = 0o640
@@ -318,15 +317,15 @@ func TestServicePermissionEnforcement(t *testing.T) {
 }
 
 func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
-	now := time.Unix(260, 0).UTC()
+	now := int64(260)
 	backend := newTestBackend(now)
 	backend.seedDir("shared")
 	parent := backend.repo.GetDirectory("shared")
 	parent.Mode = 0o2775
 	parent.UID = 50
 	parent.GID = 60
-	parent.ModifiedAt = now.Add(-time.Hour)
-	parent.ChangedAt = now.Add(-time.Hour)
+	parent.ModifiedAt = now - 3600
+	parent.ChangedAt = now - 3600
 	backend.repo.Dirs["shared"] = *parent
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
@@ -346,13 +345,13 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 		t.Fatalf("expected setgid inheritance on directory, got %+v", dir)
 	}
 	parent = backend.repo.GetDirectory("shared")
-	if !parent.ModifiedAt.Equal(now) || !parent.ChangedAt.Equal(now) {
+	if parent.ModifiedAt != now || parent.ChangedAt != now {
 		t.Fatalf("expected parent timestamps touched, got mtime=%v ctime=%v", parent.ModifiedAt, parent.ChangedAt)
 	}
 }
 
 func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
-	backend := newTestBackend(time.Unix(265, 0).UTC())
+	backend := newTestBackend(265)
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
 	dir.Mode = 0o777

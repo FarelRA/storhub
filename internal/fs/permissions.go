@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"time"
 
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -246,23 +245,23 @@ func CheckStickyDelete(ctx context.Context, repo *meta.RepoMetadata, parentPath,
 	return syscall.EPERM
 }
 
-func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now time.Time) {
+func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now int64) {
 	if repo == nil {
 		return
 	}
 	if dirPath == "" {
-		repo.Root.ModifiedAt = now.UTC()
-		repo.Root.ChangedAt = now.UTC()
+		repo.Root.ModifiedAt = now
+		repo.Root.ChangedAt = now
 		return
 	}
 	if dir := repo.GetDirectory(dirPath); dir != nil {
-		dir.ModifiedAt = now.UTC()
-		dir.ChangedAt = now.UTC()
+		dir.ModifiedAt = now
+		dir.ChangedAt = now
 		repo.Dirs[dirPath] = *dir
 	}
 }
 
-func TouchParentDirectory(repo *meta.RepoMetadata, targetPath string, now time.Time) {
+func TouchParentDirectory(repo *meta.RepoMetadata, targetPath string, now int64) {
 	TouchDirectory(repo, ParentPath(targetPath), now)
 }
 

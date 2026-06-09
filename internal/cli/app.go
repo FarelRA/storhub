@@ -795,9 +795,9 @@ func defaultDownloadPath(remotePath string) string {
 	return "downloaded-file"
 }
 
-func formatTime(t time.Time) string {
-	if t.IsZero() {
+func formatTime(t int64) string {
+	if t == 0 {
 		return "-"
 	}
-	return t.Format(time.RFC3339)
+	return time.Unix(t, 0).Format(time.RFC3339)
 }

@@ -300,8 +300,8 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.mu.Unlock()
 		return nil
 	}
-	pm.meta.Normalize(project, h.config.Now())
-	pm.meta.LastMod = h.config.Now().UTC()
+	pm.meta.Normalize(project, h.config.Now().Unix())
+	pm.meta.LastMod = h.config.Now().Unix()
 	pm.meta.RecomputeStats()
 	meta := pm.meta.Clone()
 	previousSHA := pm.sha
@@ -568,7 +568,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// file content (before truncation), producing chunks past the new EOF.
 	chunks = trimChunks(chunks, size)
 
-	now := h.config.Now().UTC()
+	now := h.config.Now().Unix()
 	fileMeta := current.Clone()
 
 	// Add new chunks to the repo's Chunks map
@@ -715,11 +715,11 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	if err != nil {
 		return nil, err
 	}
-	now := h.config.Now().UTC()
+	now := h.config.Now().Unix()
 	patched := fileMeta.Clone()
 	chunkNames := make([]string, len(newChunks))
 	for i, chunk := range newChunks {
-		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now.UnixNano(), i)
+		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now, i)
 		repoMeta.Chunks[name] = chunk
 		chunkNames[i] = name
 	}
@@ -760,11 +760,11 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	if err != nil {
 		return nil, err
 	}
-	now := h.config.Now().UTC()
+	now := h.config.Now().Unix()
 	rewritten := fileMeta.Clone()
 	chunkNames := make([]string, len(newChunks))
 	for i, chunk := range newChunks {
-		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now.UnixNano(), i)
+		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now, i)
 		repoMeta.Chunks[name] = chunk
 		chunkNames[i] = name
 	}
@@ -880,7 +880,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		Size:    fileInfo.Size(),
 		Chunks:  chunkNames,
 	}
-	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().UTC())
+	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().Unix())
 	if existing == nil {
 		defaultUID, defaultGID := h.DefaultOwnerIDs()
 		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -906,20 +906,20 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.mu.Unlock()
 		return nil, shfs.AlreadyExists(cleanName)
 	}
-	pm.meta.EnsureRelease(releaseTag, h.config.Now().UTC())
+	pm.meta.EnsureRelease(releaseTag, h.config.Now().Unix())
 	for i, name := range chunkNames {
 		pm.meta.Chunks[name] = results[i]
 	}
 	current := pm.meta.FindFile(cleanName)
 	if current != nil {
-		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().UTC())
-		implposix.ReplaceInodeFamily(pm.meta, cleanName, current, fileMeta, h.config.Now().UTC())
+		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().Unix())
+		implposix.ReplaceInodeFamily(pm.meta, cleanName, current, fileMeta, h.config.Now().Unix())
 	} else {
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(pm.meta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
-		metadata.InitializeNewFileIdentity(pm.meta, &fileMeta, h.config.Now().UTC())
-		pm.meta.UpsertFile(cleanName, fileMeta, h.config.Now().UTC())
+		metadata.InitializeNewFileIdentity(pm.meta, &fileMeta, h.config.Now().Unix())
+		pm.meta.UpsertFile(cleanName, fileMeta, h.config.Now().Unix())
 	}
-	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
+	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
@@ -1324,8 +1324,8 @@ func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesyst
 	return fusefs.New(h, project, opts)
 }
 
-func (h *StorHub) Now() time.Time {
-	return h.config.Now().UTC()
+func (h *StorHub) Now() int64 {
+	return h.config.Now().Unix()
 }
 
 func (h *StorHub) ChunkSize() int64 {
@@ -1552,7 +1552,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	}
 	segments := overlappingFileSegments(file, repo.Chunks, offset, end)
 	if len(segments) == 0 {
-		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
+		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
 		return int(end - offset), nil
 	}
 	// Flatten two-tier parallelism: sub-split every large segment, then
@@ -1573,7 +1573,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 			}); err != nil {
 				return 0, err
 			}
-			shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
+			shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
 			return int(end - offset), nil
 		}
 	}
@@ -1582,7 +1582,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 			return 0, err
 		}
 	}
-	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
+	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
 	return int(end - offset), nil
 }
 
@@ -1720,11 +1720,11 @@ func (h *StorHub) ChownContext(ctx context.Context, project, targetPath string, 
 	return h.posixService().ChownContext(ctx, project, targetPath, uid, gid)
 }
 
-func (h *StorHub) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+func (h *StorHub) Chtimes(project, targetPath string, atime, mtime int64) error {
 	return h.ChtimesContext(context.Background(), project, targetPath, atime, mtime)
 }
 
-func (h *StorHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime time.Time) error {
+func (h *StorHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	return h.posixService().ChtimesContext(ctx, project, targetPath, atime, mtime)
 }
 

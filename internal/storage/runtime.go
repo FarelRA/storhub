@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
@@ -17,7 +16,7 @@ func (h *StorHub) projectLogger(project string) *slog.Logger {
 }
 
 // QueueAtimeUpdateContext updates atime directly in metadata (simple batching system)
-func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time) {
+func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64) {
 	if project == "" {
 		return
 	}
@@ -36,14 +35,14 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		if targetPath == "" {
 			// Root directory
 			if shfs.ShouldUpdateAtime(h.config.AtimePolicy, pm.meta.Root.AccessedAt, pm.meta.Root.ModifiedAt, pm.meta.Root.ChangedAt, now) {
-				pm.meta.Root.AccessedAt = now.UTC()
+				pm.meta.Root.AccessedAt = now
 				markProjectDirtyLocked(pm)
 			}
 		} else {
 			// Subdirectory
 			dir := pm.meta.GetDirectory(targetPath)
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
-				dir.AccessedAt = now.UTC()
+				dir.AccessedAt = now
 				markProjectDirtyLocked(pm)
 			}
 		}
@@ -51,7 +50,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		// File
 		file := pm.meta.FindFile(targetPath)
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
-			file.AccessedAt = now.UTC()
+			file.AccessedAt = now
 			markProjectDirtyLocked(pm)
 		}
 	}

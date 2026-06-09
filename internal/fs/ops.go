@@ -25,9 +25,9 @@ type Backend interface {
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
 	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
-	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time)
+	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64)
 	Logger() *slog.Logger
-	Now() time.Time
+	Now() int64
 	AtimePolicy() storcfg.AtimePolicy
 	FileNotFound(path string) error
 	DefaultFileMode(kind meta.NodeKind) uint32
@@ -88,7 +88,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	if repoMeta.FindFile(cleanPath) != nil {
 		return nil, AlreadyExists(cleanPath)
 	}
-	now := s.backend.Now().UTC()
+	now := s.backend.Now()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	fileMeta := meta.FileMeta{
@@ -155,14 +155,14 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		if parent := ParentPath(cleanPath); parent != "" && !repo.HasDirectory(parent) {
 			return NotFound(parent)
 		}
-		repo.EnsureDirectory(cleanPath, s.backend.Now().UTC())
+		repo.EnsureDirectory(cleanPath, s.backend.Now())
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
 			dir.UID, dir.GID = OwnerIDsForCreate(ctx, dir.UID, dir.GID)
 			dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
-			dir.ChangedAt = s.backend.Now().UTC()
+			dir.ChangedAt = s.backend.Now()
 			repo.Dirs[cleanPath] = *dir
 		}
-		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
+		TouchParentDirectory(repo, cleanPath, s.backend.Now())
 		return nil
 	}, fmt.Sprintf("storhub: mkdir %s", cleanPath))
 	return err
@@ -197,7 +197,7 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 			return NotEmpty(cleanPath)
 		}
 		repo.RemoveDirectory(cleanPath)
-		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
+		TouchParentDirectory(repo, cleanPath, s.backend.Now())
 		return nil
 	}, fmt.Sprintf("storhub: rmdir %s", cleanPath))
 	return err
@@ -244,11 +244,11 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 				return AlreadyExists(newClean)
 			}
 			renamed := file.Clone()
-			renamed.ChangedAt = s.backend.Now().UTC()
+			renamed.ChangedAt = s.backend.Now()
 			repo.RemoveFile(oldClean)
-			repo.UpsertFile(newClean, renamed, s.backend.Now().UTC())
-			TouchParentDirectory(repo, oldClean, s.backend.Now().UTC())
-			TouchParentDirectory(repo, newClean, s.backend.Now().UTC())
+			repo.UpsertFile(newClean, renamed, s.backend.Now())
+			TouchParentDirectory(repo, oldClean, s.backend.Now())
+			TouchParentDirectory(repo, newClean, s.backend.Now())
 			return nil
 		}
 		if !repo.HasDirectory(oldClean) {
@@ -269,7 +269,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
 			return AlreadyExists(newClean)
 		}
-		now := s.backend.Now().UTC()
+		now := s.backend.Now()
 		updatedDirs := make(map[string]meta.DirMeta, len(repo.Dirs))
 		for path, dir := range repo.Dirs {
 			if IsParentOrSame(oldClean, path) {
@@ -471,7 +471,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 			return nil, err
 		}
 	}
-	TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
+	TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now())
 	return result, nil
 }
 
@@ -563,7 +563,7 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	TouchDirectoryAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
+	TouchDirectoryAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now())
 	result = entries
 	return result, nil
 }

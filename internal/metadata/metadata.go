@@ -21,10 +21,10 @@ type FileMeta struct {
 	Chunks     []string          `json:"cs,omitempty"`
 	Size       int64             `json:"s"`
 	Symlink    string            `json:"sl,omitempty"`
-	UploadedAt time.Time         `json:"ua"`
-	ModifiedAt time.Time         `json:"ma,omitempty"`
-	AccessedAt time.Time         `json:"aa,omitempty"`
-	ChangedAt  time.Time         `json:"ca,omitempty"`
+	UploadedAt int64             `json:"ua"`
+	ModifiedAt int64             `json:"ma,omitempty"`
+	AccessedAt int64             `json:"aa,omitempty"`
+	ChangedAt  int64             `json:"ca,omitempty"`
 	Mode       uint32            `json:"md,omitempty"`
 	UID        uint32            `json:"u,omitempty"`
 	GID        uint32            `json:"g,omitempty"`
@@ -42,10 +42,10 @@ func (f FileMeta) Clone() FileMeta {
 }
 
 type DirMeta struct {
-	CreatedAt  time.Time         `json:"ca"`
-	ModifiedAt time.Time         `json:"ma"`
-	AccessedAt time.Time         `json:"aa,omitempty"`
-	ChangedAt  time.Time         `json:"cha,omitempty"`
+	CreatedAt  int64             `json:"ca"`
+	ModifiedAt int64             `json:"ma"`
+	AccessedAt int64             `json:"aa,omitempty"`
+	ChangedAt  int64             `json:"cha,omitempty"`
 	Mode       uint32            `json:"m,omitempty"`
 	UID        uint32            `json:"u,omitempty"`
 	GID        uint32            `json:"g,omitempty"`
@@ -60,8 +60,8 @@ func (d DirMeta) Clone() DirMeta {
 }
 
 type ReleaseRef struct {
-	AssetCount int       `json:"ac"`
-	CreatedAt  time.Time `json:"ca"`
+	AssetCount int   `json:"ac"`
+	CreatedAt  int64 `json:"ca"`
 }
 
 func (r ReleaseRef) Clone() ReleaseRef {
@@ -73,7 +73,7 @@ type RepoMetadata struct {
 	Project    string                `json:"p"`
 	TotalFiles int                   `json:"tf"`
 	TotalSize  int64                 `json:"ts"`
-	LastMod    time.Time             `json:"lm"`
+	LastMod    int64                 `json:"lm"`
 	Root       DirMeta               `json:"rt"`
 	Dirs       map[string]DirMeta    `json:"d"`
 	Files      map[string]FileMeta   `json:"f"`
@@ -87,13 +87,13 @@ type RepoMetadata struct {
 }
 
 type MetadataRevision struct {
-	CommitSHA   string    `json:"commit_sha"`
-	Message     string    `json:"message"`
-	CommittedAt time.Time `json:"committed_at"`
+	CommitSHA   string `json:"commit_sha"`
+	Message     string `json:"message"`
+	CommittedAt int64  `json:"committed_at"`
 }
 
 func NewRepoMetadata(project string) *RepoMetadata {
-	now := time.Now().UTC()
+	now := time.Now().Unix()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
 		Version:   2,
@@ -188,7 +188,7 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 	return json.Unmarshal(data, m)
 }
 
-func (m *RepoMetadata) Normalize(project string, now time.Time) {
+func (m *RepoMetadata) Normalize(project string, now int64) {
 	m.Version = 2
 	m.Project = chooseNonEmpty(m.Project, project)
 	m.normalizeRoot(now)
@@ -212,16 +212,15 @@ func (m *RepoMetadata) Normalize(project string, now time.Time) {
 		file.Normalize(now)
 		m.Files[path] = file
 	}
-	nowUTC := now.UTC()
 	for tag, ref := range m.Releases {
-		if ref.CreatedAt.IsZero() {
-			ref.CreatedAt = nowUTC
+		if ref.CreatedAt == 0 {
+			ref.CreatedAt = now
 			m.Releases[tag] = ref
 		}
 	}
 	m.RecomputeStats()
-	if m.LastMod.IsZero() {
-		m.LastMod = nowUTC
+	if m.LastMod == 0 {
+		m.LastMod = now
 	}
 	m.RebuildIndexes()
 }
@@ -258,7 +257,7 @@ func (m *RepoMetadata) RecomputeStats() {
 	m.RebuildIndexes()
 }
 
-func (d *DirMeta) Normalize(now time.Time) {
+func (d *DirMeta) Normalize(now int64) {
 	uid, gid := defaultOwnerIDs()
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
@@ -269,22 +268,22 @@ func (d *DirMeta) Normalize(now time.Time) {
 	if d.GID == 0 && gid != 0 {
 		d.GID = gid
 	}
-	if d.CreatedAt.IsZero() {
-		d.CreatedAt = now.UTC()
+	if d.CreatedAt == 0 {
+		d.CreatedAt = now
 	}
-	if d.ModifiedAt.IsZero() {
+	if d.ModifiedAt == 0 {
 		d.ModifiedAt = d.CreatedAt
 	}
-	if d.AccessedAt.IsZero() {
+	if d.AccessedAt == 0 {
 		d.AccessedAt = d.ModifiedAt
 	}
-	if d.ChangedAt.IsZero() {
+	if d.ChangedAt == 0 {
 		d.ChangedAt = d.ModifiedAt
 	}
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
-func (f *FileMeta) Normalize(now time.Time) {
+func (f *FileMeta) Normalize(now int64) {
 	uid, gid := defaultOwnerIDs()
 	if f.Mode == 0 {
 		f.Mode = defaultFileMode(NodeKindFile)
@@ -295,16 +294,16 @@ func (f *FileMeta) Normalize(now time.Time) {
 	if f.GID == 0 && gid != 0 {
 		f.GID = gid
 	}
-	if f.UploadedAt.IsZero() {
-		f.UploadedAt = now.UTC()
+	if f.UploadedAt == 0 {
+		f.UploadedAt = now
 	}
-	if f.ModifiedAt.IsZero() {
+	if f.ModifiedAt == 0 {
 		f.ModifiedAt = f.UploadedAt
 	}
-	if f.AccessedAt.IsZero() {
+	if f.AccessedAt == 0 {
 		f.AccessedAt = f.ModifiedAt
 	}
-	if f.ChangedAt.IsZero() {
+	if f.ChangedAt == 0 {
 		f.ChangedAt = f.ModifiedAt
 	}
 	if f.Inode == 0 {
@@ -346,7 +345,7 @@ func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
 	return nil
 }
 
-func (m *RepoMetadata) EnsureDirectory(path string, now time.Time) {
+func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 	path = normalizeStoredPath(path)
 	if path == "" || m.HasDirectory(path) {
 		return
@@ -356,9 +355,8 @@ func (m *RepoMetadata) EnsureDirectory(path string, now time.Time) {
 		m.EnsureDirectory(parent, now)
 	}
 	uid, gid := defaultOwnerIDs()
-	nowUTC := now.UTC()
 	m.Dirs[path] = DirMeta{
-		CreatedAt: nowUTC, ModifiedAt: nowUTC, AccessedAt: nowUTC, ChangedAt: nowUTC,
+		CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
 		Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode(),
 	}
 	m.invalidateIndexes()
@@ -380,17 +378,17 @@ func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	return m.childDirs[path], m.childFiles[path]
 }
 
-func (m *RepoMetadata) EnsureRelease(tag string, createdAt time.Time) *ReleaseRef {
+func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
 	if ref, ok := m.Releases[tag]; ok {
 		return &ref
 	}
-	m.Releases[tag] = ReleaseRef{CreatedAt: createdAt.UTC()}
+	m.Releases[tag] = ReleaseRef{CreatedAt: createdAt}
 	m.invalidateIndexes()
 	ref := m.Releases[tag]
 	return &ref
 }
 
-func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt time.Time) {
+func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	name = normalizeStoredPath(name)
 	if parent := parentPath(name); parent != "" {
 		m.EnsureDirectory(parent, createdAt)
@@ -525,7 +523,7 @@ func (m *RepoMetadata) NLink(inode uint64) int {
 	return len(m.filesByInode[inode])
 }
 
-func preserveFileIdentity(file *FileMeta, existing *FileMeta, now time.Time) {
+func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 	if file.Inode == 0 {
 		file.Inode = existing.Inode
 	}
@@ -538,16 +536,16 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now time.Time) {
 	if file.GID == 0 && existing.GID != 0 {
 		file.GID = existing.GID
 	}
-	if file.UploadedAt.IsZero() {
+	if file.UploadedAt == 0 {
 		file.UploadedAt = chooseNonZeroTime(existing.UploadedAt, now)
 	}
-	if file.ModifiedAt.IsZero() {
+	if file.ModifiedAt == 0 {
 		file.ModifiedAt = chooseNonZeroTime(now, existing.ModifiedAt, file.UploadedAt)
 	}
-	if file.AccessedAt.IsZero() {
+	if file.AccessedAt == 0 {
 		file.AccessedAt = chooseNonZeroTime(existing.AccessedAt, file.ModifiedAt)
 	}
-	if file.ChangedAt.IsZero() {
+	if file.ChangedAt == 0 {
 		file.ChangedAt = chooseNonZeroTime(now, existing.ChangedAt, file.ModifiedAt)
 	}
 	if len(file.XAttrs) == 0 && len(existing.XAttrs) > 0 {
@@ -558,7 +556,7 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now time.Time) {
 	}
 }
 
-func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now time.Time) {
+func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	uid, gid := defaultOwnerIDs()
 	if file.Inode == 0 {
 		file.Inode = meta.allocateInode()
@@ -572,21 +570,21 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now time.Time
 	if file.GID == 0 && gid != 0 {
 		file.GID = gid
 	}
-	if file.UploadedAt.IsZero() {
-		file.UploadedAt = now.UTC()
+	if file.UploadedAt == 0 {
+		file.UploadedAt = now
 	}
-	if file.ModifiedAt.IsZero() {
+	if file.ModifiedAt == 0 {
 		file.ModifiedAt = file.UploadedAt
 	}
-	if file.AccessedAt.IsZero() {
+	if file.AccessedAt == 0 {
 		file.AccessedAt = file.ModifiedAt
 	}
-	if file.ChangedAt.IsZero() {
+	if file.ChangedAt == 0 {
 		file.ChangedAt = file.ModifiedAt
 	}
 }
 
-func (m *RepoMetadata) normalizeRoot(now time.Time) {
+func (m *RepoMetadata) normalizeRoot(now int64) {
 	uid, gid := defaultOwnerIDs()
 	if m.Root.Inode == 0 {
 		m.Root.Inode = 1
@@ -600,16 +598,16 @@ func (m *RepoMetadata) normalizeRoot(now time.Time) {
 	if m.Root.GID == 0 && gid != 0 {
 		m.Root.GID = gid
 	}
-	if m.Root.CreatedAt.IsZero() {
-		m.Root.CreatedAt = now.UTC()
+	if m.Root.CreatedAt == 0 {
+		m.Root.CreatedAt = now
 	}
-	if m.Root.ModifiedAt.IsZero() {
+	if m.Root.ModifiedAt == 0 {
 		m.Root.ModifiedAt = m.Root.CreatedAt
 	}
-	if m.Root.AccessedAt.IsZero() {
+	if m.Root.AccessedAt == 0 {
 		m.Root.AccessedAt = m.Root.ModifiedAt
 	}
-	if m.Root.ChangedAt.IsZero() {
+	if m.Root.ChangedAt == 0 {
 		m.Root.ChangedAt = m.Root.ModifiedAt
 	}
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
@@ -631,7 +629,7 @@ func (m *RepoMetadata) normalizeRoot(now time.Time) {
 }
 
 func (m *RepoMetadata) allocateInode() uint64 {
-	m.normalizeRoot(time.Now().UTC())
+	m.normalizeRoot(time.Now().Unix())
 	ino := m.NextInode
 	m.NextInode++
 	return ino
@@ -857,12 +855,12 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	m.Project = v1.Project
 	m.TotalFiles = v1.TotalFiles
 	m.TotalSize = v1.TotalSize
-	m.LastMod = v1.LastModified
+	m.LastMod = timeToUnix(v1.LastModified)
 	m.NextInode = v1.NextInode
 
 	m.Root = DirMeta{
-		CreatedAt: v1.Root.CreatedAt, ModifiedAt: v1.Root.ModifiedAt,
-		AccessedAt: v1.Root.AccessedAt, ChangedAt: v1.Root.ChangedAt,
+		CreatedAt: timeToUnix(v1.Root.CreatedAt), ModifiedAt: timeToUnix(v1.Root.ModifiedAt),
+		AccessedAt: timeToUnix(v1.Root.AccessedAt), ChangedAt: timeToUnix(v1.Root.ChangedAt),
 		Mode: v1.Root.Mode, UID: v1.Root.UID, GID: v1.Root.GID,
 		Inode: v1.Root.Inode, XAttrs: v1.Root.XAttrs,
 	}
@@ -870,8 +868,8 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	m.Dirs = make(map[string]DirMeta, len(v1.Directories))
 	for _, d := range v1.Directories {
 		m.Dirs[d.Path] = DirMeta{
-			CreatedAt: d.CreatedAt, ModifiedAt: d.ModifiedAt,
-			AccessedAt: d.AccessedAt, ChangedAt: d.ChangedAt,
+			CreatedAt: timeToUnix(d.CreatedAt), ModifiedAt: timeToUnix(d.ModifiedAt),
+			AccessedAt: timeToUnix(d.AccessedAt), ChangedAt: timeToUnix(d.ChangedAt),
 			Mode: d.Mode, UID: d.UID, GID: d.GID,
 			Inode: d.Inode, XAttrs: d.XAttrs,
 		}
@@ -884,7 +882,7 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	for _, r := range v1.Releases {
 		ref := ReleaseRef{
 			AssetCount: r.AssetCount,
-			CreatedAt:  r.CreatedAt,
+			CreatedAt:  timeToUnix(r.CreatedAt),
 		}
 		m.Releases[r.Tag] = ref
 
@@ -908,10 +906,10 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 				Chunks:     chunkNames,
 				Size:       f.Size,
 				Symlink:    symlink,
-				UploadedAt: f.UploadedAt,
-				ModifiedAt: f.ModifiedAt,
-				AccessedAt: f.AccessedAt,
-				ChangedAt:  f.ChangedAt,
+				UploadedAt: timeToUnix(f.UploadedAt),
+				ModifiedAt: timeToUnix(f.ModifiedAt),
+				AccessedAt: timeToUnix(f.AccessedAt),
+				ChangedAt:  timeToUnix(f.ChangedAt),
 				Mode:       f.Mode,
 				UID:        f.UID,
 				GID:        f.GID,

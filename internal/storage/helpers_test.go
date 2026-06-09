@@ -65,7 +65,7 @@ func TestHelperUtilities(t *testing.T) {
 	if posix.CloneStringMap(nil) != nil {
 		t.Fatal("expected nil clone")
 	}
-	if posix.ChooseNonZeroTime(time.Time{}, time.Unix(1, 0)).IsZero() {
+	if posix.ChooseNonZeroTime(0, 1) == 0 {
 		t.Fatal("expected chosen non-zero time")
 	}
 	if err := sleepWithContext(context.Background(), 0); err != nil {

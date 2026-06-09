@@ -134,7 +134,7 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		if err := meta.FromJSON(data); err != nil {
 			return nil, "", fmt.Errorf("parse metadata: %w", err)
 		}
-		meta.Normalize(project, h.config.Now())
+		meta.Normalize(project, h.config.Now().Unix())
 		if err := meta.Validate(); err != nil {
 			return nil, "", fmt.Errorf("validate metadata: %w", err)
 		}
@@ -168,7 +168,7 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	if err := meta.FromJSON(data); err != nil {
 		return nil, "", fmt.Errorf("parse metadata: %w", err)
 	}
-	meta.Normalize(project, h.config.Now())
+	meta.Normalize(project, h.config.Now().Unix())
 	if err := meta.Validate(); err != nil {
 		return nil, "", fmt.Errorf("validate metadata: %w", err)
 	}
@@ -183,8 +183,8 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	if err := h.ensureOwner(ctx); err != nil {
 		return "", "", err
 	}
-	metadata.Normalize(project, h.config.Now())
-	metadata.LastMod = h.config.Now().UTC()
+	metadata.Normalize(project, h.config.Now().Unix())
+	metadata.LastMod = h.config.Now().Unix()
 	metadata.RecomputeStats()
 	if err := metadata.Validate(); err != nil {
 		return "", "", fmt.Errorf("validate metadata: %w", err)
@@ -237,7 +237,7 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 	}
 	revisions := make([]MetadataRevision, 0, len(commits))
 	for _, commit := range commits {
-		revisions = append(revisions, MetadataRevision{CommitSHA: commit.SHA, Message: commit.Message, CommittedAt: commit.CommittedAt})
+		revisions = append(revisions, MetadataRevision{CommitSHA: commit.SHA, Message: commit.Message, CommittedAt: commit.CommittedAt.Unix()})
 	}
 	return revisions, nil
 }
@@ -260,7 +260,7 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	if err := meta.FromJSON(data); err != nil {
 		return nil, fmt.Errorf("parse metadata revision: %w", err)
 	}
-	meta.Normalize(project, h.config.Now())
+	meta.Normalize(project, h.config.Now().Unix())
 	if err := meta.Validate(); err != nil {
 		return nil, fmt.Errorf("validate metadata revision: %w", err)
 	}
@@ -311,7 +311,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	}
 	if strings.TrimSpace(preferredTag) != "" {
 		if release, ok := releaseIndex[preferredTag]; ok && len(release.Assets)+requiredSlots <= 1000 {
-			metadata.EnsureRelease(preferredTag, h.config.Now().UTC())
+			metadata.EnsureRelease(preferredTag, h.config.Now().Unix())
 			return preferredTag, release.UploadURL, nil
 		}
 	}
@@ -328,7 +328,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	if err != nil {
 		return "", "", err
 	}
-	metadata.EnsureRelease(tag, h.config.Now().UTC())
+	metadata.EnsureRelease(tag, h.config.Now().Unix())
 	return tag, release.UploadURL, nil
 }
 

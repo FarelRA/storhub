@@ -5,14 +5,13 @@ import (
 	"errors"
 	"syscall"
 	"testing"
-	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
 func TestCheckStickyDelete(t *testing.T) {
-	now := time.Unix(280, 0).UTC()
+	now := int64(280)
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureRelease("v1", now)
 	repo.EnsureDirectory("tmp", now)
@@ -34,9 +33,9 @@ func TestCheckStickyDelete(t *testing.T) {
 }
 
 func TestShouldUpdateAtimePolicy(t *testing.T) {
-	now := time.Unix(1000, 0).UTC()
-	old := now.Add(-48 * time.Hour)
-	recent := now.Add(-time.Hour)
+	now := int64(1000)
+	old := now - 172800
+	recent := now - 3600
 	if ShouldUpdateAtime(storcfg.AtimeNo, old, old, old, now) {
 		t.Fatal("expected noatime to skip updates")
 	}

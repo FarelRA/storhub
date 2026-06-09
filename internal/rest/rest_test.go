@@ -359,7 +359,7 @@ type fakeRESTClient struct {
 	nextInode uint64
 	projects  map[string]*fakeRESTProject
 	deleted   map[string]bool
-	now       time.Time
+	now       int64
 	rollbacks []string
 	readCalls []readCall
 }
@@ -394,7 +394,7 @@ func newFakeRESTClient() *fakeRESTClient {
 		nextInode: 2,
 		projects:  make(map[string]*fakeRESTProject),
 		deleted:   make(map[string]bool),
-		now:       time.Unix(10, 0).UTC(),
+		now:       10,
 	}
 }
 
@@ -869,7 +869,7 @@ func (c *fakeRESTClient) Chown(project, targetPath string, uid, gid uint32) erro
 	return nil
 }
 
-func (c *fakeRESTClient) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+func (c *fakeRESTClient) Chtimes(project, targetPath string, atime, mtime int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1084,7 +1084,7 @@ func (c *fakeRESTClient) syncLinksLocked(p *fakeRESTProject, data *fakeRESTData)
 	}
 }
 
-func (c *fakeRESTClient) touchDataLocked(p *fakeRESTProject, data *fakeRESTData, now time.Time) {
+func (c *fakeRESTClient) touchDataLocked(p *fakeRESTProject, data *fakeRESTData, now int64) {
 	c.now = now
 	for _, node := range p.files {
 		if node.data == data {
@@ -1106,8 +1106,8 @@ func (c *fakeRESTClient) allocInode() uint64 {
 	return ino
 }
 
-func (c *fakeRESTClient) tick() time.Time {
-	c.now = c.now.Add(time.Second)
+func (c *fakeRESTClient) tick() int64 {
+	c.now++
 	return c.now
 }
 

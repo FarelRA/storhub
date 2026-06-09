@@ -352,7 +352,7 @@ func (c *authorizedClient) Chown(project, targetPath string, uid, gid uint32) er
 	}
 	return c.base.Chown(project, targetPath, uid, gid)
 }
-func (c *authorizedClient) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+func (c *authorizedClient) Chtimes(project, targetPath string, atime, mtime int64) error {
 	entry, err := c.base.StatPath(project, targetPath)
 	if err != nil {
 		return err

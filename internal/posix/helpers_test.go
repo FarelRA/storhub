@@ -2,13 +2,12 @@ package posix
 
 import (
 	"testing"
-	"time"
 
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
+	now := int64(100)
 	repo := meta.NewRepoMetadata("demo")
 	file := &meta.FileMeta{Chunks: []string{}}
 	ApplyUploadIdentity(repo, "docs/file.txt", nil, file, now)
@@ -17,17 +16,17 @@ func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	}
 	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
 	updated := &meta.FileMeta{Chunks: []string{}}
-	ApplyUpdatedFileIdentity("", updated, existing, now.Add(time.Minute))
+	ApplyUpdatedFileIdentity("", updated, existing, now+60)
 	if updated.Inode != 9 || updated.Symlink != "" {
 		t.Fatalf("unexpected updated identity: %+v", updated)
 	}
-	if updated.ModifiedAt.IsZero() || updated.ChangedAt.IsZero() || updated.AccessedAt.IsZero() {
+	if updated.ModifiedAt == 0 || updated.ChangedAt == 0 || updated.AccessedAt == 0 {
 		t.Fatalf("expected timestamps to be set: %+v", updated)
 	}
 }
 
 func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
-	now := time.Unix(200, 0).UTC()
+	now := int64(200)
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureDirectory("docs", now)
 
@@ -43,7 +42,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	repo.Chunks["chunk_2"] = chunk2
 	updated := first.Clone()
 	updated.Chunks = []string{"chunk_2"}
-	ReplaceInodeFamily(repo, "docs/a.txt", first, updated, now.Add(time.Minute))
+	ReplaceInodeFamily(repo, "docs/a.txt", first, updated, now+60)
 	got := repo.FindFilesByInode(first.Inode)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 files, got %d: %+v", len(got), got)
@@ -62,7 +61,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	if repo.FindFile("docs/missing.txt") == nil {
 		t.Fatal("expected missing inode family to fall back to upsert")
 	}
-	if ChooseNonZeroTime(time.Time{}, now).IsZero() {
+	if ChooseNonZeroTime(0, now) == 0 {
 		t.Fatal("expected non-zero time selection")
 	}
 	if CloneStringMap(nil) != nil || CloneStringMap(map[string]string{"a": "b"})["a"] != "b" {

@@ -237,7 +237,7 @@ func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataR
 		revisions = append(revisions, MetadataRevision{
 			CommitSHA:   c.Hash.String(),
 			Message:     strings.SplitN(c.Message, "\n", 2)[0],
-			CommittedAt: c.Committer.When,
+			CommittedAt: c.Committer.When.Unix(),
 		})
 		return nil
 	}); err != nil {

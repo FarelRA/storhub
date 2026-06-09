@@ -57,11 +57,18 @@ func normalizeXAttrs(attrs map[string]string) map[string]string {
 	return clone
 }
 
-func chooseNonZeroTime(values ...time.Time) time.Time {
+func chooseNonZeroTime(values ...int64) int64 {
 	for _, value := range values {
-		if !value.IsZero() {
-			return value.UTC()
+		if value != 0 {
+			return value
 		}
 	}
-	return time.Time{}
+	return 0
+}
+
+func timeToUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }

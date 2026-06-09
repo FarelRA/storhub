@@ -1780,7 +1780,7 @@ func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 	if err := hub.ChownContext(ctx, "project-posix", "docs/alias.txt", 123, 456); err != nil {
 		t.Fatalf("chown hardlink family: %v", err)
 	}
-	if err := hub.ChtimesContext(ctx, "project-posix", "docs/base.txt", time.Unix(10, 0), time.Unix(20, 0)); err != nil {
+	if err := hub.ChtimesContext(ctx, "project-posix", "docs/base.txt", 10, 20); err != nil {
 		t.Fatalf("chtimes hardlink family: %v", err)
 	}
 	if err := hub.SetXAttrContext(ctx, "project-posix", "docs/alias.txt", "user.note", []byte("linked")); err != nil {
@@ -1819,7 +1819,7 @@ func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 	if aliasInfo.Mode != 0o600 || aliasInfo.UID != 123 || aliasInfo.GID != 456 {
 		t.Fatalf("hardlink family metadata did not propagate: %+v", aliasInfo)
 	}
-	if !aliasInfo.ModifiedAt.After(time.Unix(20, 0).UTC()) {
+	if aliasInfo.ModifiedAt <= time.Unix(20, 0).Unix() {
 		t.Fatalf("expected modified time to advance after write, got %v", aliasInfo.ModifiedAt)
 	}
 	if err := hub.RemoveXAttrContext(ctx, "project-posix", "docs/base.txt", "user.note"); err != nil {

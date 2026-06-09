@@ -17,10 +17,10 @@ type EntryInfo struct {
 	UID           uint32            `json:"uid,omitempty"`
 	GID           uint32            `json:"gid,omitempty"`
 	NLink         uint32            `json:"nlink,omitempty"`
-	ModifiedAt    time.Time         `json:"modified_at"`
-	CreatedAt     time.Time         `json:"created_at"`
-	AccessedAt    time.Time         `json:"accessed_at,omitempty"`
-	ChangedAt     time.Time         `json:"changed_at,omitempty"`
+	ModifiedAt    int64             `json:"modified_at"`
+	CreatedAt     int64             `json:"created_at"`
+	AccessedAt    int64             `json:"accessed_at,omitempty"`
+	ChangedAt     int64             `json:"changed_at,omitempty"`
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 }
 

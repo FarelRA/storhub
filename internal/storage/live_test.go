@@ -275,8 +275,7 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 	if err := hub.Chown(repoName, "docs/base.txt", 1001, 1002); err != nil {
 		t.Fatalf("chown base: %v", err)
 	}
-	wantTime := time.Unix(123, 0).UTC()
-	if err := hub.Chtimes(repoName, "docs/base.txt", wantTime, wantTime); err != nil {
+	if err := hub.Chtimes(repoName, "docs/base.txt", 123, 123); err != nil {
 		t.Fatalf("chtimes base: %v", err)
 	}
 	if err := hub.SetXAttr(repoName, "docs/base.txt", "user.note", []byte("present")); err != nil {
@@ -302,7 +301,7 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat alias: %v", err)
 	}
-	if !aliasInfo.ModifiedAt.Equal(wantTime) {
+	if aliasInfo.ModifiedAt != 123 {
 		t.Fatalf("unexpected alias modified time: %v", aliasInfo.ModifiedAt)
 	}
 	attrs, err := hub.ListXAttr(repoName, "docs/alias.txt")

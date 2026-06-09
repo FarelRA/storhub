@@ -58,13 +58,13 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		return shfs.NotFound(cleanName)
 	}
 	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
-		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
-		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, h.config.Now().UTC()); err != nil {
+		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
+		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, h.config.Now().Unix()); err != nil {
 			pm.mu.Unlock()
 			return err
 		}
 	} else {
-		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
+		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
 	}
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
@@ -121,9 +121,9 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 		return err
 	}
 	before := repoMeta.Clone()
-	before.Normalize(project, h.config.Now().UTC())
+	before.Normalize(project, h.config.Now().Unix())
 	repoMeta.RecomputeStats()
-	repoMeta.Normalize(project, h.config.Now().UTC())
+	repoMeta.Normalize(project, h.config.Now().Unix())
 	beforePayload, beforeErr := before.ToJSON()
 	afterPayload, afterErr := repoMeta.ToJSON()
 	if beforeErr == nil && afterErr == nil && bytes.Equal(beforePayload, afterPayload) {

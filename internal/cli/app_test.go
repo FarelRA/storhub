@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	rest "github.com/FarelRA/storhub/rest"
@@ -48,7 +47,7 @@ func TestHelpersAndRendering(t *testing.T) {
 	if defaultDownloadPath("docs/readme.txt") != "readme.txt" || defaultDownloadPath("/") != "downloaded-file" {
 		t.Fatal("unexpected download path")
 	}
-	if formatTime(time.Time{}) != "-" || !strings.Contains(formatTime(time.Unix(1, 0)), "1970") {
+	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
 	if _, err := newHubFromFlags("", "", 0, 0, false); err == nil {
@@ -85,7 +84,7 @@ func TestHelpersAndRendering(t *testing.T) {
 		t.Fatalf("unexpected nil entry info: %q", buf.String())
 	}
 	buf.Reset()
-	printEntryInfo(&buf, &storhub.EntryInfo{Path: "docs/a", IsSymlink: true, Inode: 1, Size: 3, Mode: 0o777, UID: 1, GID: 2, NLink: 1, ModifiedAt: time.Unix(1, 0), AccessedAt: time.Unix(2, 0), ChangedAt: time.Unix(3, 0), SymlinkTarget: "target"})
+	printEntryInfo(&buf, &storhub.EntryInfo{Path: "docs/a", IsSymlink: true, Inode: 1, Size: 3, Mode: 0o777, UID: 1, GID: 2, NLink: 1, ModifiedAt: 1, AccessedAt: 2, ChangedAt: 3, SymlinkTarget: "target"})
 	if !strings.Contains(buf.String(), "target: target") || entryKind(&storhub.EntryInfo{IsDir: true}) != "directory" || entryKind(&storhub.EntryInfo{IsSymlink: true}) != "symlink" || entryKind(&storhub.EntryInfo{}) != "file" {
 		t.Fatalf("unexpected entry rendering: %q", buf.String())
 	}
@@ -95,7 +94,7 @@ func TestHelpersAndRendering(t *testing.T) {
 		t.Fatalf("unexpected empty revisions: %q", buf.String())
 	}
 	buf.Reset()
-	printRevisions(&buf, []storhub.MetadataRevision{{CommitSHA: "1234567890abcdef", Message: "msg", CommittedAt: time.Unix(4, 0)}})
+	printRevisions(&buf, []storhub.MetadataRevision{{CommitSHA: "1234567890abcdef", Message: "msg", CommittedAt: 4}})
 	if !strings.Contains(buf.String(), "1234567890") || !strings.Contains(buf.String(), "msg") {
 		t.Fatalf("unexpected revisions rendering: %q", buf.String())
 	}
@@ -441,7 +440,7 @@ func (h *fakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, erro
 			h.t.Fatalf("unexpected stat path: %q", targetPath)
 		}
 	}
-	return &storhub.EntryInfo{Path: targetPath, Size: 11, Mode: 0o644, Inode: 1, UID: 1, GID: 2, NLink: 1, ModifiedAt: time.Unix(1, 0), AccessedAt: time.Unix(2, 0), ChangedAt: time.Unix(3, 0)}, nil
+	return &storhub.EntryInfo{Path: targetPath, Size: 11, Mode: 0o644, Inode: 1, UID: 1, GID: 2, NLink: 1, ModifiedAt: 1, AccessedAt: 2, ChangedAt: 3}, nil
 }
 func (h *fakeHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
 	return []byte("hello world"), nil
@@ -460,7 +459,7 @@ func (h *fakeHub) PatchFile(project, filePath string, offset, deleteSize int64, 
 	return &storhub.FileMetadata{Size: 9, Inode: 4, Mode: 0o644}, nil
 }
 func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
-	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: time.Unix(1, 0)}}, nil
+	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: 1}}, nil
 }
 func (h *fakeHub) RollbackMetadata(project, commitSHA string) error { return nil }
 func (h *fakeHub) PurgeUntracked(project string) (*storhub.PurgeResult, error) {

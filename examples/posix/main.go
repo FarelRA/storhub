@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/FarelRA/storhub/storhub"
 )
@@ -33,7 +32,7 @@ func main() {
 	}
 	must(hub.Chmod(project, "docs/source.txt", 0o640))
 	must(hub.Chown(project, "docs/source.txt", 1000, 1000))
-	must(hub.Chtimes(project, "docs/source.txt", time.Unix(1, 0), time.Unix(2, 0)))
+	must(hub.Chtimes(project, "docs/source.txt", 1, 2))
 	must(hub.SetXAttr(project, "docs/source.txt", "user.demo", []byte("on")))
 	value, err := hub.GetXAttr(project, "docs/source.txt", "user.demo")
 	if err != nil {

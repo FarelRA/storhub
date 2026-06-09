@@ -84,7 +84,7 @@ type Client interface {
 	Link(project, existingPath, newPath string) (*metadata.FileMeta, error)
 	Chmod(project, targetPath string, mode uint32) error
 	Chown(project, targetPath string, uid, gid uint32) error
-	Chtimes(project, targetPath string, atime, mtime time.Time) error
+	Chtimes(project, targetPath string, atime, mtime int64) error
 	SetXAttr(project, targetPath, attr string, data []byte) error
 	GetXAttr(project, targetPath, attr string) ([]byte, error)
 	ListXAttr(project, targetPath string) ([]string, error)
@@ -271,7 +271,7 @@ func (c *restrictedClient) Chown(project, targetPath string, uid, gid uint32) er
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Chtimes(project, targetPath string, atime, mtime time.Time) error {
+func (c *restrictedClient) Chtimes(project, targetPath string, atime, mtime int64) error {
 	return errForbidden("access denied: read-only share")
 }
 
@@ -1132,7 +1132,7 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Chtimes(project, req.Path, req.Atime, req.Mtime); err != nil {
+	if err := h.clientFor(r).Chtimes(project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1701,7 +1701,7 @@ func restEntryETag(entry *shfs.EntryInfo) string {
 	hash := sha256.New()
 	_, _ = io.WriteString(hash, entry.Path)
 	_, _ = io.WriteString(hash, "|")
-	_, _ = io.WriteString(hash, fmt.Sprintf("%d|%d|%d|%d|%d|%t|%t|%s|%s", entry.Inode, entry.Size, entry.Mode, entry.UID, entry.GID, entry.IsDir, entry.IsSymlink, entry.ModifiedAt.UTC().Format(time.RFC3339Nano), entry.ChangedAt.UTC().Format(time.RFC3339Nano)))
+	_, _ = io.WriteString(hash, fmt.Sprintf("%d|%d|%d|%d|%d|%t|%t|%s|%s", entry.Inode, entry.Size, entry.Mode, entry.UID, entry.GID, entry.IsDir, entry.IsSymlink, time.Unix(entry.ModifiedAt, 0).UTC().Format(time.RFC3339Nano), time.Unix(entry.ChangedAt, 0).UTC().Format(time.RFC3339Nano)))
 	if entry.SymlinkTarget != "" {
 		_, _ = io.WriteString(hash, "|")
 		_, _ = io.WriteString(hash, entry.SymlinkTarget)

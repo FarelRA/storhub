@@ -36,7 +36,7 @@ type showcaseHub interface {
 	StatFS(project string) (*storhub.FSStats, error)
 	Chmod(project, targetPath string, mode uint32) error
 	Chown(project, targetPath string, uid, gid uint32) error
-	Chtimes(project, targetPath string, atime, mtime time.Time) error
+	Chtimes(project, targetPath string, atime, mtime int64) error
 	SetXAttr(project, targetPath, attr string, data []byte) error
 	GetXAttr(project, targetPath, attr string) ([]byte, error)
 	ListXAttr(project, targetPath string) ([]string, error)
@@ -195,14 +195,14 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	fmt.Println()
 
 	if err := runStep("apply POSIX metadata", func() error {
-		now := time.Unix(1_700_000_000, 0).UTC()
+		now := int64(1_700_000_000)
 		if err := hub.Chmod(project, guidePath, 0o640); err != nil {
 			return err
 		}
 		if err := hub.Chown(project, guidePath, 1000, 1000); err != nil {
 			return err
 		}
-		if err := hub.Chtimes(project, guidePath, now, now.Add(2*time.Hour)); err != nil {
+		if err := hub.Chtimes(project, guidePath, now, now+7200); err != nil { // +2 hours
 			return err
 		}
 		if err := hub.SetXAttr(project, guidePath, "user.demo", []byte("enabled")); err != nil {
@@ -481,7 +481,7 @@ func printRevisions(revisions []storhub.MetadataRevision) {
 		if i >= 5 {
 			break
 		}
-		fmt.Printf("- %s  %s  %s\n", shortSHA(rev.CommitSHA), rev.CommittedAt.Format("2006-01-02 15:04:05"), rev.Message)
+		fmt.Printf("- %s  %s  %s\n", shortSHA(rev.CommitSHA), time.Unix(rev.CommittedAt, 0).Format("2006-01-02 15:04:05"), rev.Message)
 	}
 	fmt.Println()
 }

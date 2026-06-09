@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"syscall"
 	"testing"
-	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -16,10 +15,10 @@ import (
 
 type testBackend struct {
 	repo *meta.RepoMetadata
-	now  time.Time
+	now  int64
 }
 
-func newTestBackend(now time.Time) *testBackend {
+func newTestBackend(now int64) *testBackend {
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureRelease("v1", now)
 	return &testBackend{repo: repo, now: now}
@@ -55,7 +54,7 @@ func (b *testBackend) UpdateRepoMetadataContext(_ context.Context, _ string, fn 
 	return &clone, nil
 }
 
-func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time) {
+func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64) {
 	_, _ = b.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if isDir {
 			if targetPath == "" {
@@ -81,7 +80,7 @@ func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ strin
 	return "v1", "upload", nil
 }
 
-func (b *testBackend) Now() time.Time { return b.now }
+func (b *testBackend) Now() int64 { return b.now }
 
 func (b *testBackend) AtimePolicy() storcfg.AtimePolicy { return storcfg.AtimeRelatime }
 
@@ -109,7 +108,7 @@ func (b *testBackend) seedFile(path string) *meta.FileMeta {
 }
 
 func TestServicePOSIXWorkflow(t *testing.T) {
-	now := time.Unix(300, 0).UTC()
+	now := int64(300)
 	backend := newTestBackend(now)
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
@@ -125,7 +124,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 	if err := svc.ChownContext(context.Background(), "demo", "docs/base.txt", 9, 10); err != nil {
 		t.Fatalf("chown: %v", err)
 	}
-	if err := svc.ChtimesContext(context.Background(), "demo", "docs/base.txt", time.Unix(1, 0), time.Unix(2, 0)); err != nil {
+	if err := svc.ChtimesContext(context.Background(), "demo", "docs/base.txt", int64(1), int64(2)); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
 	if err := svc.SetXAttrContext(context.Background(), "demo", "docs/base.txt", "user.note", []byte("hello")); err != nil {
@@ -178,7 +177,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 }
 
 func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
-	backend := newTestBackend(time.Unix(400, 0).UTC())
+	backend := newTestBackend(int64(400))
 	backend.seedDir("docs")
 	backend.seedFile("docs/base.txt")
 	svc := NewService(backend)
@@ -217,13 +216,13 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 	if err := TouchInodeFamilyChangedAt(&repo, 999, backend.now); err == nil {
 		t.Fatal("expected missing inode touch error")
 	}
-	if ChooseNonZeroTime() != (time.Time{}) || CloneStringMap(nil) != nil {
+	if ChooseNonZeroTime() != 0 || CloneStringMap(nil) != nil {
 		t.Fatal("helper coverage failure")
 	}
 }
 
 func TestServicePOSIXPermissionEnforcement(t *testing.T) {
-	backend := newTestBackend(time.Unix(500, 0).UTC())
+	backend := newTestBackend(int64(500))
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
 	base.Mode = 0o640
@@ -250,7 +249,7 @@ func TestServicePOSIXPermissionEnforcement(t *testing.T) {
 }
 
 func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
-	backend := newTestBackend(time.Unix(600, 0).UTC())
+	backend := newTestBackend(int64(600))
 	backend.seedDir("docs")
 	svc := NewService(backend)
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
@@ -273,7 +272,7 @@ func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
 }
 
 func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t *testing.T) {
-	backend := newTestBackend(time.Unix(610, 0).UTC())
+	backend := newTestBackend(int64(610))
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
 	dir.Mode = 0o777
