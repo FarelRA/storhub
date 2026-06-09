@@ -1545,10 +1545,6 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	} else if size > oldSize && oldSize < size && !w.tempAuthoritative {
 		w.tempAuthoritative = false
 	}
-	if size > oldSize {
-		w.markDirtyLocked(oldSize, size)
-		return nil
-	}
 	w.truncateDirtyRangesLocked(size)
 	return nil
 }

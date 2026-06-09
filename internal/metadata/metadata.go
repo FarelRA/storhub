@@ -736,9 +736,6 @@ func (m *RepoMetadata) Validate() error {
 			if c.Offset < 0 {
 				return fmt.Errorf("file %s: chunk has negative offset %d", path, c.Offset)
 			}
-			if c.Offset > nextOffset {
-				return fmt.Errorf("file %s: chunk gap at offset %d (expected %d)", path, c.Offset, nextOffset)
-			}
 			if c.Offset < nextOffset {
 				return fmt.Errorf("file %s: chunk overlap at offset %d", path, c.Offset)
 			}
