@@ -27,11 +27,11 @@ func main() {
 	project := fmt.Sprintf("storhub-revisions-%d", os.Getpid())
 	input := filepath.Join(workspace, "rev.txt")
 	_ = os.WriteFile(input, []byte("revision demo\n"), 0o644)
-	meta, err := hub.UploadFile(project, "docs/rev.txt", input)
+	_, err = hub.UploadFile(project, "docs/rev.txt", input)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if _, err := hub.PatchFile(project, meta.Name, 0, 0, []byte("v2: ")); err != nil {
+	if _, err := hub.PatchFile(project, "docs/rev.txt", 0, 0, []byte("v2: ")); err != nil {
 		log.Fatal(err)
 	}
 	revisions, err := hub.ListMetadataRevisions(project)

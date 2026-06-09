@@ -53,7 +53,7 @@ func (s *Service) logFinish(project, op string, started time.Time, err error, ar
 	logging.Info(s.logger(project), op+" complete", args...)
 }
 
-func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (result *meta.FileMetadata, err error) {
+func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "symlink start", "target", target, "path", linkPath)
 	defer func() { s.logFinish(project, "symlink", started, err, "target", target, "path", linkPath) }()
@@ -86,12 +86,9 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
-	symlink := meta.FileMetadata{
-		Name:          cleanPath,
-		Kind:          meta.NodeKindSymlink,
+	symlink := meta.FileMeta{
 		Size:          int64(len([]byte(target))),
-		Chunks:        []meta.ChunkInfo{},
-		Release:       shfs.PendingReleaseTag,
+		Chunks:        []string{},
 		UploadedAt:    now,
 		ModifiedAt:    now,
 		AccessedAt:    now,
@@ -99,7 +96,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		Mode:          s.backend.DefaultFileMode(meta.NodeKindSymlink),
 		UID:           uid,
 		GID:           gid,
-		SymlinkTarget: target,
+		Symlink:       target,
 	}
 	symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(repo, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
@@ -114,7 +111,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		}
 		symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(current, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 		symlink.Inode = current.AllocateInode()
-		current.UpsertFile(symlink, now)
+		current.UpsertFile(cleanPath, symlink, now)
 		shfs.TouchParentDirectory(current, cleanPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: symlink %s -> %s", cleanPath, target)); err != nil {
@@ -143,15 +140,15 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 	if file == nil {
 		return "", s.backend.FileNotFound(cleanPath)
 	}
-	if file.Kind != meta.NodeKindSymlink {
+	if file.Symlink == "" {
 		return "", shfs.InvalidSymlink(cleanPath)
 	}
 	shfs.TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
-	target = file.SymlinkTarget
+	target = file.Symlink
 	return target, nil
 }
 
-func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPath string) (result *meta.FileMetadata, err error) {
+func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPath string) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "link start", "source", existingPath, "path", newPath)
 	defer func() { s.logFinish(project, "link", started, err, "source", existingPath, "path", newPath) }()
@@ -170,7 +167,7 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		return nil, fmt.Errorf("source and destination are the same: %s", sourcePath)
 	}
 	now := s.backend.Now().UTC()
-	var linked meta.FileMetadata
+	var linked meta.FileMeta
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if err := shfs.CheckReadAccess(ctx, repo, sourcePath); err != nil {
 			return err
@@ -188,18 +185,17 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		if source == nil {
 			return s.backend.FileNotFound(sourcePath)
 		}
-		if source.Kind != meta.NodeKindFile {
+		if source.Symlink != "" {
 			return fmt.Errorf("hard links only support regular files: %s", sourcePath)
 		}
 		linked = source.Clone()
-		linked.Name = linkPath
 		linked.ChangedAt = now
 		linked.AccessedAt = now
 		linked.Mode, linked.UID, linked.GID = shfs.ApplyParentInheritance(repo, linkPath, false, linked.Mode, linked.UID, linked.GID)
 		if err := TouchInodeFamilyChangedAt(repo, source.Inode, now); err != nil {
 			return err
 		}
-		repo.UpsertFile(linked, now)
+		repo.UpsertFile(linkPath, linked, now)
 		shfs.TouchParentDirectory(repo, linkPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: link %s to %s", sourcePath, linkPath)); err != nil {
@@ -221,10 +217,10 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 		return err
 	}
 	mode = shfs.SanitizeChmodMode(ctx, entry, mode)
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				current.Mode = mode
 				current.ChangedAt = now
 			})
@@ -245,10 +241,10 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	if err := shfs.CanChown(ctx); err != nil {
 		return err
 	}
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				current.UID = uid
 				current.GID = gid
 				current.Mode &^= 0o6000
@@ -273,12 +269,12 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 	if err := shfs.CanSetTimes(ctx, entry); err != nil {
 		return err
 	}
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		atime = ChooseNonZeroTime(atime, now)
 		mtime = ChooseNonZeroTime(mtime, now)
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				current.AccessedAt = atime
 				current.ModifiedAt = mtime
 				current.ChangedAt = now
@@ -308,10 +304,10 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 		return err
 	}
 	value := string(append([]byte(nil), data...))
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				if current.XAttrs == nil {
 					current.XAttrs = make(map[string]string)
 				}
@@ -414,10 +410,10 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	} else if _, ok := dir.XAttrs[attr]; !ok {
 		return shfs.XAttrNotFound(cleanPath)
 	}
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				delete(current.XAttrs, attr)
 				current.ChangedAt = now
 			})
@@ -428,7 +424,7 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	})
 }
 
-func (s *Service) updatePathMetadataContext(ctx context.Context, project, targetPath string, mutate func(*meta.RepoMetadata, *meta.FileMetadata, *meta.DirectoryMetadata) error) (err error) {
+func (s *Service) updatePathMetadataContext(ctx context.Context, project, targetPath string, mutate func(*meta.RepoMetadata, *meta.FileMeta, *meta.DirMeta) error) (err error) {
 	started := time.Now().UTC()
 	logging.Debug(s.logger(project), "update-path-metadata start", "path", targetPath)
 	defer func() { s.logFinish(project, "update-path-metadata", started, err, "path", targetPath) }()
@@ -442,13 +438,11 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if cleanPath == "" {
-			root := &meta.DirectoryMetadata{
-				Path:       "",
+			root := &meta.DirMeta{
 				Inode:      repo.Root.Inode,
 				Mode:       repo.Root.Mode,
 				UID:        repo.Root.UID,
 				GID:        repo.Root.GID,
-				NLink:      repo.Root.NLink,
 				CreatedAt:  repo.Root.CreatedAt,
 				ModifiedAt: repo.Root.ModifiedAt,
 				AccessedAt: repo.Root.AccessedAt,
@@ -461,7 +455,6 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			repo.Root.Mode = root.Mode
 			repo.Root.UID = root.UID
 			repo.Root.GID = root.GID
-			repo.Root.NLink = root.NLink
 			repo.Root.CreatedAt = root.CreatedAt
 			repo.Root.ModifiedAt = root.ModifiedAt
 			repo.Root.AccessedAt = root.AccessedAt
@@ -478,7 +471,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			if err := mutate(repo, nil, &copy); err != nil {
 				return err
 			}
-			*dir = copy
+			repo.Dirs[cleanPath] = copy
 			return nil
 		}
 		return s.backend.FileNotFound(cleanPath)
@@ -519,10 +512,10 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 		working.AccessedAt = patch.ATime
 		working.ModifiedAt = patch.MTime
 	}
-	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMetadata, dir *meta.DirectoryMetadata) error {
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now().UTC()
 		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMetadata) {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				if patch.HasOwner {
 					current.UID = patch.UID
 					current.GID = patch.GID
@@ -555,7 +548,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 	})
 }
 
-func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*meta.RepoMetadata, string, *meta.FileMetadata, *meta.DirectoryMetadata, error) {
+func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*meta.RepoMetadata, string, *meta.FileMeta, *meta.DirMeta, error) {
 	cleanPath := ""
 	if strings.TrimSpace(targetPath) != "" {
 		var err error
@@ -569,13 +562,11 @@ func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*
 		return nil, "", nil, nil, err
 	}
 	if cleanPath == "" {
-		root := meta.DirectoryMetadata{
-			Path:       "",
+		root := meta.DirMeta{
 			Inode:      repo.Root.Inode,
 			Mode:       repo.Root.Mode,
 			UID:        repo.Root.UID,
 			GID:        repo.Root.GID,
-			NLink:      repo.Root.NLink,
 			CreatedAt:  repo.Root.CreatedAt,
 			ModifiedAt: repo.Root.ModifiedAt,
 			AccessedAt: repo.Root.AccessedAt,
@@ -604,33 +595,37 @@ func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath 
 		return nil, err
 	}
 	if file != nil {
-		return shfs.EntryInfoFromFile(file), nil
+		return shfs.EntryInfoFromFile(file, cleanPath, repo.FileNLink(cleanPath)), nil
 	}
-	return shfs.EntryInfoFromDirectory(dir), nil
+	return shfs.EntryInfoFromDirectory(dir, cleanPath, repo.DirNLink(cleanPath)), nil
 }
 
-func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.FileMetadata)) error {
-	files := repo.FindFilesByInode(inode)
-	if len(files) == 0 {
+func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.FileMeta)) error {
+	names := repo.FindFilesByInode(inode)
+	if len(names) == 0 {
 		return fmt.Errorf("%w: inode family %d", shfs.ErrNotFound, inode)
 	}
-	updated := make([]meta.FileMetadata, 0, len(files))
-	for _, file := range files {
+	updated := make(map[string]meta.FileMeta, len(names))
+	for _, name := range names {
+		file := repo.FindFile(name)
+		if file == nil {
+			continue
+		}
 		clone := file.Clone()
 		mutate(&clone)
-		updated = append(updated, clone)
+		updated[name] = clone
 	}
-	for _, file := range files {
-		repo.RemoveFile(file.Name)
+	for _, name := range names {
+		repo.RemoveFile(name)
 	}
-	for _, file := range updated {
-		repo.UpsertFile(file, file.ChangedAt)
+	for name, clone := range updated {
+		repo.UpsertFile(name, clone, clone.ChangedAt)
 	}
 	return nil
 }
 
 func TouchInodeFamilyChangedAt(repo *meta.RepoMetadata, inode uint64, now time.Time) error {
-	return UpdateFileFamily(repo, inode, func(current *meta.FileMetadata) {
+	return UpdateFileFamily(repo, inode, func(current *meta.FileMeta) {
 		current.ChangedAt = now
 	})
 }

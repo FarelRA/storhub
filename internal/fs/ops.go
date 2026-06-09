@@ -23,7 +23,7 @@ type Backend interface {
 	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
-	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMetadata, offset, deleteSize int64, edit []byte) (*meta.FileMetadata, error)
+	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
 	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now time.Time)
 	Logger() *slog.Logger
@@ -58,7 +58,7 @@ func (s *Service) logFinish(project, op string, started time.Time, err error, ar
 	logging.Info(s.logger(project), op+" complete", args...)
 }
 
-func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMetadata, err error) {
+func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "create-file start", "path", filePath)
 	defer func() { s.logFinish(project, "create-file", started, err, "path", filePath) }()
@@ -91,12 +91,9 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	now := s.backend.Now().UTC()
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
-	fileMeta := meta.FileMetadata{
-		Name:       cleanPath,
-		Kind:       meta.NodeKindFile,
+	fileMeta := meta.FileMeta{
 		Size:       0,
-		Chunks:     []meta.ChunkInfo{},
-		Release:    PendingReleaseTag,
+		Chunks:     []string{},
 		UploadedAt: now,
 		ModifiedAt: now,
 		AccessedAt: now,
@@ -118,7 +115,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		}
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repo, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 		fileMeta.Inode = repo.AllocateInode()
-		repo.UpsertFile(fileMeta, now)
+		repo.UpsertFile(cleanPath, fileMeta, now)
 		TouchParentDirectory(repo, cleanPath, now)
 		return nil
 	}, fmt.Sprintf("storhub: create %s", cleanPath)); err != nil {
@@ -163,6 +160,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 			dir.UID, dir.GID = OwnerIDsForCreate(ctx, dir.UID, dir.GID)
 			dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
 			dir.ChangedAt = s.backend.Now().UTC()
+			repo.Dirs[cleanPath] = *dir
 		}
 		TouchParentDirectory(repo, cleanPath, s.backend.Now().UTC())
 		return nil
@@ -246,10 +244,9 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 				return AlreadyExists(newClean)
 			}
 			renamed := file.Clone()
-			renamed.Name = newClean
 			renamed.ChangedAt = s.backend.Now().UTC()
 			repo.RemoveFile(oldClean)
-			repo.UpsertFile(renamed, s.backend.Now().UTC())
+			repo.UpsertFile(newClean, renamed, s.backend.Now().UTC())
 			TouchParentDirectory(repo, oldClean, s.backend.Now().UTC())
 			TouchParentDirectory(repo, newClean, s.backend.Now().UTC())
 			return nil
@@ -273,20 +270,28 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return AlreadyExists(newClean)
 		}
 		now := s.backend.Now().UTC()
-		for i := range repo.Directories {
-			if IsParentOrSame(oldClean, repo.Directories[i].Path) {
-				repo.Directories[i].Path = RemapPath(oldClean, newClean, repo.Directories[i].Path)
-				repo.Directories[i].ModifiedAt = now
+		updatedDirs := make(map[string]meta.DirMeta, len(repo.Dirs))
+		for path, dir := range repo.Dirs {
+			if IsParentOrSame(oldClean, path) {
+				newPath := RemapPath(oldClean, newClean, path)
+				dir.ModifiedAt = now
+				updatedDirs[newPath] = dir
+			} else {
+				updatedDirs[path] = dir
 			}
 		}
-		for i := range repo.Releases {
-			for j := range repo.Releases[i].Files {
-				if IsParentOrSame(oldClean, repo.Releases[i].Files[j].Name) {
-					repo.Releases[i].Files[j].Name = RemapPath(oldClean, newClean, repo.Releases[i].Files[j].Name)
-					repo.Releases[i].Files[j].ChangedAt = now
-				}
+		repo.Dirs = updatedDirs
+		updatedFiles := make(map[string]meta.FileMeta, len(repo.Files))
+		for path, file := range repo.Files {
+			if IsParentOrSame(oldClean, path) {
+				newPath := RemapPath(oldClean, newClean, path)
+				file.ChangedAt = now
+				updatedFiles[newPath] = file
+			} else {
+				updatedFiles[path] = file
 			}
 		}
+		repo.Files = updatedFiles
 		TouchParentDirectory(repo, oldClean, now)
 		TouchParentDirectory(repo, newClean, now)
 		repo.RecomputeStats()
@@ -295,7 +300,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 	return err
 }
 
-func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMetadata, err error) {
+func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "truncate start", "path", filePath, "size", size)
 	defer func() { s.logFinish(project, "truncate", started, err, "path", filePath, "size", size) }()
@@ -317,7 +322,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Kind == meta.NodeKindSymlink {
+	if file.Symlink != "" {
 		return nil, fmt.Errorf("cannot truncate symlink: %s", cleanPath)
 	}
 	if size == file.Size {
@@ -333,7 +338,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	return result, err
 }
 
-func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMetadata, err error) {
+func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "append start", "path", filePath, "bytes", len(data))
 	defer func() { s.logFinish(project, "append", started, err, "path", filePath, "bytes", len(data)) }()
@@ -352,14 +357,14 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Kind == meta.NodeKindSymlink {
+	if file.Symlink != "" {
 		return nil, fmt.Errorf("cannot append to symlink: %s", cleanPath)
 	}
 	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, data)
 	return result, err
 }
 
-func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMetadata, err error) {
+func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "write-at start", "path", filePath, "offset", offset, "bytes", len(data))
 	defer func() {
@@ -380,7 +385,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Kind == meta.NodeKindSymlink {
+	if file.Symlink != "" {
 		return nil, fmt.Errorf("cannot write symlink: %s", cleanPath)
 	}
 	if offset < 0 {
@@ -428,7 +433,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if err := CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Kind == meta.NodeKindSymlink {
+	if file.Symlink != "" {
 		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
 	}
 	if offset > file.Size {
@@ -443,10 +448,11 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 		end = file.Size
 	}
 	result = make([]byte, end-offset)
-	startIndex := sort.Search(len(file.Chunks), func(i int) bool {
-		return file.Chunks[i].Offset+file.Chunks[i].Size > offset
+	chunks := repo.FileChunks(cleanPath)
+	startIndex := sort.Search(len(chunks), func(i int) bool {
+		return chunks[i].Offset+chunks[i].Size > offset
 	})
-	for _, chunk := range file.Chunks[startIndex:] {
+	for _, chunk := range chunks[startIndex:] {
 		chunkEnd := chunk.Offset + chunk.Size
 		if chunk.Offset >= end {
 			break
@@ -489,15 +495,15 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 		return nil, err
 	}
 	if cleanPath == "" {
-		result = &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: repo.Root.NLink, CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}
+		result = &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: uint32(repo.DirNLink("")), CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}
 		return result, nil
 	}
 	if file := repo.FindFile(cleanPath); file != nil {
-		result = EntryInfoFromFile(file)
+		result = EntryInfoFromFile(file, cleanPath, repo.FileNLink(cleanPath))
 		return result, nil
 	}
 	if dir := repo.GetDirectory(cleanPath); dir != nil {
-		result = EntryInfoFromDirectory(dir)
+		result = EntryInfoFromDirectory(dir, cleanPath, repo.DirNLink(cleanPath))
 		return result, nil
 	}
 	return nil, NotFound(cleanPath)
@@ -511,9 +517,9 @@ func (s *Service) StatFSContext(ctx context.Context, project string) (result *FS
 	if err != nil {
 		return nil, err
 	}
-	stats := &FSStats{Files: repo.TotalFiles, Directories: len(repo.Directories), Inodes: CountUniqueInodes(repo), Bytes: repo.TotalSize, Releases: len(repo.Releases)}
-	for _, release := range repo.Releases {
-		stats.Assets += release.AssetCount
+	stats := &FSStats{Files: repo.TotalFiles, Directories: len(repo.Dirs), Inodes: CountUniqueInodes(repo), Bytes: repo.TotalSize, Releases: len(repo.Releases)}
+	for _, ref := range repo.Releases {
+		stats.Assets += ref.AssetCount
 	}
 	result = stats
 	return result, nil
@@ -544,13 +550,17 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	if cleanPath != "" && !repo.HasDirectory(cleanPath) {
 		return nil, NotFound(cleanPath)
 	}
-	dirs, files := repo.DirectoryChildren(cleanPath)
-	entries := make([]DirEntry, 0, len(dirs)+len(files))
-	for _, dir := range dirs {
-		entries = append(entries, DirEntryFromDirectory(dir))
+	dirNames, fileNames := repo.DirectoryChildren(cleanPath)
+	entries := make([]DirEntry, 0, len(dirNames)+len(fileNames))
+	for _, name := range dirNames {
+		if dir := repo.GetDirectory(name); dir != nil {
+			entries = append(entries, DirEntryFromDirectory(*dir, name, repo.DirNLink(name)))
+		}
 	}
-	for _, file := range files {
-		entries = append(entries, DirEntryFromFile(file))
+	for _, name := range fileNames {
+		if file := repo.FindFile(name); file != nil {
+			entries = append(entries, DirEntryFromFile(*file, name, repo.FileNLink(name)))
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	TouchDirectoryAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now().UTC())
@@ -579,34 +589,38 @@ func MaxInt64(a, b int64) int64 {
 	return b
 }
 
-func EntryInfoFromFile(file *meta.FileMetadata) *EntryInfo {
+func EntryInfoFromFile(file *meta.FileMeta, path string, nlink int) *EntryInfo {
+	kind := meta.NodeKindFile
+	if file.Symlink != "" {
+		kind = meta.NodeKindSymlink
+	}
 	return &EntryInfo{
-		Path:          file.Name,
-		Kind:          file.Kind,
-		IsSymlink:     file.Kind == meta.NodeKindSymlink,
+		Path:          path,
+		Kind:          kind,
+		IsSymlink:     file.Symlink != "",
 		Size:          file.Size,
 		Inode:         file.Inode,
 		Mode:          file.Mode,
 		UID:           file.UID,
 		GID:           file.GID,
-		NLink:         file.NLink,
+		NLink:         uint32(nlink),
 		CreatedAt:     file.UploadedAt,
 		ModifiedAt:    file.ModifiedAt,
 		AccessedAt:    file.AccessedAt,
 		ChangedAt:     file.ChangedAt,
-		SymlinkTarget: file.SymlinkTarget,
+		SymlinkTarget: file.Symlink,
 	}
 }
 
-func EntryInfoFromDirectory(dir *meta.DirectoryMetadata) *EntryInfo {
+func EntryInfoFromDirectory(dir *meta.DirMeta, path string, nlink int) *EntryInfo {
 	return &EntryInfo{
-		Path:       dir.Path,
+		Path:       path,
 		IsDir:      true,
 		Inode:      dir.Inode,
 		Mode:       dir.Mode,
 		UID:        dir.UID,
 		GID:        dir.GID,
-		NLink:      dir.NLink,
+		NLink:      uint32(nlink),
 		CreatedAt:  dir.CreatedAt,
 		ModifiedAt: dir.ModifiedAt,
 		AccessedAt: dir.AccessedAt,
@@ -614,17 +628,17 @@ func EntryInfoFromDirectory(dir *meta.DirectoryMetadata) *EntryInfo {
 	}
 }
 
-func DirEntryFromDirectory(dir meta.DirectoryMetadata) DirEntry {
-	return DirEntry{Name: path.Base(dir.Path), Path: dir.Path, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: dir.NLink}
+func DirEntryFromDirectory(dir meta.DirMeta, dirPath string, nlink int) DirEntry {
+	return DirEntry{Name: path.Base(dirPath), Path: dirPath, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: uint32(nlink)}
 }
 
-func DirEntryFromFile(file meta.FileMetadata) DirEntry {
-	return DirEntry{Name: path.Base(file.Name), Path: file.Name, Kind: file.Kind, IsSymlink: file.Kind == meta.NodeKindSymlink, Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: file.NLink}
+func DirEntryFromFile(file meta.FileMeta, filePath string, nlink int) DirEntry {
+	return DirEntry{Name: path.Base(filePath), Path: filePath, IsSymlink: file.Symlink != "", Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: uint32(nlink)}
 }
 
 func CountUniqueInodes(repo *meta.RepoMetadata) int {
 	seen := map[uint64]struct{}{repo.Root.Inode: {}}
-	for _, dir := range repo.Directories {
+	for _, dir := range repo.Dirs {
 		seen[dir.Inode] = struct{}{}
 	}
 	for _, file := range repo.AllFiles() {

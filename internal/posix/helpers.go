@@ -7,18 +7,17 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-func ApplyUploadIdentity(repo *meta.RepoMetadata, existing *meta.FileMetadata, file *meta.FileMetadata, now time.Time) {
+func ApplyUploadIdentity(repo *meta.RepoMetadata, name string, existing *meta.FileMeta, file *meta.FileMeta, now time.Time) {
 	if existing != nil {
-		ApplyUpdatedFileIdentity(file, existing, now)
+		ApplyUpdatedFileIdentity(name, file, existing, now)
 		return
 	}
 	meta.InitializeNewFileIdentity(repo, file, now)
 }
 
-func ApplyUpdatedFileIdentity(file *meta.FileMetadata, existing *meta.FileMetadata, now time.Time) {
+func ApplyUpdatedFileIdentity(name string, file *meta.FileMeta, existing *meta.FileMeta, now time.Time) {
 	meta.PreserveFileIdentity(file, existing, now)
-	file.Kind = meta.NodeKindFile
-	file.SymlinkTarget = ""
+	file.Symlink = ""
 	file.ModifiedAt = now.UTC()
 	file.ChangedAt = now.UTC()
 	if file.AccessedAt.IsZero() {
@@ -26,21 +25,26 @@ func ApplyUpdatedFileIdentity(file *meta.FileMetadata, existing *meta.FileMetada
 	}
 }
 
-func ReplaceInodeFamily(repo *meta.RepoMetadata, existing *meta.FileMetadata, updated meta.FileMetadata, now time.Time) {
+func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.FileMeta, updated meta.FileMeta, now time.Time) {
 	siblings := repo.FindFilesByInode(existing.Inode)
 	if len(siblings) == 0 {
-		repo.RemoveFile(existing.Name)
-		repo.UpsertFile(updated, now)
+		repo.RemoveFile(name)
+		repo.UpsertFile(name, updated, now)
 		return
 	}
-	for _, sibling := range siblings {
-		repo.RemoveFile(sibling.Name)
+	for _, sibName := range siblings {
+		repo.RemoveFile(sibName)
 	}
-	for _, sibling := range siblings {
+	for _, sibName := range siblings {
 		clone := updated.Clone()
-		clone.Name = sibling.Name
-		clone.AccessedAt = ChooseNonZeroTime(sibling.AccessedAt, updated.AccessedAt, now)
-		repo.UpsertFile(clone, now)
+		var sibFile *meta.FileMeta
+		if f := repo.FindFile(sibName); f != nil {
+			sibFile = f
+		}
+		if sibFile != nil {
+			clone.AccessedAt = ChooseNonZeroTime(sibFile.AccessedAt, updated.AccessedAt, now)
+		}
+		repo.UpsertFile(sibName, clone, now)
 	}
 }
 

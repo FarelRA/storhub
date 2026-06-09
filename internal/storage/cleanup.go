@@ -93,19 +93,6 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	for _, release := range pm.meta.Releases {
-		for _, file := range release.Files {
-			if file.Release == tag {
-				continue
-			}
-			for _, chunk := range file.Chunks {
-				if chunk.Release == tag {
-					pm.mu.Unlock()
-					return fmt.Errorf("release %s is still referenced by active file %s", tag, file.Name)
-				}
-			}
-		}
-	}
 	if !pm.meta.RemoveRelease(tag) {
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
@@ -175,10 +162,12 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	}
 	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases))
 	trackedAssets := make(map[int64]struct{})
-	for _, release := range repoMeta.Releases {
-		trackedReleases[release.Tag] = struct{}{}
-		for _, file := range release.Files {
-			for _, chunk := range file.Chunks {
+	for tag := range repoMeta.Releases {
+		trackedReleases[tag] = struct{}{}
+	}
+	for _, file := range repoMeta.Files {
+		for _, chunkName := range file.Chunks {
+			if chunk, ok := repoMeta.Chunks[chunkName]; ok {
 				trackedAssets[chunk.AssetID] = struct{}{}
 			}
 		}

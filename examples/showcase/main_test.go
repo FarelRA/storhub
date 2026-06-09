@@ -20,7 +20,7 @@ func TestShortSHAAndPrintHelpers(t *testing.T) {
 	}
 	output := captureStdout(t, func() {
 		printFile("file", nil)
-		printFile("file", &storhub.FileMetadata{Name: "docs/a.txt", Size: 3, Release: "v1", Inode: 1, NLink: 1, Mode: 0o644})
+		printFile("file", &storhub.FileMetadata{Size: 3, Inode: 1, Mode: 0o644})
 		printDir("docs", []storhub.DirEntry{{Path: "docs/a.txt", Inode: 1, Size: 3, Mode: 0o644}, {Path: "docs/link", IsSymlink: true, Inode: 2, Mode: 0o777}})
 		printStat("stat", nil)
 		printStat("stat", &storhub.EntryInfo{Path: "docs/a.txt", Inode: 1, Size: 3, Mode: 0o644, UID: 1, GID: 2, NLink: 1, Kind: storhub.NodeKindFile})
@@ -147,7 +147,7 @@ func (f *fakeShowcaseHub) ListFiles(project string) ([]storhub.FileMetadata, err
 	return []storhub.FileMetadata{*fileMeta("docs/specs/guide.txt", []byte("StorHub showcase guide\n"))}, nil
 }
 func (f *fakeShowcaseHub) ListReleases(project string) ([]storhub.ReleaseMetadata, error) {
-	return []storhub.ReleaseMetadata{{Tag: "v1", AssetCount: 1, Files: []storhub.FileMetadata{*fileMeta("docs/specs/guide.txt", []byte("StorHub showcase guide\n"))}}}, nil
+	return []storhub.ReleaseMetadata{{AssetCount: 1}}, nil
 }
 func (f *fakeShowcaseHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "new", CommittedAt: time.Unix(2, 0)}, {CommitSHA: "facefeedcafebabe", Message: "old", CommittedAt: time.Unix(1, 0)}}, nil
@@ -168,8 +168,7 @@ func (f *fakeShowcaseHub) ListXAttr(project, targetPath string) ([]string, error
 func (f *fakeShowcaseHub) RemoveXAttr(project, targetPath, attr string) error { return nil }
 func (f *fakeShowcaseHub) Symlink(project, target, linkPath string) (*storhub.FileMetadata, error) {
 	meta := fileMeta(linkPath, []byte(target))
-	meta.Kind = storhub.NodeKindSymlink
-	meta.SymlinkTarget = target
+	meta.Symlink = target
 	meta.Mode = 0o777
 	return meta, nil
 }
@@ -202,17 +201,10 @@ func (f *fakeShowcaseHub) DeleteProject(project string) error      { return nil 
 
 func fileMeta(path string, data []byte) *storhub.FileMetadata {
 	return &storhub.FileMetadata{
-		Name:    path,
-		Size:    int64(len(data)),
-		Release: "v1",
-		Inode:   1,
-		NLink:   1,
-		Mode:    0o644,
-		Chunks: []storhub.ChunkInfo{{
-			Index:  0,
-			Offset: 0,
-			Size:   int64(len(data)),
-		}},
+		Size:  int64(len(data)),
+		Inode: 1,
+		Mode:  0o644,
+		Chunks: []string{path + "/chunk0"},
 	}
 }
 

@@ -10,15 +10,15 @@ import (
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	repo := meta.NewRepoMetadata("demo")
-	file := &meta.FileMetadata{Name: "docs/file.txt", Release: "v1"}
-	ApplyUploadIdentity(repo, nil, file, now)
-	if file.Inode == 0 || file.Kind != meta.NodeKindFile || file.Mode == 0 {
+	file := &meta.FileMeta{Chunks: []string{}}
+	ApplyUploadIdentity(repo, "docs/file.txt", nil, file, now)
+	if file.Inode == 0 || file.Mode == 0 {
 		t.Fatalf("unexpected initialized file identity: %+v", file)
 	}
-	existing := &meta.FileMetadata{Inode: 9, Kind: meta.NodeKindSymlink, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, SymlinkTarget: "target", XAttrs: map[string]string{"user.demo": "1"}}
-	updated := &meta.FileMetadata{Release: "v1"}
-	ApplyUpdatedFileIdentity(updated, existing, now.Add(time.Minute))
-	if updated.Inode != 9 || updated.Kind != meta.NodeKindFile || updated.SymlinkTarget != "" {
+	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
+	updated := &meta.FileMeta{Chunks: []string{}}
+	ApplyUpdatedFileIdentity("", updated, existing, now.Add(time.Minute))
+	if updated.Inode != 9 || updated.Symlink != "" {
 		t.Fatalf("unexpected updated identity: %+v", updated)
 	}
 	if updated.ModifiedAt.IsZero() || updated.ChangedAt.IsZero() || updated.AccessedAt.IsZero() {
@@ -30,22 +30,35 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureDirectory("docs", now)
-	base := meta.FileMetadata{Name: "docs/a.txt", Release: "v1", Size: 1, Chunks: []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v1", AssetID: 1}}}
-	repo.UpsertFile(base, now)
+
+	chunk1 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
+	repo.Chunks["chunk_1"] = chunk1
+	base := meta.FileMeta{Size: 1, Chunks: []string{"chunk_1"}}
+	repo.UpsertFile("docs/a.txt", base, now)
 	first := repo.FindFile("docs/a.txt")
 	clone := first.Clone()
-	clone.Name = "docs/b.txt"
-	repo.UpsertFile(clone, now)
+	repo.UpsertFile("docs/b.txt", clone, now)
+
+	chunk2 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v2", AssetID: 2}
+	repo.Chunks["chunk_2"] = chunk2
 	updated := first.Clone()
-	updated.Release = "v2"
-	updated.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: 1, Release: "v2", AssetID: 2}}
-	ReplaceInodeFamily(repo, first, updated, now.Add(time.Minute))
-	if got := repo.FindFilesByInode(first.Inode); len(got) != 2 || got[0].Release != "v2" || got[1].Release != "v2" {
-		t.Fatalf("expected inode family replacement, got %+v", got)
+	updated.Chunks = []string{"chunk_2"}
+	ReplaceInodeFamily(repo, "docs/a.txt", first, updated, now.Add(time.Minute))
+	got := repo.FindFilesByInode(first.Inode)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 files, got %d: %+v", len(got), got)
 	}
-	missing := &meta.FileMetadata{Name: "docs/missing.txt", Inode: 99}
-	updated.Name = "docs/missing.txt"
-	ReplaceInodeFamily(repo, missing, updated, now)
+	for _, name := range got {
+		f := repo.FindFile(name)
+		if f == nil || len(f.Chunks) != 1 || f.Chunks[0] != "chunk_2" {
+			t.Fatalf("expected chunk_2 on %s, got %+v", name, f)
+		}
+	}
+
+	missing := &meta.FileMeta{Inode: 99}
+	updated2 := first.Clone()
+	updated2.Chunks = []string{"chunk_2"}
+	ReplaceInodeFamily(repo, "docs/missing.txt", missing, updated2, now)
 	if repo.FindFile("docs/missing.txt") == nil {
 		t.Fatal("expected missing inode family to fall back to upsert")
 	}

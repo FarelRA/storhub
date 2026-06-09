@@ -49,7 +49,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if fileMeta.Name != "live.txt" || fileMeta.Size != int64(len(payload)) {
+	if fileMeta.Size != int64(len(payload)) {
 		t.Fatalf("unexpected uploaded metadata: %+v", fileMeta)
 	}
 
@@ -57,7 +57,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
-	if len(files) != 1 || files[0].Name != "live.txt" {
+	if len(files) != 1 {
 		t.Fatalf("unexpected listed files: %+v", files)
 	}
 
@@ -286,7 +286,7 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create symlink: %v", err)
 	}
-	if symlink.Kind != NodeKindSymlink {
+	if symlink.Symlink == "" {
 		t.Fatalf("unexpected symlink metadata: %+v", symlink)
 	}
 	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
@@ -397,7 +397,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
-	if len(files) != 1 || files[0].Name != "live-2gb.bin" || files[0].Size != fileSize {
+	if len(files) != 1 || files[0].Size != fileSize {
 		t.Fatalf("unexpected listed files: %+v", files)
 	}
 
@@ -449,7 +449,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 	}
 
 	project := "project-large-validation"
-	uploaded := make([]FileMetadata, 0, len(scenarios))
+	uploaded := make([]FileMeta, 0, len(scenarios))
 	for _, scenario := range scenarios {
 		inputPath := filepath.Join(t.TempDir(), scenario.name)
 		if err := createSparseZeroFile(inputPath, scenario.size); err != nil {

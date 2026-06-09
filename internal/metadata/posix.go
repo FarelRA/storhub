@@ -12,25 +12,6 @@ const (
 	NodeKindSymlink NodeKind = "symlink"
 )
 
-type RootMetadata struct {
-	Inode      uint64            `json:"inode"`
-	Mode       uint32            `json:"mode"`
-	UID        uint32            `json:"uid"`
-	GID        uint32            `json:"gid"`
-	NLink      uint32            `json:"nlink"`
-	CreatedAt  time.Time         `json:"created_at"`
-	ModifiedAt time.Time         `json:"modified_at"`
-	AccessedAt time.Time         `json:"accessed_at"`
-	ChangedAt  time.Time         `json:"changed_at"`
-	XAttrs     map[string]string `json:"xattrs,omitempty"`
-}
-
-func (r RootMetadata) Clone() RootMetadata {
-	clone := r
-	clone.XAttrs = cloneStringMap(r.XAttrs)
-	return clone
-}
-
 func cloneStringMap(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil

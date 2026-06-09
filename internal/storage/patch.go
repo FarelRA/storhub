@@ -12,28 +12,36 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
-func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMetadata, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
+func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
 	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(file.Name)
-	finalSize := file.Size - deleteSize + int64(len(edit))
+	workingMeta.RemoveFile(filePath)
+	finalSize := fileMeta.Size - deleteSize + int64(len(edit))
 	requiredSlots := inlineChunkCount(int64(len(edit)), h.config.ChunkSize)
 	if finalSize == 0 && requiredSlots == 0 {
-		return []ChunkInfo{}, file.Release, nil
+		return []ChunkInfo{}, "", nil
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, file.Release)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
 	if err != nil {
 		return nil, "", err
 	}
 
-	patchedChunks, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, file.Name, patchOffset, edit)
+	patchedChunks, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit)
 	if err != nil {
 		return nil, "", err
 	}
 
-	assembled := make([]ChunkInfo, 0, len(file.Chunks)+len(patchedChunks)+2)
+	// Resolve chunk names to ChunkInfo
+	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
+	for _, name := range fileMeta.Chunks {
+		if chunk, ok := repoMeta.Chunks[name]; ok {
+			resolved = append(resolved, chunk)
+		}
+	}
+
+	assembled := make([]ChunkInfo, 0, len(resolved)+len(patchedChunks)+2)
 	patchEnd := patchOffset + deleteSize
 	delta := int64(len(edit)) - deleteSize
-	for _, chunk := range file.Chunks {
+	for _, chunk := range resolved {
 		chunkEnd := chunk.Offset + chunk.Size
 		if chunkEnd <= patchOffset || chunk.Offset >= patchEnd {
 			if chunk.Offset >= patchEnd {
@@ -60,17 +68,12 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 	}
 	assembled = append(assembled, patchedChunks...)
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	for i := range assembled {
-		assembled[i].Index = i
-	}
 	return assembled, releaseTag, nil
 }
 
-func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL, fileName string, fileOffset int64, data []byte) ([]ChunkInfo, error) {
+func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte) ([]ChunkInfo, error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
 	results := make([]ChunkInfo, count)
-	_ = fileName
-	_ = fileOffset
 	namer := newAssetNamer()
 	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
 		start := int64(i) * normalizedChunkSize(h.config.ChunkSize)
@@ -88,13 +91,11 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 			return fmt.Errorf("upload patch chunk %d: %w", i, err)
 		}
 		results[i] = ChunkInfo{
-			Name:        assetName,
 			Size:        int64(len(part)),
-			Index:       i,
 			Offset:      fileOffset + start,
-			Release:     releaseTag,
 			AssetOffset: 0,
 			AssetID:     assetID,
+			Release:     releaseTag,
 		}
 		return nil
 	})
@@ -127,9 +128,9 @@ func normalizedChunkSize(chunkSize int64) int64 {
 	return chunkSize
 }
 
-func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMetadata, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
+func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
 	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(file.Name)
+	workingMeta.RemoveFile(filePath)
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
 	dirtySegments := make([]byteRange, 0, len(dirtyRanges))
 	for _, dirty := range dirtyRanges {
@@ -139,7 +140,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	for _, dirty := range dirtySegments {
 		requiredSlots += inlineChunkCount(dirty.end-dirty.start, chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, file.Release)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -156,26 +157,20 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		}
 		segment := byteRange{start: offset, end: end}
 		if rangeOverlapsAny(segment, dirtySegments) {
-			uploaded, err := h.uploadFileRangeChunks(ctx, project, releaseTag, uploadURL, file.Name, snapshot, segment.start, segment.end)
+			uploaded, err := h.uploadFileRangeChunks(ctx, project, releaseTag, uploadURL, snapshot, segment.start, segment.end)
 			if err != nil {
 				return nil, "", err
 			}
 			assembled = append(assembled, uploaded...)
 			continue
 		}
-		reused, err := h.referenceFileRangeChunks(ctx, project, file, segment.start, segment.end)
+		reused, err := h.referenceFileRangeChunks(ctx, project, repoMeta.Chunks, file, segment.start, segment.end)
 		if err != nil {
 			return nil, "", err
 		}
 		assembled = append(assembled, reused...)
 	}
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	for i := range assembled {
-		assembled[i].Index = i
-		if assembled[i].Release == "" {
-			assembled[i].Release = releaseTag
-		}
-	}
 	return assembled, releaseTag, nil
 }
 
@@ -192,14 +187,13 @@ func rangeOverlapsAny(target byteRange, ranges []byteRange) bool {
 	return false
 }
 
-func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag, uploadURL, fileName string, snapshot *os.File, start, end int64) ([]ChunkInfo, error) {
+func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag, uploadURL string, snapshot *os.File, start, end int64) ([]ChunkInfo, error) {
 	if end <= start {
 		return nil, nil
 	}
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
 	results := make([]ChunkInfo, count)
-	_ = fileName
 	namer := newAssetNamer()
 	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
 		chunkStart := start + int64(i)*chunkSize
@@ -216,18 +210,22 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 		if err != nil {
 			return fmt.Errorf("upload rewritten chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Name: assetName, Size: chunkEnd - chunkStart, Index: i, Offset: chunkStart, Release: releaseTag, AssetOffset: 0, AssetID: assetID}
+		results[i] = ChunkInfo{Size: chunkEnd - chunkStart, Offset: chunkStart, AssetOffset: 0, AssetID: assetID, Release: releaseTag}
 		return nil
 	})
 	return results, err
 }
 
-func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, file FileMetadata, start, end int64) ([]ChunkInfo, error) {
+func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[string]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
 	if end <= start {
 		return nil, nil
 	}
 	assembled := make([]ChunkInfo, 0, len(file.Chunks))
-	for _, chunk := range file.Chunks {
+	for _, name := range file.Chunks {
+		chunk, ok := repoChunks[name]
+		if !ok {
+			continue
+		}
 		chunkEnd := chunk.Offset + chunk.Size
 		if chunkEnd <= start || chunk.Offset >= end {
 			continue

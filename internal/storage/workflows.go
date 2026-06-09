@@ -32,7 +32,7 @@ func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadU
 		if err != nil {
 			return fmt.Errorf("upload chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Name: assetName, Size: chunk.Size(), Index: i, Offset: chunk.Offset(), Release: releaseTag, AssetOffset: 0, AssetID: assetID}
+		results[i] = ChunkInfo{Size: chunk.Size(), Offset: chunk.Offset(), AssetOffset: 0, AssetID: assetID, Release: releaseTag}
 		return nil
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		return "", "", err
 	}
 	metadata.Normalize(project, h.config.Now())
-	metadata.LastModified = h.config.Now().UTC()
+	metadata.LastMod = h.config.Now().UTC()
 	metadata.RecomputeStats()
 	if err := metadata.Validate(); err != nil {
 		return "", "", fmt.Errorf("validate metadata: %w", err)
@@ -282,16 +282,18 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 		}
 		assetIndex[release.TagName] = assets
 	}
-	for _, releaseMeta := range metadata.Releases {
-		for _, file := range releaseMeta.Files {
-			for _, chunk := range file.Chunks {
-				release, ok := releaseIndex[chunk.Release]
-				if !ok {
-					return fmt.Errorf("rollback metadata references missing release: %s", chunk.Release)
-				}
-				if _, ok := assetIndex[release.TagName][chunk.AssetID]; !ok {
-					return fmt.Errorf("rollback metadata references missing asset %d in release %s", chunk.AssetID, chunk.Release)
-				}
+	for _, file := range metadata.AllFiles() {
+		for _, chunkName := range file.Chunks {
+			chunk, ok := metadata.Chunks[chunkName]
+			if !ok {
+				continue
+			}
+			release, ok := releaseIndex[chunk.Release]
+			if !ok {
+				return fmt.Errorf("rollback metadata references missing release: %s", chunk.Release)
+			}
+			if _, ok := assetIndex[release.TagName][chunk.AssetID]; !ok {
+				return fmt.Errorf("rollback metadata references missing asset %d in release %s", chunk.AssetID, chunk.Release)
 			}
 		}
 	}
@@ -313,9 +315,9 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 			return preferredTag, release.UploadURL, nil
 		}
 	}
-	for _, existing := range metadata.Releases {
-		if release, ok := releaseIndex[existing.Tag]; ok && len(release.Assets)+requiredSlots <= 1000 {
-			return existing.Tag, release.UploadURL, nil
+	for tag, _ := range metadata.Releases {
+		if release, ok := releaseIndex[tag]; ok && len(release.Assets)+requiredSlots <= 1000 {
+			return tag, release.UploadURL, nil
 		}
 	}
 	tag, err := h.getNextReleaseTag(metadata, releases)
@@ -332,8 +334,8 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 
 func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Release) (string, error) {
 	maxVersion := 0
-	for _, release := range metadata.Releases {
-		if n, ok := meta.ParseNumericReleaseTag(release.Tag); ok && n > maxVersion {
+	for tag, _ := range metadata.Releases {
+		if n, ok := meta.ParseNumericReleaseTag(tag); ok && n > maxVersion {
 			maxVersion = n
 		}
 	}

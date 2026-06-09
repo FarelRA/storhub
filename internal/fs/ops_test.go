@@ -83,7 +83,7 @@ func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ strin
 	return "v1", "upload", nil
 }
 
-func (b *testBackend) PatchFileWithMetadataContext(_ context.Context, _ string, cleanName string, _ *meta.RepoMetadata, fileMeta *meta.FileMetadata, offset, deleteSize int64, edit []byte) (*meta.FileMetadata, error) {
+func (b *testBackend) PatchFileWithMetadataContext(_ context.Context, _ string, cleanName string, _ *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error) {
 	current, err := b.fileData(fileMeta)
 	if err != nil {
 		return nil, err
@@ -98,7 +98,7 @@ func (b *testBackend) PatchFileWithMetadataContext(_ context.Context, _ string, 
 	updated.AccessedAt = b.now
 	b.storeFile(&updated, patched)
 	if _, err := b.UpdateRepoMetadataContext(context.Background(), "", func(repo *meta.RepoMetadata) error {
-		repo.UpsertFile(updated, b.now)
+		repo.UpsertFile(cleanName, updated, b.now)
 		return nil
 	}, "patch"); err != nil {
 		return nil, err
@@ -131,31 +131,44 @@ func (b *testBackend) seedDir(path string) {
 	b.repo.EnsureDirectory(path, b.now)
 }
 
-func (b *testBackend) seedFile(path string, data []byte) *meta.FileMetadata {
-	file := meta.FileMetadata{Name: path, Kind: meta.NodeKindFile, Release: "v1", Mode: 0o644, UID: 1, GID: 2, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
+func (b *testBackend) seedFile(path string, data []byte) *meta.FileMeta {
+	file := meta.FileMeta{Mode: 0o644, UID: 1, GID: 2, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
 	b.storeFile(&file, data)
-	b.repo.UpsertFile(file, b.now)
+	b.repo.UpsertFile(path, file, b.now)
 	stored := b.repo.FindFile(path)
 	clone := stored.Clone()
 	return &clone
 }
 
-func (b *testBackend) storeFile(file *meta.FileMetadata, data []byte) {
+func (b *testBackend) storeFile(file *meta.FileMeta, data []byte) {
 	assetID := b.nextAsset
 	b.nextAsset++
 	b.assetBytes[assetID] = append([]byte(nil), data...)
 	file.Size = int64(len(data))
-	file.Chunks = []meta.ChunkInfo{{Index: 0, Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: file.Release}}
 	if len(data) == 0 {
-		file.Chunks = nil
+		file.Chunks = []string{}
+		return
 	}
+	chunkName := fmt.Sprintf("chunk_%d", assetID)
+	release := "v1"
+	if len(file.Chunks) > 0 {
+		if c, ok := b.repo.Chunks[file.Chunks[0]]; ok {
+			release = c.Release
+		}
+	}
+	b.repo.Chunks[chunkName] = meta.ChunkInfo{Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: release}
+	file.Chunks = []string{chunkName}
 }
 
-func (b *testBackend) fileData(file *meta.FileMetadata) ([]byte, error) {
+func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {
 	if len(file.Chunks) == 0 {
 		return nil, nil
 	}
-	chunk := file.Chunks[0]
+	chunkName := file.Chunks[0]
+	chunk, ok := b.repo.Chunks[chunkName]
+	if !ok {
+		return nil, io.EOF
+	}
 	data, ok := b.assetBytes[chunk.AssetID]
 	if !ok {
 		return nil, io.EOF
@@ -171,7 +184,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	seeded := backend.seedFile("docs/readme.txt", []byte("hello"))
 
 	created, err := svc.CreateFileContext(context.Background(), "demo", "docs/empty.txt")
-	if err != nil || created.Name != "docs/empty.txt" || created.Size != 0 {
+	if err != nil || created.Size != 0 {
 		returnFail(t, "create file", err, created)
 	}
 	if err := svc.MkdirContext(context.Background(), "demo", "docs/sub"); err != nil {
@@ -217,10 +230,10 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	if _, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/archive/final.txt", 99, 1); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected eof, got %v", err)
 	}
-	if info := EntryInfoFromFile(seeded); info.Path != seeded.Name || !EntryInfoFromDirectory(&meta.DirectoryMetadata{Path: "docs", Inode: 2, Mode: 0o755}).IsDir {
+	if info := EntryInfoFromFile(seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")); info.Path != "docs/readme.txt" || !EntryInfoFromDirectory(&meta.DirMeta{Inode: 2, Mode: 0o755}, "docs", 2).IsDir {
 		t.Fatal("entry helper conversion failed")
 	}
-	if DirEntryFromFile(*seeded).Path != seeded.Name || !DirEntryFromDirectory(meta.DirectoryMetadata{Path: "docs/sub"}).IsDir {
+	if DirEntryFromFile(*seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")).Path != "docs/readme.txt" || !DirEntryFromDirectory(meta.DirMeta{}, "docs/sub", 2).IsDir {
 		t.Fatal("dir entry helper conversion failed")
 	}
 	if CountUniqueInodes(backend.repo) == 0 || MinInt64(1, 2) != 1 || MaxInt64(1, 2) != 2 {
@@ -236,7 +249,7 @@ func TestServiceErrors(t *testing.T) {
 	svc := NewService(backend)
 	backend.seedDir("docs")
 	backend.seedFile("docs/link", []byte("abc"))
-	backend.repo.UpsertFile(meta.FileMetadata{Name: "docs/symlink", Kind: meta.NodeKindSymlink, Release: "v1", Mode: 0o777, SymlinkTarget: "docs/link", UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
+	backend.repo.UpsertFile("docs/symlink", meta.FileMeta{Mode: 0o777, Symlink: "docs/link", UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
 
 	if _, err := svc.CreateFileContext(context.Background(), "bad/project", "docs/x"); err == nil {
 		t.Fatal("expected project validation error")
@@ -280,11 +293,12 @@ func TestServicePermissionEnforcement(t *testing.T) {
 	file.Mode = 0o640
 	file.UID = 11
 	file.GID = 22
-	backend.repo.UpsertFile(*file, backend.now)
+	backend.repo.UpsertFile("private/note.txt", *file, backend.now)
 	dir := backend.repo.GetDirectory("private")
 	dir.Mode = 0o750
 	dir.UID = 11
 	dir.GID = 22
+	backend.repo.Dirs["private"] = *dir
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 30, GID: 40, Groups: []uint32{40}})
@@ -313,6 +327,7 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 	parent.GID = 60
 	parent.ModifiedAt = now.Add(-time.Hour)
 	parent.ChangedAt = now.Add(-time.Hour)
+	backend.repo.Dirs["shared"] = *parent
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 70, GID: 80, Groups: []uint32{80, 60}})
@@ -339,7 +354,9 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
 	backend := newTestBackend(time.Unix(265, 0).UTC())
 	backend.seedDir("docs")
-	backend.repo.GetDirectory("docs").Mode = 0o777
+	dir := backend.repo.GetDirectory("docs")
+	dir.Mode = 0o777
+	backend.repo.Dirs["docs"] = *dir
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 986, GID: 986, Groups: []uint32{986}})
 	file, err := svc.CreateFileContext(ctx, "demo", "docs/file.txt")
@@ -352,7 +369,7 @@ func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
 	if err := svc.MkdirContext(ctx, "demo", "docs/subdir"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	dir := backend.repo.GetDirectory("docs/subdir")
+	dir = backend.repo.GetDirectory("docs/subdir")
 	if dir == nil || dir.UID != 986 || dir.GID != 986 {
 		t.Fatalf("expected caller-owned dir, got %+v", dir)
 	}

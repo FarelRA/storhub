@@ -100,9 +100,9 @@ func (b *testBackend) seedDir(path string) {
 	b.repo.EnsureDirectory(path, b.now)
 }
 
-func (b *testBackend) seedFile(path string) *meta.FileMetadata {
-	file := meta.FileMetadata{Name: path, Kind: meta.NodeKindFile, Release: "v1", Mode: 0o644, UID: 1, GID: 2, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
-	b.repo.UpsertFile(file, b.now)
+func (b *testBackend) seedFile(path string) *meta.FileMeta {
+	file := meta.FileMeta{Mode: 0o644, UID: 1, GID: 2, Chunks: []string{}, UploadedAt: b.now, ModifiedAt: b.now, AccessedAt: b.now, ChangedAt: b.now}
+	b.repo.UpsertFile(path, file, b.now)
 	stored := b.repo.FindFile(path)
 	clone := stored.Clone()
 	return &clone
@@ -147,7 +147,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 		t.Fatalf("listxattr after remove: %v %v", attrs, err)
 	}
 	symlink, err := svc.SymlinkContext(context.Background(), "demo", "docs/base.txt", "docs/base.link")
-	if err != nil || symlink.Kind != meta.NodeKindSymlink {
+	if err != nil || symlink.Symlink != "docs/base.txt" {
 		t.Fatalf("symlink: %+v %v", symlink, err)
 	}
 	target, err := svc.ReadlinkContext(context.Background(), "demo", "docs/base.link")
@@ -172,7 +172,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 	if err := svc.RemoveXAttrContext(context.Background(), "demo", "", "user.root"); err != nil {
 		t.Fatalf("remove root xattr: %v", err)
 	}
-	if !shfs.EntryInfoFromFile(base).IsDir && shfs.EntryInfoFromFile(base).Path != base.Name {
+	if !shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).IsDir && shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).Path != "docs/base.txt" {
 		t.Fatal("unexpected file entry conversion")
 	}
 }
@@ -211,7 +211,7 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 		t.Fatal("expected missing xattr removal error")
 	}
 	repo := backend.repo.Clone()
-	if err := UpdateFileFamily(&repo, 999, func(*meta.FileMetadata) {}); err == nil {
+	if err := UpdateFileFamily(&repo, 999, func(*meta.FileMeta) {}); err == nil {
 		t.Fatal("expected missing inode family error")
 	}
 	if err := TouchInodeFamilyChangedAt(&repo, 999, backend.now); err == nil {
@@ -229,7 +229,7 @@ func TestServicePOSIXPermissionEnforcement(t *testing.T) {
 	base.Mode = 0o640
 	base.UID = 7
 	base.GID = 8
-	backend.repo.UpsertFile(*base, backend.now)
+	backend.repo.UpsertFile("docs/base.txt", *base, backend.now)
 	dir := backend.repo.GetDirectory("docs")
 	dir.Mode = 0o755
 	dir.UID = 7
@@ -275,11 +275,13 @@ func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
 func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t *testing.T) {
 	backend := newTestBackend(time.Unix(610, 0).UTC())
 	backend.seedDir("docs")
-	backend.repo.GetDirectory("docs").Mode = 0o777
+	dir := backend.repo.GetDirectory("docs")
+	dir.Mode = 0o777
+	backend.repo.Dirs["docs"] = *dir
 	base := backend.seedFile("docs/base.txt")
 	base.UID = 1000
 	base.GID = 1000
-	backend.repo.UpsertFile(*base, backend.now)
+	backend.repo.UpsertFile("docs/base.txt", *base, backend.now)
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 986, GID: 986, Groups: []uint32{986}})

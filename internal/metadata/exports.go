@@ -6,15 +6,11 @@ func (m *RepoMetadata) AllocateInode() uint64 {
 	return m.allocateInode()
 }
 
-func (m *RepoMetadata) RebuildIndexes() {
-	m.rebuildIndexes()
-}
-
-func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMetadata, now time.Time) {
+func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now time.Time) {
 	initializeNewFileIdentity(meta, file, now)
 }
 
-func PreserveFileIdentity(file *FileMetadata, existing *FileMetadata, now time.Time) {
+func PreserveFileIdentity(file *FileMeta, existing *FileMeta, now time.Time) {
 	preserveFileIdentity(file, existing, now)
 }
 

@@ -37,12 +37,10 @@ var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 type (
 	Config            = storcfg.Config
 	ChunkInfo         = metadata.ChunkInfo
-	FileMetadata      = metadata.FileMetadata
-	ReleaseMetadata   = metadata.ReleaseMetadata
+	FileMeta          = metadata.FileMeta
 	RepoMetadata      = metadata.RepoMetadata
 	MetadataRevision  = metadata.MetadataRevision
-	DirectoryMetadata = metadata.DirectoryMetadata
-	RootMetadata      = metadata.RootMetadata
+	DirMeta           = metadata.DirMeta
 	NodeKind          = metadata.NodeKind
 )
 
@@ -303,7 +301,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		return nil
 	}
 	pm.meta.Normalize(project, h.config.Now())
-	pm.meta.LastModified = h.config.Now().UTC()
+	pm.meta.LastMod = h.config.Now().UTC()
 	pm.meta.RecomputeStats()
 	meta := pm.meta.Clone()
 	previousSHA := pm.sha
@@ -444,19 +442,19 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 	return firstErr
 }
 
-func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMetadata, error) {
+func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, error) {
 	return h.UploadFileContext(context.Background(), project, fileName, inputPath)
 }
 
-func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMetadata, error) {
+func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
 	return h.putFileContext(ctx, project, fileName, inputPath, false)
 }
 
-func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMetadata, error) {
+func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMeta, error) {
 	return h.ReplaceFileContext(context.Background(), project, fileName, inputPath)
 }
 
-func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMetadata, error) {
+func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
 	return h.putFileContext(ctx, project, fileName, inputPath, true)
 }
 
@@ -488,7 +486,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	}
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
-	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, existing.Release)
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
 	return releaseTag, uploadURL, err
 }
 
@@ -502,9 +500,7 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
 		if err == nil {
 			return ChunkInfo{
-				Name:        assetName,
 				Size:        int64(len(data)),
-				Index:       index,
 				Offset:      offset,
 				Release:     releaseTag,
 				AssetID:     assetID,
@@ -541,13 +537,10 @@ func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].Offset < filtered[j].Offset
 	})
-	for i := range filtered {
-		filtered[i].Index = i
-	}
 	return filtered
 }
 
-func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (result *FileMetadata, err error) {
+func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (result *FileMeta, err error) {
 	started := h.logOpStart(project, "finalize-replace", "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
 	defer func() {
 		h.logOpFinish(project, "finalize-replace", started, err, "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
@@ -577,22 +570,32 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 
 	now := h.config.Now().UTC()
 	fileMeta := current.Clone()
-	fileMeta.Chunks = append([]ChunkInfo(nil), chunks...)
-	fileMeta.Release = releaseTag
+
+	// Add new chunks to the repo's Chunks map
+	chunkNames := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		name := fmt.Sprintf("%s/chunk/%d", cleanName, i)
+		repoMeta.Chunks[name] = chunk
+		chunkNames[i] = name
+	}
+	fileMeta.Chunks = chunkNames
 	fileMeta.Size = size
-	implposix.ApplyUpdatedFileIdentity(&fileMeta, current, now)
+	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, now)
 
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	for i, name := range chunkNames {
+		pm.meta.Chunks[name] = chunks[i]
+	}
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
 		pm.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
-	implposix.ApplyUpdatedFileIdentity(&fileMeta, latest, now)
-	implposix.ReplaceInodeFamily(pm.meta, latest, fileMeta, now)
+	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
+	implposix.ReplaceInodeFamily(pm.meta, cleanName, latest, fileMeta, now)
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
@@ -605,11 +608,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	return result, nil
 }
 
-func (h *StorHub) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
+func (h *StorHub) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
 	return h.ReplaceFileFromReaderContext(context.Background(), project, filePath, body)
 }
 
-func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (result *metadata.FileMetadata, err error) {
+func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (result *metadata.FileMeta, err error) {
 	if body == nil {
 		return nil, fmt.Errorf("request body is nil")
 	}
@@ -658,11 +661,11 @@ func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chu
 	return h.fillAssetRange(ctx, project, chunk, dst)
 }
 
-func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
+func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
 	return h.PatchFileContext(context.Background(), project, fileName, offset, deleteSize, edit)
 }
 
-func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte) (result *FileMetadata, err error) {
+func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte) (result *FileMeta, err error) {
 	started := h.logOpStart(project, "patch-file", "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
 	defer func() {
 		h.logOpFinish(project, "patch-file", started, err, "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
@@ -695,7 +698,7 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	if fileMeta == nil {
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
-	if fileMeta.Kind == NodeKindSymlink {
+	if fileMeta.Symlink != "" {
 		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
 	}
 	patchEnd := offset + deleteSize
@@ -707,15 +710,20 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	return result, err
 }
 
-func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMetadata, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
-	newChunks, targetRelease, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, offset, deleteSize, edit)
+func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMeta, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
+	newChunks, _, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
 	if err != nil {
 		return nil, err
 	}
 	now := h.config.Now().UTC()
 	patched := fileMeta.Clone()
-	patched.Chunks = newChunks
-	patched.Release = targetRelease
+	chunkNames := make([]string, len(newChunks))
+	for i, chunk := range newChunks {
+		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now.UnixNano(), i)
+		repoMeta.Chunks[name] = chunk
+		chunkNames[i] = name
+	}
+	patched.Chunks = chunkNames
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
 	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
 	patched.ModifiedAt = now
@@ -726,13 +734,16 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	for i, name := range chunkNames {
+		pm.meta.Chunks[name] = newChunks[i]
+	}
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
-	implposix.ApplyUpdatedFileIdentity(&patched, current, now)
-	implposix.ReplaceInodeFamily(pm.meta, current, patched, now)
+	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
+	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
@@ -744,15 +755,20 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	return &patched, nil
 }
 
-func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *RepoMetadata, fileMeta *FileMetadata, finalSize int64, dirtyRanges []byteRange) (*FileMetadata, error) {
-	newChunks, targetRelease, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, snapshotPath, finalSize, dirtyRanges)
+func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *RepoMetadata, fileMeta *FileMeta, finalSize int64, dirtyRanges []byteRange) (*FileMeta, error) {
+	newChunks, _, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, cleanName, snapshotPath, finalSize, dirtyRanges)
 	if err != nil {
 		return nil, err
 	}
 	now := h.config.Now().UTC()
 	rewritten := fileMeta.Clone()
-	rewritten.Chunks = newChunks
-	rewritten.Release = targetRelease
+	chunkNames := make([]string, len(newChunks))
+	for i, chunk := range newChunks {
+		name := fmt.Sprintf("%s/chunk/%d_%d", cleanName, now.UnixNano(), i)
+		repoMeta.Chunks[name] = chunk
+		chunkNames[i] = name
+	}
+	rewritten.Chunks = chunkNames
 	rewritten.Size = finalSize
 	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
 	rewritten.ModifiedAt = now
@@ -763,13 +779,16 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	for i, name := range chunkNames {
+		pm.meta.Chunks[name] = newChunks[i]
+	}
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
 	}
-	implposix.ApplyUpdatedFileIdentity(&rewritten, current, now)
-	implposix.ReplaceInodeFamily(pm.meta, current, rewritten, now)
+	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
+	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, rewritten, now)
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
@@ -781,7 +800,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	return &rewritten, nil
 }
 
-func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (result *FileMetadata, err error) {
+func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (result *FileMeta, err error) {
 	op := "upload-file"
 	if replace {
 		op = "replace-file"
@@ -823,9 +842,6 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}
 	existing := repoMeta.FindFile(cleanName)
 	var preferredRelease string
-	if existing != nil {
-		preferredRelease = existing.Release
-	}
 	if !replace && existing != nil {
 		return nil, shfs.AlreadyExists(cleanName)
 	}
@@ -854,14 +870,17 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 			return nil, err
 		}
 	}
-	fileMeta := FileMetadata{
-		Name:    cleanName,
-		Kind:    NodeKindFile,
-		Size:    fileInfo.Size(),
-		Chunks:  results,
-		Release: releaseTag,
+	chunkNames := make([]string, len(results))
+	for i, chunk := range results {
+		name := fmt.Sprintf("%s/chunk/%d", cleanName, i)
+		workingMeta.Chunks[name] = chunk
+		chunkNames[i] = name
 	}
-	implposix.ApplyUploadIdentity(repoMeta, existing, &fileMeta, h.config.Now().UTC())
+	fileMeta := FileMeta{
+		Size:    fileInfo.Size(),
+		Chunks:  chunkNames,
+	}
+	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().UTC())
 	if existing == nil {
 		defaultUID, defaultGID := h.DefaultOwnerIDs()
 		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -887,14 +906,18 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.mu.Unlock()
 		return nil, shfs.AlreadyExists(cleanName)
 	}
+	pm.meta.EnsureRelease(releaseTag, h.config.Now().UTC())
+	for i, name := range chunkNames {
+		pm.meta.Chunks[name] = results[i]
+	}
 	current := pm.meta.FindFile(cleanName)
 	if current != nil {
-		implposix.ApplyUpdatedFileIdentity(&fileMeta, current, h.config.Now().UTC())
-		implposix.ReplaceInodeFamily(pm.meta, current, fileMeta, h.config.Now().UTC())
+		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().UTC())
+		implposix.ReplaceInodeFamily(pm.meta, cleanName, current, fileMeta, h.config.Now().UTC())
 	} else {
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(pm.meta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 		metadata.InitializeNewFileIdentity(pm.meta, &fileMeta, h.config.Now().UTC())
-		pm.meta.UpsertFile(fileMeta, h.config.Now().UTC())
+		pm.meta.UpsertFile(cleanName, fileMeta, h.config.Now().UTC())
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().UTC())
 	markProjectDirtyLocked(pm)
@@ -958,7 +981,12 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	err = runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(fileMeta.Chunks), func(i int) error {
-		return h.downloadChunkWithRetry(ctx, project, outFile, fileMeta.Chunks[i])
+		chunkName := fileMeta.Chunks[i]
+		chunk, ok := repoMeta.Chunks[chunkName]
+		if !ok {
+			return fmt.Errorf("chunk %s not found", chunkName)
+		}
+		return h.downloadChunkWithRetry(ctx, project, outFile, chunk)
 	})
 	if err != nil {
 		return err
@@ -973,11 +1001,11 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	return nil
 }
 
-func (h *StorHub) ListFiles(project string) ([]FileMetadata, error) {
+func (h *StorHub) ListFiles(project string) ([]FileMeta, error) {
 	return h.ListFilesContext(context.Background(), project)
 }
 
-func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result []FileMetadata, err error) {
+func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result []FileMeta, err error) {
 	started := h.logOpStart(project, "list-files")
 	defer func() { h.logOpFinish(project, "list-files", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
@@ -988,16 +1016,15 @@ func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result 
 		return nil, err
 	}
 	files := repoMeta.AllFiles()
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	result = files
 	return result, nil
 }
 
-func (h *StorHub) ListReleases(project string) ([]ReleaseMetadata, error) {
+func (h *StorHub) ListReleases(project string) ([]metadata.ReleaseRef, error) {
 	return h.ListReleasesContext(context.Background(), project)
 }
 
-func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (result []ReleaseMetadata, err error) {
+func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (result []metadata.ReleaseRef, err error) {
 	started := h.logOpStart(project, "list-releases")
 	defer func() { h.logOpFinish(project, "list-releases", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
@@ -1007,11 +1034,10 @@ func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (resu
 	if err != nil {
 		return nil, err
 	}
-	releases := make([]ReleaseMetadata, len(repoMeta.Releases))
-	for i := range repoMeta.Releases {
-		releases[i] = repoMeta.Releases[i].Clone()
+	result = make([]metadata.ReleaseRef, 0, len(repoMeta.Releases))
+	for _, ref := range repoMeta.Releases {
+		result = append(result, ref.Clone())
 	}
-	result = releases
 	return result, nil
 }
 
@@ -1081,7 +1107,7 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
 			if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
-				return fmt.Errorf("download chunk %d: %w", chunk.Index, err)
+				return fmt.Errorf("download chunk %d: %w", chunk.AssetID, err)
 			}
 			if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(err))); sleepErr != nil {
 				return sleepErr
@@ -1095,19 +1121,19 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 			copyErr = closeErr
 		}
 		if copyErr == nil && written != chunk.Size {
-			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.Index, chunk.Size, written)
+			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.AssetID, chunk.Size, written)
 		}
 		if copyErr == nil {
 			return nil
 		}
 		if !isRetryableDownloadError(copyErr) || attempt == h.config.MaxRetries {
-			return fmt.Errorf("download chunk %d: %w", chunk.Index, copyErr)
+			return fmt.Errorf("download chunk %d: %w", chunk.AssetID, copyErr)
 		}
 		if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(copyErr))); sleepErr != nil {
 			return sleepErr
 		}
 	}
-	return fmt.Errorf("download chunk %d: exhausted retries", chunk.Index)
+	return fmt.Errorf("download chunk %d: exhausted retries", chunk.AssetID)
 }
 
 func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chunk ChunkInfo) (int64, error) {
@@ -1116,7 +1142,7 @@ func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chu
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			if _, writeErr := outFile.WriteAt(buf[:n], chunk.Offset+written); writeErr != nil {
-				return written, fmt.Errorf("write chunk %d: %w", chunk.Index, writeErr)
+				return written, fmt.Errorf("write chunk %d: %w", chunk.AssetID, writeErr)
 			}
 			written += int64(n)
 		}
@@ -1124,7 +1150,7 @@ func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chu
 			return written, nil
 		}
 		if readErr != nil {
-			return written, fmt.Errorf("read chunk %d: %w", chunk.Index, readErr)
+			return written, fmt.Errorf("read chunk %d: %w", chunk.AssetID, readErr)
 		}
 	}
 }
@@ -1347,7 +1373,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	return pm.meta, nil
 }
 
-func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMetadata, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMetadata, error) {
+func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {
 	ranges := make([]byteRange, len(dirtyRanges))
 	for i, dirty := range dirtyRanges {
 		ranges[i] = byteRange{start: dirty.Start, end: dirty.End}
@@ -1371,7 +1397,7 @@ func (h *StorHub) GetOrCreateUploadReleaseContext(ctx context.Context, project s
 	return h.getOrCreateUploadRelease(ctx, project, repoMeta, requiredSize, preferredTag)
 }
 
-func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMetadata, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error) {
+func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
 	return h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
 }
 
@@ -1403,11 +1429,11 @@ func (h *StorHub) posixService() *implposix.Service {
 	return implposix.NewService(h)
 }
 
-func (h *StorHub) CreateFile(project, filePath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
 	return h.CreateFileContext(context.Background(), project, filePath)
 }
 
-func (h *StorHub) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
 	return h.fsService().CreateFileContext(ctx, project, filePath)
 }
 
@@ -1443,27 +1469,27 @@ func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 	return h.fsService().RenameContext(ctx, project, oldPath, newPath)
 }
 
-func (h *StorHub) TruncateFile(project, filePath string, size int64) (*metadata.FileMetadata, error) {
+func (h *StorHub) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
 	return h.TruncateFileContext(context.Background(), project, filePath, size)
 }
 
-func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMetadata, error) {
+func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
 	return h.fsService().TruncateFileContext(ctx, project, filePath, size)
 }
 
-func (h *StorHub) AppendFile(project, filePath string, data []byte) (*metadata.FileMetadata, error) {
+func (h *StorHub) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
 	return h.AppendFileContext(context.Background(), project, filePath, data)
 }
 
-func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMetadata, error) {
+func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
 	return h.fsService().AppendFileContext(ctx, project, filePath, data)
 }
 
-func (h *StorHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error) {
+func (h *StorHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
 	return h.WriteFileAtContext(context.Background(), project, filePath, offset, data)
 }
 
-func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error) {
+func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
 	return h.fsService().WriteFileAtContext(ctx, project, filePath, offset, data)
 }
 
@@ -1511,7 +1537,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return 0, err
 	}
-	if file.Kind == NodeKindSymlink {
+	if file.Symlink != "" {
 		return 0, shfs.InvalidSymlink(cleanPath)
 	}
 	if offset > file.Size {
@@ -1524,7 +1550,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if end > file.Size {
 		end = file.Size
 	}
-	segments := overlappingFileSegments(file, offset, end)
+	segments := overlappingFileSegments(file, repo.Chunks, offset, end)
 	if len(segments) == 0 {
 		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UTC())
 		return int(end - offset), nil
@@ -1581,11 +1607,8 @@ func splitSegment(seg fileReadSegment, maxParts int) []fileReadSegment {
 		partLen := end - off
 		subs = append(subs, fileReadSegment{
 			chunk: metadata.ChunkInfo{
-				Name:        seg.chunk.Name,
 				Size:        int64(partLen),
-				Index:       seg.chunk.Index,
 				Offset:      seg.chunk.Offset + int64(off),
-				Release:     seg.chunk.Release,
 				AssetOffset: seg.chunk.AssetOffset + int64(off),
 				AssetID:     seg.chunk.AssetID,
 			},
@@ -1596,15 +1619,21 @@ func splitSegment(seg fileReadSegment, maxParts int) []fileReadSegment {
 	return subs
 }
 
-func overlappingFileSegments(file *metadata.FileMetadata, offset, end int64) []fileReadSegment {
+func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[string]metadata.ChunkInfo, offset, end int64) []fileReadSegment {
 	if file == nil || end <= offset {
 		return nil
 	}
 	segments := make([]fileReadSegment, 0, len(file.Chunks))
-	startIndex := sort.Search(len(file.Chunks), func(i int) bool {
-		return file.Chunks[i].Offset+file.Chunks[i].Size > offset
+	chunks := make([]metadata.ChunkInfo, 0, len(file.Chunks))
+	for _, name := range file.Chunks {
+		if chunk, ok := repoChunks[name]; ok {
+			chunks = append(chunks, chunk)
+		}
+	}
+	startIndex := sort.Search(len(chunks), func(i int) bool {
+		return chunks[i].Offset+chunks[i].Size > offset
 	})
-	for _, chunk := range file.Chunks[startIndex:] {
+	for _, chunk := range chunks[startIndex:] {
 		chunkEnd := chunk.Offset + chunk.Size
 		if chunk.Offset >= end {
 			break
@@ -1651,11 +1680,11 @@ func (h *StorHub) StatFSContext(ctx context.Context, project string) (*shfs.FSSt
 	return h.fsService().StatFSContext(ctx, project)
 }
 
-func (h *StorHub) Symlink(project, target, linkPath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
 	return h.SymlinkContext(context.Background(), project, target, linkPath)
 }
 
-func (h *StorHub) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
 	return h.posixService().SymlinkContext(ctx, project, target, linkPath)
 }
 
@@ -1667,11 +1696,11 @@ func (h *StorHub) ReadlinkContext(ctx context.Context, project, linkPath string)
 	return h.posixService().ReadlinkContext(ctx, project, linkPath)
 }
 
-func (h *StorHub) Link(project, existingPath, newPath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	return h.LinkContext(context.Background(), project, existingPath, newPath)
 }
 
-func (h *StorHub) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMetadata, error) {
+func (h *StorHub) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	return h.posixService().LinkContext(ctx, project, existingPath, newPath)
 }
 

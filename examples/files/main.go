@@ -29,15 +29,15 @@ func main() {
 	output := filepath.Join(workspace, "downloaded.txt")
 	_ = os.WriteFile(inputA, []byte("hello from storhub\n"), 0o644)
 	_ = os.WriteFile(inputB, []byte("hello from storhub v2\n"), 0o644)
-	meta, err := hub.UploadFile(project, "docs/readme.txt", inputA)
+	_, err = hub.UploadFile(project, "docs/readme.txt", inputA)
 	if err != nil {
 		log.Fatal(err)
 	}
-	meta, err = hub.ReplaceFile(project, meta.Name, inputB)
+	_, err = hub.ReplaceFile(project, "docs/readme.txt", inputB)
 	if err != nil {
 		log.Fatal(err)
 	}
-	meta, err = hub.PatchFile(project, meta.Name, 6, 4, []byte("there"))
+	_, err = hub.PatchFile(project, "docs/readme.txt", 6, 4, []byte("there"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -49,8 +49,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := hub.DownloadFile(project, meta.Name, output); err != nil {
+	if err := hub.DownloadFile(project, "docs/readme.txt", output); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("project=%s files=%d releases=%d chunks=%d\n", project, len(files), len(releases), len(meta.Chunks))
+	fmt.Printf("project=%s files=%d releases=%d\n", project, len(files), len(releases))
 }

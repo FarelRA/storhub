@@ -10,98 +10,80 @@ import (
 )
 
 type ChunkInfo struct {
-	Name        string `json:"name"`
-	Size        int64  `json:"size"`
-	Index       int    `json:"index"`
-	Offset      int64  `json:"offset"`
-	Release     string `json:"release"`
-	AssetOffset int64  `json:"asset_offset"`
-	AssetID     int64  `json:"asset_id"`
+	Size        int64  `json:"s"`
+	Offset      int64  `json:"o"`
+	Release     string `json:"r"`
+	AssetOffset int64  `json:"ao"`
+	AssetID     int64  `json:"a"`
 }
 
-type FileMetadata struct {
-	Name          string            `json:"name"`
-	Kind          NodeKind          `json:"kind,omitempty"`
-	Size          int64             `json:"size"`
-	Chunks        []ChunkInfo       `json:"chunks"`
-	Release       string            `json:"release"`
-	UploadedAt    time.Time         `json:"uploaded_at"`
-	ModifiedAt    time.Time         `json:"modified_at,omitempty"`
-	AccessedAt    time.Time         `json:"accessed_at,omitempty"`
-	ChangedAt     time.Time         `json:"changed_at,omitempty"`
-	Mode          uint32            `json:"mode,omitempty"`
-	UID           uint32            `json:"uid,omitempty"`
-	GID           uint32            `json:"gid,omitempty"`
-	Inode         uint64            `json:"inode,omitempty"`
-	NLink         uint32            `json:"nlink,omitempty"`
-	SymlinkTarget string            `json:"symlink_target,omitempty"`
-	XAttrs        map[string]string `json:"xattrs,omitempty"`
+type FileMeta struct {
+	Chunks     []string          `json:"cs,omitempty"`
+	Size       int64             `json:"s"`
+	Symlink    string            `json:"sl,omitempty"`
+	UploadedAt time.Time         `json:"ua"`
+	ModifiedAt time.Time         `json:"ma,omitempty"`
+	AccessedAt time.Time         `json:"aa,omitempty"`
+	ChangedAt  time.Time         `json:"ca,omitempty"`
+	Mode       uint32            `json:"md,omitempty"`
+	UID        uint32            `json:"u,omitempty"`
+	GID        uint32            `json:"g,omitempty"`
+	Inode      uint64            `json:"i,omitempty"`
+	XAttrs     map[string]string `json:"x,omitempty"`
 }
 
-type DirectoryMetadata struct {
-	Path       string            `json:"path"`
-	CreatedAt  time.Time         `json:"created_at"`
-	ModifiedAt time.Time         `json:"modified_at"`
-	AccessedAt time.Time         `json:"accessed_at,omitempty"`
-	ChangedAt  time.Time         `json:"changed_at,omitempty"`
-	Mode       uint32            `json:"mode,omitempty"`
-	UID        uint32            `json:"uid,omitempty"`
-	GID        uint32            `json:"gid,omitempty"`
-	Inode      uint64            `json:"inode,omitempty"`
-	NLink      uint32            `json:"nlink,omitempty"`
-	XAttrs     map[string]string `json:"xattrs,omitempty"`
-}
-
-func (d DirectoryMetadata) Clone() DirectoryMetadata {
-	clone := d
-	clone.XAttrs = cloneStringMap(d.XAttrs)
-	return clone
-}
-
-func (f FileMetadata) Clone() FileMetadata {
+func (f FileMeta) Clone() FileMeta {
 	clone := f
 	if f.Chunks != nil {
-		clone.Chunks = append([]ChunkInfo(nil), f.Chunks...)
+		clone.Chunks = append([]string(nil), f.Chunks...)
 	}
 	clone.XAttrs = cloneStringMap(f.XAttrs)
 	return clone
 }
 
-type ReleaseMetadata struct {
-	Tag        string         `json:"tag"`
-	AssetCount int            `json:"asset_count"`
-	Files      []FileMetadata `json:"files"`
-	CreatedAt  time.Time      `json:"created_at"`
+type DirMeta struct {
+	CreatedAt  time.Time         `json:"ca"`
+	ModifiedAt time.Time         `json:"ma"`
+	AccessedAt time.Time         `json:"aa,omitempty"`
+	ChangedAt  time.Time         `json:"cha,omitempty"`
+	Mode       uint32            `json:"m,omitempty"`
+	UID        uint32            `json:"u,omitempty"`
+	GID        uint32            `json:"g,omitempty"`
+	Inode      uint64            `json:"i,omitempty"`
+	XAttrs     map[string]string `json:"x,omitempty"`
 }
 
-func (r ReleaseMetadata) Clone() ReleaseMetadata {
-	clone := r
-	if r.Files != nil {
-		clone.Files = make([]FileMetadata, len(r.Files))
-		for i := range r.Files {
-			clone.Files[i] = r.Files[i].Clone()
-		}
-	}
+func (d DirMeta) Clone() DirMeta {
+	clone := d
+	clone.XAttrs = cloneStringMap(d.XAttrs)
 	return clone
 }
 
+type ReleaseRef struct {
+	AssetCount int       `json:"ac"`
+	CreatedAt  time.Time `json:"ca"`
+}
+
+func (r ReleaseRef) Clone() ReleaseRef {
+	return r
+}
+
 type RepoMetadata struct {
-	Version      int                            `json:"version"`
-	Project      string                         `json:"project"`
-	NextInode    uint64                         `json:"next_inode,omitempty"`
-	Root         RootMetadata                   `json:"root"`
-	TotalFiles   int                            `json:"total_files"`
-	TotalSize    int64                          `json:"total_size"`
-	Directories  []DirectoryMetadata            `json:"directories"`
-	Releases     []ReleaseMetadata              `json:"releases"`
-	LastModified time.Time                      `json:"last_modified"`
-	fileIndex    map[string]*FileMetadata       `json:"-"`
-	releaseIndex map[string]*ReleaseMetadata    `json:"-"`
-	dirIndex     map[string]*DirectoryMetadata  `json:"-"`
-	childDirs    map[string][]DirectoryMetadata `json:"-"`
-	childFiles   map[string][]FileMetadata      `json:"-"`
-	filesByInode map[uint64][]FileMetadata      `json:"-"`
-	allFiles     []FileMetadata                 `json:"-"`
+	Version    int                   `json:"v"`
+	Project    string                `json:"p"`
+	TotalFiles int                   `json:"tf"`
+	TotalSize  int64                 `json:"ts"`
+	LastMod    time.Time             `json:"lm"`
+	Root       DirMeta               `json:"rt"`
+	Dirs       map[string]DirMeta    `json:"d"`
+	Files      map[string]FileMeta   `json:"f"`
+	Chunks     map[string]ChunkInfo  `json:"c"`
+	Releases   map[string]ReleaseRef `json:"r"`
+
+	NextInode    uint64              `json:"-"`
+	filesByInode map[uint64][]string `json:"-"`
+	childDirs    map[string][]string `json:"-"`
+	childFiles   map[string][]string `json:"-"`
 }
 
 type MetadataRevision struct {
@@ -114,47 +96,79 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().UTC()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
-		Version:     1,
-		Project:     project,
-		NextInode:   2,
-		Root:        RootMetadata{Inode: 1, Mode: defaultDirMode(), UID: uid, GID: gid, NLink: 2, CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now},
-		Directories: make([]DirectoryMetadata, 0),
-		Releases:    make([]ReleaseMetadata, 0),
-	}
-}
-
-func NewReleaseMetadata(tag string, createdAt time.Time) *ReleaseMetadata {
-	return &ReleaseMetadata{
-		Tag:       tag,
-		Files:     make([]FileMetadata, 0),
-		CreatedAt: createdAt.UTC(),
+		Version:   2,
+		Project:   project,
+		NextInode: 2,
+		Root: DirMeta{
+			Inode: 1, Mode: defaultDirMode(), UID: uid, GID: gid,
+			CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
+		},
+		Dirs:     make(map[string]DirMeta),
+		Files:    make(map[string]FileMeta),
+		Chunks:   make(map[string]ChunkInfo),
+		Releases: make(map[string]ReleaseRef),
 	}
 }
 
 func (m RepoMetadata) Clone() RepoMetadata {
 	clone := m
-	if m.Directories != nil {
-		clone.Directories = append([]DirectoryMetadata(nil), m.Directories...)
-	}
-	if m.Releases != nil {
-		clone.Releases = make([]ReleaseMetadata, len(m.Releases))
-		for i := range m.Releases {
-			clone.Releases[i] = m.Releases[i].Clone()
-		}
-	}
-	clone.fileIndex = nil
-	clone.releaseIndex = nil
-	clone.dirIndex = nil
+	clone.Dirs = cloneDirMetaMap(m.Dirs)
+	clone.Files = cloneFileMetaMap(m.Files)
+	clone.Chunks = cloneChunkInfoMap(m.Chunks)
+	clone.Releases = cloneReleaseRefMap(m.Releases)
+	clone.Root = m.Root.Clone()
+	clone.filesByInode = nil
 	clone.childDirs = nil
 	clone.childFiles = nil
-	clone.filesByInode = nil
-	clone.allFiles = nil
-	clone.Root = m.Root.Clone()
 	return clone
 }
 
+func cloneDirMetaMap(src map[string]DirMeta) map[string]DirMeta {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]DirMeta, len(src))
+	for k, v := range src {
+		dst[k] = v.Clone()
+	}
+	return dst
+}
+
+func cloneFileMetaMap(src map[string]FileMeta) map[string]FileMeta {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]FileMeta, len(src))
+	for k, v := range src {
+		dst[k] = v.Clone()
+	}
+	return dst
+}
+
+func cloneChunkInfoMap(src map[string]ChunkInfo) map[string]ChunkInfo {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]ChunkInfo, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneReleaseRefMap(src map[string]ReleaseRef) map[string]ReleaseRef {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]ReleaseRef, len(src))
+	for k, v := range src {
+		dst[k] = v.Clone()
+	}
+	return dst
+}
+
 func (m *RepoMetadata) ToJSON() ([]byte, error) {
-	data, err := json.MarshalIndent(m, "", "  ")
+	data, err := json.Marshal(m)
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -162,153 +176,89 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 }
 
 func (m *RepoMetadata) FromJSON(data []byte) error {
+	var raw struct {
+		Version int `json:"v"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Version < 2 {
+		return m.migrateV1(data)
+	}
 	return json.Unmarshal(data, m)
 }
 
 func (m *RepoMetadata) Normalize(project string, now time.Time) {
-	m.Version = 1
+	m.Version = 2
 	m.Project = chooseNonEmpty(m.Project, project)
 	m.normalizeRoot(now)
+	if m.Dirs == nil {
+		m.Dirs = make(map[string]DirMeta)
+	}
+	if m.Files == nil {
+		m.Files = make(map[string]FileMeta)
+	}
+	if m.Chunks == nil {
+		m.Chunks = make(map[string]ChunkInfo)
+	}
 	if m.Releases == nil {
-		m.Releases = make([]ReleaseMetadata, 0)
+		m.Releases = make(map[string]ReleaseRef)
 	}
-	if m.Directories == nil {
-		m.Directories = make([]DirectoryMetadata, 0)
+	for path, dir := range m.Dirs {
+		dir.Normalize(now)
+		m.Dirs[path] = dir
 	}
-	for i := range m.Directories {
-		m.Directories[i].Normalize(now)
+	for path, file := range m.Files {
+		file.Normalize(now)
+		m.Files[path] = file
 	}
-	for i := range m.Releases {
-		m.Releases[i].Normalize(m.Releases[i].Tag, now)
+	nowUTC := now.UTC()
+	for tag, ref := range m.Releases {
+		if ref.CreatedAt.IsZero() {
+			ref.CreatedAt = nowUTC
+			m.Releases[tag] = ref
+		}
 	}
 	m.RecomputeStats()
-	stableSortReleases(m.Releases)
-	if m.LastModified.IsZero() {
-		m.LastModified = now.UTC()
+	if m.LastMod.IsZero() {
+		m.LastMod = nowUTC
 	}
-	m.rebuildIndexes()
+	m.RebuildIndexes()
 }
 
 func (m *RepoMetadata) RecomputeStats() {
 	totalFiles := 0
 	totalSize := int64(0)
-	m.normalizeRoot(chooseNonZeroTime(m.LastModified, time.Now().UTC()))
-	assetRefs := make(map[string]map[int64]struct{})
-	referencedReleases := make(map[string]struct{})
-	for _, release := range m.Releases {
-		for _, file := range release.Files {
-			for _, chunk := range file.Chunks {
-				tag := chooseNonEmpty(chunk.Release, file.Release, release.Tag)
-				if tag == "" {
-					continue
-				}
-				if assetRefs[tag] == nil {
-					assetRefs[tag] = make(map[int64]struct{})
-				}
-				assetRefs[tag][chunk.AssetID] = struct{}{}
-				referencedReleases[tag] = struct{}{}
-			}
+	assetCounts := make(map[string]int)
+
+	for _, chunk := range m.Chunks {
+		if chunk.Release != "" {
+			assetCounts[chunk.Release]++
 		}
 	}
-	filtered := m.Releases[:0]
-	for _, release := range m.Releases {
-		release.RecomputeStats()
-		release.AssetCount = len(assetRefs[release.Tag])
-		if len(release.Files) == 0 && release.AssetCount == 0 {
-			continue
-		}
-		totalFiles += len(release.Files)
-		for _, file := range release.Files {
+
+	for _, file := range m.Files {
+		if file.Symlink == "" {
+			totalFiles++
 			totalSize += file.Size
 		}
-		filtered = append(filtered, release)
 	}
-	for tag := range referencedReleases {
-		if containsRelease(filtered, tag) {
-			continue
-		}
-		filtered = append(filtered, ReleaseMetadata{Tag: tag, AssetCount: len(assetRefs[tag]), Files: make([]FileMetadata, 0)})
+
+	for tag := range m.Releases {
+		ref := m.Releases[tag]
+		ref.AssetCount = assetCounts[tag]
+		m.Releases[tag] = ref
 	}
-	m.Releases = filtered
+
 	m.TotalFiles = totalFiles
 	m.TotalSize = totalSize
-	m.recomputeLinkCounts()
-	stableSortDirectories(m.Directories)
-	stableSortReleases(m.Releases)
-	for i := range m.Releases {
-		stableSortFiles(m.Releases[i].Files)
-	}
 	if m.Version == 0 {
-		m.Version = 1
+		m.Version = 2
 	}
-	m.rebuildIndexes()
+	m.RebuildIndexes()
 }
 
-func (r *ReleaseMetadata) Normalize(tag string, createdAt time.Time) {
-	r.Tag = chooseNonEmpty(r.Tag, tag)
-	if r.Files == nil {
-		r.Files = make([]FileMetadata, 0)
-	}
-	for i := range r.Files {
-		r.Files[i].Normalize(r.Tag)
-	}
-	if r.CreatedAt.IsZero() {
-		r.CreatedAt = createdAt.UTC()
-	}
-	r.RecomputeStats()
-}
-
-func (f *FileMetadata) Normalize(release string) {
-	now := time.Now().UTC()
-	uid, gid := defaultOwnerIDs()
-	f.Release = chooseNonEmpty(f.Release, release)
-	f.Name = normalizeStoredPath(f.Name)
-	if f.Kind == "" {
-		f.Kind = NodeKindFile
-	}
-	if f.Chunks == nil {
-		f.Chunks = make([]ChunkInfo, 0)
-	}
-	if f.Mode == 0 {
-		f.Mode = defaultFileMode(f.Kind)
-	}
-	if f.UID == 0 && uid != 0 {
-		f.UID = uid
-	}
-	if f.GID == 0 && gid != 0 {
-		f.GID = gid
-	}
-	if f.UploadedAt.IsZero() {
-		f.UploadedAt = now
-	}
-	if f.ModifiedAt.IsZero() {
-		f.ModifiedAt = f.UploadedAt.UTC()
-	}
-	if f.AccessedAt.IsZero() {
-		f.AccessedAt = f.ModifiedAt.UTC()
-	}
-	if f.ChangedAt.IsZero() {
-		f.ChangedAt = f.ModifiedAt.UTC()
-	}
-	if f.Inode == 0 {
-		f.Inode = 0
-	}
-	if f.NLink == 0 {
-		f.NLink = 1
-	}
-	f.XAttrs = normalizeXAttrs(f.XAttrs)
-	for i := range f.Chunks {
-		f.Chunks[i].Release = chooseNonEmpty(f.Chunks[i].Release, f.Release)
-	}
-	if f.Kind == NodeKindSymlink {
-		f.Chunks = make([]ChunkInfo, 0)
-		f.Size = int64(len([]byte(f.SymlinkTarget)))
-	}
-	stableSortChunks(f.Chunks)
-}
-
-func (d *DirectoryMetadata) Normalize(now time.Time) {
-	d.Path = normalizeStoredPath(d.Path)
+func (d *DirMeta) Normalize(now time.Time) {
 	uid, gid := defaultOwnerIDs()
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
@@ -323,52 +273,77 @@ func (d *DirectoryMetadata) Normalize(now time.Time) {
 		d.CreatedAt = now.UTC()
 	}
 	if d.ModifiedAt.IsZero() {
-		d.ModifiedAt = d.CreatedAt.UTC()
+		d.ModifiedAt = d.CreatedAt
 	}
 	if d.AccessedAt.IsZero() {
-		d.AccessedAt = d.ModifiedAt.UTC()
+		d.AccessedAt = d.ModifiedAt
 	}
 	if d.ChangedAt.IsZero() {
-		d.ChangedAt = d.ModifiedAt.UTC()
-	}
-	if d.NLink == 0 {
-		d.NLink = 2
+		d.ChangedAt = d.ModifiedAt
 	}
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
-func (r *ReleaseMetadata) RecomputeStats() {
-	filtered := r.Files[:0]
-	for _, file := range r.Files {
-		if strings.TrimSpace(file.Name) == "" {
-			continue
-		}
-		file.Normalize(r.Tag)
-		filtered = append(filtered, file)
+func (f *FileMeta) Normalize(now time.Time) {
+	uid, gid := defaultOwnerIDs()
+	if f.Mode == 0 {
+		f.Mode = defaultFileMode(NodeKindFile)
 	}
-	r.Files = filtered
-	stableSortFiles(r.Files)
+	if f.UID == 0 && uid != 0 {
+		f.UID = uid
+	}
+	if f.GID == 0 && gid != 0 {
+		f.GID = gid
+	}
+	if f.UploadedAt.IsZero() {
+		f.UploadedAt = now.UTC()
+	}
+	if f.ModifiedAt.IsZero() {
+		f.ModifiedAt = f.UploadedAt
+	}
+	if f.AccessedAt.IsZero() {
+		f.AccessedAt = f.ModifiedAt
+	}
+	if f.ChangedAt.IsZero() {
+		f.ChangedAt = f.ModifiedAt
+	}
+	if f.Inode == 0 {
+		f.Inode = 0
+	}
+	if f.Chunks == nil {
+		f.Chunks = make([]string, 0)
+	}
+	stableSortChunkNames(f.Chunks)
+	if f.Symlink != "" {
+		f.Chunks = make([]string, 0)
+		f.Size = int64(len([]byte(f.Symlink)))
+	}
+	f.XAttrs = normalizeXAttrs(f.XAttrs)
 }
 
-func (m *RepoMetadata) GetRelease(tag string) *ReleaseMetadata {
-	m.ensureIndexes()
-	return m.releaseIndex[tag]
+func (m *RepoMetadata) GetRelease(tag string) *ReleaseRef {
+	if ref, ok := m.Releases[tag]; ok {
+		return &ref
+	}
+	return nil
 }
 
 func (m *RepoMetadata) HasDirectory(path string) bool {
 	if path == "" {
 		return true
 	}
-	m.ensureIndexes()
-	return m.dirIndex[path] != nil
+	_, ok := m.Dirs[path]
+	return ok
 }
 
-func (m *RepoMetadata) GetDirectory(path string) *DirectoryMetadata {
+func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
 	if path == "" {
 		return nil
 	}
-	m.ensureIndexes()
-	return m.dirIndex[path]
+	if dir, ok := m.Dirs[path]; ok {
+		return &dir
+	}
+	return nil
 }
 
 func (m *RepoMetadata) EnsureDirectory(path string, now time.Time) {
@@ -381,188 +356,176 @@ func (m *RepoMetadata) EnsureDirectory(path string, now time.Time) {
 		m.EnsureDirectory(parent, now)
 	}
 	uid, gid := defaultOwnerIDs()
-	m.Directories = append(m.Directories, DirectoryMetadata{Path: path, CreatedAt: now.UTC(), ModifiedAt: now.UTC(), AccessedAt: now.UTC(), ChangedAt: now.UTC(), Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode()})
-	stableSortDirectories(m.Directories)
+	nowUTC := now.UTC()
+	m.Dirs[path] = DirMeta{
+		CreatedAt: nowUTC, ModifiedAt: nowUTC, AccessedAt: nowUTC, ChangedAt: nowUTC,
+		Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode(),
+	}
 	m.invalidateIndexes()
 }
 
 func (m *RepoMetadata) RemoveDirectory(path string) bool {
 	path = normalizeStoredPath(path)
-	removed := false
-	filtered := m.Directories[:0]
-	for _, dir := range m.Directories {
-		if dir.Path == path {
-			removed = true
-			continue
-		}
-		filtered = append(filtered, dir)
+	if _, ok := m.Dirs[path]; !ok {
+		return false
 	}
-	m.Directories = filtered
+	delete(m.Dirs, path)
 	m.invalidateIndexes()
-	return removed
+	return true
 }
 
-func (m *RepoMetadata) DirectoryChildren(path string) ([]DirectoryMetadata, []FileMetadata) {
+func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	path = normalizeStoredPath(path)
-	m.ensureIndexes()
-	dirs := append([]DirectoryMetadata(nil), m.childDirs[path]...)
-	files := append([]FileMetadata(nil), m.childFiles[path]...)
-	return dirs, files
+	m.RebuildIndexes()
+	return m.childDirs[path], m.childFiles[path]
 }
 
-func (m *RepoMetadata) EnsureRelease(tag string, createdAt time.Time) *ReleaseMetadata {
-	if release := m.GetRelease(tag); release != nil {
-		return release
+func (m *RepoMetadata) EnsureRelease(tag string, createdAt time.Time) *ReleaseRef {
+	if ref, ok := m.Releases[tag]; ok {
+		return &ref
 	}
-	release := NewReleaseMetadata(tag, createdAt)
-	m.Releases = append(m.Releases, *release)
-	stableSortReleases(m.Releases)
+	m.Releases[tag] = ReleaseRef{CreatedAt: createdAt.UTC()}
 	m.invalidateIndexes()
-	return m.GetRelease(tag)
+	ref := m.Releases[tag]
+	return &ref
 }
 
-func (m *RepoMetadata) UpsertFile(file FileMetadata, createdAt time.Time) {
-	if parent := parentPath(file.Name); parent != "" {
+func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt time.Time) {
+	name = normalizeStoredPath(name)
+	if parent := parentPath(name); parent != "" {
 		m.EnsureDirectory(parent, createdAt)
 	}
-	if existing := m.FindFile(file.Name); existing != nil {
-		preserveFileIdentity(&file, existing, createdAt)
+	if existing, ok := m.Files[name]; ok {
+		preserveFileIdentity(&file, &existing, createdAt)
 	} else {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
-	m.RemoveFile(file.Name)
-	release := m.EnsureRelease(file.Release, createdAt)
-	release.UpsertFile(file)
-	m.RecomputeStats()
+	m.Files[name] = file
+	m.invalidateIndexes()
 }
 
-func (r *ReleaseMetadata) UpsertFile(file FileMetadata) {
-	for i := range r.Files {
-		if r.Files[i].Name == file.Name {
-			r.Files[i] = file
-			r.RecomputeStats()
-			return
-		}
-	}
-	r.Files = append(r.Files, file)
-	r.RecomputeStats()
-}
-
-func (r *ReleaseMetadata) GetFile(name string) *FileMetadata {
-	for i := range r.Files {
-		if r.Files[i].Name == name {
-			return &r.Files[i]
-		}
+func (m *RepoMetadata) FindFile(name string) *FileMeta {
+	name = normalizeStoredPath(name)
+	if file, ok := m.Files[name]; ok {
+		return &file
 	}
 	return nil
 }
 
-func (m *RepoMetadata) FindFile(name string) *FileMetadata {
-	m.ensureIndexes()
-	return m.fileIndex[name]
-}
-
-func (m *RepoMetadata) FindFilesByInode(inode uint64) []FileMetadata {
-	m.ensureIndexes()
-	files := m.filesByInode[inode]
-	return append([]FileMetadata(nil), files...)
+func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
+	m.RebuildIndexes()
+	names := m.filesByInode[inode]
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
 }
 
 func (m *RepoMetadata) RemoveFile(name string) bool {
-	removed := false
-	for i := range m.Releases {
-		filtered := m.Releases[i].Files[:0]
-		for _, file := range m.Releases[i].Files {
-			if file.Name == name {
-				removed = true
-				continue
-			}
-			filtered = append(filtered, file)
-		}
-		m.Releases[i].Files = filtered
-		m.Releases[i].RecomputeStats()
+	name = normalizeStoredPath(name)
+	if _, ok := m.Files[name]; !ok {
+		return false
 	}
-	m.RecomputeStats()
+	delete(m.Files, name)
 	m.invalidateIndexes()
-	return removed
+	return true
 }
 
 func (m *RepoMetadata) RemoveRelease(tag string) bool {
-	removed := false
-	filtered := m.Releases[:0]
-	for _, release := range m.Releases {
-		if release.Tag == tag {
-			removed = true
-			continue
-		}
-		filtered = append(filtered, release)
+	if _, ok := m.Releases[tag]; !ok {
+		return false
 	}
-	m.Releases = filtered
-	m.RecomputeStats()
+	delete(m.Releases, tag)
 	m.invalidateIndexes()
-	return removed
+	return true
 }
 
-func (m *RepoMetadata) AllFiles() []FileMetadata {
-	m.ensureIndexes()
-	return append([]FileMetadata(nil), m.allFiles...)
+func (m *RepoMetadata) AllFiles() []FileMeta {
+	names := make([]string, 0, len(m.Files))
+	for name := range m.Files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	files := make([]FileMeta, len(names))
+	for i, name := range names {
+		files[i] = m.Files[name]
+	}
+	return files
+}
+
+func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
+	file, ok := m.Files[name]
+	if !ok {
+		return nil
+	}
+	chunks := make([]ChunkInfo, 0, len(file.Chunks))
+	for _, cname := range file.Chunks {
+		if c, ok := m.Chunks[cname]; ok {
+			chunks = append(chunks, c)
+		}
+	}
+	return chunks
+}
+
+func (m *RepoMetadata) DirNLink(path string) int {
+	count := 2
+	for _, dirPath := range m.childDirs[path] {
+		if dirPath != path {
+			count++
+		}
+	}
+	rootDirCount := 0
+	for dirPath := range m.Dirs {
+		if parentPath(dirPath) == path {
+			rootDirCount++
+		}
+	}
+	return count + rootDirCount
+}
+
+func (m *RepoMetadata) FileNLink(name string) int {
+	file, ok := m.Files[name]
+	if !ok {
+		return 0
+	}
+	return m.NLink(file.Inode)
 }
 
 func (m *RepoMetadata) invalidateIndexes() {
-	m.fileIndex = nil
-	m.releaseIndex = nil
-	m.dirIndex = nil
+	m.filesByInode = nil
 	m.childDirs = nil
 	m.childFiles = nil
-	m.filesByInode = nil
-	m.allFiles = nil
 }
 
-func (m *RepoMetadata) ensureIndexes() {
-	if m.fileIndex != nil && m.releaseIndex != nil && m.dirIndex != nil && m.childDirs != nil && m.childFiles != nil && m.filesByInode != nil && m.allFiles != nil {
-		return
-	}
-	m.rebuildIndexes()
-}
+func (m *RepoMetadata) RebuildIndexes() {
+	m.filesByInode = make(map[uint64][]string, len(m.Files))
+	m.childDirs = make(map[string][]string, len(m.Dirs)+1)
+	m.childFiles = make(map[string][]string, len(m.Files)+1)
 
-func (m *RepoMetadata) rebuildIndexes() {
-	m.fileIndex = make(map[string]*FileMetadata, m.TotalFiles)
-	m.releaseIndex = make(map[string]*ReleaseMetadata, len(m.Releases))
-	m.dirIndex = make(map[string]*DirectoryMetadata, len(m.Directories))
-	m.childDirs = make(map[string][]DirectoryMetadata, len(m.Directories)+1)
-	m.childFiles = make(map[string][]FileMetadata, len(m.Releases)+1)
-	m.filesByInode = make(map[uint64][]FileMetadata, len(m.Releases)+1)
-	m.allFiles = make([]FileMetadata, 0, m.TotalFiles)
-	for i := range m.Directories {
-		dir := &m.Directories[i]
-		m.dirIndex[dir.Path] = dir
-		parent := parentPath(dir.Path)
-		m.childDirs[parent] = append(m.childDirs[parent], dir.Clone())
+	for path := range m.Dirs {
+		parent := parentPath(path)
+		m.childDirs[parent] = append(m.childDirs[parent], path)
 	}
-	for i := range m.Releases {
-		release := &m.Releases[i]
-		m.releaseIndex[release.Tag] = release
-		for j := range release.Files {
-			file := &release.Files[j]
-			m.fileIndex[file.Name] = file
-			m.childFiles[parentPath(file.Name)] = append(m.childFiles[parentPath(file.Name)], file.Clone())
-			m.filesByInode[file.Inode] = append(m.filesByInode[file.Inode], file.Clone())
-			m.allFiles = append(m.allFiles, file.Clone())
-		}
+	for path, file := range m.Files {
+		m.filesByInode[file.Inode] = append(m.filesByInode[file.Inode], path)
+		parent := parentPath(path)
+		m.childFiles[parent] = append(m.childFiles[parent], path)
 	}
 	for parent := range m.childDirs {
-		stableSortDirectories(m.childDirs[parent])
+		stableSortStrings(m.childDirs[parent])
 	}
 	for parent := range m.childFiles {
-		stableSortFiles(m.childFiles[parent])
+		stableSortStrings(m.childFiles[parent])
 	}
-	stableSortFiles(m.allFiles)
 }
 
-func preserveFileIdentity(file *FileMetadata, existing *FileMetadata, now time.Time) {
-	if file.Kind == "" {
-		file.Kind = existing.Kind
+func (m *RepoMetadata) NLink(inode uint64) int {
+	if m.filesByInode == nil {
+		m.RebuildIndexes()
 	}
+	return len(m.filesByInode[inode])
+}
+
+func preserveFileIdentity(file *FileMeta, existing *FileMeta, now time.Time) {
 	if file.Inode == 0 {
 		file.Inode = existing.Inode
 	}
@@ -590,21 +553,18 @@ func preserveFileIdentity(file *FileMetadata, existing *FileMetadata, now time.T
 	if len(file.XAttrs) == 0 && len(existing.XAttrs) > 0 {
 		file.XAttrs = cloneStringMap(existing.XAttrs)
 	}
-	if file.SymlinkTarget == "" && existing.Kind == NodeKindSymlink {
-		file.SymlinkTarget = existing.SymlinkTarget
+	if file.Symlink == "" && existing.Symlink != "" {
+		file.Symlink = existing.Symlink
 	}
 }
 
-func initializeNewFileIdentity(meta *RepoMetadata, file *FileMetadata, now time.Time) {
+func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now time.Time) {
 	uid, gid := defaultOwnerIDs()
-	if file.Kind == "" {
-		file.Kind = NodeKindFile
-	}
 	if file.Inode == 0 {
 		file.Inode = meta.allocateInode()
 	}
 	if file.Mode == 0 {
-		file.Mode = defaultFileMode(file.Kind)
+		file.Mode = defaultFileMode(NodeKindFile)
 	}
 	if file.UID == 0 && uid != 0 {
 		file.UID = uid
@@ -616,13 +576,13 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMetadata, now time.
 		file.UploadedAt = now.UTC()
 	}
 	if file.ModifiedAt.IsZero() {
-		file.ModifiedAt = file.UploadedAt.UTC()
+		file.ModifiedAt = file.UploadedAt
 	}
 	if file.AccessedAt.IsZero() {
-		file.AccessedAt = file.ModifiedAt.UTC()
+		file.AccessedAt = file.ModifiedAt
 	}
 	if file.ChangedAt.IsZero() {
-		file.ChangedAt = file.ModifiedAt.UTC()
+		file.ChangedAt = file.ModifiedAt
 	}
 }
 
@@ -644,29 +604,25 @@ func (m *RepoMetadata) normalizeRoot(now time.Time) {
 		m.Root.CreatedAt = now.UTC()
 	}
 	if m.Root.ModifiedAt.IsZero() {
-		m.Root.ModifiedAt = m.Root.CreatedAt.UTC()
+		m.Root.ModifiedAt = m.Root.CreatedAt
 	}
 	if m.Root.AccessedAt.IsZero() {
-		m.Root.AccessedAt = m.Root.ModifiedAt.UTC()
+		m.Root.AccessedAt = m.Root.ModifiedAt
 	}
 	if m.Root.ChangedAt.IsZero() {
-		m.Root.ChangedAt = m.Root.ModifiedAt.UTC()
+		m.Root.ChangedAt = m.Root.ModifiedAt
 	}
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
-	if m.NextInode <= m.Root.Inode {
-		m.NextInode = m.Root.Inode + 1
-	}
+
 	maxInode := m.Root.Inode
-	for _, dir := range m.Directories {
+	for _, dir := range m.Dirs {
 		if dir.Inode > maxInode {
 			maxInode = dir.Inode
 		}
 	}
-	for _, release := range m.Releases {
-		for _, file := range release.Files {
-			if file.Inode > maxInode {
-				maxInode = file.Inode
-			}
+	for _, file := range m.Files {
+		if file.Inode > maxInode {
+			maxInode = file.Inode
 		}
 	}
 	if m.NextInode <= maxInode {
@@ -681,32 +637,6 @@ func (m *RepoMetadata) allocateInode() uint64 {
 	return ino
 }
 
-func (m *RepoMetadata) recomputeLinkCounts() {
-	childDirCounts := make(map[string]uint32, len(m.Directories)+1)
-	for i := range m.Directories {
-		childDirCounts[parentPath(m.Directories[i].Path)]++
-	}
-	for i := range m.Directories {
-		m.Directories[i].NLink = 2 + childDirCounts[m.Directories[i].Path]
-	}
-	m.Root.NLink = 2 + childDirCounts[""]
-	linkCounts := make(map[uint64]uint32)
-	for _, release := range m.Releases {
-		for _, file := range release.Files {
-			linkCounts[file.Inode]++
-		}
-	}
-	for i := range m.Releases {
-		for j := range m.Releases[i].Files {
-			count := linkCounts[m.Releases[i].Files[j].Inode]
-			if count == 0 {
-				count = 1
-			}
-			m.Releases[i].Files[j].NLink = count
-		}
-	}
-}
-
 func (m *RepoMetadata) Validate() error {
 	if strings.TrimSpace(m.Project) == "" {
 		return fmt.Errorf("metadata project is required")
@@ -714,212 +644,308 @@ func (m *RepoMetadata) Validate() error {
 	if m.Root.Inode == 0 {
 		return fmt.Errorf("metadata root inode is required")
 	}
-	seenReleases := make(map[string]struct{}, len(m.Releases))
-	assetRefs := make(map[string]map[int64]struct{})
-	totalFiles := 0
-	totalSize := int64(0)
-	seenDirs := make(map[string]struct{}, len(m.Directories))
+	if m.Files == nil {
+		return fmt.Errorf("metadata files map is nil")
+	}
+	if m.Chunks == nil {
+		return fmt.Errorf("metadata chunks map is nil")
+	}
+	if m.Releases == nil {
+		return fmt.Errorf("metadata releases map is nil")
+	}
+	if m.Dirs == nil {
+		return fmt.Errorf("metadata dirs map is nil")
+	}
+
+	seenDirs := map[string]struct{}{}
 	seenInodes := map[uint64]struct{}{m.Root.Inode: {}}
-	for _, dir := range m.Directories {
+
+	for path, dir := range m.Dirs {
 		if err := dir.Validate(); err != nil {
-			return err
+			return fmt.Errorf("directory %s: %w", path, err)
 		}
-		if _, ok := seenDirs[dir.Path]; ok {
-			return fmt.Errorf("duplicate directory: %s", dir.Path)
+		if _, ok := seenDirs[path]; ok {
+			return fmt.Errorf("duplicate directory: %s", path)
 		}
-		seenDirs[dir.Path] = struct{}{}
+		seenDirs[path] = struct{}{}
 		if _, ok := seenInodes[dir.Inode]; ok {
 			return fmt.Errorf("duplicate inode %d", dir.Inode)
 		}
 		seenInodes[dir.Inode] = struct{}{}
-		if parent := parentPath(dir.Path); parent != "" {
-			if _, ok := seenDirs[parent]; !ok {
-				return fmt.Errorf("directory %s missing parent %s", dir.Path, parent)
+		if parent := parentPath(path); parent != "" {
+			if _, ok := m.Dirs[parent]; !ok {
+				return fmt.Errorf("directory %s missing parent %s", path, parent)
 			}
 		}
 	}
-	fileInodes := make(map[uint64]NodeKind)
-	for _, release := range m.Releases {
-		if err := release.Validate(); err != nil {
-			return err
+
+	totalFiles := 0
+	totalSize := int64(0)
+	for path, file := range m.Files {
+		if err := file.Validate(); err != nil {
+			return fmt.Errorf("file %s: %w", path, err)
 		}
-		if _, ok := seenReleases[release.Tag]; ok {
-			return fmt.Errorf("duplicate release tag: %s", release.Tag)
+		if file.Inode == 0 {
+			return fmt.Errorf("file %s inode is required", path)
 		}
-		seenReleases[release.Tag] = struct{}{}
-		totalFiles += len(release.Files)
-		for _, file := range release.Files {
-			if parent := parentPath(file.Name); parent != "" && !m.HasDirectory(parent) {
-				return fmt.Errorf("file %s missing parent directory %s", file.Name, parent)
+		if parent := parentPath(path); parent != "" {
+			if _, ok := m.Dirs[parent]; !ok {
+				return fmt.Errorf("file %s missing parent directory %s", path, parent)
 			}
-			if file.Inode == 0 {
-				return fmt.Errorf("file %s inode is required", file.Name)
-			}
-			if kind, ok := fileInodes[file.Inode]; ok && kind != file.Kind {
-				return fmt.Errorf("inode %d kind mismatch", file.Inode)
-			}
-			fileInodes[file.Inode] = file.Kind
+		}
+		if file.Symlink == "" {
+			totalFiles++
 			totalSize += file.Size
-			for _, chunk := range file.Chunks {
-				tag := chooseNonEmpty(chunk.Release, file.Release, release.Tag)
-				if assetRefs[tag] == nil {
-					assetRefs[tag] = make(map[int64]struct{})
-				}
-				assetRefs[tag][chunk.AssetID] = struct{}{}
+		}
+		seenChunk := map[string]struct{}{}
+		for _, chunkName := range file.Chunks {
+			if _, ok := m.Chunks[chunkName]; !ok {
+				return fmt.Errorf("file %s references missing chunk %s", path, chunkName)
 			}
+			if _, ok := seenChunk[chunkName]; ok {
+				return fmt.Errorf("file %s: duplicate chunk reference: %s", path, chunkName)
+			}
+			seenChunk[chunkName] = struct{}{}
+		}
+		chunks := make([]ChunkInfo, 0, len(file.Chunks))
+		for _, name := range file.Chunks {
+			chunks = append(chunks, m.Chunks[name])
+		}
+		sort.Slice(chunks, func(i, j int) bool {
+			return chunks[i].Offset < chunks[j].Offset
+		})
+		nextOffset := int64(0)
+		for _, c := range chunks {
+			if c.Offset < 0 {
+				return fmt.Errorf("file %s: chunk has negative offset %d", path, c.Offset)
+			}
+			if c.Offset > nextOffset {
+				return fmt.Errorf("file %s: chunk gap at offset %d (expected %d)", path, c.Offset, nextOffset)
+			}
+			if c.Offset < nextOffset {
+				return fmt.Errorf("file %s: chunk overlap at offset %d", path, c.Offset)
+			}
+			nextOffset = c.Offset + c.Size
+		}
+		if file.Symlink == "" && nextOffset > file.Size {
+			return fmt.Errorf("file %s: chunk data extends beyond file size (%d > %d)", path, nextOffset, file.Size)
 		}
 	}
+
 	if m.TotalFiles != totalFiles {
 		return fmt.Errorf("metadata total files mismatch: expected %d, got %d", totalFiles, m.TotalFiles)
 	}
 	if m.TotalSize != totalSize {
 		return fmt.Errorf("metadata total size mismatch: expected %d, got %d", totalSize, m.TotalSize)
 	}
-	for _, release := range m.Releases {
-		expected := len(assetRefs[release.Tag])
-		if release.AssetCount != expected {
-			return fmt.Errorf("release %s asset count mismatch: expected %d, got %d", release.Tag, expected, release.AssetCount)
+
+	for tag, ref := range m.Releases {
+		if ref.AssetCount < 0 {
+			return fmt.Errorf("release %s has negative asset count %d", tag, ref.AssetCount)
 		}
 	}
+
 	return nil
 }
 
-func (d DirectoryMetadata) Validate() error {
-	if d.Path == "" {
-		return fmt.Errorf("directory path is required")
-	}
+func (d DirMeta) Validate() error {
 	if d.Inode == 0 {
-		return fmt.Errorf("directory %s inode is required", d.Path)
+		return fmt.Errorf("directory inode is required")
 	}
 	return nil
 }
 
-func (r *ReleaseMetadata) Validate() error {
-	if strings.TrimSpace(r.Tag) == "" {
-		return fmt.Errorf("release tag is required")
-	}
-	seenFiles := make(map[string]struct{}, len(r.Files))
-	for _, file := range r.Files {
-		if err := file.Validate(r.Tag); err != nil {
-			return err
-		}
-		if _, ok := seenFiles[file.Name]; ok {
-			return fmt.Errorf("duplicate file in release %s: %s", r.Tag, file.Name)
-		}
-		seenFiles[file.Name] = struct{}{}
-	}
-	return nil
-}
-
-func (f *FileMetadata) Validate(release string) error {
-	if strings.TrimSpace(f.Name) == "" {
-		return fmt.Errorf("file name is required")
-	}
-	if f.Kind == "" {
-		f.Kind = NodeKindFile
-	}
+func (f FileMeta) Validate() error {
 	if f.Size < 0 {
-		return fmt.Errorf("file %s size must be non-negative", f.Name)
+		return fmt.Errorf("file size must be non-negative")
 	}
 	if f.Inode == 0 {
-		return fmt.Errorf("file %s inode is required", f.Name)
+		return fmt.Errorf("file inode is required")
 	}
-	if strings.TrimSpace(f.Release) == "" {
-		return fmt.Errorf("file %s release is required", f.Name)
-	}
-	if release != "" && f.Release != release {
-		return fmt.Errorf("file %s release mismatch: expected %s, got %s", f.Name, release, f.Release)
-	}
-	if f.Kind == NodeKindSymlink {
-		if f.SymlinkTarget == "" {
-			return fmt.Errorf("file %s symlink target is required", f.Name)
-		}
-		if f.Size != int64(len([]byte(f.SymlinkTarget))) {
-			return fmt.Errorf("file %s symlink size mismatch", f.Name)
+	if f.Symlink != "" {
+		if f.Size != int64(len([]byte(f.Symlink))) {
+			return fmt.Errorf("symlink size mismatch")
 		}
 		if len(f.Chunks) != 0 {
-			return fmt.Errorf("file %s symlink must not contain chunks", f.Name)
+			return fmt.Errorf("symlink must not contain chunks")
 		}
 		return nil
 	}
-	if len(f.Chunks) == 0 {
-		if f.Size == 0 {
-			return nil
-		}
-		return fmt.Errorf("file %s must contain at least one chunk", f.Name)
+	if len(f.Chunks) == 0 && f.Size > 0 {
+		return fmt.Errorf("file must contain at least one chunk reference")
 	}
-	chunks := append([]ChunkInfo(nil), f.Chunks...)
-	stableSortChunks(chunks)
-	seenIndexes := make(map[int]struct{}, len(chunks))
-	nextOffset := int64(0)
-	totalSize := int64(0)
-	for _, chunk := range chunks {
-		if chunk.Index < 0 {
-			return fmt.Errorf("file %s chunk index must be non-negative", f.Name)
+	seen := make(map[string]struct{}, len(f.Chunks))
+	for _, name := range f.Chunks {
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("duplicate chunk reference: %s", name)
 		}
-		if chunk.AssetID <= 0 {
-			return fmt.Errorf("file %s chunk %d asset id must be positive", f.Name, chunk.Index)
-		}
-		if strings.TrimSpace(chunk.Release) == "" {
-			return fmt.Errorf("file %s chunk %d release is required", f.Name, chunk.Index)
-		}
-		if chunk.AssetOffset < 0 {
-			return fmt.Errorf("file %s chunk %d asset offset must be non-negative", f.Name, chunk.Index)
-		}
-		if chunk.Size < 0 {
-			return fmt.Errorf("file %s chunk %d size must be non-negative", f.Name, chunk.Index)
-		}
-		if chunk.Offset != nextOffset {
-			return fmt.Errorf("file %s chunk %d offset mismatch: expected %d, got %d", f.Name, chunk.Index, nextOffset, chunk.Offset)
-		}
-		if _, ok := seenIndexes[chunk.Index]; ok {
-			return fmt.Errorf("file %s duplicate chunk index %d", f.Name, chunk.Index)
-		}
-		seenIndexes[chunk.Index] = struct{}{}
-		nextOffset += chunk.Size
-		totalSize += chunk.Size
-	}
-	if totalSize != f.Size {
-		return fmt.Errorf("file %s chunk size total mismatch: expected %d, got %d", f.Name, f.Size, totalSize)
+		seen[name] = struct{}{}
 	}
 	return nil
 }
 
-func stableSortReleases(releases []ReleaseMetadata) {
+func (m *RepoMetadata) migrateV1(data []byte) error {
+	var v1 struct {
+		Version     int    `json:"version"`
+		Project     string `json:"project"`
+		NextInode   uint64 `json:"next_inode,omitempty"`
+		TotalFiles  int    `json:"total_files"`
+		TotalSize   int64  `json:"total_size"`
+		LastModified time.Time `json:"last_modified"`
+		Root struct {
+			Inode      uint64            `json:"inode"`
+			Mode       uint32            `json:"mode"`
+			UID        uint32            `json:"uid"`
+			GID        uint32            `json:"gid"`
+			NLink      uint32            `json:"nlink"`
+			CreatedAt  time.Time         `json:"created_at"`
+			ModifiedAt time.Time         `json:"modified_at"`
+			AccessedAt time.Time         `json:"accessed_at"`
+			ChangedAt  time.Time         `json:"changed_at"`
+			XAttrs     map[string]string `json:"xattrs,omitempty"`
+		} `json:"root"`
+		Directories []struct {
+			Path       string            `json:"path"`
+			CreatedAt  time.Time         `json:"created_at"`
+			ModifiedAt time.Time         `json:"modified_at"`
+			AccessedAt time.Time         `json:"accessed_at,omitempty"`
+			ChangedAt  time.Time         `json:"changed_at,omitempty"`
+			Mode       uint32            `json:"mode,omitempty"`
+			UID        uint32            `json:"uid,omitempty"`
+			GID        uint32            `json:"gid,omitempty"`
+			Inode      uint64            `json:"inode,omitempty"`
+			NLink      uint32            `json:"nlink,omitempty"`
+			XAttrs     map[string]string `json:"xattrs,omitempty"`
+		} `json:"directories"`
+		Releases []struct {
+			Tag        string    `json:"tag"`
+			AssetCount int       `json:"asset_count"`
+			CreatedAt  time.Time `json:"created_at"`
+			Files      []struct {
+				Name          string            `json:"name"`
+				Kind          string            `json:"kind,omitempty"`
+				Size          int64             `json:"size"`
+				Release       string            `json:"release"`
+				UploadedAt    time.Time         `json:"uploaded_at"`
+				ModifiedAt    time.Time         `json:"modified_at,omitempty"`
+				AccessedAt    time.Time         `json:"accessed_at,omitempty"`
+				ChangedAt     time.Time         `json:"changed_at,omitempty"`
+				Mode          uint32            `json:"mode,omitempty"`
+				UID           uint32            `json:"uid,omitempty"`
+				GID           uint32            `json:"gid,omitempty"`
+				Inode         uint64            `json:"inode,omitempty"`
+				NLink         uint32            `json:"nlink,omitempty"`
+				SymlinkTarget string            `json:"symlink_target,omitempty"`
+				XAttrs        map[string]string `json:"xattrs,omitempty"`
+				Chunks        []struct {
+					Name        string `json:"name"`
+					Size        int64  `json:"size"`
+					Index       int    `json:"index"`
+					Offset      int64  `json:"offset"`
+					Release     string `json:"release"`
+					AssetOffset int64  `json:"asset_offset"`
+					AssetID     int64  `json:"asset_id"`
+				} `json:"chunks"`
+			} `json:"files"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(data, &v1); err != nil {
+		return fmt.Errorf("unmarshal v1 metadata: %w", err)
+	}
+
+	m.Version = 2
+	m.Project = v1.Project
+	m.TotalFiles = v1.TotalFiles
+	m.TotalSize = v1.TotalSize
+	m.LastMod = v1.LastModified
+	m.NextInode = v1.NextInode
+
+	m.Root = DirMeta{
+		CreatedAt: v1.Root.CreatedAt, ModifiedAt: v1.Root.ModifiedAt,
+		AccessedAt: v1.Root.AccessedAt, ChangedAt: v1.Root.ChangedAt,
+		Mode: v1.Root.Mode, UID: v1.Root.UID, GID: v1.Root.GID,
+		Inode: v1.Root.Inode, XAttrs: v1.Root.XAttrs,
+	}
+
+	m.Dirs = make(map[string]DirMeta, len(v1.Directories))
+	for _, d := range v1.Directories {
+		m.Dirs[d.Path] = DirMeta{
+			CreatedAt: d.CreatedAt, ModifiedAt: d.ModifiedAt,
+			AccessedAt: d.AccessedAt, ChangedAt: d.ChangedAt,
+			Mode: d.Mode, UID: d.UID, GID: d.GID,
+			Inode: d.Inode, XAttrs: d.XAttrs,
+		}
+	}
+
+	m.Files = make(map[string]FileMeta)
+	m.Chunks = make(map[string]ChunkInfo)
+	m.Releases = make(map[string]ReleaseRef)
+
+	for _, r := range v1.Releases {
+		ref := ReleaseRef{
+			AssetCount: r.AssetCount,
+			CreatedAt:  r.CreatedAt,
+		}
+		m.Releases[r.Tag] = ref
+
+		for _, f := range r.Files {
+			symlink := ""
+			if f.Kind == "symlink" || f.SymlinkTarget != "" {
+				symlink = f.SymlinkTarget
+			}
+
+			chunkNames := make([]string, 0, len(f.Chunks))
+			for _, c := range f.Chunks {
+				chunkNames = append(chunkNames, c.Name)
+				ci := ChunkInfo{
+					Size: c.Size, Offset: c.Offset, Release: chooseNonEmpty(c.Release, f.Release, r.Tag),
+					AssetOffset: c.AssetOffset, AssetID: c.AssetID,
+				}
+				m.Chunks[c.Name] = ci
+			}
+
+			fileMeta := FileMeta{
+				Chunks:     chunkNames,
+				Size:       f.Size,
+				Symlink:    symlink,
+				UploadedAt: f.UploadedAt,
+				ModifiedAt: f.ModifiedAt,
+				AccessedAt: f.AccessedAt,
+				ChangedAt:  f.ChangedAt,
+				Mode:       f.Mode,
+				UID:        f.UID,
+				GID:        f.GID,
+				Inode:      f.Inode,
+				XAttrs:     f.XAttrs,
+			}
+			if symlink != "" {
+				fileMeta.Size = int64(len(symlink))
+				fileMeta.Chunks = nil
+			}
+			m.Files[f.Name] = fileMeta
+		}
+	}
+
+	return nil
+}
+
+func stableSortReleases(releases []string) {
 	sort.SliceStable(releases, func(i, j int) bool {
-		left, lok := parseNumericReleaseTag(releases[i].Tag)
-		right, rok := parseNumericReleaseTag(releases[j].Tag)
+		left, lok := parseNumericReleaseTag(releases[i])
+		right, rok := parseNumericReleaseTag(releases[j])
 		if lok && rok && left != right {
 			return left < right
 		}
-		return releases[i].Tag < releases[j].Tag
+		return releases[i] < releases[j]
 	})
 }
 
-func stableSortFiles(files []FileMetadata) {
-	sort.SliceStable(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+func stableSortChunkNames(names []string) {
+	sort.SliceStable(names, func(i, j int) bool { return names[i] < names[j] })
 }
 
-func stableSortDirectories(dirs []DirectoryMetadata) {
-	sort.SliceStable(dirs, func(i, j int) bool { return dirs[i].Path < dirs[j].Path })
-}
-
-func stableSortChunks(chunks []ChunkInfo) {
-	sort.SliceStable(chunks, func(i, j int) bool {
-		if chunks[i].Offset != chunks[j].Offset {
-			return chunks[i].Offset < chunks[j].Offset
-		}
-		return chunks[i].Index < chunks[j].Index
-	})
-}
-
-func containsRelease(releases []ReleaseMetadata, tag string) bool {
-	for _, release := range releases {
-		if release.Tag == tag {
-			return true
-		}
-	}
-	return false
+func stableSortStrings(strs []string) {
+	sort.SliceStable(strs, func(i, j int) bool { return strs[i] < strs[j] })
 }
 
 func parseNumericReleaseTag(tag string) (int, bool) {

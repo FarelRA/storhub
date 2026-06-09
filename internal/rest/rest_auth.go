@@ -197,7 +197,7 @@ type authorizedClient struct {
 	principal *restPrincipal
 }
 
-func (c *authorizedClient) CreateFile(project, filePath string) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
 	if err := c.requireCreate(project, filePath); err != nil {
 		return nil, err
 	}
@@ -236,31 +236,31 @@ func (c *authorizedClient) Rename(project, oldPath, newPath string) error {
 	}
 	return c.base.Rename(project, oldPath, newPath)
 }
-func (c *authorizedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(project, filePath); err != nil {
 		return nil, err
 	}
 	return c.base.TruncateFile(project, filePath, size)
 }
-func (c *authorizedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(project, filePath); err != nil {
 		return nil, err
 	}
 	return c.base.AppendFile(project, filePath, data)
 }
-func (c *authorizedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(project, filePath); err != nil {
 		return nil, err
 	}
 	return c.base.WriteFileAt(project, filePath, offset, data)
 }
-func (c *authorizedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(project, filePath); err != nil {
 		return nil, err
 	}
 	return c.base.PatchFile(project, filePath, offset, deleteSize, edit)
 }
-func (c *authorizedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(project, filePath); err != nil {
 		return nil, err
 	}
@@ -308,7 +308,7 @@ func (c *authorizedClient) StatFS(project string) (*shfs.FSStats, error) {
 	}
 	return c.base.StatFS(project)
 }
-func (c *authorizedClient) Symlink(project, target, linkPath string) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
 	if err := c.requireCreate(project, linkPath); err != nil {
 		return nil, err
 	}
@@ -327,7 +327,7 @@ func (c *authorizedClient) Readlink(project, linkPath string) (string, error) {
 	}
 	return c.base.Readlink(project, linkPath)
 }
-func (c *authorizedClient) Link(project, existingPath, newPath string) (*metadata.FileMetadata, error) {
+func (c *authorizedClient) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	if err := c.requireNodeRead(project, existingPath); err != nil {
 		return nil, err
 	}

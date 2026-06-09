@@ -20,8 +20,9 @@ func TestCheckStickyDelete(t *testing.T) {
 	dir.Mode = 0o1777
 	dir.UID = 1
 	dir.GID = 2
-	file := meta.FileMetadata{Name: "tmp/note.txt", Kind: meta.NodeKindFile, Release: "v1", Mode: 0o644, UID: 11, GID: 12, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
-	repo.UpsertFile(file, now)
+	repo.Dirs["tmp"] = *dir
+	file := meta.FileMeta{Mode: 0o644, UID: 11, GID: 12, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
+	repo.UpsertFile("tmp/note.txt", file, now)
 	ctx := WithIdentity(context.Background(), Identity{UID: 22, GID: 22, Groups: []uint32{22}})
 	if err := CheckStickyDelete(ctx, repo, "tmp", "tmp/note.txt"); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("expected sticky delete denial, got %v", err)

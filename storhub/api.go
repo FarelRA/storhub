@@ -17,12 +17,12 @@ type (
 	FUSEOptions       = implfuse.Options
 	StorHubFS         = implfuse.Filesystem
 	ChunkInfo         = meta.ChunkInfo
-	FileMetadata      = meta.FileMetadata
-	ReleaseMetadata   = meta.ReleaseMetadata
+	FileMetadata      = meta.FileMeta
+	ReleaseMetadata   = meta.ReleaseRef
 	RepoMetadata      = meta.RepoMetadata
 	MetadataRevision  = meta.MetadataRevision
-	DirectoryMetadata = meta.DirectoryMetadata
-	RootMetadata      = meta.RootMetadata
+	DirectoryMetadata = meta.DirMeta
+	RootMetadata      = meta.DirMeta
 	EntryInfo         = shfs.EntryInfo
 	DirEntry          = shfs.DirEntry
 	FSStats           = shfs.FSStats

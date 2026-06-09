@@ -166,8 +166,9 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 		return err
 	}
 
+	guidePath := "docs/specs/guide.txt"
 	uploaded, err := stepFile("upload file", func() (*storhub.FileMetadata, error) {
-		return hub.UploadFile(project, "docs/specs/guide.txt", guideV1)
+		return hub.UploadFile(project, guidePath, guideV1)
 	})
 	if err != nil {
 		return err
@@ -175,7 +176,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	printFile("uploaded file", uploaded)
 
 	replaced, err := stepFile("replace file", func() (*storhub.FileMetadata, error) {
-		return hub.ReplaceFile(project, "docs/specs/guide.txt", guideV2)
+		return hub.ReplaceFile(project, guidePath, guideV2)
 	})
 	if err != nil {
 		return err
@@ -183,7 +184,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	printFile("replaced file", replaced)
 
 	patched, err := stepFile("patch file", func() (*storhub.FileMetadata, error) {
-		return hub.PatchFile(project, "docs/specs/guide.txt", 0, int64(len("StorHub")), []byte("StorHub showcase"))
+		return hub.PatchFile(project, guidePath, 0, int64(len("StorHub")), []byte("StorHub showcase"))
 	})
 	if err != nil {
 		return err
@@ -195,32 +196,32 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 
 	if err := runStep("apply POSIX metadata", func() error {
 		now := time.Unix(1_700_000_000, 0).UTC()
-		if err := hub.Chmod(project, patched.Name, 0o640); err != nil {
+		if err := hub.Chmod(project, guidePath, 0o640); err != nil {
 			return err
 		}
-		if err := hub.Chown(project, patched.Name, 1000, 1000); err != nil {
+		if err := hub.Chown(project, guidePath, 1000, 1000); err != nil {
 			return err
 		}
-		if err := hub.Chtimes(project, patched.Name, now, now.Add(2*time.Hour)); err != nil {
+		if err := hub.Chtimes(project, guidePath, now, now.Add(2*time.Hour)); err != nil {
 			return err
 		}
-		if err := hub.SetXAttr(project, patched.Name, "user.demo", []byte("enabled")); err != nil {
+		if err := hub.SetXAttr(project, guidePath, "user.demo", []byte("enabled")); err != nil {
 			return err
 		}
-		value, err := hub.GetXAttr(project, patched.Name, "user.demo")
+		value, err := hub.GetXAttr(project, guidePath, "user.demo")
 		if err != nil {
 			return err
 		}
 		printKV("xattr user.demo", "%q", string(value))
-		attrs, err := hub.ListXAttr(project, patched.Name)
+		attrs, err := hub.ListXAttr(project, guidePath)
 		if err != nil {
 			return err
 		}
 		printKV("xattrs", "%v", attrs)
-		if err := hub.RemoveXAttr(project, patched.Name, "user.demo"); err != nil {
+		if err := hub.RemoveXAttr(project, guidePath, "user.demo"); err != nil {
 			return err
 		}
-		return hub.SetXAttr(project, patched.Name, "user.demo", []byte("enabled"))
+		return hub.SetXAttr(project, guidePath, "user.demo", []byte("enabled"))
 	}); err != nil {
 		return err
 	}
@@ -249,7 +250,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 
 	downloadPath := filepath.Join(workspace, "downloaded-guide.txt")
 	if err := runStep("download final file", func() error {
-		return hub.DownloadFile(project, patched.Name, downloadPath)
+		return hub.DownloadFile(project, guidePath, downloadPath)
 	}); err != nil {
 		return err
 	}
@@ -278,7 +279,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	}
 	printDir("docs/specs", entries)
 
-	stat, err := hub.StatPath(project, patched.Name)
+	stat, err := hub.StatPath(project, guidePath)
 	if err != nil {
 		return fmt.Errorf("stat path: %w", err)
 	}
@@ -306,7 +307,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	if rollbackMarker == nil {
 		return errors.New("rollback marker metadata missing")
 	}
-	if _, err := hub.WriteFileAt(project, rollbackMarker.Name, 0, []byte("rollback me")); err != nil {
+	if _, err := hub.WriteFileAt(project, "scratch/rollback-marker.txt", 0, []byte("rollback me")); err != nil {
 		return fmt.Errorf("write rollback marker: %w", err)
 	}
 
@@ -323,7 +324,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 		}
 	}
 
-	if _, err := hub.StatPath(project, rollbackMarker.Name); err != nil {
+	if _, err := hub.StatPath(project, "scratch/rollback-marker.txt"); err != nil {
 		printKV("rollback removed marker as expected", "%v", err)
 	}
 
@@ -417,20 +418,21 @@ func printFile(label string, meta *storhub.FileMetadata) {
 		return
 	}
 	fmt.Printf("%s:\n", label)
-	fmt.Printf("- path: %s\n", meta.Name)
 	fmt.Printf("- size: %d\n", meta.Size)
-	fmt.Printf("- release: %s\n", meta.Release)
 	fmt.Printf("- inode: %d\n", meta.Inode)
-	fmt.Printf("- nlink: %d\n", meta.NLink)
 	fmt.Printf("- mode: %#o\n", meta.Mode)
 	fmt.Printf("- chunks: %d\n", len(meta.Chunks))
-	fmt.Printf("- kind: %s\n\n", meta.Kind)
+	if meta.Symlink != "" {
+		fmt.Printf("- kind: symlink\n\n")
+	} else {
+		fmt.Printf("- kind: file\n\n")
+	}
 }
 
 func printFiles(files []storhub.FileMetadata) {
 	printSection("Tracked Files")
 	for _, file := range files {
-		fmt.Printf("- %s size=%d release=%s inode=%d chunks=%d\n", file.Name, file.Size, file.Release, file.Inode, len(file.Chunks))
+		fmt.Printf("- size=%d inode=%d chunks=%d\n", file.Size, file.Inode, len(file.Chunks))
 	}
 	fmt.Println()
 }
@@ -438,11 +440,7 @@ func printFiles(files []storhub.FileMetadata) {
 func printReleases(releases []storhub.ReleaseMetadata) {
 	printSection("Releases")
 	for _, release := range releases {
-		var totalBytes int64
-		for _, file := range release.Files {
-			totalBytes += file.Size
-		}
-		fmt.Printf("- %s files=%d assets=%d bytes=%d\n", release.Tag, len(release.Files), release.AssetCount, totalBytes)
+		fmt.Printf("- assets=%d\n", release.AssetCount)
 	}
 	fmt.Println()
 }

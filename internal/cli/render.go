@@ -13,12 +13,10 @@ func printFileSummary(w io.Writer, action string, meta *storhub.FileMetadata) {
 		fmt.Fprintf(w, "%s\n", action)
 		return
 	}
-	fmt.Fprintf(w, "%s %s\n", action, meta.Name)
+	fmt.Fprintf(w, "%s\n", action)
 	fmt.Fprintf(w, "  size: %d bytes\n", meta.Size)
-	fmt.Fprintf(w, "  release: %s\n", meta.Release)
 	fmt.Fprintf(w, "  inode: %d\n", meta.Inode)
 	fmt.Fprintf(w, "  mode: %#o\n", meta.Mode)
-	fmt.Fprintf(w, "  links: %d\n", meta.NLink)
 	fmt.Fprintf(w, "  chunks: %d\n", len(meta.Chunks))
 }
 

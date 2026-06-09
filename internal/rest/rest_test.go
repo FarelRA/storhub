@@ -413,7 +413,7 @@ func (c *fakeRESTClient) CreateFile(project, filePath string) (*FileMetadata, er
 	}
 	p.files[clean] = node
 	c.recordRevisionLocked(p, "create "+clean)
-	return &FileMetadata{Name: clean, Inode: node.entry.Inode}, nil
+	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) Mkdir(project, dirPath string) error {
@@ -577,7 +577,7 @@ func (c *fakeRESTClient) Rename(project, oldPath, newPath string) error {
 func (c *fakeRESTClient) TruncateFile(project, filePath string, size int64) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	node, clean, err := c.requireWritableFile(project, filePath)
+	node, _, err := c.requireWritableFile(project, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -595,13 +595,13 @@ func (c *fakeRESTClient) TruncateFile(project, filePath string, size int64) (*Fi
 	}
 	updates := c.tick()
 	c.touchDataLocked(p, node.data, updates)
-	return &FileMetadata{Name: clean, Size: size, Inode: node.entry.Inode}, nil
+	return &FileMetadata{Size: size, Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) AppendFile(project, filePath string, data []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	node, clean, err := c.requireWritableFile(project, filePath)
+	node, _, err := c.requireWritableFile(project, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -612,13 +612,13 @@ func (c *fakeRESTClient) AppendFile(project, filePath string, data []byte) (*Fil
 	}
 	updates := c.tick()
 	c.touchDataLocked(p, node.data, updates)
-	return &FileMetadata{Name: clean, Size: int64(len(node.data.bytes)), Inode: node.entry.Inode}, nil
+	return &FileMetadata{Size: int64(len(node.data.bytes)), Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	node, clean, err := c.requireWritableFile(project, filePath)
+	node, _, err := c.requireWritableFile(project, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +643,7 @@ func (c *fakeRESTClient) WriteFileAt(project, filePath string, offset int64, dat
 	}
 	updates := c.tick()
 	c.touchDataLocked(p, node.data, updates)
-	return &FileMetadata{Name: clean, Size: int64(len(content)), Inode: node.entry.Inode}, nil
+	return &FileMetadata{Size: int64(len(content)), Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*FileMetadata, error) {
@@ -657,7 +657,7 @@ func (c *fakeRESTClient) ReplaceFileFromReader(project, filePath string, body io
 func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	node, clean, err := c.requireWritableFile(project, filePath)
+	node, _, err := c.requireWritableFile(project, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +673,7 @@ func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize 
 	}
 	updates := c.tick()
 	c.touchDataLocked(p, node.data, updates)
-	return &FileMetadata{Name: clean, Size: int64(len(patched)), Inode: node.entry.Inode}, nil
+	return &FileMetadata{Size: int64(len(patched)), Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
@@ -803,7 +803,7 @@ func (c *fakeRESTClient) Symlink(project, target, linkPath string) (*FileMetadat
 	}
 	p.files[clean] = node
 	c.recordRevisionLocked(p, "symlink "+clean)
-	return &FileMetadata{Name: clean, Kind: NodeKindSymlink, Inode: node.entry.Inode, SymlinkTarget: target}, nil
+	return &FileMetadata{Symlink: target, Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) Readlink(project, linkPath string) (string, error) {
@@ -839,7 +839,7 @@ func (c *fakeRESTClient) Link(project, existingPath, newPath string) (*FileMetad
 	p.files[clean] = node
 	c.syncLinksLocked(p, source.data)
 	c.recordRevisionLocked(p, "link "+clean)
-	return &FileMetadata{Name: clean, Inode: node.entry.Inode, NLink: node.data.nlink}, nil
+	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
 func (c *fakeRESTClient) Chmod(project, targetPath string, mode uint32) error {

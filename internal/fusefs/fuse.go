@@ -200,17 +200,17 @@ type Hub interface {
 	StatPathContext(context.Context, string, string) (*shfs.EntryInfo, error)
 	ReadDirContext(context.Context, string, string) ([]shfs.DirEntry, error)
 	StatFSContext(context.Context, string) (*shfs.FSStats, error)
-	CreateFileContext(context.Context, string, string) (*metadata.FileMetadata, error)
+	CreateFileContext(context.Context, string, string) (*metadata.FileMeta, error)
 	MkdirContext(context.Context, string, string) error
 	UnlinkContext(context.Context, string, string) error
 	RmdirContext(context.Context, string, string) error
-	TruncateFileContext(context.Context, string, string, int64) (*metadata.FileMetadata, error)
+	TruncateFileContext(context.Context, string, string, int64) (*metadata.FileMeta, error)
 	ChmodContext(context.Context, string, string, uint32) error
 	ChownContext(context.Context, string, string, uint32, uint32) error
 	ChtimesContext(context.Context, string, string, time.Time, time.Time) error
-	SymlinkContext(context.Context, string, string, string) (*metadata.FileMetadata, error)
+	SymlinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	ReadlinkContext(context.Context, string, string) (string, error)
-	LinkContext(context.Context, string, string, string) (*metadata.FileMetadata, error)
+	LinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	GetXAttrContext(context.Context, string, string, string) ([]byte, error)
 	SetXAttrContext(context.Context, string, string, string, []byte) error
 	ListXAttrContext(context.Context, string, string) ([]string, error)
@@ -220,13 +220,13 @@ type Hub interface {
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
 	PrepareReplaceContext(context.Context, string, string, int) (string, string, error)
 	UploadChunkDataContext(context.Context, string, string, string, int, int64, []byte) (metadata.ChunkInfo, error)
-	FinalizeReplaceChunksContext(context.Context, string, string, string, int64, []metadata.ChunkInfo) (*metadata.FileMetadata, error)
+	FinalizeReplaceChunksContext(context.Context, string, string, string, int64, []metadata.ChunkInfo) (*metadata.FileMeta, error)
 	FillChunkRangeContext(context.Context, string, metadata.ChunkInfo, []byte) error
-	PatchFileContext(context.Context, string, string, int64, int64, []byte) (*metadata.FileMetadata, error)
-	ReplaceFileContext(context.Context, string, string, string) (*metadata.FileMetadata, error)
+	PatchFileContext(context.Context, string, string, int64, int64, []byte) (*metadata.FileMeta, error)
+	ReplaceFileContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
-	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMetadata, int64, []ByteRange) (*metadata.FileMetadata, error)
+	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
 	Now() time.Time
 	ChunkSize() int64
 }
@@ -792,7 +792,12 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
-	entry := entryInfoFromFile(file)
+	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
+	var nlink int
+	if repo != nil {
+		nlink = repo.FileNLink(childPath)
+	}
+	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
@@ -1033,7 +1038,12 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	entry := entryInfoFromFile(file)
+	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
+	var nlink int
+	if repo != nil {
+		nlink = repo.FileNLink(childPath)
+	}
+	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
@@ -1059,7 +1069,13 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	entry := entryInfoFromFile(linked)
+	linkPath := path.Join(n.currentPath(), name)
+	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
+	var nlink int
+	if repo != nil {
+		nlink = repo.FileNLink(linkPath)
+	}
+	entry := entryInfoFromFile(linked, linkPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
@@ -3104,10 +3120,9 @@ func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath str
 			}
 			meta.RemoveFile(newPath)
 			renamed := file.Clone()
-			renamed.Name = newPath
 			renamed.ChangedAt = s.hub.Now()
 			meta.RemoveFile(oldPath)
-			meta.UpsertFile(renamed, s.hub.Now())
+			meta.UpsertFile(newPath, renamed, s.hub.Now())
 			return nil
 		}
 		if !meta.HasDirectory(oldPath) {
@@ -3124,23 +3139,31 @@ func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath str
 			if len(childDirs) > 0 || len(childFiles) > 0 {
 				return shfs.NotEmpty(newPath)
 			}
-			meta.RemoveDirectory(dir.Path)
+			meta.RemoveDirectory(newPath)
 		}
-		for i := range meta.Directories {
-			if shfs.IsParentOrSame(oldPath, meta.Directories[i].Path) {
-				meta.Directories[i].Path = shfs.RemapPath(oldPath, newPath, meta.Directories[i].Path)
-				meta.Directories[i].ModifiedAt = s.hub.Now()
-				meta.Directories[i].ChangedAt = s.hub.Now()
+		updatedDirs := make(map[string]metadata.DirMeta, len(meta.Dirs))
+		for path, d := range meta.Dirs {
+			if shfs.IsParentOrSame(oldPath, path) {
+				newP := shfs.RemapPath(oldPath, newPath, path)
+				d.ChangedAt = s.hub.Now()
+				d.ModifiedAt = s.hub.Now()
+				updatedDirs[newP] = d
+			} else {
+				updatedDirs[path] = d
 			}
 		}
-		for i := range meta.Releases {
-			for j := range meta.Releases[i].Files {
-				if shfs.IsParentOrSame(oldPath, meta.Releases[i].Files[j].Name) {
-					meta.Releases[i].Files[j].Name = shfs.RemapPath(oldPath, newPath, meta.Releases[i].Files[j].Name)
-					meta.Releases[i].Files[j].ChangedAt = s.hub.Now()
-				}
+		meta.Dirs = updatedDirs
+		updatedFiles := make(map[string]metadata.FileMeta, len(meta.Files))
+		for path, f := range meta.Files {
+			if shfs.IsParentOrSame(oldPath, path) {
+				newP := shfs.RemapPath(oldPath, newPath, path)
+				f.ChangedAt = s.hub.Now()
+				updatedFiles[newP] = f
+			} else {
+				updatedFiles[path] = f
 			}
 		}
+		meta.Files = updatedFiles
 		meta.RecomputeStats()
 		return nil
 	}, fmt.Sprintf("storhub: rename %s to %s", oldPath, newPath))
@@ -3218,22 +3241,26 @@ func errnoFromError(err error) syscall.Errno {
 	}
 }
 
-func entryInfoFromFile(file *metadata.FileMetadata) *shfs.EntryInfo {
+func entryInfoFromFile(file *metadata.FileMeta, path string, nlink int) *shfs.EntryInfo {
+	kind := metadata.NodeKindFile
+	if file.Symlink != "" {
+		kind = metadata.NodeKindSymlink
+	}
 	return &shfs.EntryInfo{
-		Path:          file.Name,
-		Kind:          file.Kind,
-		IsSymlink:     file.Kind == metadata.NodeKindSymlink,
+		Path:          path,
+		Kind:          kind,
+		IsSymlink:     file.Symlink != "",
 		Size:          file.Size,
 		Inode:         file.Inode,
 		Mode:          file.Mode,
 		UID:           file.UID,
 		GID:           file.GID,
-		NLink:         file.NLink,
+		NLink:         uint32(nlink),
 		CreatedAt:     file.UploadedAt,
 		ModifiedAt:    file.ModifiedAt,
 		AccessedAt:    file.AccessedAt,
 		ChangedAt:     file.ChangedAt,
-		SymlinkTarget: file.SymlinkTarget,
+		SymlinkTarget: file.Symlink,
 	}
 }
 

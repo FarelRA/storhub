@@ -47,7 +47,7 @@ type Options struct {
 }
 
 type (
-	FileMetadata     = metadata.FileMetadata
+	FileMetadata     = metadata.FileMeta
 	MetadataRevision = metadata.MetadataRevision
 	EntryInfo        = shfs.EntryInfo
 	DirEntry         = shfs.DirEntry
@@ -66,22 +66,22 @@ var (
 )
 
 type Client interface {
-	CreateFile(project, filePath string) (*metadata.FileMetadata, error)
+	CreateFile(project, filePath string) (*metadata.FileMeta, error)
 	Mkdir(project, dirPath string) error
 	DeleteFile(project, filePath string) error
 	Rmdir(project, dirPath string) error
 	Rename(project, oldPath, newPath string) error
-	TruncateFile(project, filePath string, size int64) (*metadata.FileMetadata, error)
-	AppendFile(project, filePath string, data []byte) (*metadata.FileMetadata, error)
-	WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error)
-	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error)
+	TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error)
+	AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error)
+	WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error)
+	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error)
 	ReadFileAt(project, filePath string, offset, length int64) ([]byte, error)
 	StatPath(project, targetPath string) (*shfs.EntryInfo, error)
 	ReadDir(project, dirPath string) ([]shfs.DirEntry, error)
 	StatFS(project string) (*shfs.FSStats, error)
-	Symlink(project, target, linkPath string) (*metadata.FileMetadata, error)
+	Symlink(project, target, linkPath string) (*metadata.FileMeta, error)
 	Readlink(project, linkPath string) (string, error)
-	Link(project, existingPath, newPath string) (*metadata.FileMetadata, error)
+	Link(project, existingPath, newPath string) (*metadata.FileMeta, error)
 	Chmod(project, targetPath string, mode uint32) error
 	Chown(project, targetPath string, uid, gid uint32) error
 	Chtimes(project, targetPath string, atime, mtime time.Time) error
@@ -93,7 +93,7 @@ type Client interface {
 	RollbackMetadata(project, commitSHA string) error
 	PurgeUntracked(project string) (*storage.PurgeResult, error)
 	DeleteProject(project string) error
-	ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error)
+	ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error)
 }
 
 type restHandler struct {
@@ -183,7 +183,7 @@ func (c *restrictedClient) checkAccess(project, targetPath string) error {
 	return errForbidden("access denied: path not shared")
 }
 
-func (c *restrictedClient) CreateFile(project, filePath string) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
@@ -203,23 +203,23 @@ func (c *restrictedClient) Rename(project, oldPath, newPath string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
@@ -248,7 +248,7 @@ func (c *restrictedClient) StatFS(project string) (*shfs.FSStats, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
-func (c *restrictedClient) Symlink(project, target, linkPath string) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
@@ -259,7 +259,7 @@ func (c *restrictedClient) Readlink(project, linkPath string) (string, error) {
 	return c.underlying.Readlink(project, linkPath)
 }
 
-func (c *restrictedClient) Link(project, existingPath, newPath string) (*metadata.FileMetadata, error) {
+func (c *restrictedClient) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 

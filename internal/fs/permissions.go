@@ -258,6 +258,7 @@ func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now time.Time) {
 	if dir := repo.GetDirectory(dirPath); dir != nil {
 		dir.ModifiedAt = now.UTC()
 		dir.ChangedAt = now.UTC()
+		repo.Dirs[dirPath] = *dir
 	}
 }
 
@@ -282,10 +283,14 @@ func lookupNode(repo *meta.RepoMetadata, targetPath string) (nodeAttrs, error) {
 		return nodeAttrs{Path: "", Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, IsDir: true}, nil
 	}
 	if file := repo.FindFile(clean); file != nil {
-		return nodeAttrs{Path: file.Name, Mode: file.Mode, UID: file.UID, GID: file.GID, Kind: file.Kind}, nil
+		kind := meta.NodeKindFile
+		if file.Symlink != "" {
+			kind = meta.NodeKindSymlink
+		}
+		return nodeAttrs{Path: clean, Mode: file.Mode, UID: file.UID, GID: file.GID, Kind: kind}, nil
 	}
 	if dir := repo.GetDirectory(clean); dir != nil {
-		return nodeAttrs{Path: dir.Path, Mode: dir.Mode, UID: dir.UID, GID: dir.GID, IsDir: true}, nil
+		return nodeAttrs{Path: clean, Mode: dir.Mode, UID: dir.UID, GID: dir.GID, IsDir: true}, nil
 	}
 	return nodeAttrs{}, syscall.ENOENT
 }
