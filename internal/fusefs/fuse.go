@@ -1178,6 +1178,9 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			writeState.mu.Unlock()
 		}
 	}
+	if h.writeState == nil {
+		h.writeState = s.attachWriteState(inode)
+	}
 	return h, nil
 }
 
@@ -1226,6 +1229,16 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 			return seekErr
 		}
 		h.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *Filesystem) attachWriteState(inode uint64) *inodeWriteState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ws := s.writeStates[inode]; ws != nil {
+		ws.refs++
+		return ws
 	}
 	return nil
 }
