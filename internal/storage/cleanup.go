@@ -172,24 +172,51 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 			}
 		}
 	}
-	result := &PurgeResult{}
+	type deleteRelease struct {
+		id  int64
+		tag string
+	}
+	type deleteAsset struct {
+		id int64
+	}
+	var releaseTasks []deleteRelease
+	var assetTasks []deleteAsset
 	for _, release := range releases {
 		if _, ok := trackedReleases[release.TagName]; !ok {
-			if err := h.deleteReleaseByID(ctx, project, release.ID); err != nil {
-				return nil, fmt.Errorf("delete untracked release %s: %w", release.TagName, err)
-			}
-			result.DeletedReleases++
+			releaseTasks = append(releaseTasks, deleteRelease{id: release.ID, tag: release.TagName})
 			continue
 		}
 		for _, asset := range release.Assets {
 			if _, ok := trackedAssets[asset.ID]; ok {
 				continue
 			}
-			if err := h.deleteAssetByID(ctx, project, asset.ID); err != nil {
-				return nil, fmt.Errorf("delete untracked asset %d: %w", asset.ID, err)
-			}
-			result.DeletedAssets++
+			assetTasks = append(assetTasks, deleteAsset{id: asset.ID})
 		}
+	}
+	result := &PurgeResult{}
+	if len(releaseTasks) > 0 {
+		if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(releaseTasks), func(i int) error {
+			task := releaseTasks[i]
+			if err := h.deleteReleaseByID(ctx, project, task.id); err != nil {
+				return fmt.Errorf("delete untracked release %s: %w", task.tag, err)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		result.DeletedReleases = len(releaseTasks)
+	}
+	if len(assetTasks) > 0 {
+		if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(assetTasks), func(i int) error {
+			task := assetTasks[i]
+			if err := h.deleteAssetByID(ctx, project, task.id); err != nil {
+				return fmt.Errorf("delete untracked asset %d: %w", task.id, err)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		result.DeletedAssets = len(assetTasks)
 	}
 
 	// Squash the entire metadata git history into a single orphan commit.
