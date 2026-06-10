@@ -191,7 +191,7 @@ func (c *Client) CreateRelease(ctx context.Context, owner, project, tag, name st
 func (c *Client) DeleteReleaseByID(ctx context.Context, owner, project string, releaseID int64) error {
 	resp, err := c.doRequest(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d", owner, project, releaseID)), func() (io.Reader, error) {
 		return nil, nil
-	}, requestOptions{retryable: false})
+	}, requestOptions{retryable: true})
 	if err != nil {
 		return err
 	}
@@ -202,7 +202,7 @@ func (c *Client) DeleteReleaseByID(ctx context.Context, owner, project string, r
 func (c *Client) DeleteAssetByID(ctx context.Context, owner, project string, assetID int64) error {
 	resp, err := c.doRequest(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
 		return nil, nil
-	}, requestOptions{retryable: false})
+	}, requestOptions{retryable: true})
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func (c *Client) DeleteAssetByID(ctx context.Context, owner, project string, ass
 }
 
 func (c *Client) DeleteRepo(ctx context.Context, owner, project string) error {
-	resp, err := c.doJSON(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil)
+	resp, err := c.doJSONWithRetryable(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil, true)
 	if err != nil {
 		return err
 	}
@@ -229,32 +229,19 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 	query.Set("name", assetName)
 	parsed.RawQuery = query.Encode()
 	endpoint := parsed.String()
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
-		started := time.Now().UTC()
-		assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
-		if err == nil {
-			logging.Info(c.logger, "upload asset complete", "asset", assetName, "size", size, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started))
-			return assetID, nil
-		}
-		logging.Warn(c.logger, "upload asset attempt failed", "asset", assetName, "size", size, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started), "err", err)
-		if existingID, resolveErr := c.FindAssetIDByName(ctx, owner, project, releaseTag, assetName); resolveErr == nil && existingID != 0 {
-			logging.Warn(c.logger, "upload asset reused existing asset after failure", "asset", assetName, "asset_id", existingID, "attempt", attempt+1)
-			return existingID, nil
-		}
-		var apiErr *APIError
-		if !(errorAs(err, &apiErr) && apiErr.IsRetryable()) && !isRetryableNetworkError(err) {
-			return 0, fmt.Errorf("upload asset: %w", err)
-		}
-		if attempt == c.maxRetries {
-			return 0, fmt.Errorf("upload asset: %w", err)
-		}
-		delay := c.retryDelay(attempt, apiErr)
-		logging.Warn(c.logger, "upload asset retry sleep", "asset", assetName, "attempt", attempt+1, "delay", delay, "err", err)
-		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
-			return 0, sleepErr
-		}
+
+	started := time.Now().UTC()
+	assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
+	if err == nil {
+		logging.Info(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
+		return assetID, nil
 	}
-	return 0, fmt.Errorf("upload asset: exhausted retries")
+	logging.Warn(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "err", err)
+	if existingID, resolveErr := c.FindAssetIDByName(ctx, owner, project, releaseTag, assetName); resolveErr == nil && existingID != 0 {
+		logging.Warn(c.logger, "upload asset reused existing asset after failure", "asset", assetName, "asset_id", existingID)
+		return existingID, nil
+	}
+	return 0, fmt.Errorf("upload asset: %w", err)
 }
 
 func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
@@ -466,7 +453,7 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 			return nil, fmt.Errorf("rewind upload reader: %w", err)
 		}
 		return reader, nil
-	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: false})
+	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: true})
 	if err != nil {
 		return 0, err
 	}
