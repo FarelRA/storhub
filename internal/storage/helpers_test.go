@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
 	"github.com/FarelRA/storhub/internal/posix"
@@ -68,12 +69,12 @@ func TestHelperUtilities(t *testing.T) {
 	if posix.ChooseNonZeroTime(0, 1) == 0 {
 		t.Fatal("expected chosen non-zero time")
 	}
-	if err := sleepWithContext(context.Background(), 0); err != nil {
+	if err := storcfg.SleepWithContext(context.Background(), 0); err != nil {
 		t.Fatalf("expected no-op sleep, got %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := sleepWithContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
+	if err := storcfg.SleepWithContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled sleep, got %v", err)
 	}
 }

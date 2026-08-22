@@ -31,6 +31,11 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	if err != nil {
 		return err
 	}
+	// Load remote metadata first: on a cold cache the in-memory view is
+	// empty and deleting an existing file would wrongly report NotFound.
+	if _, _, err := h.loadRepoMetadataReadonly(ctx, project); err != nil {
+		return err
+	}
 
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
@@ -87,6 +92,11 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	}
 	if strings.TrimSpace(tag) == "" {
 		return errors.New("release tag is required")
+	}
+	// Load remote metadata first so a cold cache cannot report NotFound for
+	// a release that exists remotely.
+	if _, _, err := h.loadRepoMetadataReadonly(ctx, project); err != nil {
+		return err
 	}
 
 	// Update metadata directly

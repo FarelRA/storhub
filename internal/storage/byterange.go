@@ -36,11 +36,3 @@ func mergeByteRange(existing []byteRange, next byteRange) []byteRange {
 	}
 	return merged
 }
-
-func totalByteRanges(ranges []byteRange) int64 {
-	total := int64(0)
-	for _, dirty := range ranges {
-		total += dirty.end - dirty.start
-	}
-	return total
-}

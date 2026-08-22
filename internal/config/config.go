@@ -73,7 +73,7 @@ func Default() Config {
 		MetadataCommitInterval: 10 * time.Second,
 		GitCacheDir:            defaultGitCacheDir(),
 		Now:                    time.Now,
-		Sleep:                  sleepWithContext,
+		Sleep:                  SleepWithContext,
 	}
 }
 
@@ -180,7 +180,8 @@ func newDefaultHTTPClient() *http.Client {
 	return &http.Client{Timeout: defaultRequestTimeout, Transport: transport}
 }
 
-func sleepWithContext(ctx context.Context, delay time.Duration) error {
+// SleepWithContext is the default config Sleep implementation.
+func SleepWithContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {

@@ -1059,7 +1059,7 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 	}
 }
 
-func TestDownloadRemovesCorruptOutput(t *testing.T) {
+func TestDownloadRejectsCorruptOutput(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -1072,15 +1072,11 @@ func TestDownloadRemovesCorruptOutput(t *testing.T) {
 	backend.corruptAsset(repoMeta.Chunks[fileMeta.Chunks[0]].AssetID)
 
 	output := filepath.Join(t.TempDir(), "corrupt.out")
-	if err := hub.DownloadFile("project-corrupt", "corrupt.bin", output); err != nil {
-		t.Fatalf("download file: %v", err)
+	if err := hub.DownloadFile("project-corrupt", "corrupt.bin", output); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("expected download to fail loudly on corrupt bytes, got %v", err)
 	}
-	data, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatalf("read output: %v", err)
-	}
-	if bytes.Equal(data, []byte("this file will be corrupted during download")) {
-		t.Fatal("expected corrupt bytes to be streamed through without integrity checks")
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatal("corrupt download output must be removed")
 	}
 }
 
@@ -1467,37 +1463,43 @@ func TestValidateProjectRejectsInvalidNames(t *testing.T) {
 	}
 }
 
-func TestUploadMetadataCommitFailureKeepsDataHidden(t *testing.T) {
+// A transient commit failure must NOT discard acknowledged writes: dirty
+// state is retained and the commit loop retries it.
+func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failed atomic.Bool
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") && !failed.Load() {
 			failed.Store(true)
 			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte(`{"message":"metadata write failed"}`))
+			_, _ = w.Write([]byte(`{"message":"transient failure"}`))
 			return true
 		}
 		return false
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "rollback.txt", []byte("rollback payload"))
-	if _, err := hub.UploadFile("project-hidden", "rollback.txt", input); err != nil {
+	input := writeTempFile(t, t.TempDir(), "retry.txt", []byte("retry payload"))
+	if _, err := hub.UploadFile("project-retry", "retry.txt", input); err != nil {
 		t.Fatalf("upload should succeed (metadata commit is async): %v", err)
 	}
-	// Wait for the background commit loop to attempt the commit and reload
-	time.Sleep(100 * time.Millisecond)
-	// After the failed commit, metadata was reloaded from GitHub (empty),
-	// so the data appears hidden (no metadata references it) but assets remain
-	files, err := hub.ListFiles("project-hidden")
-	if err != nil {
-		t.Fatalf("list files after failed upload: %v", err)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		files, err := hub.ListFiles("project-retry")
+		if err != nil {
+			t.Fatalf("list files: %v", err)
+		}
+		if len(files) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retained dirty state was not retried after transient failure; files=%+v", files)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if len(files) != 0 {
-		t.Fatalf("expected hidden data after failed metadata commit, got %+v", files)
-	}
-	repo := backend.repo("project-hidden")
+	repo := backend.repo("project-retry")
 	if repo == nil || len(repo.assets) == 0 || repo.releasesByTag["v1"] == nil {
-		t.Fatalf("expected immutable data to remain after failed metadata commit, repo=%+v", repo)
+		t.Fatalf("expected immutable data to remain, repo=%+v", repo)
 	}
 }
 
@@ -3645,4 +3647,57 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatalf("download after purge: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
+}
+
+// A fresh client (cold cache) must be able to delete data that exists only
+// remotely; previously the delete consulted an empty in-memory view.
+func TestDeleteFileWorksOnColdCache(t *testing.T) {
+	backend := newMockGitHub(t)
+	seedHub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "cold.txt", []byte("cold payload"))
+	if _, err := seedHub.UploadFile("project-cold-delete", "cold.txt", input); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if err := seedHub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	coldHub := backend.newClient(t, smallTransferTestConfig())
+	if err := coldHub.DeleteFile("project-cold-delete", "cold.txt"); err != nil {
+		t.Fatalf("cold-cache delete of existing file failed: %v", err)
+	}
+}
+
+// Downloaded chunks are verified against the SHA-256 digest recorded at
+// upload time; silent bit-rot must fail loudly instead of serving corrupt bytes.
+func TestDownloadDetectsCorruptedChunkDigest(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "digest.txt", []byte("integrity matters"))
+	fileMeta, err := hub.UploadFile("project-digest", "digest.txt", input)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-digest")
+	chunkID := fileMeta.Chunks[0]
+	chunk := repoMeta.Chunks[chunkID]
+	if chunk.Digest == "" {
+		t.Fatal("expected upload to record a chunk digest")
+	}
+
+	// Flip one byte in every asset backing this file.
+	backend.mu.Lock()
+	for _, id := range fileMeta.Chunks {
+		asset := backend.repos["project-digest"].assets[repoMeta.Chunks[id].AssetID]
+		if asset != nil && len(asset.data) > 0 {
+			asset.data[0] ^= 0xFF
+		}
+	}
+	backend.mu.Unlock()
+
+	output := filepath.Join(t.TempDir(), "digest.out")
+	err = hub.DownloadFile("project-digest", "digest.txt", output)
+	if err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("expected integrity failure, got %v", err)
+	}
 }
