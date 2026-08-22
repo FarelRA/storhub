@@ -67,8 +67,8 @@ func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMo
 	return c.StorHub.NewFUSE(project, opts)
 }
 
-var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
-	hub, err := newHubFromFlags(token, apiBase, chunkSize, concurrency, public)
+var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	hub, err := newHubFromFlags(token, apiBase, chunkSize, public)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,6 @@ func (a *App) newUploadCmd() *cobra.Command {
 		RunE:  a.runUploadOrReplace,
 	}
 	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
-	cmd.Flags().Int("concurrency", 0, "Max concurrent transfers")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	return cmd
 }
@@ -177,7 +176,6 @@ func (a *App) newReplaceCmd() *cobra.Command {
 		RunE:  a.runUploadOrReplace,
 	}
 	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
-	cmd.Flags().Int("concurrency", 0, "Max concurrent transfers")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	return cmd
 }
@@ -362,10 +360,9 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
-	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	public, _ := cmd.Flags().GetBool("public")
 
-	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, concurrency, public)
+	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public)
 	if err != nil {
 		return err
 	}
@@ -407,7 +404,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	long, _ := cmd.Flags().GetBool("long")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -426,7 +423,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -441,7 +438,7 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -460,7 +457,7 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -475,7 +472,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	recursive, _ := cmd.Flags().GetBool("recursive")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -494,7 +491,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -508,7 +505,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -527,7 +524,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid offset %q: %w", args[2], err)
 	}
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -550,7 +547,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid delete-size %q: %w", args[3], err)
 	}
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -565,7 +562,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -580,7 +577,7 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -594,7 +591,7 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -613,7 +610,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -650,7 +647,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	listen, _ := cmd.Flags().GetString("listen")
 	basePath, _ := cmd.Flags().GetString("base-path")
 	authFile, _ := cmd.Flags().GetString("auth-file")
-	hub, err := newRESTHubFromFlagsFn(token, apiBase, 0, 0, false)
+	hub, err := newRESTHubFromFlagsFn(token, apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -728,7 +725,7 @@ func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 	}, nil
 }
 
-func newHubFromFlags(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
+func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
@@ -738,9 +735,6 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, concurrency int, pu
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
 		cfg.ChunkSize = normalized
-	}
-	if concurrency > 0 {
-		cfg.MaxConcurrentTransfers = concurrency
 	}
 	cfg.CreatePublicRepo = public
 	cfg.LogLevel = cliLogLevel

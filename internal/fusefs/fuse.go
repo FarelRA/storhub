@@ -44,17 +44,16 @@ var (
 )
 
 type Options struct {
-	EntryTimeout           time.Duration
-	AttrTimeout            time.Duration
-	NegativeTimeout        time.Duration
-	CleanupInterval        time.Duration
-	PageSize               int64
-	MaxConcurrentTransfers int
-	ExtraMountOpts         []string
-	CacheDir               string
-	AllowOther             bool
-	Debug                  bool
-	Logger                 *slog.Logger
+	EntryTimeout    time.Duration
+	AttrTimeout     time.Duration
+	NegativeTimeout time.Duration
+	CleanupInterval time.Duration
+	PageSize        int64
+	ExtraMountOpts  []string
+	CacheDir        string
+	AllowOther      bool
+	Debug           bool
+	Logger          *slog.Logger
 }
 
 type Filesystem struct {
@@ -127,39 +126,12 @@ type inodeWriteState struct {
 	logicalSize       int64
 	dirtyRanges       []ByteRange
 	tempAuthoritative bool
-	stream            *streamingUploadState
-	streamCh          chan uploadTask
-	streamDone        chan struct{}
-	streamErr         atomic.Value
-	streamDraining    bool
-	streamCtx         context.Context
-	streamCancel      context.CancelFunc
 	pending           shfs.MetadataPatch
-}
-
-type streamingUploadState struct {
-	releaseTag string
-	uploadURL  string
-	path       string
-	prepared   bool
-	prepareMu  sync.Mutex
-	chunks     []metadata.ChunkInfo
-	tail       []byte
-	tailOffset int64
-	uploaded   int64
-	nextIndex  int
-	chunkSize  int64
 }
 
 type ByteRange struct {
 	Start int64
 	End   int64
-}
-
-type uploadTask struct {
-	index  int
-	offset int64
-	data   []byte
 }
 
 type writeBootstrap struct {
@@ -173,14 +145,13 @@ type (
 
 func DefaultOptions() Options {
 	return Options{
-		EntryTimeout:           60 * time.Second,
-		AttrTimeout:            60 * time.Second,
-		NegativeTimeout:        10 * time.Second,
-		CleanupInterval:        30 * time.Second,
-		PageSize:               128 * 1024,
-		MaxConcurrentTransfers: 8,
-		ExtraMountOpts:         []string{"noatime"},
-		Debug:                  true,
+		EntryTimeout:    60 * time.Second,
+		AttrTimeout:     60 * time.Second,
+		NegativeTimeout: 10 * time.Second,
+		CleanupInterval: 30 * time.Second,
+		PageSize:        128 * 1024,
+		ExtraMountOpts:  []string{"noatime"},
+		Debug:           true,
 	}
 }
 
@@ -218,10 +189,6 @@ type Hub interface {
 	ApplyMetadataPatchContext(context.Context, string, string, shfs.MetadataPatch) error
 	DownloadFileContext(context.Context, string, string, string) error
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
-	PrepareReplaceContext(context.Context, string, string, int) (string, string, error)
-	UploadChunkDataContext(context.Context, string, string, string, int, int64, []byte) (metadata.ChunkInfo, error)
-	FinalizeReplaceChunksContext(context.Context, string, string, string, int64, []metadata.ChunkInfo) (*metadata.FileMeta, error)
-	FillChunkRangeContext(context.Context, string, metadata.ChunkInfo, []byte) error
 	PatchFileContext(context.Context, string, string, int64, int64, []byte) (*metadata.FileMeta, error)
 	ReplaceFileContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
@@ -298,7 +265,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.MountOptions.AllowOther = s.opts.AllowOther
 	options.MountOptions.MaxBackground = mountMaxBackground
 	options.MountOptions.MaxWrite = mountMaxIOSize
-	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize()) * s.opts.MaxConcurrentTransfers
+	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize())
 	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
 	options.MountOptions.ExplicitDataCacheControl = true
 	options.MountOptions.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
@@ -1311,26 +1278,6 @@ func (s *Filesystem) releaseWriteState(state *inodeWriteState) {
 	}
 }
 
-func (s *Filesystem) hasOtherWriteHandle(inode uint64, excludeID uint64) bool {
-	type entry struct {
-		id    uint64
-		inode uint64
-		ws    bool
-	}
-	s.mu.RLock()
-	entries := make([]entry, 0, len(s.handles))
-	for id, handle := range s.handles {
-		entries = append(entries, entry{id, handle.inode, handle.writeState != nil})
-	}
-	s.mu.RUnlock()
-	for _, e := range entries {
-		if e.id != excludeID && e.inode == inode && e.ws {
-			return true
-		}
-	}
-	return false
-}
-
 func (w *inodeWriteState) materialize(ctx context.Context) error {
 	w.mu.Lock()
 	if w.temp != nil {
@@ -1521,14 +1468,6 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL
 	}
-	if w.stream != nil {
-		if size == w.logicalSize {
-			return nil
-		}
-		if err := w.materializeStreamToTempLocked(context.Background()); err != nil {
-			return err
-		}
-	}
 	if w.temp == nil {
 		if err := w.ensureTempLocked(); err != nil {
 			return err
@@ -1565,10 +1504,6 @@ func (w *inodeWriteState) ensureTempLocked() error {
 	return nil
 }
 
-func (w *inodeWriteState) canStreamSequentialWriteLocked() bool {
-	return !w.deleted && w.tempAuthoritative && len(w.dirtyRanges) == 0
-}
-
 func (w *inodeWriteState) releaseTempFile() {
 	if w.temp != nil {
 		if err := w.temp.Close(); err != nil {
@@ -1597,282 +1532,10 @@ func (w *inodeWriteState) releaseTempFile() {
 	w.tempAuthoritative = false
 }
 
-func (w *inodeWriteState) tryStreamWriteLocked(ctx context.Context, data []byte, off int64, handleID uint64) (uint32, bool, error) {
-	if len(data) == 0 {
-		return 0, false, nil
-	}
-	if w.stream == nil {
-		if w.fs.hasOtherWriteHandle(w.inode, handleID) {
-			return 0, false, nil
-		}
-		if !w.canStreamSequentialWriteLocked() {
-			return 0, false, nil
-		}
-		if off < w.logicalSize {
-			return 0, false, nil
-		}
-		chunkSize := normalizedChunkSize(w.fs.hub.ChunkSize())
-		if off > w.logicalSize {
-			w.logicalSize = off
-		}
-		w.stream = &streamingUploadState{
-			chunkSize:  chunkSize,
-			tailOffset: off,
-			path:       w.path,
-		}
-		if cap(data) <= int(chunkSize) {
-			w.stream.tail = data[:0]
-		}
-		w.streamCh = make(chan uploadTask, 8)
-		w.streamDone = make(chan struct{})
-		w.streamCtx, w.streamCancel = context.WithCancel(context.Background())
-		go w.uploadLoop(w.streamCtx)
-		w.releaseTempFile()
-		// Re-check: another writer may have appeared during init.
-		if w.fs.hasOtherWriteHandle(w.inode, handleID) {
-			w.materializeStreamToTempLocked(ctx)
-			return 0, false, nil
-		}
-	}
-	if w.streamCh == nil || w.streamDraining {
-		return 0, false, nil
-	}
-	if err := w.streamErr.Load(); err != nil {
-		w.materializeStreamToTempLocked(ctx)
-		return 0, false, nil
-	}
-	if off != w.logicalSize {
-		if w.streamCh != nil {
-			if len(w.stream.tail) > 0 {
-				w.mu.Unlock()
-				select {
-				case w.streamCh <- uploadTask{
-					index:  w.stream.nextIndex,
-					offset: w.stream.tailOffset,
-					data:   w.stream.tail,
-				}:
-				case <-w.streamDone:
-					w.mu.Lock()
-					w.materializeStreamToTempLocked(ctx)
-					return 0, false, nil
-				}
-				w.mu.Lock()
-				w.stream.nextIndex++
-				w.stream.uploaded += int64(len(w.stream.tail))
-				w.stream.tail = nil
-			}
-		}
-		w.logicalSize = off
-		w.stream.tailOffset = off
-	}
-	w.stream.tail = append(w.stream.tail, data...)
-	w.logicalSize += int64(len(data))
-	for int64(len(w.stream.tail)) >= w.stream.chunkSize {
-		task := uploadTask{
-			index:  w.stream.nextIndex,
-			offset: w.stream.tailOffset,
-			data:   w.stream.tail[:w.stream.chunkSize],
-		}
-		w.stream.nextIndex++
-		w.stream.uploaded += w.stream.chunkSize
-		w.stream.tailOffset += w.stream.chunkSize
-		w.stream.tail = w.stream.tail[w.stream.chunkSize:]
-
-		w.mu.Unlock()
-		select {
-		case w.streamCh <- task:
-		case <-w.streamDone:
-			w.mu.Lock()
-			w.stream.tail = append(task.data, w.stream.tail...)
-			w.stream.tailOffset -= int64(len(task.data))
-			w.stream.uploaded -= int64(len(task.data))
-			w.stream.nextIndex--
-			w.materializeStreamToTempLocked(ctx)
-			return 0, false, nil
-		}
-		w.mu.Lock()
-	}
-	return uint32(len(data)), true, nil
-}
-
-func (w *inodeWriteState) uploadLoop(ctx context.Context) {
-	defer close(w.streamDone)
-	for task := range w.streamCh {
-		if err := w.streamErr.Load(); err != nil {
-			break
-		}
-		w.stream.prepareMu.Lock()
-		if !w.stream.prepared {
-			releaseTag, uploadURL, err := w.fs.hub.PrepareReplaceContext(ctx, w.fs.project, w.stream.path, 1)
-			if err != nil {
-				w.streamErr.Store(err)
-				w.stream.prepareMu.Unlock()
-				break
-			}
-			w.stream.releaseTag = releaseTag
-			w.stream.uploadURL = uploadURL
-			w.stream.prepared = true
-		}
-		w.stream.prepareMu.Unlock()
-		chunk, err := w.fs.hub.UploadChunkDataContext(
-			ctx, w.fs.project,
-			w.stream.releaseTag, w.stream.uploadURL,
-			task.index, task.offset, task.data,
-		)
-		if err != nil {
-			w.streamErr.Store(err)
-			break
-		}
-		w.stream.prepareMu.Lock()
-		w.stream.chunks = append(w.stream.chunks, chunk)
-		w.stream.prepareMu.Unlock()
-	}
-}
-
-func (w *inodeWriteState) flushStreamingChunksLocked(ctx context.Context, force bool) error {
-	if w.stream == nil || w.streamDraining {
-		return nil
-	}
-	// If the stream has errored (e.g. upload failure), recover any uploaded
-	// data to the temp file so the caller sees a clean shutdown.
-	if err := w.streamErr.Load(); err != nil {
-		return w.materializeStreamToTempLocked(ctx)
-	}
-	if force && len(w.stream.tail) > 0 && w.streamCh != nil {
-		w.mu.Unlock()
-		select {
-		case w.streamCh <- uploadTask{
-			index:  w.stream.nextIndex,
-			offset: w.stream.tailOffset,
-			data:   w.stream.tail,
-		}:
-		case <-w.streamDone:
-			w.mu.Lock()
-			return w.materializeStreamToTempLocked(ctx)
-		}
-		w.mu.Lock()
-		w.stream.nextIndex++
-		w.stream.uploaded += int64(len(w.stream.tail))
-		w.stream.tail = nil
-	}
-	if w.streamCh != nil {
-		w.streamDraining = true
-		ch := w.streamCh
-		done := w.streamDone
-		w.mu.Unlock()
-		close(ch)
-		<-done
-		w.mu.Lock()
-		w.streamCh = nil
-		w.streamDone = nil
-		w.streamDraining = false
-	}
-	// NOTE: w.stream is intentionally kept non-nil here so that the caller
-	// (commit) can still read releaseTag and chunks for finalization.
-	// The caller is responsible for setting w.stream = nil after finalization.
-	return nil
-}
-
-func (w *inodeWriteState) materializeStreamToTempLocked(ctx context.Context) error {
-	if w.stream == nil || w.streamDraining {
-		return nil
-	}
-	w.streamDraining = true
-	ch := w.streamCh
-	done := w.streamDone
-	cancel := w.streamCancel
-	w.mu.Unlock()
-	if ch != nil {
-		close(ch)
-	}
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
-		<-done
-	}
-	// materializeStreamToTemp will acquire w.mu internally
-	err := w.materializeStreamToTemp(ctx)
-	w.mu.Lock()
-	return err
-}
-
-// materializeStreamToTemp downloads all uploaded chunks and finalizes
-// the stream into the temp file. w.mu must NOT be held.
-func (w *inodeWriteState) materializeStreamToTemp(ctx context.Context) error {
-	w.mu.Lock()
-
-	w.streamCh = nil
-	w.streamDone = nil
-	w.streamCancel = nil
-	w.streamCtx = nil
-	w.streamDraining = false
-
-	if w.stream == nil {
-		w.mu.Unlock()
-		return nil
-	}
-
-	// Snapshot all needed state under lock, then release before network I/O
-	chunks := append([]metadata.ChunkInfo(nil), w.stream.chunks...)
-	tail := append([]byte(nil), w.stream.tail...)
-	tailOff := w.stream.tailOffset
-	logicalSize := w.logicalSize
-	project := w.fs.project
-	hub := w.fs.hub
-
-	if len(chunks) == 0 && len(tail) == 0 {
-		w.stream = nil
-		w.mu.Unlock()
-		return nil
-	}
-
-	if err := w.ensureTempLocked(); err != nil {
-		w.stream = nil
-		w.mu.Unlock()
-		return err
-	}
-	if err := w.temp.Truncate(logicalSize); err != nil {
-		w.stream = nil
-		w.mu.Unlock()
-		return err
-	}
-	temp := w.temp
-	w.mu.Unlock()
-
-	for _, chunk := range chunks {
-		buf := make([]byte, chunk.Size)
-		if err := hub.FillChunkRangeContext(ctx, project, chunk, buf); err != nil {
-			return err
-		}
-		if _, err := temp.WriteAt(buf, chunk.Offset); err != nil {
-			return err
-		}
-	}
-	if len(tail) > 0 {
-		if _, err := temp.WriteAt(tail, tailOff); err != nil {
-			return err
-		}
-	}
-
-	w.mu.Lock()
-	w.dirtyRanges = []ByteRange{{Start: 0, End: logicalSize}}
-	w.tempAuthoritative = true
-	w.stream = nil
-	w.mu.Unlock()
-
-	return nil
-}
-
+// readIntoLocked fills dest with the file content visible at off, serving
+// dirty ranges from the overlay temp file and clean ranges from the base
+// snapshot or the hub. Caller must hold w.mu.
 func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off int64) (int, error) {
-	return w.readIntoInternalLocked(ctx, dest, off)
-}
-
-func (w *inodeWriteState) readIntoExactLocked(ctx context.Context, dest []byte, off int64) (int, error) {
-	return w.readIntoInternalLocked(ctx, dest, off)
-}
-
-func (w *inodeWriteState) readIntoInternalLocked(ctx context.Context, dest []byte, off int64) (int, error) {
 	if off >= w.logicalSize || len(dest) == 0 {
 		return 0, nil
 	}
@@ -2242,7 +1905,7 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 			if remaining := r.End - offset; want > remaining {
 				want = remaining
 			}
-			n, err := w.readIntoExactLocked(ctx, buf[:want], offset)
+			n, err := w.readIntoLocked(ctx, buf[:want], offset)
 			if err != nil {
 				if closeErr := temp.Close(); closeErr != nil {
 					logging.Error(nil, "failed to close range snapshot temp after read error", "path", temp.Name(), "closeErr", closeErr, "err", err)
@@ -2285,69 +1948,13 @@ func (h *storhubHandle) readFromHub(ctx context.Context, off, length int64) ([]b
 	path := h.path
 	project := h.fs.project
 	hub := h.fs.hub
-	maxConcurrent := h.fs.opts.MaxConcurrentTransfers
-	chunkSize := h.fs.hub.ChunkSize()
 	h.mu.Unlock()
 
-	var ranges []struct{ off, length int64 }
-	for pos := off; pos < off+length; {
-		chunkEnd := (pos/chunkSize + 1) * chunkSize
-		if chunkEnd > off+length {
-			chunkEnd = off + length
-		}
-		ranges = append(ranges, struct{ off, length int64 }{pos, chunkEnd - pos})
-		pos = chunkEnd
+	data, err := hub.ReadFileAtContext(ctx, project, path, off, length)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
 	}
-
-	if len(ranges) == 1 || maxConcurrent <= 1 {
-		data, err := hub.ReadFileAtContext(ctx, project, path, off, length)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		return data, nil
-	}
-
-	results := make([][]byte, len(ranges))
-	sem := make(chan struct{}, maxConcurrent)
-	fetchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var wg sync.WaitGroup
-	var firstErr error
-	var setErr sync.Once
-
-	for i, r := range ranges {
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(idx int, rOff, rLen int64) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			d, err := hub.ReadFileAtContext(fetchCtx, project, path, rOff, rLen)
-			if err != nil && !errors.Is(err, io.EOF) {
-				setErr.Do(func() {
-					firstErr = err
-					cancel()
-				})
-				return
-			}
-			results[idx] = d
-		}(i, r.off, r.length)
-	}
-	wg.Wait()
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	totalLen := int64(0)
-	for _, d := range results {
-		totalLen += int64(len(d))
-	}
-	merged := make([]byte, 0, totalLen)
-	for _, d := range results {
-		merged = append(merged, d...)
-	}
-	if int64(len(merged)) < length {
-		length = int64(len(merged))
-	}
-	return merged[:length], nil
+	return data, nil
 }
 
 func (w *inodeWriteState) closeTemp() {
@@ -2357,29 +1964,6 @@ func (w *inodeWriteState) closeTemp() {
 		return
 	}
 	w.closed = true
-	if w.streamCh != nil && !w.streamDraining {
-		w.streamDraining = true
-		ch := w.streamCh
-		done := w.streamDone
-		cancel := w.streamCancel
-		w.mu.Unlock()
-		close(ch)
-		if cancel != nil {
-			cancel()
-		}
-		<-done
-		w.mu.Lock()
-		w.streamCh = nil
-		w.streamDone = nil
-		w.streamCancel = nil
-		w.streamCtx = nil
-		w.stream = nil
-		w.streamDraining = false
-	} else if w.streamCancel != nil {
-		w.streamCancel()
-		w.streamCancel = nil
-		w.streamCtx = nil
-	}
 	if w.temp != nil {
 		if err := w.temp.Close(); err != nil {
 			logging.Error(nil, "failed to close write state temp file", "err", err)
@@ -2406,12 +1990,6 @@ func (w *inodeWriteState) closeTemp() {
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if writeState := h.writeState; writeState != nil {
 		writeState.mu.Lock()
-		if writeState.stream != nil {
-			if err := writeState.materializeStreamToTempLocked(ctx); err != nil {
-				writeState.mu.Unlock()
-				return nil, errnoFromError(err)
-			}
-		}
 		buf := make([]byte, len(dest))
 		n, err := writeState.readIntoLocked(ctx, buf, off)
 		writeState.mu.Unlock()
@@ -2451,13 +2029,6 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		defer h.writeState.mu.Unlock()
 		if h.flags&syscall.O_APPEND != 0 {
 			off = h.writeState.logicalSize
-		}
-		if n, streamed, err := h.writeState.tryStreamWriteLocked(ctx, data, off, h.id); streamed {
-			if err != nil {
-				return 0, errnoFromError(err)
-			}
-			h.fs.debugf("stream write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
-			return n, 0
 		}
 		if h.writeState.temp == nil {
 			if err := h.writeState.ensureTempLocked(); err != nil {
@@ -2513,20 +2084,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 // the commit runs, so dirtyRanges is always populated correctly.
 
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
-	if h.writeState != nil {
-		h.writeState.opMu.Lock()
-		defer h.writeState.opMu.Unlock()
-		h.writeState.mu.Lock()
-		defer h.writeState.mu.Unlock()
-		if h.writeState.stream != nil {
-			if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
-				return errnoFromError(err)
-			}
-		}
-		return 0
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	_ = ctx
 	return 0
 }
 
@@ -2568,7 +2126,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	h.writeState.opMu.Lock()
 	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
-	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() && h.writeState.stream == nil {
+	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() {
 		h.writeState.mu.Unlock()
 		return 0
 	}
@@ -2580,38 +2138,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	baseSize := h.writeState.baseSize
 	logicalSize := h.writeState.logicalSize
 	pending := h.writeState.pending
-	if h.writeState.stream != nil {
-		if err := h.writeState.flushStreamingChunksLocked(ctx, true); err != nil {
-			h.writeState.mu.Unlock()
-			h.fs.debugf("commit failed path=%s inode=%d step=stream-flush err=%v", targetPath, h.inode, err)
-			return errnoFromError(err)
-		}
-		if len(h.writeState.dirtyRanges) > 0 {
-			return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
-		}
-		return h.commitStreamReplace(ctx, targetPath, logicalSize, pending)
-	}
 	return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
-}
-
-// commitStreamReplace handles the streaming-chunks path.
-// Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
-func (h *storhubHandle) commitStreamReplace(ctx context.Context, targetPath string, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
-	releaseTag := h.writeState.stream.releaseTag
-	chunks := append([]metadata.ChunkInfo(nil), h.writeState.stream.chunks...)
-	h.writeState.mu.Unlock()
-	h.fs.debugf("commit stream-replace path=%s inode=%d base=%d size=%d chunks=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(chunks))
-	if _, err := h.fs.hub.FinalizeReplaceChunksContext(ctx, h.fs.project, targetPath, releaseTag, logicalSize, chunks); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=stream-replace err=%v", targetPath, h.inode, err)
-		return errnoFromError(err)
-	}
-	h.writeState.mu.Lock()
-	h.writeState.baseSize = logicalSize
-	h.writeState.dirtyRanges = nil
-	h.writeState.tempAuthoritative = false
-	h.writeState.stream = nil
-	h.writeState.mu.Unlock()
-	return h.commitPostUpdate(ctx, targetPath, pending)
 }
 
 // commitTemp handles all temp-based commit paths (truncate, chunk-rewrite, replace, patch).

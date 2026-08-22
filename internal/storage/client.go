@@ -27,10 +27,7 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
-const (
-	maxMetadataBytes       = 8 << 20
-	minParallelSegmentSize = 1 << 20 // 1 MiB — minimum segment size to parallelize
-)
+const maxMetadataBytes = 8 << 20
 
 var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -978,18 +975,14 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 		return fmt.Errorf("preallocate output file: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	err = runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(fileMeta.Chunks), func(i int) error {
-		chunkName := fileMeta.Chunks[i]
+	for _, chunkName := range fileMeta.Chunks {
 		chunk, ok := repoMeta.Chunks[chunkName]
 		if !ok {
 			return fmt.Errorf("chunk %d not found", chunkName)
 		}
-		return h.downloadChunkWithRetry(ctx, project, outFile, chunk)
-	})
-	if err != nil {
-		return err
+		if err := h.downloadChunkWithRetry(ctx, project, outFile, chunk); err != nil {
+			return err
+		}
 	}
 
 	if err := outFile.Sync(); err != nil {
@@ -1153,79 +1146,6 @@ func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chu
 			return written, fmt.Errorf("read chunk %d: %w", chunk.AssetID, readErr)
 		}
 	}
-}
-
-type nopReadSeeker struct{ reader io.Reader }
-
-func (n nopReadSeeker) Read(p []byte) (int, error)   { return n.reader.Read(p) }
-func (nopReadSeeker) Seek(int64, int) (int64, error) { return 0, errors.New("seek not supported") }
-
-func runConcurrent(ctx context.Context, maxConcurrent, items int, fn func(index int) error) error {
-	if items == 0 {
-		return nil
-	}
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
-	}
-	type result struct{ err error }
-	results := make(chan result, items)
-	jobs := make(chan int)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	workerCount := maxConcurrent
-	if workerCount > items {
-		workerCount = items
-	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case idx, ok := <-jobs:
-					if !ok {
-						return
-					}
-					if err := fn(idx); err != nil {
-						cancel()
-						results <- result{err: err}
-						return
-					}
-					results <- result{}
-				}
-			}
-		}()
-	}
-
-dispatch:
-	for i := 0; i < items; i++ {
-		select {
-		case <-ctx.Done():
-			break dispatch
-		case jobs <- i:
-		}
-	}
-	close(jobs)
-	wg.Wait()
-	close(results)
-	var firstErr error
-	for res := range results {
-		if res.err != nil && firstErr == nil {
-			firstErr = res.err
-		}
-	}
-	if firstErr != nil {
-		return firstErr
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return nil
 }
 
 func validateProject(project string) error {
@@ -1551,32 +1471,6 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 		end = file.Size
 	}
 	segments := overlappingFileSegments(file, repo.Chunks, offset, end)
-	if len(segments) == 0 {
-		shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
-		return int(end - offset), nil
-	}
-	// Flatten two-tier parallelism: sub-split every large segment, then
-	// dispatch all sub-segments through a single runConcurrent pool.
-	if h.config.MaxConcurrentTransfers > 1 {
-		all := make([]fileReadSegment, 0, len(segments)*2)
-		for _, seg := range segments {
-			if seg.end-seg.start >= minParallelSegmentSize {
-				all = append(all, splitSegment(seg, h.config.MaxConcurrentTransfers)...)
-			} else {
-				all = append(all, seg)
-			}
-		}
-		if len(all) > 1 {
-			if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(all), func(i int) error {
-				sub := all[i]
-				return h.fillAssetRange(ctx, project, sub.chunk, result[sub.start:sub.end])
-			}); err != nil {
-				return 0, err
-			}
-			shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
-			return int(end - offset), nil
-		}
-	}
 	for _, segment := range segments {
 		if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
 			return 0, err
@@ -1590,33 +1484,6 @@ type fileReadSegment struct {
 	chunk metadata.ChunkInfo
 	start int
 	end   int
-}
-
-func splitSegment(seg fileReadSegment, maxParts int) []fileReadSegment {
-	size := seg.end - seg.start
-	if maxParts > size {
-		maxParts = size
-	}
-	partSize := (size + maxParts - 1) / maxParts
-	subs := make([]fileReadSegment, 0, maxParts)
-	for off := 0; off < size; off += partSize {
-		end := off + partSize
-		if end > size {
-			end = size
-		}
-		partLen := end - off
-		subs = append(subs, fileReadSegment{
-			chunk: metadata.ChunkInfo{
-				Size:        int64(partLen),
-				Offset:      seg.chunk.Offset + int64(off),
-				AssetOffset: seg.chunk.AssetOffset + int64(off),
-				AssetID:     seg.chunk.AssetID,
-			},
-			start: seg.start + off,
-			end:   seg.start + end,
-		})
-	}
-	return subs
 }
 
 func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[int64]metadata.ChunkInfo, offset, end int64) []fileReadSegment {

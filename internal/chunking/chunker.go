@@ -7,10 +7,9 @@ import (
 )
 
 const (
-	MaxReleaseAssetSize           int64 = (2 * 1024 * 1024 * 1024) - 1
-	DefaultChunkSize              int64 = MaxReleaseAssetSize
-	DefaultBufferSize                   = 1 * 1024 * 1024
-	DefaultMaxConcurrentTransfers       = 8
+	MaxReleaseAssetSize int64 = (2 * 1024 * 1024 * 1024) - 1
+	DefaultChunkSize    int64 = MaxReleaseAssetSize
+	DefaultBufferSize         = 1 * 1024 * 1024
 )
 
 type ChunkReader struct {

@@ -73,33 +73,33 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 
 func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte) ([]ChunkInfo, error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
-	results := make([]ChunkInfo, count)
+	results := make([]ChunkInfo, 0, count)
 	namer := newAssetNamer()
-	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
-		start := int64(i) * normalizedChunkSize(h.config.ChunkSize)
-		end := start + normalizedChunkSize(h.config.ChunkSize)
+	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	for i := 0; i < count; i++ {
+		start := int64(i) * chunkSize
+		end := start + chunkSize
 		if end > int64(len(data)) {
 			end = int64(len(data))
 		}
 		part := data[start:end]
 		assetName, err := namer.Next()
 		if err != nil {
-			return err
+			return results, err
 		}
 		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
 		if err != nil {
-			return fmt.Errorf("upload patch chunk %d: %w", i, err)
+			return results, fmt.Errorf("upload patch chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{
+		results = append(results, ChunkInfo{
 			Size:        int64(len(part)),
 			Offset:      fileOffset + start,
 			AssetOffset: 0,
 			AssetID:     assetID,
 			Release:     releaseTag,
-		}
-		return nil
-	})
-	return results, err
+		})
+	}
+	return results, nil
 }
 
 func (h *StorHub) sliceChunk(ctx context.Context, project string, original ChunkInfo, newOffset, newSize int64) (ChunkInfo, error) {
@@ -193,9 +193,9 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	}
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
-	results := make([]ChunkInfo, count)
+	results := make([]ChunkInfo, 0, count)
 	namer := newAssetNamer()
-	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, count, func(i int) error {
+	for i := 0; i < count; i++ {
 		chunkStart := start + int64(i)*chunkSize
 		chunkEnd := chunkStart + chunkSize
 		if chunkEnd > end {
@@ -204,16 +204,15 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 		section := io.NewSectionReader(snapshot, chunkStart, chunkEnd-chunkStart)
 		assetName, err := namer.Next()
 		if err != nil {
-			return err
+			return results, err
 		}
 		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
 		if err != nil {
-			return fmt.Errorf("upload rewritten chunk %d: %w", i, err)
+			return results, fmt.Errorf("upload rewritten chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Size: chunkEnd - chunkStart, Offset: chunkStart, AssetOffset: 0, AssetID: assetID, Release: releaseTag}
-		return nil
-	})
-	return results, err
+		results = append(results, ChunkInfo{Size: chunkEnd - chunkStart, Offset: chunkStart, AssetOffset: 0, AssetID: assetID, Release: releaseTag})
+	}
+	return results, nil
 }
 
 func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[int64]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {

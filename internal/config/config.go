@@ -19,7 +19,6 @@ const (
 	defaultRepoDescription = "StorHub storage project"
 	DefaultChunkSize       = int64(2*1024*1024*1024) - 1
 	DefaultBufferSize      = 1 * 1024 * 1024
-	DefaultMaxTransfers    = 8
 )
 
 type AtimePolicy string
@@ -36,7 +35,6 @@ type Config struct {
 	HTTPClient             *http.Client
 	ChunkSize              int64
 	BufferSize             int
-	MaxConcurrentTransfers int
 	RepoDescription        string
 	CreatePublicRepo       bool
 	MaxRetries             int
@@ -62,7 +60,6 @@ func Default() Config {
 		HTTPClient:             newDefaultHTTPClient(),
 		ChunkSize:              DefaultChunkSize,
 		BufferSize:             DefaultBufferSize,
-		MaxConcurrentTransfers: DefaultMaxTransfers,
 		RepoDescription:        defaultRepoDescription,
 		CreatePublicRepo:       false,
 		MaxRetries:             4,
@@ -99,9 +96,6 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.BufferSize <= 0 {
 		c.BufferSize = defaults.BufferSize
-	}
-	if c.MaxConcurrentTransfers <= 0 {
-		c.MaxConcurrentTransfers = defaults.MaxConcurrentTransfers
 	}
 	if c.RepoDescription == "" {
 		c.RepoDescription = defaults.RepoDescription
@@ -158,7 +152,6 @@ func isZeroConfig(c Config) bool {
 		c.HTTPClient == nil &&
 		c.ChunkSize == 0 &&
 		c.BufferSize == 0 &&
-		c.MaxConcurrentTransfers == 0 &&
 		c.RepoDescription == "" &&
 		!c.CreatePublicRepo &&
 		c.MaxRetries == 0 &&

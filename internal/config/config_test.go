@@ -21,7 +21,7 @@ func TestDefaultConfigProvidesUsableDefaults(t *testing.T) {
 	if cfg.HTTPClient.Timeout != defaultRequestTimeout {
 		t.Fatalf("unexpected timeout: %v", cfg.HTTPClient.Timeout)
 	}
-	if cfg.ChunkSize != DefaultChunkSize || cfg.BufferSize != DefaultBufferSize || cfg.MaxConcurrentTransfers != DefaultMaxTransfers {
+	if cfg.ChunkSize != DefaultChunkSize || cfg.BufferSize != DefaultBufferSize {
 		t.Fatalf("unexpected transfer defaults: %+v", cfg)
 	}
 	if cfg.RepoDescription != defaultRepoDescription || cfg.CreatePublicRepo {
@@ -40,15 +40,14 @@ func TestWithDefaultsPreservesExplicitValuesAndFillsGaps(t *testing.T) {
 	sleep := func(context.Context, time.Duration) error { return nil }
 	customClient := newDefaultHTTPClient()
 	cfg := Config{
-		APIBaseURL:             "https://example.test/api",
-		HTTPClient:             customClient,
-		ChunkSize:              64,
-		BufferSize:             128,
-		MaxConcurrentTransfers: 3,
-		CreatePublicRepo:       true,
-		MaxRetries:             0,
-		Now:                    func() time.Time { return now },
-		Sleep:                  sleep,
+		APIBaseURL:       "https://example.test/api",
+		HTTPClient:       customClient,
+		ChunkSize:        64,
+		BufferSize:       128,
+		CreatePublicRepo: true,
+		MaxRetries:       0,
+		Now:              func() time.Time { return now },
+		Sleep:            sleep,
 	}
 	got := cfg.WithDefaults()
 	if got.APIBaseURL != cfg.APIBaseURL || got.HTTPClient != customClient {
@@ -57,7 +56,7 @@ func TestWithDefaultsPreservesExplicitValuesAndFillsGaps(t *testing.T) {
 	if got.APIVersion != defaultAPIVersion || got.RepoDescription != defaultRepoDescription {
 		t.Fatalf("expected defaults filled: %+v", got)
 	}
-	if got.ChunkSize != 64 || got.BufferSize != 128 || got.MaxConcurrentTransfers != 3 {
+	if got.ChunkSize != 64 || got.BufferSize != 128 {
 		t.Fatalf("unexpected transfer values: %+v", got)
 	}
 	if !got.CreatePublicRepo || got.MaxRetries != 0 || got.Now() != now || got.Sleep == nil || got.Sleep(context.Background(), 0) != nil {

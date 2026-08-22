@@ -61,7 +61,6 @@ func main() {
 	printTitle("StorHub Showcase")
 	printKV("default chunk size", "%d", storhub.DefaultChunkSize)
 	printKV("default buffer size", "%d", storhub.DefaultBufferSize)
-	printKV("default transfers", "%d", storhub.DefaultMaxConcurrentTransfers)
 	printKV("max release asset", "%d", storhub.MaxReleaseAssetSize)
 	printKV("node kinds", "file=%s symlink=%s", storhub.NodeKindFile, storhub.NodeKindSymlink)
 	fmt.Println()
@@ -74,7 +73,6 @@ func main() {
 
 	cfg := storhub.DefaultConfig()
 	cfg.ChunkSize = 8 << 20
-	cfg.MaxConcurrentTransfers = 4
 
 	configuredHub, err := storhub.NewStorHubWithConfig(token, cfg)
 	if err != nil {

@@ -19,24 +19,20 @@ const metadataFilePath = ".storhub/metadata.json"
 func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker) ([]ChunkInfo, error) {
 	results := make([]ChunkInfo, planner.NumChunks())
 	namer := newAssetNamer()
-	err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, planner.NumChunks(), func(i int) error {
+	for i := 0; i < planner.NumChunks(); i++ {
 		chunk, err := planner.GetChunk(i)
 		if err != nil {
-			return err
+			return results, err
 		}
 		assetName, err := namer.Next()
 		if err != nil {
-			return err
+			return results, err
 		}
 		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
 		if err != nil {
-			return fmt.Errorf("upload chunk %d: %w", i, err)
+			return results, fmt.Errorf("upload chunk %d: %w", i, err)
 		}
 		results[i] = ChunkInfo{Size: chunk.Size(), Offset: chunk.Offset(), AssetOffset: 0, AssetID: assetID, Release: releaseTag}
-		return nil
-	})
-	if err != nil {
-		return results, err
 	}
 	return results, nil
 }

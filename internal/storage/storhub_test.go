@@ -39,14 +39,12 @@ const (
 	testSingleBufferSize       = 32
 	testLargeChunkSize   int64 = 1 << 30
 	testLargeBufferSize        = 4 << 20
-	testLargeConcurrency       = 2
 )
 
 func singleChunkTestConfig() Config {
 	return Config{
 		ChunkSize:              testSingleChunkSize,
 		BufferSize:             testSingleBufferSize,
-		MaxConcurrentTransfers: 2,
 		MaxRetries:             0,
 		MetadataCommitInterval: 100 * time.Millisecond,
 		DisableGitBackend:      true,
@@ -73,12 +71,6 @@ func smallTransferTestConfig() Config {
 func smallRetryDisabledTestConfig() Config {
 	cfg := smallTransferTestConfig()
 	cfg.MaxRetries = -1
-	return cfg
-}
-
-func smallConcurrentTestConfig() Config {
-	cfg := smallTransferTestConfig()
-	cfg.MaxConcurrentTransfers = 2
 	return cfg
 }
 
@@ -113,14 +105,13 @@ func rateLimitTestConfig(sleep func(context.Context, time.Duration) error) Confi
 }
 
 func liveSmokeConfig() Config {
-	return Config{ChunkSize: testLargeChunkSize, BufferSize: testLargeBufferSize, MaxConcurrentTransfers: testLargeConcurrency, MaxRetries: 4, MetadataCommitInterval: 100 * time.Millisecond}
+	return Config{ChunkSize: testLargeChunkSize, BufferSize: testLargeBufferSize, MaxRetries: 4, MetadataCommitInterval: 100 * time.Millisecond}
 }
 
 func liveLargeSmokeConfig(client *http.Client) Config {
 	cfg := liveSmokeConfig()
 	cfg.HTTPClient = client
 	cfg.ChunkSize = chunking.MaxReleaseAssetSize
-	cfg.MaxConcurrentTransfers = 1
 	return cfg
 }
 
@@ -208,7 +199,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	}
 }
 
-func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
+func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 	backend := newMockGitHub(t)
 	var active atomic.Int32
 	var maxActive atomic.Int32
@@ -226,22 +217,22 @@ func TestReadFileAtContextDownloadsChunksConcurrently(t *testing.T) {
 		}
 		return false
 	})
-	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 3, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
 	input := writeTempFile(t, t.TempDir(), "video.bin", data)
-	if _, err := hub.UploadFileContext(ctx, "project-parallel-read", "video.bin", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "project-sequential-read", "video.bin", input); err != nil {
 		t.Fatalf("upload large file: %v", err)
 	}
-	got, err := hub.ReadFileAtContext(ctx, "project-parallel-read", "video.bin", 0, int64(len(data)))
+	got, err := hub.ReadFileAtContext(ctx, "project-sequential-read", "video.bin", 0, int64(len(data)))
 	if err != nil {
 		t.Fatalf("read file at: %v", err)
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatal("read data mismatch")
 	}
-	if peak := maxActive.Load(); peak < 2 {
-		t.Fatalf("expected concurrent chunk downloads, got peak %d", peak)
+	if peak := maxActive.Load(); peak != 1 {
+		t.Fatalf("expected strictly sequential chunk downloads, got peak %d", peak)
 	}
 }
 
@@ -275,7 +266,7 @@ func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 
 func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
 	if err := hub.Mkdir("project-fs-ops", "notes"); err != nil {
 		t.Fatalf("mkdir notes: %v", err)
 	}
@@ -514,7 +505,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 
 func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch.txt", []byte("abcdefghij"))
 	meta, err := hub.UploadFile("project-patch", "patch.txt", input)
 	if err != nil {
@@ -550,7 +541,7 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 
 func TestPatchFileUsesRangeDownloads(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 1, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "ranges.txt", []byte("abcdefghij"))
 	if _, err := hub.UploadFile("project-range-patch", "ranges.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
@@ -577,7 +568,7 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 
 func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 4, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
 	meta, err := hub.UploadFile("project-exact-ranges", "exact-ranges.bin", input)
@@ -1070,7 +1061,7 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 
 func TestDownloadRemovesCorruptOutput(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallConcurrentTestConfig())
+	hub := backend.newClient(t, smallTransferTestConfig())
 
 	input := writeTempFile(t, t.TempDir(), "corrupt.bin", []byte("this file will be corrupted during download"))
 	fileMeta, err := hub.UploadFile("project-corrupt", "corrupt.bin", input)
@@ -1339,32 +1330,9 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 	}
 }
 
-func TestRunConcurrentReturnsContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	started := make(chan struct{}, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runConcurrent(ctx, 2, 4, func(i int) error {
-			if i == 0 {
-				select {
-				case started <- struct{}{}:
-				default:
-				}
-			}
-			<-ctx.Done()
-			return ctx.Err()
-		})
-	}()
-	<-started
-	cancel()
-	if err := <-errCh; !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation, got %v", err)
-	}
-}
-
 func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 1, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "range-read.txt", []byte("abcdefghijklmnopqrstuvwxyz"))
 	fileMeta, err := hub.UploadFile("project-range-read", "range-read.txt", input)
 	if err != nil {
@@ -1407,7 +1375,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 
 func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 1, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch-retry.txt", []byte("abcdefghij"))
 	fileMeta, err := hub.UploadFile("project-patch-range-retry", "patch-retry.txt", input)
 	if err != nil {
@@ -1539,8 +1507,8 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	var commitCount atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
-		commitCount.Add(1)
-		if commitCount.Load() == 2 && conflicts.Load() == 0 {
+			commitCount.Add(1)
+			if commitCount.Load() == 2 && conflicts.Load() == 0 {
 				conflicts.Add(1)
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
@@ -2681,7 +2649,7 @@ func testFUSEEditorSaveCycle(t *testing.T, projectSuffix string, mutator func([]
 func testFUSEEditorSaveCycleWithSetattrHandle(t *testing.T, projectSuffix string, passHandleToSetattr bool, mutator func([]byte) ([]byte, []byte)) {
 	t.Helper()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 4096, BufferSize: testSingleBufferSize, MaxConcurrentTransfers: 2, MaxRetries: 0, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 4096, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
 	original := append(bytes.Repeat([]byte("A"), 4096), bytes.Repeat([]byte("B"), 4096)...)
 	original = append(original, bytes.Repeat([]byte("C"), 4096)...)
@@ -2765,7 +2733,6 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	hub := backend.newClient(t, Config{
 		ChunkSize:              8,
 		BufferSize:             testSingleBufferSize,
-		MaxConcurrentTransfers: 2,
 		MaxRetries:             0,
 		MetadataCommitInterval: 100 * time.Millisecond,
 		DisableGitBackend:      true,

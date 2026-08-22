@@ -194,30 +194,18 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 		}
 	}
 	result := &PurgeResult{}
-	if len(releaseTasks) > 0 {
-		if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(releaseTasks), func(i int) error {
-			task := releaseTasks[i]
-			if err := h.deleteReleaseByID(ctx, project, task.id); err != nil {
-				return fmt.Errorf("delete untracked release %s: %w", task.tag, err)
-			}
-			return nil
-		}); err != nil {
-			return nil, err
+	for _, task := range releaseTasks {
+		if err := h.deleteReleaseByID(ctx, project, task.id); err != nil {
+			return nil, fmt.Errorf("delete untracked release %s: %w", task.tag, err)
 		}
-		result.DeletedReleases = len(releaseTasks)
 	}
-	if len(assetTasks) > 0 {
-		if err := runConcurrent(ctx, h.config.MaxConcurrentTransfers, len(assetTasks), func(i int) error {
-			task := assetTasks[i]
-			if err := h.deleteAssetByID(ctx, project, task.id); err != nil {
-				return fmt.Errorf("delete untracked asset %d: %w", task.id, err)
-			}
-			return nil
-		}); err != nil {
-			return nil, err
+	result.DeletedReleases = len(releaseTasks)
+	for _, task := range assetTasks {
+		if err := h.deleteAssetByID(ctx, project, task.id); err != nil {
+			return nil, fmt.Errorf("delete untracked asset %d: %w", task.id, err)
 		}
-		result.DeletedAssets = len(assetTasks)
 	}
+	result.DeletedAssets = len(assetTasks)
 
 	// Squash the entire metadata git history into a single orphan commit.
 	// Since we cannot roll back individual files (content-addressed storage),
