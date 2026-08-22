@@ -568,17 +568,6 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	now := h.config.Now().Unix()
 	fileMeta := current.Clone()
 
-	// Add new chunks to the repo's Chunks map
-	chunkIDs := make([]int64, len(chunks))
-	for i, chunk := range chunks {
-		id := repoMeta.AllocateChunkID()
-		repoMeta.Chunks[id] = chunk
-		chunkIDs[i] = id
-	}
-	fileMeta.Chunks = chunkIDs
-	fileMeta.Size = size
-	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, now)
-
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
@@ -587,9 +576,16 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// delete live data. PrepareReplaceContext EnsureReleases only on a local
 	// clone that is discarded before this call.
 	pm.meta.EnsureRelease(releaseTag, now)
-	for i, id := range chunkIDs {
+	// Allocate identifiers against the authoritative in-memory metadata so
+	// concurrent operations can never mint colliding chunk IDs.
+	chunkIDs := make([]int64, len(chunks))
+	for i := range chunks {
+		id := pm.meta.AllocateChunkID()
 		pm.meta.Chunks[id] = chunks[i]
+		chunkIDs[i] = id
 	}
+	fileMeta.Chunks = chunkIDs
+	fileMeta.Size = size
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
 		pm.mu.Unlock()
@@ -718,18 +714,6 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	now := h.config.Now().Unix()
 	patched := fileMeta.Clone()
-	chunkIDs := make([]int64, len(newChunks))
-	for i, chunk := range newChunks {
-		id := repoMeta.AllocateChunkID()
-		repoMeta.Chunks[id] = chunk
-		chunkIDs[i] = id
-	}
-	patched.Chunks = chunkIDs
-	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
-	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
-	patched.ModifiedAt = now
-	patched.ChangedAt = now
-	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
 
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
@@ -739,9 +723,20 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// delete live data. buildPatchedChunks EnsureReleases only on a local
 	// clone that is discarded here.
 	pm.meta.EnsureRelease(releaseTag, now)
-	for i, id := range chunkIDs {
+	// Allocate identifiers against the authoritative in-memory metadata so
+	// concurrent operations can never mint colliding chunk IDs.
+	chunkIDs := make([]int64, len(newChunks))
+	for i := range newChunks {
+		id := pm.meta.AllocateChunkID()
 		pm.meta.Chunks[id] = newChunks[i]
+		chunkIDs[i] = id
 	}
+	patched.Chunks = chunkIDs
+	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
+	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
+	patched.ModifiedAt = now
+	patched.ChangedAt = now
+	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
@@ -767,18 +762,6 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	now := h.config.Now().Unix()
 	rewritten := fileMeta.Clone()
-	chunkIDs := make([]int64, len(newChunks))
-	for i, chunk := range newChunks {
-		id := repoMeta.AllocateChunkID()
-		repoMeta.Chunks[id] = chunk
-		chunkIDs[i] = id
-	}
-	rewritten.Chunks = chunkIDs
-	rewritten.Size = finalSize
-	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
-	rewritten.ModifiedAt = now
-	rewritten.ChangedAt = now
-	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
 
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
@@ -788,9 +771,20 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	// delete live data. buildRewrittenChunks EnsureReleases only on a local
 	// clone that is discarded here.
 	pm.meta.EnsureRelease(releaseTag, now)
-	for i, id := range chunkIDs {
+	// Allocate identifiers against the authoritative in-memory metadata so
+	// concurrent operations can never mint colliding chunk IDs.
+	chunkIDs := make([]int64, len(newChunks))
+	for i := range newChunks {
+		id := pm.meta.AllocateChunkID()
 		pm.meta.Chunks[id] = newChunks[i]
+		chunkIDs[i] = id
 	}
+	rewritten.Chunks = chunkIDs
+	rewritten.Size = finalSize
+	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
+	rewritten.ModifiedAt = now
+	rewritten.ChangedAt = now
+	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
@@ -879,15 +873,9 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 			return nil, err
 		}
 	}
-	chunkIDs := make([]int64, len(results))
-	for i, chunk := range results {
-		id := workingMeta.AllocateChunkID()
-		workingMeta.Chunks[id] = chunk
-		chunkIDs[i] = id
-	}
 	fileMeta := FileMeta{
 		Size:    fileInfo.Size(),
-		Chunks:  chunkIDs,
+		Chunks:  nil,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().Unix())
 	if existing == nil {
@@ -916,9 +904,15 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, shfs.AlreadyExists(cleanName)
 	}
 	pm.meta.EnsureRelease(releaseTag, h.config.Now().Unix())
-	for i, id := range chunkIDs {
+	// Allocate identifiers against the authoritative in-memory metadata so
+	// concurrent operations can never mint colliding chunk IDs.
+	chunkIDs := make([]int64, len(results))
+	for i := range results {
+		id := pm.meta.AllocateChunkID()
 		pm.meta.Chunks[id] = results[i]
+		chunkIDs[i] = id
 	}
+	fileMeta.Chunks = chunkIDs
 	current := pm.meta.FindFile(cleanName)
 	if current != nil {
 		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().Unix())

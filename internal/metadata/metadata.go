@@ -15,21 +15,73 @@ type ChunkInfo struct {
 	Release     string `json:"r"`
 	AssetOffset int64  `json:"ao,omitempty"`
 	AssetID     int64  `json:"a"`
+	// Digest is the hex-encoded SHA-256 of the chunk payload. Optional;
+	// populated by newer uploads and verified by download paths.
+	Digest string `json:"d,omitempty"`
+}
+
+// XAttrMap holds extended attributes as raw bytes. JSON values are base64
+// encoded. Decoding also accepts legacy plain-string values from v1/v2
+// metadata so old payloads migrate losslessly.
+type XAttrMap map[string][]byte
+
+func (x *XAttrMap) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*x = nil
+		return nil
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	decoded := make(XAttrMap, len(raw))
+	for k, v := range raw {
+		var b []byte
+		if err := json.Unmarshal(v, &b); err == nil {
+			decoded[k] = b
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("xattr %s: %w", k, err)
+		}
+		decoded[k] = []byte(s)
+	}
+	*x = decoded
+	return nil
+}
+
+func (x XAttrMap) MarshalJSON() ([]byte, error) {
+	if x == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(map[string][]byte(x))
+}
+
+func (x XAttrMap) Clone() XAttrMap {
+	if len(x) == 0 {
+		return nil
+	}
+	dst := make(XAttrMap, len(x))
+	for k, v := range x {
+		dst[k] = append([]byte(nil), v...)
+	}
+	return dst
 }
 
 type FileMeta struct {
-	Chunks     []int64           `json:"cs,omitempty"`
-	Size       int64             `json:"s"`
-	Symlink    string            `json:"sl,omitempty"`
-	UploadedAt int64             `json:"ua"`
-	ModifiedAt int64             `json:"ma,omitempty"`
-	AccessedAt int64             `json:"aa,omitempty"`
-	ChangedAt  int64             `json:"ca,omitempty"`
-	Mode       uint32            `json:"md,omitempty"`
-	UID        uint32            `json:"u,omitempty"`
-	GID        uint32            `json:"g,omitempty"`
-	Inode      uint64            `json:"i,omitempty"`
-	XAttrs     map[string]string `json:"x,omitempty"`
+	Chunks     []int64  `json:"cs,omitempty"`
+	Size       int64    `json:"s"`
+	Symlink    string   `json:"sl,omitempty"`
+	UploadedAt int64    `json:"ua"`
+	ModifiedAt int64    `json:"ma,omitempty"`
+	AccessedAt int64    `json:"aa,omitempty"`
+	ChangedAt  int64    `json:"ca,omitempty"`
+	Mode       uint32   `json:"md,omitempty"`
+	UID        uint32   `json:"u,omitempty"`
+	GID        uint32   `json:"g,omitempty"`
+	Inode      uint64   `json:"i,omitempty"`
+	XAttrs     XAttrMap `json:"x,omitempty"`
 }
 
 func (f FileMeta) Clone() FileMeta {
@@ -37,25 +89,25 @@ func (f FileMeta) Clone() FileMeta {
 	if f.Chunks != nil {
 		clone.Chunks = append([]int64(nil), f.Chunks...)
 	}
-	clone.XAttrs = cloneStringMap(f.XAttrs)
+	clone.XAttrs = f.XAttrs.Clone()
 	return clone
 }
 
 type DirMeta struct {
-	CreatedAt  int64             `json:"ca"`
-	ModifiedAt int64             `json:"ma"`
-	AccessedAt int64             `json:"aa,omitempty"`
-	ChangedAt  int64             `json:"cha,omitempty"`
-	Mode       uint32            `json:"m,omitempty"`
-	UID        uint32            `json:"u,omitempty"`
-	GID        uint32            `json:"g,omitempty"`
-	Inode      uint64            `json:"i,omitempty"`
-	XAttrs     map[string]string `json:"x,omitempty"`
+	CreatedAt  int64    `json:"ca"`
+	ModifiedAt int64    `json:"ma"`
+	AccessedAt int64    `json:"aa,omitempty"`
+	ChangedAt  int64    `json:"cha,omitempty"`
+	Mode       uint32   `json:"m,omitempty"`
+	UID        uint32   `json:"u,omitempty"`
+	GID        uint32   `json:"g,omitempty"`
+	Inode      uint64   `json:"i,omitempty"`
+	XAttrs     XAttrMap `json:"x,omitempty"`
 }
 
 func (d DirMeta) Clone() DirMeta {
 	clone := d
-	clone.XAttrs = cloneStringMap(d.XAttrs)
+	clone.XAttrs = d.XAttrs.Clone()
 	return clone
 }
 
@@ -77,11 +129,13 @@ type RepoMetadata struct {
 	Root       DirMeta               `json:"rt"`
 	Dirs       map[string]DirMeta    `json:"d"`
 	Files      map[string]FileMeta   `json:"f"`
-	Chunks     map[int64]ChunkInfo `json:"c"`
+	Chunks     map[int64]ChunkInfo   `json:"c"`
 	Releases   map[string]ReleaseRef `json:"r"`
 
-	NextInode    uint64              `json:"-"`
-	NextChunkID  int64               `json:"-"`
+	// NextInode/NextChunkID are persisted so deleting the highest-numbered
+	// entry cannot silently reuse identifiers across reloads.
+	NextInode    uint64              `json:"ni,omitempty"`
+	NextChunkID  int64               `json:"nc,omitempty"`
 	filesByInode map[uint64][]string `json:"-"`
 	childDirs    map[string][]string `json:"-"`
 	childFiles   map[string][]string `json:"-"`
@@ -97,8 +151,8 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().Unix()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
-		Version:   2,
-		Project:   project,
+		Version:     3,
+		Project:     project,
 		NextInode:   2,
 		NextChunkID: 1,
 		Root: DirMeta{
@@ -177,21 +231,79 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 	return data, nil
 }
 
+// maxMetadataVersion is the newest schema version this build reads and writes.
+const maxMetadataVersion = 3
+
+// xattrMapFromStrings converts legacy string-valued xattrs from v1/v2
+// payloads into the v3 byte representation.
+func xattrMapFromStrings(src map[string]string) XAttrMap {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(XAttrMap, len(src))
+	for k, v := range src {
+		dst[k] = []byte(v)
+	}
+	return dst
+}
+
+// FromJSON parses metadata, migrating older schema versions forward. It fails
+// loudly on payloads that are corrupt (no version) or from a newer schema;
+// it never guesses.
 func (m *RepoMetadata) FromJSON(data []byte) error {
 	var raw struct {
-		Version int `json:"v"`
+		V       int `json:"v"`
+		Version int `json:"version"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return fmt.Errorf("parse metadata: %w", err)
 	}
-	if raw.Version < 2 {
-		return m.migrateV1(data)
+	version := raw.V
+	if version == 0 {
+		version = raw.Version
 	}
-	return json.Unmarshal(data, m)
+	switch {
+	case version == 0:
+		return fmt.Errorf("metadata payload has no version field; refusing to guess the schema")
+	case version > maxMetadataVersion:
+		return fmt.Errorf("metadata version %d is newer than supported version %d", version, maxMetadataVersion)
+	case version < 2:
+		if err := m.migrateV1(data); err != nil {
+			return err
+		}
+	default:
+		if err := json.Unmarshal(data, m); err != nil {
+			return fmt.Errorf("unmarshal v%d metadata: %w", version, err)
+		}
+	}
+	m.Version = maxMetadataVersion
+	m.backfillLegacyOwners()
+	return nil
+}
+
+// backfillLegacyOwners stamps process ownership onto entries loaded from
+// older schemas whose owners were omitted. New writes always persist real
+// owner IDs (including 0 for root), so this never runs on v3+ data.
+func (m *RepoMetadata) backfillLegacyOwners() {
+	uid, _ := defaultOwnerIDs()
+	backfill := func(owner *uint32) {
+		if *owner == 0 && uid != 0 {
+			*owner = uid
+		}
+	}
+	backfill(&m.Root.UID)
+	for path, dir := range m.Dirs {
+		backfill(&dir.UID)
+		m.Dirs[path] = dir
+	}
+	for path, file := range m.Files {
+		backfill(&file.UID)
+		m.Files[path] = file
+	}
 }
 
 func (m *RepoMetadata) Normalize(project string, now int64) {
-	m.Version = 2
+	m.Version = maxMetadataVersion
 	m.Project = chooseNonEmpty(m.Project, project)
 	m.normalizeRoot(now)
 	if m.Dirs == nil {
@@ -214,6 +326,7 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 		file.Normalize(now)
 		m.Files[path] = file
 	}
+	m.sortFileChunksByOffset()
 	for tag, ref := range m.Releases {
 		if ref.CreatedAt == 0 {
 			ref.CreatedAt = now
@@ -225,6 +338,23 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 		m.LastMod = now
 	}
 	m.RebuildIndexes()
+}
+
+// sortFileChunksByOffset enforces the stored-order invariant every reader
+// relies on: a file's chunk IDs are ordered by data offset, so binary search
+// over FileChunks is valid.
+func (m *RepoMetadata) sortFileChunksByOffset() {
+	for path, file := range m.Files {
+		if len(file.Chunks) < 2 {
+			continue
+		}
+		sorted := append([]int64(nil), file.Chunks...)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return m.Chunks[sorted[i]].Offset < m.Chunks[sorted[j]].Offset
+		})
+		file.Chunks = sorted
+		m.Files[path] = file
+	}
 }
 
 func (m *RepoMetadata) RecomputeStats() {
@@ -254,21 +384,14 @@ func (m *RepoMetadata) RecomputeStats() {
 	m.TotalFiles = totalFiles
 	m.TotalSize = totalSize
 	if m.Version == 0 {
-		m.Version = 2
+		m.Version = maxMetadataVersion
 	}
 	m.RebuildIndexes()
 }
 
 func (d *DirMeta) Normalize(now int64) {
-	uid, gid := defaultOwnerIDs()
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
-	}
-	if d.UID == 0 && uid != 0 {
-		d.UID = uid
-	}
-	if d.GID == 0 && gid != 0 {
-		d.GID = gid
 	}
 	if d.CreatedAt == 0 {
 		d.CreatedAt = now
@@ -286,15 +409,8 @@ func (d *DirMeta) Normalize(now int64) {
 }
 
 func (f *FileMeta) Normalize(now int64) {
-	uid, gid := defaultOwnerIDs()
 	if f.Mode == 0 {
 		f.Mode = defaultFileMode(NodeKindFile)
-	}
-	if f.UID == 0 && uid != 0 {
-		f.UID = uid
-	}
-	if f.GID == 0 && gid != 0 {
-		f.GID = gid
 	}
 	if f.UploadedAt == 0 {
 		f.UploadedAt = now
@@ -336,7 +452,8 @@ func (m *RepoMetadata) HasDirectory(path string) bool {
 
 func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
 	if path == "" {
-		return nil
+		root := m.Root
+		return &root
 	}
 	if dir, ok := m.Dirs[path]; ok {
 		return &dir
@@ -382,13 +499,15 @@ func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
 		return &ref
 	}
 	m.Releases[tag] = ReleaseRef{CreatedAt: createdAt}
-	m.invalidateIndexes()
 	ref := m.Releases[tag]
 	return &ref
 }
 
 func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	name = normalizeStoredPath(name)
+	// Clone the caller's value so later mutations of its slices cannot
+	// alias into stored metadata.
+	file = file.Clone()
 	if parent := parentPath(name); parent != "" {
 		m.EnsureDirectory(parent, createdAt)
 	}
@@ -433,6 +552,34 @@ func (m *RepoMetadata) RemoveFile(name string) bool {
 	return true
 }
 
+// AllocateInode returns the next inode number. It has no hidden side effects;
+// callers normalize metadata at commit/load boundaries.
+func (m *RepoMetadata) AllocateInode() uint64 {
+	return m.allocateInode()
+}
+
+// AllocateChunkID returns the next chunk identifier.
+func (m *RepoMetadata) AllocateChunkID() int64 {
+	return m.allocateChunkID()
+}
+
+// InitializeNewFileIdentity materializes a complete identity (inode, mode,
+// owner, timestamps) for a newly created file entry.
+func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
+	initializeNewFileIdentity(meta, file, now)
+}
+
+// PreserveFileIdentity carries the existing node's stable identity onto an
+// updated entry. A type change (regular file <-> symlink) carries nothing.
+func PreserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
+	preserveFileIdentity(file, existing, now)
+}
+
+// ParseNumericReleaseTag extracts the numeric part of a "v<N>" release tag.
+func ParseNumericReleaseTag(tag string) (int, bool) {
+	return parseNumericReleaseTag(tag)
+}
+
 func (m *RepoMetadata) RemoveRelease(tag string) bool {
 	if _, ok := m.Releases[tag]; !ok {
 		return false
@@ -450,13 +597,15 @@ func (m *RepoMetadata) AllFiles() []FileMeta {
 	sort.Strings(names)
 	files := make([]FileMeta, len(names))
 	for i, name := range names {
-		files[i] = m.Files[name]
+		files[i] = m.Files[name].Clone()
 	}
 	return files
 }
 
+// FileChunks resolves a file's chunk IDs to chunk records in stored order
+// (which Normalize keeps sorted by data offset).
 func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
-	file, ok := m.Files[name]
+	file, ok := m.Files[normalizeStoredPath(name)]
 	if !ok {
 		return nil
 	}
@@ -469,20 +618,18 @@ func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
 	return chunks
 }
 
+// DirNLink returns the POSIX directory link count: 2 plus the number of
+// immediate subdirectories.
 func (m *RepoMetadata) DirNLink(path string) int {
-	count := 2
-	for _, dirPath := range m.childDirs[path] {
-		if dirPath != path {
-			count++
+	if path != "" {
+		if _, ok := m.Dirs[path]; !ok {
+			return 0
 		}
 	}
-	rootDirCount := 0
-	for dirPath := range m.Dirs {
-		if parentPath(dirPath) == path {
-			rootDirCount++
-		}
+	if m.childDirs == nil {
+		m.RebuildIndexes()
 	}
-	return count + rootDirCount
+	return 2 + len(m.childDirs[path])
 }
 
 func (m *RepoMetadata) FileNLink(name string) int {
@@ -543,10 +690,10 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 	if file.Mode == 0 {
 		file.Mode = existing.Mode
 	}
-	if file.UID == 0 && existing.UID != 0 {
+	if file.UID == 0 {
 		file.UID = existing.UID
 	}
-	if file.GID == 0 && existing.GID != 0 {
+	if file.GID == 0 {
 		file.GID = existing.GID
 	}
 	if file.UploadedAt == 0 {
@@ -562,7 +709,7 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 		file.ChangedAt = chooseNonZeroTime(now, existing.ChangedAt, file.ModifiedAt)
 	}
 	if len(file.XAttrs) == 0 && len(existing.XAttrs) > 0 {
-		file.XAttrs = cloneStringMap(existing.XAttrs)
+		file.XAttrs = existing.XAttrs.Clone()
 	}
 }
 
@@ -574,10 +721,12 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	if file.Mode == 0 {
 		file.Mode = defaultFileMode(NodeKindFile)
 	}
-	if file.UID == 0 && uid != 0 {
+	// Owner IDs are always materialized at creation (0 legitimately means
+	// root); they are never re-stamped afterwards.
+	if file.UID == 0 {
 		file.UID = uid
 	}
-	if file.GID == 0 && gid != 0 {
+	if file.GID == 0 {
 		file.GID = gid
 	}
 	if file.UploadedAt == 0 {
@@ -595,18 +744,11 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 }
 
 func (m *RepoMetadata) normalizeRoot(now int64) {
-	uid, gid := defaultOwnerIDs()
 	if m.Root.Inode == 0 {
 		m.Root.Inode = 1
 	}
 	if m.Root.Mode == 0 {
 		m.Root.Mode = defaultDirMode()
-	}
-	if m.Root.UID == 0 && uid != 0 {
-		m.Root.UID = uid
-	}
-	if m.Root.GID == 0 && gid != 0 {
-		m.Root.GID = gid
 	}
 	if m.Root.CreatedAt == 0 {
 		m.Root.CreatedAt = now
@@ -649,14 +791,12 @@ func (m *RepoMetadata) normalizeRoot(now int64) {
 }
 
 func (m *RepoMetadata) allocateInode() uint64 {
-	m.normalizeRoot(time.Now().Unix())
 	ino := m.NextInode
 	m.NextInode++
 	return ino
 }
 
 func (m *RepoMetadata) allocateChunkID() int64 {
-	m.normalizeRoot(time.Now().Unix())
 	id := m.NextChunkID
 	m.NextChunkID++
 	return id
@@ -689,6 +829,9 @@ func (m *RepoMetadata) Validate() error {
 		if err := dir.Validate(); err != nil {
 			return fmt.Errorf("directory %s: %w", path, err)
 		}
+		if err := validateStoredPathKey(path); err != nil {
+			return fmt.Errorf("directory %s: %w", path, err)
+		}
 		if _, ok := seenDirs[path]; ok {
 			return fmt.Errorf("duplicate directory: %s", path)
 		}
@@ -707,11 +850,24 @@ func (m *RepoMetadata) Validate() error {
 	totalFiles := 0
 	totalSize := int64(0)
 	for path, file := range m.Files {
+		if path == "" {
+			return fmt.Errorf("file entry with empty path")
+		}
+		if err := validateStoredPathKey(path); err != nil {
+			return fmt.Errorf("file %s: %w", path, err)
+		}
 		if err := file.Validate(); err != nil {
 			return fmt.Errorf("file %s: %w", path, err)
 		}
 		if file.Inode == 0 {
 			return fmt.Errorf("file %s inode is required", path)
+		}
+		// Files may share an inode (hardlinks), but a file must never
+		// collide with a directory or root inode. seenInodes holds only
+		// root+directory inodes here; file inodes are deliberately not
+		// added.
+		if _, ok := seenInodes[file.Inode]; ok {
+			return fmt.Errorf("file %s reuses directory inode %d", path, file.Inode)
 		}
 		if parent := parentPath(path); parent != "" {
 			if _, ok := m.Dirs[parent]; !ok {
@@ -723,34 +879,29 @@ func (m *RepoMetadata) Validate() error {
 			totalSize += file.Size
 		}
 		seenChunk := map[int64]struct{}{}
+		var prevOffset int64 = -1
 		for _, id := range file.Chunks {
-			if _, ok := m.Chunks[id]; !ok {
+			chunk, ok := m.Chunks[id]
+			if !ok {
 				return fmt.Errorf("file %s references missing chunk %d", path, id)
 			}
 			if _, ok := seenChunk[id]; ok {
 				return fmt.Errorf("file %s: duplicate chunk reference: %d", path, id)
 			}
 			seenChunk[id] = struct{}{}
-		}
-		chunks := make([]ChunkInfo, 0, len(file.Chunks))
-		for _, id := range file.Chunks {
-			chunks = append(chunks, m.Chunks[id])
-		}
-		sort.Slice(chunks, func(i, j int) bool {
-			return chunks[i].Offset < chunks[j].Offset
-		})
-		nextOffset := int64(0)
-		for _, c := range chunks {
-			if c.Offset < 0 {
-				return fmt.Errorf("file %s: chunk has negative offset %d", path, c.Offset)
+			if chunk.Size < 0 {
+				return fmt.Errorf("file %s: chunk %d has negative size %d", path, id, chunk.Size)
 			}
-			if c.Offset < nextOffset {
-				return fmt.Errorf("file %s: chunk overlap at offset %d", path, c.Offset)
+			if chunk.Offset < 0 {
+				return fmt.Errorf("file %s: chunk %d has negative offset %d", path, id, chunk.Offset)
 			}
-			nextOffset = c.Offset + c.Size
-		}
-		if file.Symlink == "" && nextOffset > file.Size {
-			return fmt.Errorf("file %s: chunk data extends beyond file size (%d > %d)", path, nextOffset, file.Size)
+			if chunk.Offset < prevOffset {
+				return fmt.Errorf("file %s: chunks not stored in offset order (%d after %d)", path, chunk.Offset, prevOffset)
+			}
+			prevOffset = chunk.Offset
+			if file.Symlink == "" && chunk.Offset+chunk.Size > file.Size {
+				return fmt.Errorf("file %s: chunk data extends beyond file size (%d > %d)", path, chunk.Offset+chunk.Size, file.Size)
+			}
 		}
 	}
 
@@ -761,12 +912,29 @@ func (m *RepoMetadata) Validate() error {
 		return fmt.Errorf("metadata total size mismatch: expected %d, got %d", totalSize, m.TotalSize)
 	}
 
+	// Note: chunk.Release tags are intentionally allowed to reference tags
+	// absent from the Releases catalog — DeleteRelease hides catalog entries
+	// while live chunks keep pointing at them, and PurgeUntracked treats any
+	// chunk-referenced release as tracked.
+
 	for tag, ref := range m.Releases {
 		if ref.AssetCount < 0 {
 			return fmt.Errorf("release %s has negative asset count %d", tag, ref.AssetCount)
 		}
 	}
 
+	return nil
+}
+
+// validateStoredPathKey rejects map keys that can never be produced by the
+// path normalizer: absolute paths, empty segments, and ".." traversal.
+func validateStoredPathKey(path string) error {
+	if path == "" || strings.HasPrefix(path, "/") {
+		return fmt.Errorf("invalid stored path %q", path)
+	}
+	if path == ".." || strings.HasPrefix(path, "../") || strings.Contains(path, "/../") {
+		return fmt.Errorf("stored path escapes root: %q", path)
+	}
 	return nil
 }
 
@@ -783,6 +951,10 @@ func (f FileMeta) Validate() error {
 	}
 	if f.Inode == 0 {
 		return fmt.Errorf("file inode is required")
+	}
+	// Directory type bits on a file entry indicate structural corruption.
+	if f.Mode&0o170000 == 0o040000 {
+		return fmt.Errorf("file entry carries directory type bits")
 	}
 	if f.Symlink != "" {
 		if f.Size != int64(len([]byte(f.Symlink))) {
@@ -875,18 +1047,21 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 		return fmt.Errorf("unmarshal v1 metadata: %w", err)
 	}
 
-	m.Version = 2
+	m.Version = maxMetadataVersion
 	m.Project = v1.Project
 	m.TotalFiles = v1.TotalFiles
 	m.TotalSize = v1.TotalSize
 	m.LastMod = timeToUnix(v1.LastModified)
 	m.NextInode = v1.NextInode
+	// Chunk IDs start at 1; normalizeRoot raises the counter past the live
+	// maximum after allocation.
+	m.NextChunkID = 1
 
 	m.Root = DirMeta{
 		CreatedAt: timeToUnix(v1.Root.CreatedAt), ModifiedAt: timeToUnix(v1.Root.ModifiedAt),
 		AccessedAt: timeToUnix(v1.Root.AccessedAt), ChangedAt: timeToUnix(v1.Root.ChangedAt),
 		Mode: v1.Root.Mode, UID: v1.Root.UID, GID: v1.Root.GID,
-		Inode: v1.Root.Inode, XAttrs: v1.Root.XAttrs,
+		Inode: v1.Root.Inode, XAttrs: xattrMapFromStrings(v1.Root.XAttrs),
 	}
 
 	m.Dirs = make(map[string]DirMeta, len(v1.Directories))
@@ -895,7 +1070,7 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 			CreatedAt: timeToUnix(d.CreatedAt), ModifiedAt: timeToUnix(d.ModifiedAt),
 			AccessedAt: timeToUnix(d.AccessedAt), ChangedAt: timeToUnix(d.ChangedAt),
 			Mode: d.Mode, UID: d.UID, GID: d.GID,
-			Inode: d.Inode, XAttrs: d.XAttrs,
+			Inode: d.Inode, XAttrs: xattrMapFromStrings(d.XAttrs),
 		}
 	}
 
@@ -939,7 +1114,7 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 				UID:        f.UID,
 				GID:        f.GID,
 				Inode:      f.Inode,
-				XAttrs:     f.XAttrs,
+				XAttrs:     xattrMapFromStrings(f.XAttrs),
 			}
 			if symlink != "" {
 				fileMeta.Size = int64(len(symlink))
@@ -950,21 +1125,6 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	}
 
 	return nil
-}
-
-func stableSortReleases(releases []string) {
-	sort.SliceStable(releases, func(i, j int) bool {
-		left, lok := parseNumericReleaseTag(releases[i])
-		right, rok := parseNumericReleaseTag(releases[j])
-		if lok && rok && left != right {
-			return left < right
-		}
-		return releases[i] < releases[j]
-	})
-}
-
-func stableSortChunkNames(names []string) {
-	sort.SliceStable(names, func(i, j int) bool { return names[i] < names[j] })
 }
 
 func stableSortStrings(strs []string) {
@@ -980,10 +1140,11 @@ func parseNumericReleaseTag(tag string) (int, bool) {
 	return n, true
 }
 
+// chooseNonEmpty returns the first value that is non-blank, trimmed.
 func chooseNonEmpty(values ...string) string {
 	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
 		}
 	}
 	return ""

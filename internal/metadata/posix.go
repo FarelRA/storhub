@@ -12,15 +12,21 @@ const (
 	NodeKindSymlink NodeKind = "symlink"
 )
 
-func cloneStringMap(src map[string]string) map[string]string {
-	if len(src) == 0 {
+func normalizeXAttrs(attrs XAttrMap) XAttrMap {
+	if len(attrs) == 0 {
 		return nil
 	}
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
+	clone := make(XAttrMap, len(attrs))
+	for k, v := range attrs {
+		if k == "" {
+			continue
+		}
+		clone[k] = v
 	}
-	return dst
+	if len(clone) == 0 {
+		return nil
+	}
+	return clone
 }
 
 func defaultFileMode(kind NodeKind) uint32 {
@@ -38,23 +44,6 @@ func defaultDirMode() uint32 {
 
 func defaultOwnerIDs() (uint32, uint32) {
 	return uint32(os.Getuid()), uint32(os.Getgid())
-}
-
-func normalizeXAttrs(attrs map[string]string) map[string]string {
-	if len(attrs) == 0 {
-		return nil
-	}
-	clone := make(map[string]string, len(attrs))
-	for k, v := range attrs {
-		if k == "" {
-			continue
-		}
-		clone[k] = v
-	}
-	if len(clone) == 0 {
-		return nil
-	}
-	return clone
 }
 
 func chooseNonZeroTime(values ...int64) int64 {

@@ -303,20 +303,20 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	if err := shfs.CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return err
 	}
-	value := string(append([]byte(nil), data...))
+	value := append([]byte(nil), data...)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				if current.XAttrs == nil {
-					current.XAttrs = make(map[string]string)
+					current.XAttrs = make(meta.XAttrMap)
 				}
 				current.XAttrs[attr] = value
 				current.ChangedAt = now
 			})
 		}
 		if dir.XAttrs == nil {
-			dir.XAttrs = make(map[string]string)
+			dir.XAttrs = make(meta.XAttrMap)
 		}
 		dir.XAttrs[attr] = value
 		dir.ChangedAt = now
@@ -345,7 +345,7 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	var value string
+	var value []byte
 	var ok bool
 	if file != nil {
 		value, ok = file.XAttrs[attr]
@@ -355,7 +355,7 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 	if !ok {
 		return nil, shfs.XAttrNotFound(cleanPath)
 	}
-	result = []byte(value)
+	result = append([]byte(nil), value...)
 	return result, nil
 }
 
@@ -370,7 +370,7 @@ func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath stri
 	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	var attrs map[string]string
+	var attrs meta.XAttrMap
 	if file != nil {
 		attrs = file.XAttrs
 	} else {
@@ -447,7 +447,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 				ModifiedAt: repo.Root.ModifiedAt,
 				AccessedAt: repo.Root.AccessedAt,
 				ChangedAt:  repo.Root.ChangedAt,
-				XAttrs:     CloneStringMap(repo.Root.XAttrs),
+				XAttrs:     repo.Root.XAttrs.Clone(),
 			}
 			if err := mutate(repo, nil, root); err != nil {
 				return err
@@ -459,7 +459,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			repo.Root.ModifiedAt = root.ModifiedAt
 			repo.Root.AccessedAt = root.AccessedAt
 			repo.Root.ChangedAt = root.ChangedAt
-			repo.Root.XAttrs = CloneStringMap(root.XAttrs)
+			repo.Root.XAttrs = root.XAttrs.Clone()
 			return nil
 		}
 		if file := repo.FindFile(cleanPath); file != nil {
@@ -583,7 +583,7 @@ func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*
 			ModifiedAt: repo.Root.ModifiedAt,
 			AccessedAt: repo.Root.AccessedAt,
 			ChangedAt:  repo.Root.ChangedAt,
-			XAttrs:     CloneStringMap(repo.Root.XAttrs),
+			XAttrs:     repo.Root.XAttrs.Clone(),
 		}
 		return repo, cleanPath, nil, &root, nil
 	}

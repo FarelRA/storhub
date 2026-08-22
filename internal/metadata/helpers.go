@@ -5,14 +5,16 @@ import (
 	"strings"
 )
 
+// normalizeStoredPath canonicalizes user-supplied paths to storage keys:
+// relative, slash-clean, and without a leading separator. It is idempotent.
+// Escaping paths ("..") are returned unchanged for now; Validate rejects
+// such keys at load/commit boundaries.
 func normalizeStoredPath(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return ""
 	}
-	if strings.HasPrefix(trimmed, "/") {
-		trimmed = strings.TrimPrefix(trimmed, "/")
-	}
+	trimmed = strings.TrimLeft(trimmed, "/")
 	cleaned := path.Clean(trimmed)
 	if cleaned == "." {
 		return ""
