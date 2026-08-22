@@ -166,11 +166,19 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	now := int64(300)
 	repo := NewRepoMetadata("validate")
 	InitializeNewFileIdentity(repo, &FileMeta{}, now)
-	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
+	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, XAttrs: map[string]string{"user.demo": "1"}}
 	incoming := &FileMeta{}
 	PreserveFileIdentity(incoming, existing, now+60)
-	if incoming.Inode != existing.Inode || incoming.Symlink != "target" || incoming.XAttrs["user.demo"] != "1" {
+	if incoming.Inode != existing.Inode || incoming.XAttrs["user.demo"] != "1" {
 		t.Fatalf("unexpected preserved identity: %+v", incoming)
+	}
+	// A regular file replacing a symlink is a type change: the old target
+	// must never leak onto the incoming file.
+	symExisting := &FileMeta{Inode: 43, Mode: 0o777, Symlink: "target", UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
+	symIncoming := &FileMeta{}
+	PreserveFileIdentity(symIncoming, symExisting, now+60)
+	if symIncoming.Symlink != "" {
+		t.Fatalf("symlink target leaked onto regular file: %+v", symIncoming)
 	}
 	badRepo := RepoMetadata{}
 	if err := badRepo.Validate(); err == nil || !strings.Contains(err.Error(), "project") {
@@ -299,5 +307,51 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 	decoded.Normalize("demo", 100)
 	if err := decoded.Validate(); err != nil {
 		t.Fatalf("Validate after round-trip: %v", err)
+	}
+}
+
+func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	link := FileMeta{Symlink: "target", Size: 6, Inode: 7, Mode: 0o120777, UID: 1, GID: 1}
+	m.UpsertFile("link", link, 100)
+	m.EnsureRelease("v1", 100)
+	m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+
+	file := FileMeta{Size: 4, Chunks: []int64{1}, Mode: 0o100644}
+	m.UpsertFile("link", file, 200)
+
+	got := m.FindFile("link")
+	if got == nil {
+		t.Fatal("file missing after replace")
+	}
+	if got.Symlink != "" {
+		t.Fatalf("stale symlink target survived replace: %+v", got)
+	}
+	if got.Size != 4 || len(got.Chunks) != 1 {
+		t.Fatalf("new content destroyed by symlink identity leak: %+v", got)
+	}
+	if got.Inode == 7 || got.Inode == 0 {
+		t.Fatalf("expected fresh inode for replaced node, got %d", got.Inode)
+	}
+	m.Normalize("demo", 300)
+	if err := m.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
+func TestUpsertSymlinkRefreshKeepsIdentity(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	link := FileMeta{Symlink: "old-target", Inode: 9, Mode: 0o120777, UID: 5, GID: 5, UploadedAt: 100, ModifiedAt: 100, AccessedAt: 100, ChangedAt: 100}
+	m.UpsertFile("lnk", link, 100)
+
+	refresh := FileMeta{Symlink: "new-target"}
+	m.UpsertFile("lnk", refresh, 200)
+
+	got := m.FindFile("lnk")
+	if got == nil || got.Symlink != "new-target" {
+		t.Fatalf("symlink refresh failed: %+v", got)
+	}
+	if got.Inode != 9 || got.UID != 5 {
+		t.Fatalf("identity not preserved on symlink refresh: %+v", got)
 	}
 }

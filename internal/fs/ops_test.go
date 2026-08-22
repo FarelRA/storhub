@@ -379,3 +379,17 @@ func returnFail(t *testing.T, label string, err error, value any) {
 	t.Helper()
 	t.Fatalf("%s: value=%+v err=%v", label, value, err)
 }
+
+func TestCreateFileRejectsExistingDirectory(t *testing.T) {
+	backend := newTestBackend(100)
+	svc := NewService(backend)
+	if err := svc.MkdirContext(context.Background(), "demo", "sub"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := svc.CreateFileContext(context.Background(), "demo", "sub"); !errors.Is(err, ErrIsDirectory) {
+		t.Fatalf("expected ErrIsDirectory, got %v", err)
+	}
+	if _, shadowed := backend.repo.Files["sub"]; shadowed {
+		t.Fatal("directory was silently shadowed by a file entry")
+	}
+}

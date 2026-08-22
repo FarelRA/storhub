@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1199,4 +1200,86 @@ func (s *stubHub) ChunkSize() int64 {
 		return 4
 	}
 	return s.chunkSize
+}
+
+func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
+	cacheDir := t.TempDir()
+	fsys, err := New(&stubHub{
+		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
+			return nil, errors.New("network down")
+		},
+	}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	if err != nil {
+		t.Fatalf("new handle: %v", err)
+	}
+	if n, errno := h.Write(context.Background(), []byte("abcdefghij"), 0); errno != 0 || n != 10 {
+		t.Fatalf("write: n=%d errno=%v", n, errno)
+	}
+	if errno := h.Release(context.Background()); errno == 0 {
+		t.Fatal("expected release to report the commit failure")
+	}
+	recovery := filepath.Join(cacheDir, "recovery")
+	entries, err := os.ReadDir(recovery)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one quarantined overlay in %s, got %v (err=%v)", recovery, entries, err)
+	}
+	data, err := os.ReadFile(filepath.Join(recovery, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read quarantined overlay: %v", err)
+	}
+	if string(data) != "abcdefghij" {
+		t.Fatalf("quarantined overlay lost data: %q", data)
+	}
+	rootEntries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	for _, entry := range rootEntries {
+		if !entry.IsDir() {
+			t.Fatalf("stray temp left in cache root: %s", entry.Name())
+		}
+	}
+}
+
+func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
+	cacheDir := t.TempDir()
+	var failOnce atomic.Bool
+	failOnce.Store(true)
+	fsys, err := New(&stubHub{
+		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
+			if failOnce.Load() {
+				return nil, errors.New("network down")
+			}
+			return &meta.FileMeta{}, nil
+		},
+	}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	if err != nil {
+		t.Fatalf("new handle: %v", err)
+	}
+	if _, errno := h.Write(context.Background(), []byte("dirty"), 0); errno != 0 {
+		t.Fatalf("write: %v", errno)
+	}
+	// Do not Release; Close() must quarantine the dirty overlay instead of
+	// silently discarding acknowledged writes.
+	if err := fsys.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	recovery := filepath.Join(cacheDir, "recovery")
+	entries, err := os.ReadDir(recovery)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("expected quarantined overlay after close, got %v (err=%v)", entries, err)
+	}
+	data, err := os.ReadFile(filepath.Join(recovery, entries[0].Name()))
+	if err != nil || string(data) != "dirty" {
+		t.Fatalf("quarantined overlay content wrong: %q (err=%v)", data, err)
+	}
 }

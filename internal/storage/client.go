@@ -583,6 +583,10 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	// Register the release holding the new chunks so PurgeUntracked cannot
+	// delete live data. PrepareReplaceContext EnsureReleases only on a local
+	// clone that is discarded before this call.
+	pm.meta.EnsureRelease(releaseTag, now)
 	for i, id := range chunkIDs {
 		pm.meta.Chunks[id] = chunks[i]
 	}
@@ -708,7 +712,7 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 }
 
 func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMeta, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
-	newChunks, _, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
+	newChunks, releaseTag, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
 	if err != nil {
 		return nil, err
 	}
@@ -731,6 +735,10 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	// Register the release holding the new chunks so PurgeUntracked cannot
+	// delete live data. buildPatchedChunks EnsureReleases only on a local
+	// clone that is discarded here.
+	pm.meta.EnsureRelease(releaseTag, now)
 	for i, id := range chunkIDs {
 		pm.meta.Chunks[id] = newChunks[i]
 	}
@@ -753,7 +761,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 }
 
 func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *RepoMetadata, fileMeta *FileMeta, finalSize int64, dirtyRanges []byteRange) (*FileMeta, error) {
-	newChunks, _, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, cleanName, snapshotPath, finalSize, dirtyRanges)
+	newChunks, releaseTag, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, cleanName, snapshotPath, finalSize, dirtyRanges)
 	if err != nil {
 		return nil, err
 	}
@@ -776,6 +784,10 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	// Register the release holding the new chunks so PurgeUntracked cannot
+	// delete live data. buildRewrittenChunks EnsureReleases only on a local
+	// clone that is discarded here.
+	pm.meta.EnsureRelease(releaseTag, now)
 	for i, id := range chunkIDs {
 		pm.meta.Chunks[id] = newChunks[i]
 	}
