@@ -14,7 +14,11 @@ func TestDefaultOptionsAndNewValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new storhub: %v", err)
 	}
-	handler, err := New(hub, DefaultOptions())
+	// DefaultOptions serve wide-open by design of this facade test; the
+	// explicit opt-in documents intent.
+	opts0 := DefaultOptions()
+	opts0.AllowAnonymous = true
+	handler, err := New(hub, opts0)
 	if err != nil {
 		t.Fatalf("new rest: %v", err)
 	}
