@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -278,9 +280,18 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 
 func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	logger := h.projectLogger(project)
-	logging.Error(logger, "metadata commit failed, reloading from github", "err", err)
+	// Conflict (stale previous_sha against remote HEAD) means another
+	// writer advanced the metadata: reload and discard local uncommitted
+	// state, matching what actually happened remotely. Any other failure
+	// is transient: retain dirty state so the loop retries with it.
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		logging.Error(logger, "metadata commit failed; retaining dirty metadata for retry", "err", err)
+		return
+	}
+	logging.Error(logger, "metadata commit conflicted, reloading from github", "err", err)
 	if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-		logging.Error(logger, "failed to reload metadata after commit failure; preserving dirty metadata for retry", "err", loadErr)
+		logging.Error(logger, "failed to reload metadata after conflict; preserving dirty metadata for retry", "err", loadErr)
 		return
 	}
 	logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
@@ -487,14 +498,14 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	return releaseTag, uploadURL, err
 }
 
-func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, index int, offset int64, data []byte) (ChunkInfo, error) {
+func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, offset int64, data []byte) (ChunkInfo, error) {
 	const maxNameRetries = 5
 	for attempt := 0; attempt < maxNameRetries; attempt++ {
 		assetName, err := randomAssetName()
 		if err != nil {
 			return ChunkInfo{}, err
 		}
-		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
+		assetID, digest, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
 		if err == nil {
 			return ChunkInfo{
 				Size:        int64(len(data)),
@@ -502,6 +513,7 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 				Release:     releaseTag,
 				AssetID:     assetID,
 				AssetOffset: 0,
+				Digest:      digest,
 			}, nil
 		}
 		var apiErr *ghapi.APIError
@@ -524,6 +536,9 @@ func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
 		if c.Offset < size {
 			if c.Offset+c.Size > size {
 				c.Size = size - c.Offset
+				// Clipped chunk is a partial view; its digest no longer
+				// covers the bytes actually referenced.
+				c.Digest = ""
 			}
 			filtered = append(filtered, c)
 		}
@@ -622,7 +637,6 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 
 	var chunks []ChunkInfo
 	var uploaded int64
-	var index int
 	buf := h.getBuffer()
 	defer h.putBuffer(buf)
 
@@ -635,13 +649,12 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	for {
 		n, readErr := reader.Read(*buf)
 		if n > 0 {
-			chunk, uploadErr := h.UploadChunkDataContext(ctx, project, releaseTag, uploadURL, index, uploaded, (*buf)[:n])
+			chunk, uploadErr := h.UploadChunkDataContext(ctx, project, releaseTag, uploadURL, uploaded, (*buf)[:n])
 			if uploadErr != nil {
 				return nil, uploadErr
 			}
 			chunks = append(chunks, chunk)
 			uploaded += int64(n)
-			index++
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
@@ -741,6 +754,13 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	if current == nil {
 		pm.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+	}
+	// The pre-network validation ran against a snapshot; the file may have
+	// changed since. Re-check the edited range against current state before
+	// committing, so a concurrent truncate/replace cannot be clobbered.
+	if current.Size != fileMeta.Size || offset+deleteSize > current.Size {
+		pm.mu.Unlock()
+		return nil, fmt.Errorf("file %s changed concurrently (size %d, expected %d); patch rejected", cleanName, current.Size, fileMeta.Size)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
@@ -1114,13 +1134,26 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 			continue
 		}
 
-		written, copyErr := h.writeChunk(outFile, reader, *buf, chunk)
+		// Whole-chunk downloads hash the payload in passing and verify it
+		// against the digest recorded at upload time.
+		hasher := sha256.New()
+		stream := io.Reader(reader)
+		verifyDigest := chunk.Digest != "" && chunk.AssetOffset == 0
+		if verifyDigest {
+			stream = io.TeeReader(stream, hasher)
+		}
+		written, copyErr := h.writeChunk(outFile, stream, *buf, chunk)
 		closeErr := reader.Close()
 		if copyErr == nil && closeErr != nil {
 			copyErr = closeErr
 		}
 		if copyErr == nil && written != chunk.Size {
 			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.AssetID, chunk.Size, written)
+		}
+		if copyErr == nil && verifyDigest {
+			if got := hex.EncodeToString(hasher.Sum(nil)); got != chunk.Digest {
+				copyErr = fmt.Errorf("integrity check failed for chunk %d: digest mismatch", chunk.AssetID)
+			}
 		}
 		if copyErr == nil {
 			return nil
@@ -1186,25 +1219,6 @@ func shortSHA(value string) string {
 		return value
 	}
 	return value[:12]
-}
-
-func sleepWithContext(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func isConflictError(err error) bool {
-	var apiErr *ghapi.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
 
 func extractAPIError(err error) *ghapi.APIError {

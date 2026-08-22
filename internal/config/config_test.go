@@ -81,10 +81,10 @@ func TestWithDefaultsHandlesZeroAndNegativeValues(t *testing.T) {
 func TestSleepWithContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := sleepWithContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
+	if err := SleepWithContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled context, got %v", err)
 	}
-	if err := sleepWithContext(context.Background(), time.Millisecond); err != nil {
+	if err := SleepWithContext(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("expected timer completion, got %v", err)
 	}
 }

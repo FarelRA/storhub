@@ -63,10 +63,11 @@ func (r *gitRepo) ensure(ctx context.Context) error {
 	if err := os.MkdirAll(r.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", r.dir, err)
 	}
+	// Full history is required: rollback and revision listing resolve
+	// arbitrary past commits. The metadata repo is tiny, so depth is cheap.
 	repo, err = git.PlainCloneContext(ctx, r.dir, &git.CloneOptions{
 		URL:           r.remoteURL(),
 		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
-		Depth:         1,
 	})
 	if err != nil {
 		return fmt.Errorf("clone %s: %w", r.project, err)
