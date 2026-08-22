@@ -66,8 +66,13 @@ func TestWithDefaultsPreservesExplicitValuesAndFillsGaps(t *testing.T) {
 
 func TestWithDefaultsHandlesZeroAndNegativeValues(t *testing.T) {
 	got := (Config{MaxRetries: -2}).WithDefaults()
-	if got.MaxRetries != 0 {
-		t.Fatalf("expected negative retries clamped to zero, got %d", got.MaxRetries)
+	// Negative values are preserved for Validate to reject loudly instead
+	// of being silently clamped.
+	if got.MaxRetries != -2 {
+		t.Fatalf("expected negative retries preserved for validation, got %d", got.MaxRetries)
+	}
+	if err := got.Validate(); err == nil {
+		t.Fatal("expected negative retries to fail validation")
 	}
 	if got.BaseRetryDelay != Default().BaseRetryDelay || got.MaxRetryDelay != Default().MaxRetryDelay {
 		t.Fatalf("expected default retry delays, got %+v", got)
