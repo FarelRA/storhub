@@ -33,12 +33,11 @@ type (
 )
 
 const (
-	DefaultChunkSize              = chunking.DefaultChunkSize
-	DefaultBufferSize             = chunking.DefaultBufferSize
-	DefaultMaxConcurrentTransfers = chunking.DefaultMaxConcurrentTransfers
-	MaxReleaseAssetSize           = chunking.MaxReleaseAssetSize
-	NodeKindFile                  = meta.NodeKindFile
-	NodeKindSymlink               = meta.NodeKindSymlink
+	DefaultChunkSize    = chunking.DefaultChunkSize
+	DefaultBufferSize   = chunking.DefaultBufferSize
+	MaxReleaseAssetSize = chunking.MaxReleaseAssetSize
+	NodeKindFile        = meta.NodeKindFile
+	NodeKindSymlink     = meta.NodeKindSymlink
 )
 
 var (

@@ -20,7 +20,7 @@ StorHub is not intended to replace a local SSD filesystem or a database storage 
 
 - Stores file content in GitHub release assets
 - Uses `.storhub/metadata.json` as the logical source of truth
-- Supports upload, replace, patch, append, truncate, download, and integrity verification
+- Supports upload, replace, patch, append, truncate, and download
 - Exposes filesystem-style operations such as create, rename, readdir, stat, and delete
 - Tracks POSIX-like metadata including mode, uid, gid, timestamps, symlinks, hardlinks, and xattrs
 - Supports metadata revision history, rollback, cleanup, and purge operations
@@ -146,7 +146,6 @@ Core storage APIs:
 
 - `UploadFile`, `ReplaceFile`, `PatchFile`, `DownloadFile`
 - `ListFiles`, `ListReleases`
-- `VerifyFileIntegrity`, `CombineChunkCRC32Cs`
 
 Filesystem-style APIs:
 
@@ -346,7 +345,7 @@ Internal layout:
 - `internal/config` - config defaults and transport tuning
 - `internal/github` - real GitHub API client, transport, and request handling
 - `internal/metadata` - metadata model, normalization, indexing, and validation
-- `internal/chunking` - chunk planning and CRC32C integrity helpers
+- `internal/chunking` - chunk planning helpers
 - `internal/storage` - high-level StorHub workflows and orchestration
 - `internal/fs` - filesystem-style operations and path logic
 - `internal/posix` - POSIX-like metadata operations

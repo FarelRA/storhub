@@ -50,10 +50,10 @@ func TestHelpersAndRendering(t *testing.T) {
 	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
-	if _, err := newHubFromFlags("", "", 0, 0, false); err == nil {
+	if _, err := newHubFromFlags("", "", 0, false); err == nil {
 		t.Fatal("expected missing token error")
 	}
-	hub, err := newHubFromFlags("token", "https://example.test/api/", 64, 3, true)
+	hub, err := newHubFromFlags("token", "https://example.test/api/", 64, true)
 	if err != nil || hub == nil {
 		t.Fatalf("newHubFromFlags: %v", err)
 	}
@@ -159,13 +159,13 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	downloadFile := filepath.Join(t.TempDir(), "download.txt")
 	mountDir := t.TempDir()
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
@@ -226,7 +226,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
@@ -269,7 +269,7 @@ func TestListAcceptsAbsolutePath(t *testing.T) {
 	app, _, _ := newTestApp(t)
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 		return &fakeHub{t: t, assertReadDirPath: "docs/readme.txt"}, nil
 	}
 	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
@@ -325,7 +325,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 			if token != "env-token" {
 				t.Fatalf("expected token env-token, got %q", token)
 			}
@@ -343,7 +343,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 			if token != "override" {
 				t.Fatalf("expected token override, got %q", token)
 			}
@@ -359,7 +359,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, stdout, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, concurrency int, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 			return &fakeHub{t: t}, nil
 		}
 		if err := app.Run([]string{"ls", "--token", "x", "-l", "demo"}); err != nil {
