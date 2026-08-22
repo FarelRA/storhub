@@ -22,10 +22,7 @@ func printFileSummary(w io.Writer, action string, meta *storhub.FileMetadata) {
 
 func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	if len(entries) == 0 {
-		fmt.Fprintln(w, "empty")
-		return
-	}
+	// Silence is golden: an empty directory prints nothing, like ls(1).
 	for _, entry := range entries {
 		kind := "file"
 		if entry.IsDir {

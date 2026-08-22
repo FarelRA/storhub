@@ -20,6 +20,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is injected at build time via -ldflags "-X ...version=x.y.z".
+var version = "dev"
+
 type App struct {
 	stdout  *os.File
 	stderr  *os.File
@@ -127,9 +130,11 @@ Examples:
   storhub mount docs-project ./mnt`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       version,
 	}
+	rootCmd.SetVersionTemplate("storhub {{.Version}}\n")
 
-	rootCmd.PersistentFlags().String("token", os.Getenv("GITHUB_TOKEN"), "GitHub token")
+	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
 	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
 	rootCmd.PersistentFlags().StringVar(&cliLogLevel, "log-level", cliLogLevel, "Log level: debug, info, warn, error")
 	rootCmd.PersistentFlags().StringVar(&cliLogFormat, "log-format", cliLogFormat, "Log format: pretty, text")
@@ -363,7 +368,7 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 	public, _ := cmd.Flags().GetBool("public")
 
-	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, chunkSize, public)
 	if err != nil {
 		return err
 	}
@@ -379,14 +384,14 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printFileSummary(a.stdout, ternary(replace, "replaced", "uploaded"), meta)
+	printFileSummary(a.stderr, ternary(replace, "replaced", "uploaded"), meta)
 	return nil
 }
 
 func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newMountHubFromFlagsFn(token, apiBase)
+	hub, err := newMountHubFromFlagsFn(resolveToken(token), apiBase)
 	if err != nil {
 		return err
 	}
@@ -397,7 +402,7 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
+	fmt.Fprintf(a.stderr, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
 	return nil
 }
 
@@ -405,7 +410,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	long, _ := cmd.Flags().GetBool("long")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -424,7 +429,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -439,7 +444,7 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -458,14 +463,14 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
 	if err := hub.Mkdir(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "created directory %s\n", args[1])
+	fmt.Fprintf(a.stderr, "created directory %s\n", args[1])
 	return nil
 }
 
@@ -473,7 +478,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	recursive, _ := cmd.Flags().GetBool("recursive")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -485,28 +490,28 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "removed %s\n", args[1])
+	fmt.Fprintf(a.stderr, "removed %s\n", args[1])
 	return nil
 }
 
 func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
 	if err := hub.Rename(args[0], args[1], args[2]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "moved %s -> %s\n", args[1], args[2])
+	fmt.Fprintf(a.stderr, "moved %s -> %s\n", args[1], args[2])
 	return nil
 }
 
 func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -514,7 +519,7 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printFileSummary(a.stdout, "appended", meta)
+	printFileSummary(a.stderr, "appended", meta)
 	return nil
 }
 
@@ -525,7 +530,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid offset %q: %w", args[2], err)
 	}
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -533,7 +538,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printFileSummary(a.stdout, "written", meta)
+	printFileSummary(a.stderr, "written", meta)
 	return nil
 }
 
@@ -548,7 +553,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid delete-size %q: %w", args[3], err)
 	}
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -556,14 +561,14 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printFileSummary(a.stdout, "patched", meta)
+	printFileSummary(a.stderr, "patched", meta)
 	return nil
 }
 
 func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -578,21 +583,21 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
 	if err := hub.RollbackMetadata(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "rolled back %s to %s\n", args[0], args[1])
+	fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
 	return nil
 }
 
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -600,7 +605,7 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "purged %s: %d releases, %d assets deleted\n",
+	fmt.Fprintf(a.stderr, "purged %s: %d releases, %d assets deleted\n",
 		args[0], result.DeletedReleases, result.DeletedAssets)
 	return nil
 }
@@ -611,7 +616,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
-	hub, err := newHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -630,8 +635,8 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	if err := fsys.Mount(args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "mounted %s at %s\n", args[0], args[1])
-	fmt.Fprintln(a.stdout, "press Ctrl+C to unmount")
+	fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
+	fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -648,7 +653,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	listen, _ := cmd.Flags().GetString("listen")
 	basePath, _ := cmd.Flags().GetString("base-path")
 	authFile, _ := cmd.Flags().GetString("auth-file")
-	hub, err := newRESTHubFromFlagsFn(token, apiBase, 0, false)
+	hub, err := newRESTHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -678,7 +683,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	if opts.Auth != nil {
 		mode = "with auth"
 	}
-	fmt.Fprintf(a.stdout, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
+	fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           handler,
@@ -735,7 +740,8 @@ func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 }
 
 func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
-	if strings.TrimSpace(token) == "" {
+	token = resolveToken(token)
+	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
 	cfg := storhub.DefaultConfig()
@@ -753,7 +759,8 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*stor
 }
 
 func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
-	if strings.TrimSpace(token) == "" {
+	token = resolveToken(token)
+	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
 	cfg := storhub.DefaultConfig()
@@ -762,6 +769,15 @@ func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
 	}
 	cfg.AtimePolicy = storcfg.AtimeNo
 	return storhub.NewStorHubWithConfig(token, cfg)
+}
+
+// resolveToken prefers the explicit --token value and falls back to
+// $GITHUB_TOKEN. The token is never rendered into help output.
+func resolveToken(flagValue string) string {
+	if strings.TrimSpace(flagValue) != "" {
+		return flagValue
+	}
+	return os.Getenv("GITHUB_TOKEN")
 }
 
 func envOrDefault(key, fallback string) string {

@@ -70,8 +70,8 @@ func TestHelpersAndRendering(t *testing.T) {
 	}
 	buf.Reset()
 	printDirEntries(&buf, nil, false)
-	if strings.TrimSpace(buf.String()) != "empty" {
-		t.Fatalf("unexpected empty dir listing: %q", buf.String())
+	if buf.String() != "" {
+		t.Fatalf("empty dir listing must print nothing, got %q", buf.String())
 	}
 	buf.Reset()
 	printDirEntries(&buf, []storhub.DirEntry{{Name: "b", Path: "b"}, {Name: "a", Path: "a", IsDir: true}, {Name: "c", Path: "c", IsSymlink: true}}, true)
@@ -152,7 +152,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		newRESTHandlerFn = oldRESTHandler
 		restListenAndServeFn = oldRESTListen
 	})
-	app, stdout, _ := newTestApp(t)
+	app, stdout, stderr := newTestApp(t)
 	localFile := filepath.Join(t.TempDir(), "upload.txt")
 	if err := os.WriteFile(localFile, []byte("hello world"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
@@ -198,11 +198,15 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 			t.Fatalf("run %v: %v", args, err)
 		}
 	}
-	output := stdout()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at "} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("expected %q in output %q", want, output)
+	// Status chatter belongs on stderr; stdout carries only data.
+	chatter := stderr()
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at "} {
+		if !strings.Contains(chatter, want) {
+			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
+	}
+	if data := stdout(); !strings.Contains(data, "hello world") {
+		t.Fatalf("expected cat data on stdout, got %q", data)
 	}
 	data, err := os.ReadFile(downloadFile)
 	if err != nil || string(data) != "downloaded" {
@@ -221,7 +225,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 		newRESTHandlerFn = oldHandlerFactory
 		restListenAndServeFn = oldListen
 	})
-	app, stdout, _ := newTestApp(t)
+	app, _, stderr := newTestApp(t)
 	authFile := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
 		t.Fatalf("write auth file: %v", err)
@@ -248,8 +252,8 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	if err == nil || err.Error() != "stop" {
 		t.Fatalf("expected stop error, got %v", err)
 	}
-	if !strings.Contains(stdout(), "with auth") {
-		t.Fatalf("unexpected stdout: %q", stdout())
+	if !strings.Contains(stderr(), "with auth") {
+		t.Fatalf("unexpected stderr: %q", stderr())
 	}
 }
 
