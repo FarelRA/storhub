@@ -138,6 +138,9 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	}
 
 	cfg = cfg.WithDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
 	hub := &StorHub{
 		token:      token,
 		gh:         ghapi.NewClient(token, cfg),

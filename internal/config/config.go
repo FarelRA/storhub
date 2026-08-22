@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -77,10 +78,10 @@ func Default() Config {
 	}
 }
 
+// WithDefaults fills every unset field from Default(). There is no
+// zero-config fast path: field-by-field filling is cheap and a shortcut
+// that forgets a field silently discards user configuration.
 func (c Config) WithDefaults() Config {
-	if isZeroConfig(c) {
-		return Default()
-	}
 	defaults := Default()
 	if c.APIBaseURL == "" {
 		c.APIBaseURL = defaults.APIBaseURL
@@ -99,9 +100,6 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.RepoDescription == "" {
 		c.RepoDescription = defaults.RepoDescription
-	}
-	if c.MaxRetries < 0 {
-		c.MaxRetries = 0
 	}
 	if c.BaseRetryDelay <= 0 {
 		c.BaseRetryDelay = defaults.BaseRetryDelay
@@ -146,36 +144,17 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-func isZeroConfig(c Config) bool {
-	return c.APIBaseURL == "" &&
-		c.APIVersion == "" &&
-		c.HTTPClient == nil &&
-		c.ChunkSize == 0 &&
-		c.BufferSize == 0 &&
-		c.RepoDescription == "" &&
-		!c.CreatePublicRepo &&
-		c.MaxRetries == 0 &&
-		c.BaseRetryDelay == 0 &&
-		c.MaxRetryDelay == 0 &&
-		c.Logger == nil &&
-		c.LogOutput == nil &&
-		c.LogLevel == "" &&
-		c.LogFormat == "" &&
-		!c.LogColor &&
-		c.AtimePolicy == "" &&
-		c.Now == nil &&
-		c.Sleep == nil
-}
-
 func defaultGitCacheDir() string {
 	return filepath.Join(os.TempDir(), "storhub")
 }
 
 func newDefaultHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 128
-	transport.MaxIdleConnsPerHost = 32
-	transport.MaxConnsPerHost = 64
+	// Transfers are strictly sequential: a couple of pooled connections
+	// per host is plenty, and small pools avoid socket buildup.
+	transport.MaxIdleConns = 4
+	transport.MaxIdleConnsPerHost = 2
+	transport.MaxConnsPerHost = 4
 	transport.IdleConnTimeout = 90 * time.Second
 	return &http.Client{Timeout: defaultRequestTimeout, Transport: transport}
 }
@@ -190,4 +169,31 @@ func SleepWithContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// Validate rejects configurations that would otherwise fail silently or
+// behave surprisingly at operation time. Empty optional fields are fine;
+// unknown values are not.
+func (c Config) Validate() error {
+	if !logging.ValidLevel(c.LogLevel) {
+		return fmt.Errorf("invalid log level %q (known: %v)", c.LogLevel, logging.KnownLevels())
+	}
+	if !logging.ValidFormat(c.LogFormat) {
+		return fmt.Errorf("invalid log format %q (known: %v)", c.LogFormat, logging.KnownFormats())
+	}
+	switch c.AtimePolicy {
+	case "", AtimeRelatime, AtimeStrict, AtimeNo:
+	default:
+		return fmt.Errorf("invalid atime policy %q (known: %s, %s, %s)", c.AtimePolicy, AtimeRelatime, AtimeStrict, AtimeNo)
+	}
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("MaxRetries must be >= 0, got %d", c.MaxRetries)
+	}
+	if c.ChunkSize < 0 {
+		return fmt.Errorf("ChunkSize must be >= 0, got %d", c.ChunkSize)
+	}
+	if c.BufferSize < 0 {
+		return fmt.Errorf("BufferSize must be >= 0, got %d", c.BufferSize)
+	}
+	return nil
 }

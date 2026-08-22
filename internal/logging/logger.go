@@ -55,35 +55,33 @@ func WithComponent(logger *slog.Logger, component string) *slog.Logger {
 	return logger.With("component", component)
 }
 
-func Debug(logger *slog.Logger, msg string, args ...any) {
-	if logger != nil {
-		logger.Debug(msg, args...)
+func resolve(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		// Operational messages must never be silently dropped; fall back
+		// to the process-default logger.
+		return slog.Default()
 	}
+	return logger
+}
+
+func Debug(logger *slog.Logger, msg string, args ...any) {
+	resolve(logger).Debug(msg, args...)
 }
 
 func Info(logger *slog.Logger, msg string, args ...any) {
-	if logger != nil {
-		logger.Info(msg, args...)
-	}
+	resolve(logger).Info(msg, args...)
 }
 
 func Warn(logger *slog.Logger, msg string, args ...any) {
-	if logger != nil {
-		logger.Warn(msg, args...)
-	}
+	resolve(logger).Warn(msg, args...)
 }
 
 func Error(logger *slog.Logger, msg string, args ...any) {
-	if logger != nil {
-		logger.Error(msg, args...)
-	}
+	resolve(logger).Error(msg, args...)
 }
 
 func Enabled(logger *slog.Logger, level slog.Level) bool {
-	if logger == nil {
-		return false
-	}
-	return logger.Enabled(context.Background(), level)
+	return resolve(logger).Enabled(context.Background(), level)
 }
 
 func NormalizeLevel(level string) string {
@@ -136,4 +134,44 @@ func normalizeFormat(format string) string {
 	default:
 		return FormatPretty
 	}
+}
+
+// KnownLevels lists the accepted log level strings ("" is also allowed and
+// means "unset").
+func KnownLevels() []string {
+	return []string{LevelDebug, LevelInfo, LevelWarn, LevelError}
+}
+
+// KnownFormats lists the accepted log format strings ("" is also allowed
+// and means "unset").
+func KnownFormats() []string {
+	return []string{FormatPretty, FormatText}
+}
+
+// ValidLevel reports whether level is a recognized log level (or unset).
+func ValidLevel(level string) bool {
+	level = strings.ToLower(strings.TrimSpace(level))
+	if level == "" {
+		return true
+	}
+	for _, known := range KnownLevels() {
+		if level == known {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidFormat reports whether format is a recognized log format (or unset).
+func ValidFormat(format string) bool {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return true
+	}
+	for _, known := range KnownFormats() {
+		if format == known {
+			return true
+		}
+	}
+	return false
 }
