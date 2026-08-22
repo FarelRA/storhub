@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	charmlog "github.com/charmbracelet/log"
-	"github.com/muesli/termenv"
+	charmlog "charm.land/log/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 const (
@@ -40,7 +40,7 @@ func NewLogger(opts Options) *slog.Logger {
 		TimeFormat:      "2006-01-02T15:04:05.999999999Z07:00",
 	})
 	if !opts.Color {
-		logger.SetColorProfile(termenv.Ascii)
+		logger.SetColorProfile(colorprofile.Ascii)
 	}
 	return slog.New(logger)
 }
