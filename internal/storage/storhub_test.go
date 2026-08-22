@@ -353,8 +353,9 @@ func TestFilesystemEdgeCasesAndRootSemantics(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
-	if err := hub.Mkdir("project-fs-edge", "."); err != nil {
-		t.Fatalf("mkdir root should be a no-op: %v", err)
+	// POSIX: mkdir on the always-existing root reports EEXIST.
+	if err := hub.Mkdir("project-fs-edge", "."); err == nil {
+		t.Fatal("expected mkdir on root to fail")
 	}
 	if err := hub.Rmdir("project-fs-edge", ""); err == nil {
 		t.Fatal("expected rmdir root to fail")

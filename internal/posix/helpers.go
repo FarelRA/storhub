@@ -31,17 +31,21 @@ func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.Fil
 		repo.UpsertFile(name, updated, now)
 		return
 	}
+	// Capture sibling access times BEFORE removing the entries; looking
+	// them up afterwards always yields nil.
+	atimes := make(map[string]int64, len(siblings))
+	for _, sibName := range siblings {
+		if f := repo.FindFile(sibName); f != nil {
+			atimes[sibName] = f.AccessedAt
+		}
+	}
 	for _, sibName := range siblings {
 		repo.RemoveFile(sibName)
 	}
 	for _, sibName := range siblings {
 		clone := updated.Clone()
-		var sibFile *meta.FileMeta
-		if f := repo.FindFile(sibName); f != nil {
-			sibFile = f
-		}
-		if sibFile != nil {
-			clone.AccessedAt = ChooseNonZeroTime(sibFile.AccessedAt, updated.AccessedAt, now)
+		if at, ok := atimes[sibName]; ok && at != 0 {
+			clone.AccessedAt = ChooseNonZeroTime(at, updated.AccessedAt, now)
 		}
 		repo.UpsertFile(sibName, clone, now)
 	}

@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -140,7 +141,9 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		return err
 	}
 	if cleanPath == "" {
-		return nil
+		// POSIX: mkdir on an existing directory fails; the root always
+		// exists.
+		return AlreadyExists("/")
 	}
 	if err := s.backend.ValidateProjectName(project); err != nil {
 		return err
@@ -222,9 +225,22 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		return err
 	}
 	if oldClean == newClean {
+		// POSIX: rename(x, x) succeeds when x exists, ENOENT otherwise.
+		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+		if err != nil {
+			return err
+		}
+		if repo.FindFile(oldClean) == nil && !repo.HasDirectory(oldClean) {
+			return NotFound(oldClean)
+		}
 		return nil
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		srcFile := repo.FindFile(oldClean)
+		srcIsDir := repo.HasDirectory(oldClean)
+		if srcFile == nil && !srcIsDir {
+			return NotFound(oldClean)
+		}
 		if err := CheckParentWrite(ctx, repo, oldClean); err != nil {
 			return err
 		}
@@ -237,50 +253,66 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
 			return NotFound(parent)
 		}
-		if file := repo.FindFile(oldClean); file != nil {
+		dstFile := repo.FindFile(newClean)
+		dstDir := repo.GetDirectory(newClean)
+		now := s.backend.Now()
+
+		if srcFile != nil {
 			if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
 				return err
 			}
-			if existing := repo.FindFile(newClean); existing != nil {
+			if dstFile != nil || dstDir != nil {
 				if err := CheckStickyDelete(ctx, repo, ParentPath(newClean), newClean); err != nil {
 					return err
 				}
 			}
-			if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
-				return AlreadyExists(newClean)
+			// POSIX: renaming a file onto an existing directory fails with
+			// EISDIR; onto an existing file it atomically replaces it.
+			if dstDir != nil {
+				return syscall.EISDIR
 			}
-			renamed := file.Clone()
-			renamed.ChangedAt = s.backend.Now()
+			renamed := srcFile.Clone()
+			renamed.ChangedAt = now
 			repo.RemoveFile(oldClean)
-			repo.UpsertFile(newClean, renamed, s.backend.Now())
-			TouchParentDirectory(repo, oldClean, s.backend.Now())
-			TouchParentDirectory(repo, newClean, s.backend.Now())
+			if dstFile != nil {
+				repo.RemoveFile(newClean)
+			}
+			repo.UpsertFile(newClean, renamed, now)
+			TouchParentDirectory(repo, oldClean, now)
+			TouchParentDirectory(repo, newClean, now)
 			return nil
 		}
-		if !repo.HasDirectory(oldClean) {
-			return NotFound(oldClean)
-		}
+
 		if err := CheckStickyDelete(ctx, repo, ParentPath(oldClean), oldClean); err != nil {
 			return err
 		}
-		if existing := repo.GetDirectory(newClean); existing != nil {
+		// POSIX: renaming a directory onto an existing file fails with
+		// ENOTDIR regardless of path relation.
+		if dstFile != nil {
+			return syscall.ENOTDIR
+		}
+		if dstDir != nil {
 			if err := CheckStickyDelete(ctx, repo, ParentPath(newClean), newClean); err != nil {
 				return err
 			}
-			_ = existing
 		}
 		if IsParentOrSame(oldClean, newClean) {
 			return fmt.Errorf("cannot move directory %s into itself %s", oldClean, newClean)
 		}
-		if repo.FindFile(newClean) != nil || repo.HasDirectory(newClean) {
-			return AlreadyExists(newClean)
+		// Directory onto empty directory replaces it.
+		if dstDir != nil {
+			childDirs, childFiles := repo.DirectoryChildren(newClean)
+			if len(childDirs) > 0 || len(childFiles) > 0 {
+				return NotEmpty(newClean)
+			}
+			repo.RemoveDirectory(newClean)
 		}
-		now := s.backend.Now()
 		updatedDirs := make(map[string]meta.DirMeta, len(repo.Dirs))
 		for path, dir := range repo.Dirs {
 			if IsParentOrSame(oldClean, path) {
 				newPath := RemapPath(oldClean, newClean, path)
 				dir.ModifiedAt = now
+				dir.ChangedAt = now
 				updatedDirs[newPath] = dir
 			} else {
 				updatedDirs[path] = dir
@@ -504,6 +536,9 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 		result = &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: uint32(repo.DirNLink("")), CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}
 		return result, nil
 	}
+	// lstat semantics: a terminal symlink reports itself; intermediate
+	// components were already resolved by CheckTraverse. Callers wanting
+	// stat() semantics compose LookupNodeFollowed/ResolvePath.
 	if file := repo.FindFile(cleanPath); file != nil {
 		result = EntryInfoFromFile(file, cleanPath, repo.FileNLink(cleanPath))
 		return result, nil

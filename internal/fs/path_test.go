@@ -3,14 +3,15 @@ package fs
 import "testing"
 
 func TestPathHelpers(t *testing.T) {
-	if got, err := NormalizePath(" docs/guide.txt "); err != nil || got != "docs/guide.txt" {
-		t.Fatalf("unexpected normalized path: %q %v", got, err)
+	// Whitespace is significant: it is part of the filename.
+	if got, err := NormalizePath(" docs/guide.txt "); err != nil || got != " docs/guide.txt " {
+		t.Fatalf("expected whitespace to be preserved, got %q %v", got, err)
 	}
 	if got, err := NormalizePath("."); err != nil || got != "" {
 		t.Fatalf("unexpected root normalization: %q %v", got, err)
 	}
-	if got, err := NormalizePath(" /docs/guide.txt "); err != nil || got != "docs/guide.txt" {
-		t.Fatalf("unexpected absolute normalization: %q %v", got, err)
+	if got, err := NormalizePath(" /docs/guide.txt "); err != nil || got != " /docs/guide.txt " {
+		t.Fatalf("non-absolute leading whitespace is part of the name: %q %v", got, err)
 	}
 	if got, err := NormalizePath("/"); err != nil || got != "" {
 		t.Fatalf("unexpected absolute root normalization: %q %v", got, err)
@@ -24,8 +25,8 @@ func TestPathHelpers(t *testing.T) {
 	if _, err := NormalizePath("/../escape"); err == nil {
 		t.Fatal("expected absolute path escape error")
 	}
-	if got := normalizeStoredPath(" /tmp/file "); got != "tmp/file" {
-		t.Fatalf("unexpected stored path fallback: %q", got)
+	if got := normalizeStoredPath(" /tmp/file "); got != " /tmp/file " {
+		t.Fatalf("stored path preserves significant whitespace: %q", got)
 	}
 	if ParentPath("docs/guide.txt") != "docs" || ParentPath("guide.txt") != "" || ParentPath("") != "" {
 		t.Fatal("unexpected parent path results")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -87,16 +88,16 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	symlink := meta.FileMeta{
-		Size:          int64(len([]byte(target))),
-		Chunks:        []int64{},
-		UploadedAt:    now,
-		ModifiedAt:    now,
-		AccessedAt:    now,
-		ChangedAt:     now,
-		Mode:          s.backend.DefaultFileMode(meta.NodeKindSymlink),
-		UID:           uid,
-		GID:           gid,
-		Symlink:       target,
+		Size:       int64(len([]byte(target))),
+		Chunks:     []int64{},
+		UploadedAt: now,
+		ModifiedAt: now,
+		AccessedAt: now,
+		ChangedAt:  now,
+		Mode:       s.backend.DefaultFileMode(meta.NodeKindSymlink),
+		UID:        uid,
+		GID:        gid,
+		Symlink:    target,
 	}
 	symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(repo, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
@@ -164,7 +165,15 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		return nil, errors.New("source and link paths are required")
 	}
 	if sourcePath == linkPath {
-		return nil, fmt.Errorf("source and destination are the same: %s", sourcePath)
+		// POSIX: link(x, x) succeeds when x exists.
+		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+		if err != nil {
+			return nil, err
+		}
+		if repo.FindFile(sourcePath) == nil && !repo.HasDirectory(sourcePath) {
+			return nil, s.backend.FileNotFound(sourcePath)
+		}
+		return repo.FindFile(sourcePath), nil
 	}
 	now := s.backend.Now()
 	var linked meta.FileMeta
@@ -183,10 +192,14 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		}
 		source := repo.FindFile(sourcePath)
 		if source == nil {
+			if repo.HasDirectory(sourcePath) {
+				// POSIX: hard links to directories are not permitted.
+				return syscall.EPERM
+			}
 			return s.backend.FileNotFound(sourcePath)
 		}
 		if source.Symlink != "" {
-			return fmt.Errorf("hard links only support regular files: %s", sourcePath)
+			return syscall.EPERM
 		}
 		linked = source.Clone()
 		linked.ChangedAt = now
@@ -463,8 +476,18 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			return nil
 		}
 		if file := repo.FindFile(cleanPath); file != nil {
-			copy := file.Clone()
-			return mutate(repo, &copy, nil)
+			before := file.Clone()
+			work := file.Clone()
+			if err := mutate(repo, &work, nil); err != nil {
+				return err
+			}
+			// Persist the mutated clone only when the callback did not
+			// persist it itself (some callbacks route through
+			// UpdateFileFamily to keep hardlink families consistent).
+			if current := repo.FindFile(cleanPath); current != nil && equalFileMeta(*current, before) {
+				repo.ReplaceFile(cleanPath, work)
+			}
+			return nil
 		}
 		if dir := repo.GetDirectory(cleanPath); dir != nil {
 			copy := dir.Clone()
@@ -640,4 +663,28 @@ func TouchInodeFamilyChangedAt(repo *meta.RepoMetadata, inode uint64, now int64)
 	return UpdateFileFamily(repo, inode, func(current *meta.FileMeta) {
 		current.ChangedAt = now
 	})
+}
+
+func equalFileMeta(a, b meta.FileMeta) bool {
+	if a.Chunks == nil && b.Chunks != nil || a.Chunks != nil && b.Chunks == nil {
+		return false
+	}
+	for i := range a.Chunks {
+		if a.Chunks[i] != b.Chunks[i] {
+			return false
+		}
+	}
+	if len(a.XAttrs) != len(b.XAttrs) {
+		return false
+	}
+	for k, v := range a.XAttrs {
+		bv, ok := b.XAttrs[k]
+		if !ok || string(v) != string(bv) {
+			return false
+		}
+	}
+	return a.Size == b.Size && a.Symlink == b.Symlink &&
+		a.UploadedAt == b.UploadedAt && a.ModifiedAt == b.ModifiedAt &&
+		a.AccessedAt == b.AccessedAt && a.ChangedAt == b.ChangedAt &&
+		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID && a.Inode == b.Inode
 }

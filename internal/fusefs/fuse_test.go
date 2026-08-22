@@ -533,36 +533,36 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 	}
 }
 
-func TestRenameWithReplaceFilePath(t *testing.T) {
+func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 	now := int64(10)
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
 	metaState.Chunks[1] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
 	metaState.EnsureRelease("v1", now)
-	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []int64{1}}, now)
+	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []int64{1}, Inode: 5, Mode: 0o644, UploadedAt: now}, now)
+	var renamedOld, renamedNew string
 	fake := &stubHub{
 		now: now,
-		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
-			file := metaState.FindFile(target)
+		renameFn: func(_ context.Context, _ string, oldPath, newPath string) error {
+			file := metaState.FindFile(oldPath)
 			if file == nil {
-				return nil, syscall.ENOENT
+				return syscall.ENOENT
 			}
-			return entryInfoFromFile(file, target, metaState.FileNLink(target)), nil
+			renamed := file.Clone()
+			metaState.RemoveFile(oldPath)
+			metaState.RemoveFile(newPath)
+			metaState.UpsertFile(newPath, renamed, now)
+			renamedOld, renamedNew = oldPath, newPath
+			return nil
 		},
-		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
-			clone := metaState.Clone()
-			clone.RebuildIndexes()
-			return &clone, "sha", nil
-		},
-		updateMeta: func(_ context.Context, _ string, apply func(*meta.RepoMetadata) error, _ string) (*meta.RepoMetadata, error) {
-			clone := metaState.Clone()
-			clone.RebuildIndexes()
-			if err := apply(&clone); err != nil {
-				return nil, err
+		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+			if f := metaState.FindFile(target); f != nil {
+				return &shfs.EntryInfo{Path: target, Inode: f.Inode, Size: f.Size, Mode: f.Mode}, nil
 			}
-			metaState = &clone
-			metaState.RebuildIndexes()
-			return metaState, nil
+			if metaState.HasDirectory(target) {
+				return &shfs.EntryInfo{Path: target, IsDir: true, Mode: 0o755}, nil
+			}
+			return nil, syscall.ENOENT
 		},
 	}
 	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
@@ -572,8 +572,19 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 	defer fsys.Close()
 	oldFileMeta := metaState.FindFile("docs/old.txt")
 	fsys.rememberPath(oldFileMeta.Inode, "docs/old.txt")
-	if err := fsys.renameWithReplace(context.Background(), "docs/old.txt", "docs/new.txt", 0); err != nil {
-		t.Fatalf("rename file: %v", err)
+
+	dirEntry := &shfs.EntryInfo{Path: "docs", IsDir: true, Inode: 2, Mode: 0o755}
+	docsNode := fsys.EnsureNodeForTest(context.Background(), dirEntry)
+	if !docsNode.isDir {
+		t.Fatal("expected directory node")
+	}
+
+	// Rename is invoked on the parent node with child names.
+	if errno := docsNode.Rename(context.Background(), "old.txt", docsNode, "new.txt", 0); errno != 0 {
+		t.Fatalf("rename: %v", errno)
+	}
+	if renamedOld != "docs/old.txt" || renamedNew != "docs/new.txt" {
+		t.Fatalf("hub rename not called with resolved paths: %q -> %q", renamedOld, renamedNew)
 	}
 	if metaState.FindFile("docs/new.txt") == nil || metaState.FindFile("docs/old.txt") != nil {
 		t.Fatalf("expected metadata rename, got %+v", metaState.AllFiles())
@@ -581,8 +592,10 @@ func TestRenameWithReplaceFilePath(t *testing.T) {
 	if got := fsys.pathForInode(oldFileMeta.Inode); got != "docs/new.txt" {
 		t.Fatalf("expected inode path remap, got %q", got)
 	}
-	if err := fsys.renameWithReplace(context.Background(), "docs/new.txt", "docs/newer.txt", renameNoReplace); err != nil {
-		t.Fatalf("rename into empty destination: %v", err)
+	// RENAME_NOREPLACE onto an existing destination must fail before the
+	// hub is consulted.
+	if errno := docsNode.Rename(context.Background(), "new.txt", docsNode, "new.txt", renameNoReplace); errno != syscall.EEXIST {
+		t.Fatalf("expected EEXIST for noreplace onto existing target, got %v", errno)
 	}
 }
 
@@ -1058,6 +1071,7 @@ type stubHub struct {
 	truncateFile func(context.Context, string, string, int64) (*meta.FileMeta, error)
 	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
+	renameFn     func(context.Context, string, string, string) error
 	replaceFile  func(context.Context, string, string, string) (*meta.FileMeta, error)
 	now          int64
 	chunkSize    int64
@@ -1282,4 +1296,11 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 	if err != nil || string(data) != "dirty" {
 		t.Fatalf("quarantined overlay content wrong: %q (err=%v)", data, err)
 	}
+}
+
+func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+	if s.renameFn != nil {
+		return s.renameFn(ctx, project, oldPath, newPath)
+	}
+	return syscall.ENOSYS
 }
