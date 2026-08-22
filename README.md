@@ -122,8 +122,11 @@ For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/READ
 REST serving from the CLI:
 
 ```bash
-GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080
+# With authentication (recommended):
 GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --auth-file ./rest-auth.json
+
+# Deliberately unauthenticated (insecure; requires the explicit flag):
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --allow-anonymous
 ```
 
 Open `http://localhost:8080/ui` for the built-in Alpine.js file browser and console.
@@ -405,3 +408,21 @@ Environment gates:
 ## License
 
 This project is licensed under the GNU General Public License v3.0. See `LICENSE`.
+
+## Design Notes
+
+- **Sequential transfers**: exactly one HTTP request is in flight at any
+  time. Uploads and downloads are deterministic and retry-safe; the
+  metadata commit loop and cache janitors are the only background work.
+- **Chunk integrity**: uploads record a per-chunk SHA-256 digest; whole-
+  chunk downloads verify it and fail loudly on bit rot.
+- **Metadata schema v3**: strict version handling (no silent migrations of
+  corrupt payloads), byte-valued extended attributes, offset-ordered chunk
+  lists, persisted inode/chunk counters, and real zero values (UID/GID 0
+  means root).
+- **POSIX semantics**: `mv` replaces targets atomically, symlinks traverse
+  (with ELOOP protection), directory link counts follow POSIX, and errno
+  fidelity is preserved end to end.
+- **Fail loudly**: invalid configurations are rejected at construction;
+  operational failures are logged at error level and never silently
+  swallowed.
