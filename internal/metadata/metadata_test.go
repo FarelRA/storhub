@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -20,11 +19,11 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 	if defaultFileMode(NodeKindFile) != 0o644 || defaultFileMode(NodeKindSymlink) != 0o777 || defaultDirMode() != 0o755 {
 		t.Fatal("unexpected mode defaults")
 	}
-	if cloneStringMap(nil) != nil || normalizeXAttrs(map[string]string{"": "x"}) != nil {
+	if normalizeXAttrs(XAttrMap{"": []byte("x")}) != nil {
 		t.Fatal("expected nil map normalization")
 	}
-	attrs := normalizeXAttrs(map[string]string{"user.a": "1", "": "skip"})
-	if len(attrs) != 1 || attrs["user.a"] != "1" {
+	attrs := normalizeXAttrs(XAttrMap{"user.a": []byte("1"), "": []byte("skip")})
+	if len(attrs) != 1 || string(attrs["user.a"]) != "1" {
 		t.Fatalf("unexpected xattrs: %+v", attrs)
 	}
 	when := chooseNonZeroTime(0, 5)
@@ -46,7 +45,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	repo.EnsureDirectory("docs", now)
 	repo.EnsureDirectory("docs/sub", now)
 	repo.Dirs["docs"] = DirMeta{Inode: 2, CreatedAt: now, ModifiedAt: now}
-	repo.Dirs["docs/sub"] = DirMeta{Inode: 3, XAttrs: map[string]string{"user.dir": "1"}, CreatedAt: now, ModifiedAt: now}
+	repo.Dirs["docs/sub"] = DirMeta{Inode: 3, XAttrs: XAttrMap{"user.dir": []byte("1")}, CreatedAt: now, ModifiedAt: now}
 
 	repo.EnsureRelease("v2", now)
 	repo.UpsertFile("docs/sub/file.txt", FileMeta{Size: 3, Inode: 5, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{2, 1}}, now)
@@ -58,7 +57,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	if err := repo.Validate(); err != nil {
 		t.Fatalf("validate normalized repo: %v", err)
 	}
-	if repo.Version != 2 || repo.Project != "demo" {
+	if repo.Version != maxMetadataVersion || repo.Project != "demo" {
 		t.Fatalf("unexpected normalized repo: %+v", repo)
 	}
 	if repo.Root.Inode == 0 {
@@ -82,12 +81,13 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	if len(byInode) != 1 || byInode[0] != "docs/sub/file.txt" {
 		t.Fatalf("unexpected inode lookup: %+v", byInode)
 	}
+	repo.Root.XAttrs = XAttrMap{"user.root": []byte("1")}
 	clone := repo.Clone()
 	clonedRoot := &clone.Root
 	origRoot := &repo.Root
-	clonedRoot.XAttrs = map[string]string{"mutated": "1"}
-	if reflect.DeepEqual(clonedRoot.XAttrs, origRoot.XAttrs) && clonedRoot.XAttrs != nil {
-		t.Fatal("expected deep clone of root attrs")
+	clonedRoot.XAttrs["user.root"] = []byte("mutated")
+	if string(origRoot.XAttrs["user.root"]) != "1" {
+		t.Fatal("expected deep clone of root attrs (mutation must not alias)")
 	}
 	allFiles := repo.AllFiles()
 	allFiles[0].Mode = 0
@@ -166,10 +166,10 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	now := int64(300)
 	repo := NewRepoMetadata("validate")
 	InitializeNewFileIdentity(repo, &FileMeta{}, now)
-	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, XAttrs: map[string]string{"user.demo": "1"}}
+	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, XAttrs: XAttrMap{"user.demo": []byte("1")}}
 	incoming := &FileMeta{}
 	PreserveFileIdentity(incoming, existing, now+60)
-	if incoming.Inode != existing.Inode || incoming.XAttrs["user.demo"] != "1" {
+	if incoming.Inode != existing.Inode || string(incoming.XAttrs["user.demo"]) != "1" {
 		t.Fatalf("unexpected preserved identity: %+v", incoming)
 	}
 	// A regular file replacing a symlink is a type change: the old target
@@ -353,5 +353,122 @@ func TestUpsertSymlinkRefreshKeepsIdentity(t *testing.T) {
 	}
 	if got.Inode != 9 || got.UID != 5 {
 		t.Fatalf("identity not preserved on symlink refresh: %+v", got)
+	}
+}
+
+func TestFromJSONRejectsCorruptAndFutureVersions(t *testing.T) {
+	var corrupt RepoMetadata
+	if err := corrupt.FromJSON([]byte(`{"p":"demo"}`)); err == nil || !strings.Contains(err.Error(), "no version") {
+		t.Fatalf("expected loud rejection of versionless payload, got %v", err)
+	}
+	var future RepoMetadata
+	if err := future.FromJSON([]byte(`{"v":99,"p":"demo"}`)); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("expected rejection of future version, got %v", err)
+	}
+}
+
+func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
+	v2JSON := `{"v":2,"p":"demo","f":{"a.txt":{"s":0,"i":5,"ua":100,"x":{"user.bin":"aGVsbG8=","user.txt":"plain"}}}}`
+	var m RepoMetadata
+	if err := m.FromJSON([]byte(v2JSON)); err != nil {
+		t.Fatalf("migrate v2: %v", err)
+	}
+	if m.Version != maxMetadataVersion {
+		t.Fatalf("expected version %d after migration, got %d", maxMetadataVersion, m.Version)
+	}
+	file := m.FindFile("a.txt")
+	if file == nil {
+		t.Fatal("file missing after migration")
+	}
+	if string(file.XAttrs["user.bin"]) != "hello" || string(file.XAttrs["user.txt"]) != "plain" {
+		t.Fatalf("xattr migration lost data: %+v", file.XAttrs)
+	}
+}
+
+func TestCountersPersistAcrossReload(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.EnsureRelease("v1", 1)
+	m.Chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
+	m.UpsertFile("a.txt", FileMeta{Size: 1, Chunks: []int64{1}}, 1)
+	m.Normalize("demo", 1)
+	nextChunk := m.NextChunkID
+	nextInode := m.NextInode
+
+	encoded, err := m.ToJSON()
+	if err != nil {
+		t.Fatalf("tojson: %v", err)
+	}
+	// Drop the highest entries, reload, and verify identifiers are not reused.
+	delete(m.Files, "a.txt")
+	delete(m.Chunks, 1)
+	var reloaded RepoMetadata
+	if err := reloaded.FromJSON(encoded); err != nil {
+		t.Fatalf("fromjson: %v", err)
+	}
+	reloaded.Normalize("demo", 2)
+	if reloaded.NextChunkID < nextChunk {
+		t.Fatalf("chunk counter rolled back: %d < %d", reloaded.NextChunkID, nextChunk)
+	}
+	if reloaded.AllocateChunkID() != nextChunk {
+		t.Fatalf("chunk id reused after reload")
+	}
+	if reloaded.AllocateInode() != nextInode {
+		t.Fatalf("inode reused after reload")
+	}
+}
+
+func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.EnsureRelease("v1", 1)
+	m.Chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
+	m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+	m.UpsertFile("f.bin", FileMeta{Size: 6, Chunks: []int64{2, 1}, Inode: 9}, 1)
+	m.Normalize("demo", 1)
+	if err := m.Validate(); err != nil {
+		t.Fatalf("validate after normalize: %v", err)
+	}
+	got := m.FindFile("f.bin")
+	if got.Chunks[0] != 1 || got.Chunks[1] != 2 {
+		t.Fatalf("chunks not sorted by offset: %v", got.Chunks)
+	}
+
+	// Out-of-order stored chunks must fail validation loudly.
+	bad := NewRepoMetadata("demo")
+	bad.EnsureRelease("v1", 1)
+	bad.Chunks[1] = ChunkInfo{Size: 4, Offset: 4, Release: "v1"}
+	bad.Chunks[2] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+	bad.UpsertFile("g.bin", FileMeta{Size: 8, Chunks: []int64{1, 2}, Inode: 9}, 1)
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "offset order") {
+		t.Fatalf("expected offset-order violation, got %v", err)
+	}
+}
+
+func TestDirNLinkCountsEachSubdirectoryOnce(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.EnsureDirectory("docs/a", 1)
+	m.EnsureDirectory("docs/b", 1)
+	m.RebuildIndexes()
+	if got := m.DirNLink("docs"); got != 4 {
+		t.Fatalf("indexed DirNLink = %d, want 4", got)
+	}
+	m.invalidateIndexes()
+	if got := m.DirNLink("docs"); got != 4 {
+		t.Fatalf("unindexed DirNLink = %d, want 4 (index-state independent)", got)
+	}
+	if got := m.DirNLink(""); got != 3 {
+		t.Fatalf("root DirNLink = %d, want 3 (one child dir)", got)
+	}
+}
+
+func TestZeroOwnerSurvivesNormalize(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.EnsureDirectory("rooted", 1)
+	dir := m.Dirs["rooted"]
+	dir.UID = 0
+	dir.GID = 0
+	m.Dirs["rooted"] = dir
+	m.Normalize("demo", 1)
+	if m.Dirs["rooted"].UID != 0 || m.Dirs["rooted"].GID != 0 {
+		t.Fatalf("zero owner was clobbered by normalize: %+v", m.Dirs["rooted"])
 	}
 }

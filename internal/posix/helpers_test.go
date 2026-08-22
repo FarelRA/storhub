@@ -14,7 +14,7 @@ func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	if file.Inode == 0 || file.Mode == 0 {
 		t.Fatalf("unexpected initialized file identity: %+v", file)
 	}
-	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, XAttrs: map[string]string{"user.demo": "1"}}
+	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, XAttrs: meta.XAttrMap{"user.demo": []byte("1")}}
 	updated := &meta.FileMeta{Chunks: []int64{}}
 	ApplyUpdatedFileIdentity("", updated, existing, now+60)
 	if updated.Inode != 9 || updated.Symlink != "" {
