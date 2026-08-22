@@ -135,7 +135,15 @@ func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath st
 
 func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
 	id := IdentityFromContext(ctx)
-	for _, ancestor := range ancestorPaths(targetPath) {
+	// Symlink components are followed before checking ancestors: POSIX
+	// traversal permission applies to the directories actually walked.
+	// The final component is left unresolved so that lstat/readlink-style
+	// operations check permission to reach the link itself, not its target.
+	resolved, err := ResolvePath(repo, targetPath, false)
+	if err != nil {
+		return err
+	}
+	for _, ancestor := range ancestorPaths(resolved) {
 		attrs, err := lookupNode(repo, ancestor)
 		if err != nil {
 			return err

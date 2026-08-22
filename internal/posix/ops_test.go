@@ -191,8 +191,12 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 	if _, err := svc.LinkContext(context.Background(), "demo", "", "docs/link"); err == nil {
 		t.Fatal("expected missing link paths error")
 	}
-	if _, err := svc.LinkContext(context.Background(), "demo", "docs/base.txt", "docs/base.txt"); err == nil {
-		t.Fatal("expected same-path link error")
+	// POSIX: link(x, x) succeeds when x exists.
+	if _, err := svc.LinkContext(context.Background(), "demo", "docs/base.txt", "docs/base.txt"); err != nil {
+		t.Fatalf("expected same-path link to succeed on existing file, got %v", err)
+	}
+	if _, err := svc.LinkContext(context.Background(), "demo", "docs/missing.txt", "docs/missing.txt"); err == nil {
+		t.Fatal("expected same-path link on missing path to fail")
 	}
 	if _, err := svc.ReadlinkContext(context.Background(), "demo", "docs/base.txt"); err == nil {
 		t.Fatal("expected non-symlink readlink error")

@@ -17,8 +17,8 @@ import (
 )
 
 func TestHelperUtilities(t *testing.T) {
-	if got, err := shfs.NormalizePath(" docs/guide.txt "); err != nil || got != "docs/guide.txt" {
-		t.Fatalf("unexpected normalized fs path: %q %v", got, err)
+	if got, err := shfs.NormalizePath(" docs/guide.txt "); err != nil || got != " docs/guide.txt " {
+		t.Fatalf("whitespace must be preserved in fs paths: %q %v", got, err)
 	}
 	if got, err := shfs.NormalizePath("."); err != nil || got != "" {
 		t.Fatalf("expected root path normalization, got %q %v", got, err)

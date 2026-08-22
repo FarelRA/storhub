@@ -194,6 +194,7 @@ type Hub interface {
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
+	RenameContext(context.Context, string, string, string) error
 	Now() int64
 	ChunkSize() int64
 }
@@ -906,8 +907,32 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 		return syscall.EINVAL
 	}
 	newPath := path.Join(parentNode.currentPath(), newName)
-	if err := n.fs.renameWithReplace(ctx, oldPath, newPath, flags); err != nil {
+	if flags&renameExchange != 0 || flags&renameWhiteout != 0 {
+		return syscall.EINVAL
+	}
+	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
+	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
+	// Rename semantics (including POSIX replacement) live in exactly one
+	// place: the fs service behind the hub.
+	if flags&renameNoReplace != 0 && newEntry != nil {
+		return syscall.EEXIST
+	}
+	// A handle open on the replaced target must keep serving its own
+	// snapshot: materialize before the metadata swap removes the path.
+	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
+		if err := n.fs.materializeHandlesForPath(ctx, newEntry.Inode, newPath); err != nil {
+			return errnoFromError(err)
+		}
+	}
+	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath); err != nil {
 		return errnoFromError(err)
+	}
+	if oldEntry != nil {
+		n.fs.remapPaths(oldPath, newPath)
+	}
+	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
+		remaining := n.fs.dropPath(newEntry.Inode, newPath)
+		n.fs.rebindHandlesAfterPathChange(newEntry.Inode, newPath, remaining)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
 	if err == nil {
@@ -2745,98 +2770,6 @@ func (s *Filesystem) cleanupExpiredCache() {
 	}
 }
 
-func (s *Filesystem) renameWithReplace(ctx context.Context, oldPath, newPath string, flags uint32) error {
-	if flags&renameExchange != 0 || flags&renameWhiteout != 0 {
-		return syscall.EINVAL
-	}
-	oldEntry, _ := s.hub.StatPathContext(ctx, s.project, oldPath)
-	newEntry, _ := s.hub.StatPathContext(ctx, s.project, newPath)
-	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
-		if err := s.materializeHandlesForPath(ctx, newEntry.Inode, newPath); err != nil {
-			return err
-		}
-	}
-	_, err := s.hub.UpdateRepoMetadataContext(ctx, s.project, func(meta *metadata.RepoMetadata) error {
-		if err := shfs.CheckParentWrite(ctx, meta, oldPath); err != nil {
-			return err
-		}
-		if err := shfs.CheckParentWrite(ctx, meta, newPath); err != nil {
-			return err
-		}
-		if err := shfs.CheckTraverse(ctx, meta, oldPath); err != nil {
-			return err
-		}
-		if parent := shfs.ParentPath(newPath); parent != "" && !meta.HasDirectory(parent) {
-			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
-		}
-		if flags&renameNoReplace != 0 && (meta.FindFile(newPath) != nil || meta.HasDirectory(newPath)) {
-			return shfs.AlreadyExists(newPath)
-		}
-		if file := meta.FindFile(oldPath); file != nil {
-			if existingDir := meta.GetDirectory(newPath); existingDir != nil {
-				return shfs.AlreadyExists(newPath)
-			}
-			meta.RemoveFile(newPath)
-			renamed := file.Clone()
-			renamed.ChangedAt = s.hub.Now()
-			meta.RemoveFile(oldPath)
-			meta.UpsertFile(newPath, renamed, s.hub.Now())
-			return nil
-		}
-		if !meta.HasDirectory(oldPath) {
-			return shfs.NotFound(oldPath)
-		}
-		if shfs.IsParentOrSame(oldPath, newPath) {
-			return fmt.Errorf("cannot move directory %s into itself %s", oldPath, newPath)
-		}
-		if file := meta.FindFile(newPath); file != nil {
-			return shfs.AlreadyExists(newPath)
-		}
-		if dir := meta.GetDirectory(newPath); dir != nil {
-			childDirs, childFiles := meta.DirectoryChildren(newPath)
-			if len(childDirs) > 0 || len(childFiles) > 0 {
-				return shfs.NotEmpty(newPath)
-			}
-			meta.RemoveDirectory(newPath)
-		}
-		updatedDirs := make(map[string]metadata.DirMeta, len(meta.Dirs))
-		for path, d := range meta.Dirs {
-			if shfs.IsParentOrSame(oldPath, path) {
-				newP := shfs.RemapPath(oldPath, newPath, path)
-				d.ChangedAt = s.hub.Now()
-				d.ModifiedAt = s.hub.Now()
-				updatedDirs[newP] = d
-			} else {
-				updatedDirs[path] = d
-			}
-		}
-		meta.Dirs = updatedDirs
-		updatedFiles := make(map[string]metadata.FileMeta, len(meta.Files))
-		for path, f := range meta.Files {
-			if shfs.IsParentOrSame(oldPath, path) {
-				newP := shfs.RemapPath(oldPath, newPath, path)
-				f.ChangedAt = s.hub.Now()
-				updatedFiles[newP] = f
-			} else {
-				updatedFiles[path] = f
-			}
-		}
-		meta.Files = updatedFiles
-		meta.RecomputeStats()
-		return nil
-	}, fmt.Sprintf("storhub: rename %s to %s", oldPath, newPath))
-	if err != nil {
-		return err
-	}
-	if oldEntry != nil {
-		s.remapPaths(oldPath, newPath)
-	}
-	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
-		remaining := s.dropPath(newEntry.Inode, newPath)
-		s.rebindHandlesAfterPathChange(newEntry.Inode, newPath, remaining)
-	}
-	return err
-}
 
 func fillEntryOut(out *fuse.EntryOut, entry *shfs.EntryInfo, opts Options) {
 	if out == nil || entry == nil {

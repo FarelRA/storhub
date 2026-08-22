@@ -1149,3 +1149,16 @@ func chooseNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// ReplaceFile overwrites a stored file entry verbatim (no identity
+// preservation). Returns false when the path holds no file entry. Use this
+// for authoritative rewrites such as metadata-mutation callbacks; prefer
+// UpsertFile for create/update flows where identity carries over.
+func (m *RepoMetadata) ReplaceFile(name string, file FileMeta) bool {
+	name = normalizeStoredPath(name)
+	if _, ok := m.Files[name]; !ok {
+		return false
+	}
+	m.Files[name] = file.Clone()
+	return true
+}
