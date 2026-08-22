@@ -558,9 +558,26 @@ func (s *Service) StatFSContext(ctx context.Context, project string) (result *FS
 	if err != nil {
 		return nil, err
 	}
-	stats := &FSStats{Files: repo.TotalFiles, Directories: len(repo.Dirs), Inodes: CountUniqueInodes(repo), Bytes: repo.TotalSize, Releases: len(repo.Releases)}
-	for _, ref := range repo.Releases {
-		stats.Assets += ref.AssetCount
+	// Aggregate live instead of trusting cached counters: those only
+	// refresh during metadata commits, so a freshly mutated tree would
+	// otherwise report stale numbers.
+	files := 0
+	var totalBytes int64
+	for _, file := range repo.Files {
+		if file.Symlink == "" {
+			files++
+			totalBytes += file.Size
+		}
+	}
+	stats := &FSStats{Files: files, Directories: len(repo.Dirs), Inodes: CountUniqueInodes(repo), Bytes: totalBytes, Releases: len(repo.Releases)}
+	assetCounts := make(map[string]int, len(repo.Chunks))
+	for _, chunk := range repo.Chunks {
+		if chunk.Release != "" {
+			assetCounts[chunk.Release]++
+		}
+	}
+	for _, count := range assetCounts {
+		stats.Assets += count
 	}
 	result = stats
 	return result, nil

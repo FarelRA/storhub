@@ -512,16 +512,20 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 	for _, handle := range handles {
 		handle.mu.Lock()
 		if handle.path == oldPath {
-			handle.path = newPath
-			handle.deleted = newPath == ""
+			// The path now belongs to a different inode. Detach like an
+			// unlinked-but-open file: reads keep serving the handle's
+			// own snapshot instead of silently switching to the
+			// replacement's content.
+			handle.path = ""
+			handle.deleted = true
 		}
 		handle.mu.Unlock()
 	}
 	if writeState != nil {
 		writeState.mu.Lock()
 		if writeState.path == oldPath {
-			writeState.path = newPath
-			writeState.deleted = newPath == ""
+			writeState.path = ""
+			writeState.deleted = true
 		}
 		writeState.mu.Unlock()
 	}
@@ -578,7 +582,10 @@ func (s *Filesystem) materializeHandlesForPath(ctx context.Context, inode uint64
 	s.mu.RUnlock()
 	for _, handle := range handles {
 		handle.mu.Lock()
-		needsSnapshot := handle.path == targetPath && handle.temp == nil && handle.writeState == nil
+		// Snapshot every handle of this inode lacking private bytes:
+		// after the swap they may be detached from their path, and the
+		// old content becomes unfetchable.
+		needsSnapshot := handle.temp == nil && handle.writeState == nil
 		handle.mu.Unlock()
 		if !needsSnapshot {
 			continue
@@ -1366,21 +1373,32 @@ func (w *inodeWriteState) materialize(ctx context.Context) error {
 		w.mu.Unlock()
 		return err
 	}
+	tempPath := temp.Name()
 	w.temp = temp
-	w.tempPath = temp.Name()
+	w.tempPath = tempPath
 	w.mu.Unlock()
 
 	// Network call without lock
 	entry, err := w.fs.hub.StatPathContext(ctx, w.fs.project, path)
-	if err == nil {
-		w.mu.Lock()
-		w.baseSize = entry.Size
-		w.logicalSize = entry.Size
-		if truncErr := w.temp.Truncate(entry.Size); truncErr != nil {
-			w.mu.Unlock()
-			return truncErr
+	if err != nil {
+		// Propagate: silently treating stat failure as "empty file"
+		// would swap an open handle's content to EOF.
+		if rmErr := os.Remove(tempPath); rmErr != nil {
+			w.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", path, tempPath, rmErr)
 		}
+		w.mu.Lock()
+		w.temp = nil
+		w.tempPath = ""
 		w.mu.Unlock()
+		return err
+	}
+	w.mu.Lock()
+	w.baseSize = entry.Size
+	w.logicalSize = entry.Size
+	truncErr := w.temp.Truncate(entry.Size)
+	w.mu.Unlock()
+	if truncErr != nil {
+		return truncErr
 	}
 	return nil
 }
@@ -1557,8 +1575,22 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size == 0 {
 		w.tempAuthoritative = true
 		w.clearBaseSnapshotLocked()
-	} else if size > oldSize && oldSize < size && !w.tempAuthoritative {
-		w.tempAuthoritative = false
+	} else if size > oldSize && !w.tempAuthoritative {
+		// Regrown bytes must read as zeros (POSIX); the temp file may
+		// hold stale data left over from before a shrink. Zero-fill the
+		// regrown region and mark it dirty so the commit uploads it.
+		buf := make([]byte, 32*1024)
+		for offset := oldSize; offset < size; {
+			n := int64(len(buf))
+			if remaining := size - offset; remaining < n {
+				n = remaining
+			}
+			if _, err := w.temp.WriteAt(buf[:n], offset); err != nil {
+				return err
+			}
+			offset += n
+		}
+		w.markDirtyLocked(oldSize, size)
 	}
 	w.truncateDirtyRangesLocked(size)
 	return nil
@@ -2380,6 +2412,26 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	return h.commitPostUpdate(ctx, targetPath, pending)
 }
 
+// removeDirtyRangeLocked drops [start,end) from the dirty set after a range
+// was successfully committed, so a retry only re-applies the remainder.
+// Caller must hold w.mu.
+func (w *inodeWriteState) removeDirtyRangeLocked(start, end int64) {
+	kept := w.dirtyRanges[:0]
+	for _, r := range w.dirtyRanges {
+		if r.End <= start || r.Start >= end {
+			kept = append(kept, r)
+			continue
+		}
+		if r.Start < start {
+			kept = append(kept, ByteRange{Start: r.Start, End: start})
+		}
+		if r.End > end {
+			kept = append(kept, ByteRange{Start: end, End: r.End})
+		}
+	}
+	w.dirtyRanges = kept
+}
+
 // commitPatch handles the partial patch path.
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
 func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
@@ -2410,6 +2462,12 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 			h.fs.debugf("commit failed path=%s inode=%d step=patch offset=%d err=%v", targetPath, h.inode, dirty.Start, err)
 			return errnoFromError(err)
 		}
+		// Mark this range applied so a retry resumes instead of
+		// re-applying already-committed edits (which would duplicate
+		// bytes).
+		h.writeState.mu.Lock()
+		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
+		h.writeState.mu.Unlock()
 	}
 	if logicalSize != baseSize {
 		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
@@ -2744,6 +2802,11 @@ func (s *Filesystem) cleanupExpiredCache() {
 		if writeState.tempPath != "" {
 			openTemps[writeState.tempPath] = struct{}{}
 		}
+		// Base snapshots feed in-flight commits; deleting them mid-commit
+		// corrupts the upload.
+		if writeState.baseTempPath != "" {
+			openTemps[writeState.baseTempPath] = struct{}{}
+		}
 		writeState.mu.Unlock()
 	}
 	graceThreshold := time.Now().Add(-5 * time.Minute)
@@ -2769,7 +2832,6 @@ func (s *Filesystem) cleanupExpiredCache() {
 		}
 	}
 }
-
 
 func fillEntryOut(out *fuse.EntryOut, entry *shfs.EntryInfo, opts Options) {
 	if out == nil || entry == nil {
@@ -2806,7 +2868,8 @@ func errnoFromError(err error) syscall.Errno {
 	if err == nil {
 		return 0
 	}
-	if errno, ok := err.(syscall.Errno); ok {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
 		return errno
 	}
 	if errors.Is(err, context.Canceled) {

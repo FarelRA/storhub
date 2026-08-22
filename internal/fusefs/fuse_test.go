@@ -1304,3 +1304,41 @@ func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 	}
 	return syscall.ENOSYS
 }
+
+// Shrinking then regrowing must serve zeros for the regrown region, never
+// stale bytes from before the shrink.
+func TestSetSizeRegrowServesZeros(t *testing.T) {
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+	state := &inodeWriteState{fs: fsys, inode: 9, path: "grow.bin", refs: 1}
+	fsys.mu.Lock()
+	fsys.writeStates[9] = state
+	fsys.mu.Unlock()
+	if err := state.materializeBootstrap(8); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := state.temp.WriteAt([]byte("ABCDEFGH"), 0); err != nil {
+		t.Fatalf("seed temp: %v", err)
+	}
+	state.mu.Lock()
+	state.baseSize = 8
+	state.logicalSize = 8
+	state.tempAuthoritative = false
+	if err := state.setSizeLocked(4); err != nil {
+		t.Fatalf("shrink: %v", err)
+	}
+	if err := state.setSizeLocked(7); err != nil {
+		t.Fatalf("regrow: %v", err)
+	}
+	buf := make([]byte, 3)
+	if _, err := state.temp.ReadAt(buf, 4); err != nil {
+		t.Fatalf("read regrown region: %v", err)
+	}
+	state.mu.Unlock()
+	if string(buf) != "\x00\x00\x00" {
+		t.Fatalf("regrown region must be zeros, got %q", buf)
+	}
+}
