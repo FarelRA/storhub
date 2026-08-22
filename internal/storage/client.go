@@ -278,16 +278,39 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 	}
 }
 
+// commitError carries the metadata version a failed commit attempted, so
+// recovery can tell whether newer mutations arrived after the snapshot.
+type commitError struct {
+	err     error
+	version uint64
+}
+
+func (e *commitError) Error() string { return e.err.Error() }
+func (e *commitError) Unwrap() error { return e.err }
+
 func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	logger := h.projectLogger(project)
 	// Conflict (stale previous_sha against remote HEAD) means another
 	// writer advanced the metadata: reload and discard local uncommitted
-	// state, matching what actually happened remotely. Any other failure
+	// state, matching what actually happened remotely — but only when no
+	// newer mutation landed after the failed snapshot. Any other failure
 	// is transient: retain dirty state so the loop retries with it.
 	var apiErr *ghapi.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+	var cerr *commitError
+	isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
+	if !isConflict {
 		logging.Error(logger, "metadata commit failed; retaining dirty metadata for retry", "err", err)
 		return
+	}
+	if errors.As(err, &cerr) {
+		pm := h.getOrCreateProjectMeta(project)
+		pm.mu.Lock()
+		mutatedSince := pm.version != cerr.version
+		pm.mu.Unlock()
+		if mutatedSince {
+			logging.Error(logger, "metadata commit conflicted; newer local mutations pending, retaining them for retry", "err", err)
+			return
+		}
 	}
 	logging.Error(logger, "metadata commit conflicted, reloading from github", "err", err)
 	if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
@@ -324,19 +347,19 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	if err := meta.Validate(); err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "validate", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return fmt.Errorf("invalid metadata: %w", err)
+		return &commitError{err: fmt.Errorf("invalid metadata: %w", err), version: version}
 	}
 
 	metaBytes, err := meta.ToJSON()
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "serialize", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return fmt.Errorf("marshal metadata: %w", err)
+		return &commitError{err: fmt.Errorf("marshal metadata: %w", err), version: version}
 	}
 
 	if len(metaBytes) > maxMetadataBytes {
 		err := fmt.Errorf("metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes)
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return err
+		return &commitError{err: err, version: version}
 	}
 
 	// Commit metadata
@@ -349,7 +372,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	}
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return fmt.Errorf("commit metadata: %w", err)
+		return &commitError{err: fmt.Errorf("commit metadata: %w", err), version: version}
 	}
 
 	pm.mu.Lock()
