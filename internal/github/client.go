@@ -62,7 +62,8 @@ type Commit struct {
 	CommittedAt time.Time
 }
 
-type requestOptions struct {
+type requestOptions struct { //nolint:revive // internal request options bundle
+	stream      bool
 	contentType string
 	accept      string
 	contentSize int64
@@ -130,7 +131,8 @@ func (c *Client) CreateRepo(ctx context.Context, project, description string, pr
 		"private":     private,
 		"auto_init":   autoInit,
 	}
-	resp, err := c.doJSONWithRetryable(ctx, http.MethodPost, c.apiURL("/user/repos"), body, true)
+	// Repository creation is not idempotent; never blind-retry it.
+	resp, err := c.doJSONWithRetryable(ctx, http.MethodPost, c.apiURL("/user/repos"), body, false)
 	if err != nil {
 		return err
 	}
@@ -168,7 +170,7 @@ func (c *Client) ListReleases(ctx context.Context, owner, project string) ([]Rel
 
 func (c *Client) GetReleaseByTag(ctx context.Context, owner, project, tag string) (*Release, error) {
 	var release Release
-	if err := c.getJSON(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/tags/%s", owner, project, tag)), &release); err != nil {
+	if err := c.getJSON(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/tags/%s", owner, project, url.PathEscape(tag))), &release); err != nil {
 		return nil, err
 	}
 	return &release, nil
@@ -176,7 +178,8 @@ func (c *Client) GetReleaseByTag(ctx context.Context, owner, project, tag string
 
 func (c *Client) CreateRelease(ctx context.Context, owner, project, tag, name string) (*Release, error) {
 	requestBody := map[string]any{"tag_name": tag, "name": name, "body": "", "draft": false}
-	resp, err := c.doJSONWithRetryable(ctx, http.MethodPost, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases", owner, project)), requestBody, true)
+	// Release creation is not idempotent; never blind-retry it.
+	resp, err := c.doJSONWithRetryable(ctx, http.MethodPost, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases", owner, project)), requestBody, false)
 	if err != nil {
 		return nil, err
 	}
@@ -246,12 +249,17 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 
 func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
 	rangeHeader := ""
-	if start >= 0 && end >= start {
+	switch {
+	case start >= 0 && end >= start:
 		rangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
+	default:
+		// No silent full-asset fallback: an invalid or unset range is a
+		// caller bug and must surface as an error.
+		return nil, 0, fmt.Errorf("download asset %d: invalid byte range [%d,%d]", assetID, start, end)
 	}
 	resp, err := c.doRequest(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
 		return nil, nil
-	}, requestOptions{accept: "application/octet-stream", rangeHeader: rangeHeader, retryable: true})
+	}, requestOptions{accept: "application/octet-stream", rangeHeader: rangeHeader, retryable: true, stream: true})
 	if err != nil {
 		return nil, 0, fmt.Errorf("download asset: %w", err)
 	}
@@ -259,7 +267,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 }
 
 func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, ref string) ([]byte, string, error) {
-	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, path.Clean(filePath)))
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
 	if ref != "" {
 		endpoint += "?ref=" + url.QueryEscape(ref)
 	}
@@ -309,7 +317,7 @@ func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath st
 		return "", "", fmt.Errorf("close base64 encoder: %w", err)
 	}
 	buf.WriteString(`"}`)
-	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, path.Clean(filePath)))
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
 	resp, err := c.doRequest(ctx, http.MethodPut, endpoint, func() (io.Reader, error) {
 		return bytes.NewReader(buf.Bytes()), nil
 	}, requestOptions{
@@ -413,7 +421,15 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		if opts.contentSize >= 0 {
 			req.ContentLength = opts.contentSize
 		}
-		resp, err := c.client.Do(req)
+		client := c.client
+		if opts.stream && client.Timeout > 0 {
+			// Streams must not be killed by the client-wide timeout; the
+			// request context governs cancellation instead.
+			noTimeout := *client
+			noTimeout.Timeout = 0
+			client = &noTimeout
+		}
+		resp, err := client.Do(req)
 		if err == nil {
 			apiErr := decodeAPIError(resp)
 			if apiErr == nil {
@@ -453,7 +469,9 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 			return nil, fmt.Errorf("rewind upload reader: %w", err)
 		}
 		return reader, nil
-	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: true})
+		// Upload is a non-idempotent POST; a single attempt per call keeps
+		// ambiguous failures from silently duplicating assets.
+	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: false})
 	if err != nil {
 		return 0, err
 	}
@@ -514,10 +532,10 @@ func decodeAPIError(resp *http.Response) *APIError {
 func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 	if apiErr != nil {
 		if apiErr.RetryAfter > 0 {
-			return nonNegativeDelay(apiErr.RetryAfter)
+			return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
 		}
 		if apiErr.RateLimited && !apiErr.RateLimitReset.IsZero() {
-			return nonNegativeDelay(time.Until(apiErr.RateLimitReset))
+			return c.boundedWait(nonNegativeDelay(time.Until(apiErr.RateLimitReset)))
 		}
 	}
 	base := float64(c.baseRetryDelay)
@@ -574,6 +592,9 @@ func parseUnixTime(value string) (time.Time, bool) {
 }
 
 func isRetryableNetworkError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var netErr net.Error
 	if errorAs(err, &netErr) {
 		return true
@@ -583,4 +604,28 @@ func isRetryableNetworkError(err error) bool {
 
 func errorAs(err error, target any) bool {
 	return err != nil && errors.As(err, target)
+}
+
+// boundedWait caps server-provided wait hints (Retry-After, rate-limit
+// reset) at maxRetryDelay so a hostile or misconfigured header cannot stall
+// callers invisibly for minutes.
+func (c *Client) boundedWait(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if c.maxRetryDelay > 0 && d > c.maxRetryDelay {
+		return c.maxRetryDelay
+	}
+	return d
+}
+
+// escapeContentPath URL-escapes each path segment; raw '#', '?' or '%'
+// characters in filenames would otherwise truncate or rewrite the request.
+func escapeContentPath(filePath string) string {
+	cleaned := path.Clean(strings.TrimLeft(filePath, "/"))
+	segments := strings.Split(cleaned, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
 }

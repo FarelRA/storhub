@@ -1126,7 +1126,7 @@ func TestRetryOnTransientServerError(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" && failures.Load() == 0 {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/") && failures.Load() == 0 {
 			failures.Add(1)
 			w.WriteHeader(http.StatusBadGateway)
 			_, _ = w.Write([]byte(`{"message":"temporary upstream issue"}`))
@@ -1137,10 +1137,41 @@ func TestRetryOnTransientServerError(t *testing.T) {
 	hub := backend.newClient(t, retryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry.txt", []byte("retry payload"))
 	if _, err := hub.UploadFile("project-retry", "retry.txt", input); err != nil {
-		t.Fatalf("expected retry upload success, got %v", err)
+		t.Fatalf("expected retried idempotent request to succeed, got %v", err)
 	}
 	if failures.Load() != 1 {
 		t.Fatalf("expected one transient failure, got %d", failures.Load())
+	}
+}
+
+// Non-idempotent POSTs (repo creation, asset upload) must surface transient
+// failures instead of blind-retrying them.
+func TestNonIdempotentPostsDoNotRetry(t *testing.T) {
+	backend := newMockGitHub(t)
+	var repoAttempts atomic.Int32
+	var uploadAttempts atomic.Int32
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/user/repos":
+			repoAttempts.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"temporary upstream issue"}`))
+			return true
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/"):
+			uploadAttempts.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"temporary upload issue"}`))
+			return true
+		}
+		return false
+	})
+	hub := backend.newClient(t, retryTestConfig())
+	input := writeTempFile(t, t.TempDir(), "noretry.txt", []byte("no retry payload"))
+	if _, err := hub.UploadFile("project-noretry", "noretry.txt", input); err == nil {
+		t.Fatal("expected non-idempotent POST failure to surface")
+	}
+	if repoAttempts.Load() != 1 || uploadAttempts.Load() != 0 {
+		t.Fatalf("expected exactly one repo POST and no upload POST, got %d/%d", repoAttempts.Load(), uploadAttempts.Load())
 	}
 }
 
@@ -1175,7 +1206,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 	}
 }
 
-func TestUploadChunkRetriesTransientFailure(t *testing.T) {
+func TestUploadChunkSurfacesTransientFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1189,11 +1220,11 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	})
 	hub := backend.newClient(t, smallRetryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", []byte("retry upload payload"))
-	if _, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input); err != nil {
-		t.Fatalf("expected retried upload success, got %v", err)
+	if _, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input); err == nil {
+		t.Fatal("expected single-attempt upload failure to surface")
 	}
 	if failures.Load() != 1 {
-		t.Fatalf("expected one transient upload failure, got %d", failures.Load())
+		t.Fatalf("expected exactly one upload attempt, got %d", failures.Load())
 	}
 }
 
@@ -1229,8 +1260,9 @@ func TestRateLimitAwareRetry(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("expected one rate-limited response, got %d", hits.Load())
 	}
-	if time.Duration(slept.Load()) < time.Second {
-		t.Fatalf("expected unclamped rate-limit sleep, got %v", time.Duration(slept.Load()))
+	waited := time.Duration(slept.Load())
+	if waited <= 0 || waited > 2*time.Millisecond {
+		t.Fatalf("rate-limit wait must be positive and clamped to MaxRetryDelay, got %v", waited)
 	}
 }
 
