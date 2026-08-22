@@ -42,8 +42,14 @@ type Options struct {
 	StreamChunkSize  int64
 	MaxPatchBodySize int64
 	ShareTTL         time.Duration
-	ShareSigningKey  []byte
-	Auth             *AuthOptions
+	// MaxShareTTL bounds client-requested share lifetimes; zero uses the
+	// default of one week.
+	MaxShareTTL     time.Duration
+	ShareSigningKey []byte
+	Auth            *AuthOptions
+	// AllowAnonymous explicitly opts into serving every route without any
+	// authentication. It never happens by accident.
+	AllowAnonymous bool
 }
 
 type (
@@ -396,6 +402,10 @@ type rollbackRequest struct {
 type shareRequest struct {
 	Path      string        `json:"path"`
 	ExpiresIn time.Duration `json:"expires_in,omitempty"`
+	// ExpiresInSeconds expresses the lifetime in plain seconds, avoiding
+	// the Duration-as-nanoseconds JSON trap. Takes precedence over
+	// ExpiresIn when set.
+	ExpiresInSeconds int64 `json:"expires_in_seconds,omitempty"`
 	Download  *bool         `json:"download,omitempty"`
 }
 
@@ -442,6 +452,9 @@ func NewHandler(hub *storage.StorHub, opts Options) (http.Handler, error) {
 }
 
 func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
+	if opts.Auth == nil && !opts.AllowAnonymous {
+		return nil, errors.New("security constraint: no Auth configured; set AllowAnonymous:true to serve unauthenticated traffic deliberately")
+	}
 	opts = opts.withDefaults()
 	logger := logging.WithComponent(nil, "rest")
 	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
@@ -1210,8 +1223,16 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	expiresIn := req.ExpiresIn
+	if req.ExpiresInSeconds > 0 {
+		// seconds field wins: JSON numbers for a Duration field are
+		// nanoseconds, which is a trap nobody should fall into.
+		expiresIn = time.Duration(req.ExpiresInSeconds) * time.Second
+	}
 	if expiresIn <= 0 {
 		expiresIn = h.opts.ShareTTL
+	}
+	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
+		expiresIn = max
 	}
 	download := true
 	if req.Download != nil {
@@ -1266,6 +1287,13 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 	claims, err := h.parseShareToken(shareID)
 	if err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	// A valid signature alone is not enough: a deleted share must stop
+	// working immediately, not at token expiry.
+	record, ok := h.lookupShare(shareID)
+	if !ok || record.Project != claims.Project {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
 	if !claims.Download {
@@ -1345,13 +1373,15 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	w.WriteHeader(status)
-	for offset := start; offset < end; offset += h.opts.StreamChunkSize {
+	sent := int64(0)
+	for offset := start; offset < end; {
 		readLen := h.opts.StreamChunkSize
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
 		chunk, readErr := h.clientFor(r).ReadFileAt(project, targetPath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", targetPath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
 			return
 		}
 		if len(chunk) == 0 {
@@ -1360,6 +1390,10 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		if _, writeErr := w.Write(chunk); writeErr != nil {
 			return
 		}
+		// Advance by the bytes actually read: short reads must not skip
+		// data.
+		offset += int64(len(chunk))
+		sent += int64(len(chunk))
 	}
 }
 

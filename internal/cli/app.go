@@ -327,6 +327,7 @@ func (a *App) newServeRESTCmd() *cobra.Command {
 	cmd.Flags().String("listen", ":8080", "Listen address")
 	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
 	cmd.Flags().String("auth-file", os.Getenv("STORHUB_REST_AUTH_FILE"), "Optional JSON auth config file")
+	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
 	return cmd
 }
 
@@ -659,6 +660,14 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		opts.Auth = auth
+	} else {
+		// Running without an auth file is a deliberate choice: require the
+		// explicit opt-in flag so an open server never happens by accident.
+		noAuth, _ := cmd.Flags().GetBool("allow-anonymous")
+		if !noAuth {
+			return fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")
+		}
+		opts.AllowAnonymous = true
 	}
 	handler, err := newRESTHandlerFn(hub, opts)
 	if err != nil {

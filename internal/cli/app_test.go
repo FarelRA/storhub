@@ -190,7 +190,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"patch", "--token", "x", "demo", "docs/readme.txt", "1", "2", "x"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
-		{"serve-rest", "--token", "x", "--listen", "127.0.0.1:0"},
+		{"serve-rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
 	}
 	for _, args := range checks {
