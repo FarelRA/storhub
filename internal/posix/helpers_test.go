@@ -14,11 +14,18 @@ func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	if file.Inode == 0 || file.Mode == 0 {
 		t.Fatalf("unexpected initialized file identity: %+v", file)
 	}
-	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, Symlink: "target", XAttrs: map[string]string{"user.demo": "1"}}
+	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, XAttrs: map[string]string{"user.demo": "1"}}
 	updated := &meta.FileMeta{Chunks: []int64{}}
 	ApplyUpdatedFileIdentity("", updated, existing, now+60)
 	if updated.Inode != 9 || updated.Symlink != "" {
 		t.Fatalf("unexpected updated identity: %+v", updated)
+	}
+	// Replacing a symlink with a regular file must not inherit the target.
+	symExisting := &meta.FileMeta{Inode: 11, Mode: 0o777, Symlink: "target", AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now}
+	symUpdated := &meta.FileMeta{Chunks: []int64{}}
+	ApplyUpdatedFileIdentity("", symUpdated, symExisting, now+60)
+	if symUpdated.Symlink != "" || symUpdated.Inode == 11 {
+		t.Fatalf("symlink identity leaked onto regular file: %+v", symUpdated)
 	}
 	if updated.ModifiedAt == 0 || updated.ChangedAt == 0 || updated.AccessedAt == 0 {
 		t.Fatalf("expected timestamps to be set: %+v", updated)

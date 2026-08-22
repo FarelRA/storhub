@@ -3591,3 +3591,58 @@ func mustMetadataRevision(t *testing.T, hub *StorHub, project, message string) M
 	t.Fatalf("metadata revision %q not found", message)
 	return MetadataRevision{}
 }
+
+// Regression test for the purge data-destruction chain: a patch that spills
+// into a new release must register that release in the metadata catalog so
+// PurgeUntracked cannot delete it (GitHub cascade-deletes its assets).
+func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "spill.txt", []byte("abcdefghijklmno"))
+	fileMeta, err := hub.UploadFile("project-purge-spill", "spill.txt", input)
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge-spill")
+	firstRelease := metaState.Chunks[fileMeta.Chunks[0]].Release
+	backend.addAssetsToRelease(t, "project-purge-spill", firstRelease, 999)
+
+	patched, err := hub.PatchFile("project-purge-spill", "spill.txt", 4, 4, []byte("ZZZZ"))
+	if err != nil {
+		t.Fatalf("patch file: %v", err)
+	}
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
+
+	metaState, _, err = hub.loadRepoMetadata(context.Background(), "project-purge-spill")
+	if err != nil {
+		t.Fatalf("load metadata: %v", err)
+	}
+	spillTag := ""
+	for _, id := range patched.Chunks {
+		if chunk := metaState.Chunks[id]; chunk.Release != firstRelease {
+			spillTag = chunk.Release
+		}
+	}
+	if spillTag == "" {
+		t.Fatal("expected patch to spill into a second release")
+	}
+
+	result, err := hub.PurgeUntracked("project-purge-spill")
+	if err != nil {
+		t.Fatalf("purge untracked: %v", err)
+	}
+	if result.DeletedReleases != 0 {
+		t.Fatalf("purge deleted live releases: %+v", result)
+	}
+	repo := backend.repo("project-purge-spill")
+	if repo == nil || repo.releasesByTag[spillTag] == nil {
+		t.Fatalf("spill release %s was deleted by purge", spillTag)
+	}
+	output := filepath.Join(t.TempDir(), "spill.out")
+	if err := hub.DownloadFile("project-purge-spill", "spill.txt", output); err != nil {
+		t.Fatalf("download after purge: %v", err)
+	}
+	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
+}

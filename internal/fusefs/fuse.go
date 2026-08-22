@@ -330,7 +330,18 @@ func (s *Filesystem) Close() error {
 	for _, handle := range s.handles {
 		handles = append(handles, handle)
 	}
+	writeStates := make([]*inodeWriteState, 0, len(s.writeStates))
+	for _, writeState := range s.writeStates {
+		writeStates = append(writeStates, writeState)
+	}
 	s.mu.Unlock()
+	// Preserve uncommitted overlay data before tearing down; deleting it
+	// would silently discard acknowledged writes.
+	for _, writeState := range writeStates {
+		if writeState.hasUncommittedChanges() {
+			writeState.quarantineTemps()
+		}
+	}
 	for _, handle := range handles {
 		handle.closeTemp()
 	}
@@ -343,6 +354,46 @@ func (s *Filesystem) debugf(format string, args ...any) {
 		return
 	}
 	logging.Debug(s.opts.Logger, fmt.Sprintf(format, args...))
+}
+
+// errorf logs at error level even when no injected logger is configured:
+// operational failures like data preservation must never be silently dropped.
+func (s *Filesystem) errorf(format string, args ...any) {
+	logger := s.opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logging.Error(logger, fmt.Sprintf(format, args...))
+}
+
+func (s *Filesystem) recoveryDir() string {
+	return path.Join(s.cacheDir, "recovery")
+}
+
+// quarantineFile moves tempPath into the recovery directory, where the cache
+// janitor will not touch it. Called when a commit fails and the overlay holds
+// the only copy of data the application has already written.
+func (s *Filesystem) quarantineFile(tempPath string) {
+	dir := s.recoveryDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		s.errorf("quarantine failed; dirty overlay left in cache path=%s mkdir err=%v", tempPath, err)
+		return
+	}
+	target := path.Join(dir, fmt.Sprintf("%s.%d", path.Base(tempPath), time.Now().UnixNano()))
+	if err := os.Rename(tempPath, target); err != nil {
+		s.errorf("quarantine failed; dirty overlay left in cache path=%s rename err=%v", tempPath, err)
+		return
+	}
+	s.errorf("commit failed; dirty overlay quarantined for manual recovery path=%s saved=%s", tempPath, target)
+}
+
+// soleWriteStateRef reports whether state is registered and held by exactly
+// one open handle. Caller must not hold state.mu.
+func (s *Filesystem) soleWriteStateRef(state *inodeWriteState) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.writeStates[state.inode]
+	return current == state && state.refs <= 1
 }
 
 func (s *Filesystem) Invalidate() {
@@ -1987,6 +2038,47 @@ func (w *inodeWriteState) closeTemp() {
 	w.mu.Unlock()
 }
 
+// quarantineTemps moves the overlay temp (the only copy of uncommitted
+// written data) into the recovery directory; the re-downloadable base snapshot
+// is discarded as usual. Marks the state closed so a later closeTemp is a no-op.
+func (w *inodeWriteState) quarantineTemps() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	w.closed = true
+	temp := w.temp
+	tempPath := w.tempPath
+	baseTemp := w.baseTemp
+	baseTempPath := w.baseTempPath
+	w.temp = nil
+	w.tempPath = ""
+	w.baseTemp = nil
+	w.baseTempPath = ""
+	w.mu.Unlock()
+	if baseTemp != nil {
+		_ = baseTemp.Close()
+	}
+	if baseTempPath != "" {
+		_ = os.Remove(baseTempPath)
+	}
+	if temp != nil {
+		_ = temp.Close()
+	}
+	if tempPath != "" {
+		w.fs.quarantineFile(tempPath)
+	}
+}
+
+// hasUncommittedChanges reports whether the overlay holds data that has never
+// been successfully committed.
+func (w *inodeWriteState) hasUncommittedChanges() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.dirtyRanges) > 0 || w.logicalSize != w.baseSize || w.hasPendingMetadataLocked()
+}
+
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if writeState := h.writeState; writeState != nil {
 		writeState.mu.Lock()
@@ -2098,7 +2190,18 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	h.fs.debugf("release path=%s inode=%d", h.path, h.inode)
 	errno := h.commit(ctx)
 	h.releaseTrackedLocks()
-	h.closeTemp()
+	if errno != 0 {
+		// The commit failed; the overlay temps hold the only copy of data
+		// the application already wrote (Flush returns 0 by design, so the
+		// application considers these writes acknowledged). Preserve them
+		// for manual recovery instead of deleting them.
+		h.quarantineTemps()
+		if h.writeState != nil && h.fs.soleWriteStateRef(h.writeState) {
+			h.writeState.quarantineTemps()
+		}
+	} else {
+		h.closeTemp()
+	}
 	h.fs.mu.Lock()
 	delete(h.fs.handles, h.id)
 	h.fs.mu.Unlock()
@@ -2108,6 +2211,28 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	}
 	_ = ctx
 	return errno
+}
+
+// quarantineTemps moves this handle's temp snapshot into the recovery
+// directory instead of deleting it. Used on commit failure.
+func (h *storhubHandle) quarantineTemps() {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.closed = true
+	temp := h.temp
+	tempPath := h.tempPath
+	h.temp = nil
+	h.tempPath = ""
+	h.mu.Unlock()
+	if temp != nil {
+		_ = temp.Close()
+	}
+	if tempPath != "" {
+		h.fs.quarantineFile(tempPath)
+	}
 }
 
 func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
@@ -2602,6 +2727,10 @@ func (s *Filesystem) cleanupExpiredCache() {
 		return
 	}
 	for _, entry := range entries {
+		if entry.IsDir() {
+			// Subdirectories (e.g. recovery/) are never cache temp files.
+			continue
+		}
 		fullPath := path.Join(s.cacheDir, entry.Name())
 		if _, ok := openTemps[fullPath]; ok {
 			continue

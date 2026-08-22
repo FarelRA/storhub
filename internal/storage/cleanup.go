@@ -169,6 +169,13 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 		for _, chunkName := range file.Chunks {
 			if chunk, ok := repoMeta.Chunks[chunkName]; ok {
 				trackedAssets[chunk.AssetID] = struct{}{}
+				// A release referenced by any live chunk is tracked even if
+				// the release catalog drifted (e.g. a crash between upload
+				// and metadata commit); deleting it would cascade-delete
+				// assets the file still needs.
+				if chunk.Release != "" {
+					trackedReleases[chunk.Release] = struct{}{}
+				}
 			}
 		}
 	}

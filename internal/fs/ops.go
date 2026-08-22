@@ -85,6 +85,9 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	if err := RequireParentDirectory(repoMeta, cleanPath); err != nil {
 		return nil, err
 	}
+	if repoMeta.HasDirectory(cleanPath) {
+		return nil, IsDirectory(cleanPath)
+	}
 	if repoMeta.FindFile(cleanPath) != nil {
 		return nil, AlreadyExists(cleanPath)
 	}
@@ -109,6 +112,9 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		}
 		if err := RequireParentDirectory(repo, cleanPath); err != nil {
 			return err
+		}
+		if repo.HasDirectory(cleanPath) {
+			return IsDirectory(cleanPath)
 		}
 		if repo.FindFile(cleanPath) != nil {
 			return AlreadyExists(cleanPath)

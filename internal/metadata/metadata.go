@@ -308,9 +308,6 @@ func (f *FileMeta) Normalize(now int64) {
 	if f.ChangedAt == 0 {
 		f.ChangedAt = f.ModifiedAt
 	}
-	if f.Inode == 0 {
-		f.Inode = 0
-	}
 	if f.Chunks == nil {
 		f.Chunks = make([]int64, 0)
 	}
@@ -396,7 +393,13 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 		m.EnsureDirectory(parent, createdAt)
 	}
 	if existing, ok := m.Files[name]; ok {
-		preserveFileIdentity(&file, &existing, createdAt)
+		if (file.Symlink == "") != (existing.Symlink == "") {
+			// Type change (regular file <-> symlink): the old node identity
+			// is discarded and a fresh one allocated, mirroring replacement.
+			initializeNewFileIdentity(m, &file, createdAt)
+		} else {
+			preserveFileIdentity(&file, &existing, createdAt)
+		}
 	} else {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
@@ -526,6 +529,14 @@ func (m *RepoMetadata) NLink(inode uint64) int {
 }
 
 func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
+	// A type change (regular file <-> symlink) replaces the whole node rather
+	// than updating it: no identity carries over. In particular the old
+	// symlink target must never leak onto a regular file — Normalize treats
+	// any file with a symlink target as pure link data and would silently
+	// discard the freshly written content.
+	if (file.Symlink == "") != (existing.Symlink == "") {
+		return
+	}
 	if file.Inode == 0 {
 		file.Inode = existing.Inode
 	}
@@ -552,9 +563,6 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 	}
 	if len(file.XAttrs) == 0 && len(existing.XAttrs) > 0 {
 		file.XAttrs = cloneStringMap(existing.XAttrs)
-	}
-	if file.Symlink == "" && existing.Symlink != "" {
-		file.Symlink = existing.Symlink
 	}
 }
 

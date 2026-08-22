@@ -236,11 +236,11 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 		logging.Info(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
 		return assetID, nil
 	}
+	// Fail loudly: silently reusing a pre-existing asset with the same name
+	// would hand the caller an unverified ID (possibly stale or partial
+	// content) as if the fresh bytes had been stored. Callers that want
+	// name-based reuse can compose FindAssetIDByName themselves.
 	logging.Warn(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "err", err)
-	if existingID, resolveErr := c.FindAssetIDByName(ctx, owner, project, releaseTag, assetName); resolveErr == nil && existingID != 0 {
-		logging.Warn(c.logger, "upload asset reused existing asset after failure", "asset", assetName, "asset_id", existingID)
-		return existingID, nil
-	}
 	return 0, fmt.Errorf("upload asset: %w", err)
 }
 
