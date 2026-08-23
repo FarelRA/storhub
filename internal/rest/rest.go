@@ -582,13 +582,13 @@ func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now().UTC()
 		sw := &statusWriter{ResponseWriter: w}
-		logging.Info(h.logger, "http request start", "method", r.Method, "path", r.URL.Path, "query", r.URL.RawQuery, "remote", r.RemoteAddr)
+		logging.Info(h.logger, "http request start", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "query", logging.RedactQueryValues(r.URL.RawQuery), "remote", r.RemoteAddr)
 		next.ServeHTTP(sw, r)
 		status := sw.status
 		if status == 0 {
 			status = http.StatusOK
 		}
-		logging.Info(h.logger, "http request complete", "method", r.Method, "path", r.URL.Path, "status", status, "bytes", sw.bytes, "elapsed", time.Since(started))
+		logging.Info(h.logger, "http request complete", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "status", status, "bytes", sw.bytes, "elapsed", time.Since(started))
 	})
 }
 
