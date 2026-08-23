@@ -350,6 +350,49 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 	})
 }
 
+// ChtimesExplicitContext sets timestamps with POSIX utimensat trinary
+// semantics: a nil pointer omits that timestamp entirely (UTIME_OMIT), a
+// non-nil pointer sets it to exactly that value — the epoch included,
+// unlike ChtimesContext whose omit-on-zero contract maps zero to "now".
+// Provided values are marked authoritative in metadata.
+func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "chtimes-explicit start", "path", targetPath, "has_atime", atime != nil, "has_mtime", mtime != nil)
+	defer func() { s.logFinish(project, "chtimes-explicit", started, err, "path", targetPath) }()
+	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
+		return err
+	}
+	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
+		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			return shfs.CanSetTimes(ctx, current)
+		}); err != nil {
+			return err
+		}
+		if file != nil {
+			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
+				if atime != nil {
+					current.AccessedAt = atime.Unix()
+				}
+				if mtime != nil {
+					current.ModifiedAt = mtime.Unix()
+				}
+				current.TimesExplicit = true
+				current.ChangedAt = now
+			})
+		}
+		if atime != nil {
+			dir.AccessedAt = atime.Unix()
+		}
+		if mtime != nil {
+			dir.ModifiedAt = mtime.Unix()
+		}
+		dir.TimesExplicit = true
+		dir.ChangedAt = now
+		return nil
+	})
+}
+
 func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) (err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "setxattr start", "path", targetPath, "attr", attr, "bytes", len(data))
@@ -569,38 +612,47 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 	if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
 		return nil
 	}
-	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
-	if err != nil {
+	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
 		return err
 	}
-	working := *entry
 	if patch.HasOwner {
 		if err := shfs.CanChown(ctx); err != nil {
 			return err
 		}
-		working.UID = patch.UID
-		working.GID = patch.GID
-		working.Mode &^= 0o6000
-	}
-	if patch.HasMode {
-		if err := shfs.CanChmod(ctx, &working); err != nil {
-			return err
-		}
-		working.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
-	}
-	if patch.HasTimes {
-		if err := shfs.CanSetTimes(ctx, &working); err != nil {
-			return err
-		}
-		if !patch.ATime.IsZero() {
-			working.AccessedAt = patch.ATime.Unix()
-		}
-		if !patch.MTime.IsZero() {
-			working.ModifiedAt = patch.MTime.Unix()
-		}
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		// Re-authorize against LIVE transaction state: the pre-transaction
+		// lookup above is only a fast-fail. A concurrent rename/chmod
+		// between authorize and apply must fail closed, exactly like the
+		// chmod/chown/chtimes/xattr verbs.
+		sanitizedMode := patch.Mode
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(live *shfs.EntryInfo) error {
+			if patch.HasOwner {
+				if err := shfs.CanChown(ctx); err != nil {
+					return err
+				}
+			}
+			if patch.HasMode {
+				liveCopy := *live
+				if patch.HasOwner {
+					liveCopy.UID = patch.UID
+					liveCopy.GID = patch.GID
+				}
+				if err := shfs.CanChmod(ctx, &liveCopy); err != nil {
+					return err
+				}
+				sanitizedMode = shfs.SanitizeChmodMode(ctx, &liveCopy, patch.Mode)
+			}
+			if patch.HasTimes {
+				if err := shfs.CanSetTimes(ctx, live); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				if patch.HasOwner {
@@ -609,7 +661,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 					current.Mode &^= 0o6000
 				}
 				if patch.HasMode {
-					current.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
+					current.Mode = sanitizedMode
 				}
 				if patch.HasTimes {
 					if !patch.ATime.IsZero() {
@@ -631,7 +683,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			dir.Mode &^= 0o6000
 		}
 		if patch.HasMode {
-			dir.Mode = shfs.SanitizeChmodMode(ctx, &working, patch.Mode)
+			dir.Mode = sanitizedMode
 		}
 		if patch.HasTimes {
 			if !patch.ATime.IsZero() {
@@ -750,5 +802,6 @@ func equalFileMeta(a, b meta.FileMeta) bool {
 	return a.Size == b.Size && a.Symlink == b.Symlink &&
 		a.UploadedAt == b.UploadedAt && a.ModifiedAt == b.ModifiedAt &&
 		a.AccessedAt == b.AccessedAt && a.ChangedAt == b.ChangedAt &&
-		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID && a.Inode == b.Inode
+		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID && a.Inode == b.Inode &&
+		a.TimesExplicit == b.TimesExplicit
 }
