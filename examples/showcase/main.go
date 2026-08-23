@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	storfuse "github.com/FarelRA/storhub/fuse"
@@ -16,40 +18,40 @@ import (
 
 type showcaseHub interface {
 	Owner() string
-	Mkdir(project, dirPath string) error
-	CreateFile(project, filePath string) (*storhub.FileMetadata, error)
-	WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error)
-	AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error)
-	ReadFileAt(project, filePath string, offset, length int64) ([]byte, error)
-	Rename(project, oldPath, newPath string) error
-	TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error)
-	UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error)
-	ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error)
-	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
-	DownloadFile(project, remotePath, localPath string) error
-	ListFiles(project string) ([]storhub.FileMetadata, error)
-	ListReleases(project string) ([]storhub.ReleaseMetadata, error)
-	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
-	RollbackMetadata(project, commitSHA string) error
-	StatPath(project, targetPath string) (*storhub.EntryInfo, error)
-	ReadDir(project, dirPath string) ([]storhub.DirEntry, error)
-	StatFS(project string) (*storhub.FSStats, error)
-	Chmod(project, targetPath string, mode uint32) error
-	Chown(project, targetPath string, uid, gid uint32) error
-	Chtimes(project, targetPath string, atime, mtime int64) error
-	SetXAttr(project, targetPath, attr string, data []byte) error
-	GetXAttr(project, targetPath, attr string) ([]byte, error)
-	ListXAttr(project, targetPath string) ([]string, error)
-	RemoveXAttr(project, targetPath, attr string) error
-	Symlink(project, target, linkPath string) (*storhub.FileMetadata, error)
-	Readlink(project, linkPath string) (string, error)
-	Link(project, existingPath, newPath string) (*storhub.FileMetadata, error)
-	DeleteFile(project, filePath string) error
-	Rmdir(project, dirPath string) error
-	PurgeUntracked(project string) (*storhub.PurgeResult, error)
-	CleanupProject(project string) error
-	DeleteRelease(project, tag string) error
-	DeleteProject(project string) error
+	MkdirContext(ctx context.Context, project, dirPath string) error
+	CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error)
+	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error)
+	AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*storhub.FileMetadata, error)
+	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
+	RenameContext(ctx context.Context, project, oldPath, newPath string) error
+	TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*storhub.FileMetadata, error)
+	UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error)
+	ReplaceFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error)
+	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
+	DownloadFileContext(ctx context.Context, project, remotePath, localPath string) error
+	ListFilesContext(ctx context.Context, project string) ([]storhub.FileMetadata, error)
+	ListReleasesContext(ctx context.Context, project string) ([]storhub.ReleaseMetadata, error)
+	ListMetadataRevisionsContext(ctx context.Context, project string) ([]storhub.MetadataRevision, error)
+	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
+	StatPathContext(ctx context.Context, project, targetPath string) (*storhub.EntryInfo, error)
+	ReadDirContext(ctx context.Context, project, dirPath string) ([]storhub.DirEntry, error)
+	StatFSContext(ctx context.Context, project string) (*storhub.FSStats, error)
+	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
+	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
+	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
+	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error
+	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
+	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)
+	RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error
+	SymlinkContext(ctx context.Context, project, target, linkPath string) (*storhub.FileMetadata, error)
+	ReadlinkContext(ctx context.Context, project, linkPath string) (string, error)
+	LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error)
+	DeleteFileContext(ctx context.Context, project, filePath string) error
+	RmdirContext(ctx context.Context, project, dirPath string) error
+	PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error)
+	CleanupProjectContext(ctx context.Context, project string) error
+	DeleteReleaseContext(ctx context.Context, project, tag string) error
+	DeleteProjectContext(ctx context.Context, project string) error
 }
 
 func main() {
@@ -65,24 +67,16 @@ func main() {
 	printKV("node kinds", "file=%s symlink=%s", storhub.NodeKindFile, storhub.NodeKindSymlink)
 	fmt.Println()
 
-	defaultHub, err := storhub.NewStorHub(token)
-	if err != nil {
-		log.Fatalf("initialize default StorHub: %v", err)
-	}
-	_ = defaultHub
+	// Ctrl+C cancels in-flight showcase operations.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg := storhub.DefaultConfig()
 	cfg.ChunkSize = 8 << 20
 
-	configuredHub, err := storhub.NewStorHubWithConfig(token, cfg)
+	hub, err := storhub.NewStorHubWithContext(ctx, token, cfg)
 	if err != nil {
-		log.Fatalf("initialize configured StorHub: %v", err)
-	}
-	_ = configuredHub
-
-	hub, err := storhub.NewStorHubWithContext(context.Background(), token, cfg)
-	if err != nil {
-		log.Fatalf("initialize contextual StorHub: %v", err)
+		log.Fatalf("initialize StorHub: %v", err)
 	}
 
 	workspace, err := os.MkdirTemp("", "storhub-showcase-")
@@ -92,20 +86,20 @@ func main() {
 	defer os.RemoveAll(workspace)
 
 	project := fmt.Sprintf("storhub-showcase-%d", os.Getpid())
-	if err := runShowcase(hub, workspace, project); err != nil {
+	if err := runShowcase(ctx, hub, workspace, project); err != nil {
 		log.Fatal(err)
 	}
 	if err := previewFUSE(hub, project); err != nil {
 		log.Fatal(err)
 	}
-	if err := runMaintenance(hub, project); err != nil {
+	if err := runMaintenance(ctx, hub, project); err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Println("showcase completed")
 }
 
-func runShowcase(hub showcaseHub, workspace, project string) error {
+func runShowcase(ctx context.Context, hub showcaseHub, workspace, project string) error {
 	printSection("Session")
 	printKV("owner", "%s", hub.Owner())
 	printKV("project", "%s", project)
@@ -114,7 +108,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 
 	if err := runStep("prepare directories", func() error {
 		for _, dir := range []string{"docs", "docs/specs", "artifacts", "scratch"} {
-			if err := hub.Mkdir(project, dir); err != nil {
+			if err := hub.MkdirContext(ctx, project, dir); err != nil {
 				return err
 			}
 		}
@@ -142,31 +136,31 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	}
 
 	if err := runStep("create and edit managed file", func() error {
-		if _, err := hub.CreateFile(project, "scratch/notes.txt"); err != nil {
+		if _, err := hub.CreateFileContext(ctx, project, "scratch/notes.txt"); err != nil {
 			return err
 		}
-		if _, err := hub.WriteFileAt(project, "scratch/notes.txt", 0, []byte("alpha\n")); err != nil {
+		if _, err := hub.WriteFileAtContext(ctx, project, "scratch/notes.txt", 0, []byte("alpha\n")); err != nil {
 			return err
 		}
-		if _, err := hub.AppendFile(project, "scratch/notes.txt", []byte("beta\n")); err != nil {
+		if _, err := hub.AppendFileContext(ctx, project, "scratch/notes.txt", []byte("beta\n")); err != nil {
 			return err
 		}
-		preview, err := hub.ReadFileAt(project, "scratch/notes.txt", 0, 64)
+		preview, err := hub.ReadFileAtContext(ctx, project, "scratch/notes.txt", 0, 64)
 		if err != nil {
 			return err
 		}
 		printKV("notes preview", "%q", string(preview))
-		if _, err := hub.TruncateFile(project, "scratch/notes.txt", 5); err != nil {
+		if _, err := hub.TruncateFileContext(ctx, project, "scratch/notes.txt", 5); err != nil {
 			return err
 		}
-		return hub.Rename(project, "scratch/notes.txt", "scratch/notes-short.txt")
+		return hub.RenameContext(ctx, project, "scratch/notes.txt", "scratch/notes-short.txt")
 	}); err != nil {
 		return err
 	}
 
 	guidePath := "docs/specs/guide.txt"
 	uploaded, err := stepFile("upload file", func() (*storhub.FileMetadata, error) {
-		return hub.UploadFile(project, guidePath, guideV1)
+		return hub.UploadFileContext(ctx, project, guidePath, guideV1)
 	})
 	if err != nil {
 		return err
@@ -174,7 +168,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	printFile("uploaded file", uploaded)
 
 	replaced, err := stepFile("replace file", func() (*storhub.FileMetadata, error) {
-		return hub.ReplaceFile(project, guidePath, guideV2)
+		return hub.ReplaceFileContext(ctx, project, guidePath, guideV2)
 	})
 	if err != nil {
 		return err
@@ -182,7 +176,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	printFile("replaced file", replaced)
 
 	patched, err := stepFile("patch file", func() (*storhub.FileMetadata, error) {
-		return hub.PatchFile(project, guidePath, 0, int64(len("StorHub")), []byte("StorHub showcase"))
+		return hub.PatchFileContext(ctx, project, guidePath, 0, int64(len("StorHub")), []byte("StorHub showcase"))
 	})
 	if err != nil {
 		return err
@@ -194,53 +188,53 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 
 	if err := runStep("apply POSIX metadata", func() error {
 		now := int64(1_700_000_000)
-		if err := hub.Chmod(project, guidePath, 0o640); err != nil {
+		if err := hub.ChmodContext(ctx, project, guidePath, 0o640); err != nil {
 			return err
 		}
-		if err := hub.Chown(project, guidePath, 1000, 1000); err != nil {
+		if err := hub.ChownContext(ctx, project, guidePath, 1000, 1000); err != nil {
 			return err
 		}
-		if err := hub.Chtimes(project, guidePath, now, now+7200); err != nil { // +2 hours
+		if err := hub.ChtimesContext(ctx, project, guidePath, now, now+7200); err != nil { // +2 hours
 			return err
 		}
-		if err := hub.SetXAttr(project, guidePath, "user.demo", []byte("enabled")); err != nil {
+		if err := hub.SetXAttrContext(ctx, project, guidePath, "user.demo", []byte("enabled")); err != nil {
 			return err
 		}
-		value, err := hub.GetXAttr(project, guidePath, "user.demo")
+		value, err := hub.GetXAttrContext(ctx, project, guidePath, "user.demo")
 		if err != nil {
 			return err
 		}
 		printKV("xattr user.demo", "%q", string(value))
-		attrs, err := hub.ListXAttr(project, guidePath)
+		attrs, err := hub.ListXAttrContext(ctx, project, guidePath)
 		if err != nil {
 			return err
 		}
 		printKV("xattrs", "%v", attrs)
-		if err := hub.RemoveXAttr(project, guidePath, "user.demo"); err != nil {
+		if err := hub.RemoveXAttrContext(ctx, project, guidePath, "user.demo"); err != nil {
 			return err
 		}
-		return hub.SetXAttr(project, guidePath, "user.demo", []byte("enabled"))
+		return hub.SetXAttrContext(ctx, project, guidePath, "user.demo", []byte("enabled"))
 	}); err != nil {
 		return err
 	}
 
 	if err := runStep("create links", func() error {
-		if _, err := hub.Symlink(project, "docs/specs/guide.txt", "docs/specs/guide.link"); err != nil {
+		if _, err := hub.SymlinkContext(ctx, project, "docs/specs/guide.txt", "docs/specs/guide.link"); err != nil {
 			return err
 		}
-		target, err := hub.Readlink(project, "docs/specs/guide.link")
+		target, err := hub.ReadlinkContext(ctx, project, "docs/specs/guide.link")
 		if err != nil {
 			return err
 		}
 		printKV("symlink target", "%s", target)
-		_, err = hub.Link(project, "docs/specs/guide.txt", "artifacts/guide-copy.txt")
+		_, err = hub.LinkContext(ctx, project, "docs/specs/guide.txt", "artifacts/guide-copy.txt")
 		return err
 	}); err != nil {
 		return err
 	}
 
 	if err := runStep("write sparse tail through hardlink", func() error {
-		_, err := hub.WriteFileAt(project, "artifacts/guide-copy.txt", patched.Size+16, []byte("tail marker"))
+		_, err := hub.WriteFileAtContext(ctx, project, "artifacts/guide-copy.txt", patched.Size+16, []byte("tail marker"))
 		return err
 	}); err != nil {
 		return err
@@ -248,7 +242,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 
 	downloadPath := filepath.Join(workspace, "downloaded-guide.txt")
 	if err := runStep("download final file", func() error {
-		return hub.DownloadFile(project, guidePath, downloadPath)
+		return hub.DownloadFileContext(ctx, project, guidePath, downloadPath)
 	}); err != nil {
 		return err
 	}
@@ -259,31 +253,31 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	printSection("Downloaded Content")
 	fmt.Println(string(downloaded))
 
-	files, err := hub.ListFiles(project)
+	files, err := hub.ListFilesContext(ctx, project)
 	if err != nil {
 		return fmt.Errorf("list files: %w", err)
 	}
 	printFiles(files)
 
-	releases, err := hub.ListReleases(project)
+	releases, err := hub.ListReleasesContext(ctx, project)
 	if err != nil {
 		return fmt.Errorf("list releases: %w", err)
 	}
 	printReleases(releases)
 
-	entries, err := hub.ReadDir(project, "docs/specs")
+	entries, err := hub.ReadDirContext(ctx, project, "docs/specs")
 	if err != nil {
 		return fmt.Errorf("read directory: %w", err)
 	}
 	printDir("docs/specs", entries)
 
-	stat, err := hub.StatPath(project, guidePath)
+	stat, err := hub.StatPathContext(ctx, project, guidePath)
 	if err != nil {
 		return fmt.Errorf("stat path: %w", err)
 	}
 	printStat("guide.txt stat", stat)
 
-	stats, err := hub.StatFS(project)
+	stats, err := hub.StatFSContext(ctx, project)
 	if err != nil {
 		return fmt.Errorf("statfs: %w", err)
 	}
@@ -297,7 +291,7 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	fmt.Println()
 
 	rollbackMarker, err := stepFile("create rollback marker", func() (*storhub.FileMetadata, error) {
-		return hub.CreateFile(project, "scratch/rollback-marker.txt")
+		return hub.CreateFileContext(ctx, project, "scratch/rollback-marker.txt")
 	})
 	if err != nil {
 		return err
@@ -305,32 +299,32 @@ func runShowcase(hub showcaseHub, workspace, project string) error {
 	if rollbackMarker == nil {
 		return errors.New("rollback marker metadata missing")
 	}
-	if _, err := hub.WriteFileAt(project, "scratch/rollback-marker.txt", 0, []byte("rollback me")); err != nil {
+	if _, err := hub.WriteFileAtContext(ctx, project, "scratch/rollback-marker.txt", 0, []byte("rollback me")); err != nil {
 		return fmt.Errorf("write rollback marker: %w", err)
 	}
 
-	revisions, err := hub.ListMetadataRevisions(project)
+	revisions, err := hub.ListMetadataRevisionsContext(ctx, project)
 	if err != nil {
 		return fmt.Errorf("list revisions: %w", err)
 	}
 	printRevisions(revisions)
 	if len(revisions) > 1 {
 		if err := runStep("rollback metadata one revision", func() error {
-			return hub.RollbackMetadata(project, revisions[1].CommitSHA)
+			return hub.RollbackMetadataContext(ctx, project, revisions[1].CommitSHA)
 		}); err != nil {
 			return err
 		}
 	}
 
-	if _, err := hub.StatPath(project, "scratch/rollback-marker.txt"); err != nil {
+	if _, err := hub.StatPathContext(ctx, project, "scratch/rollback-marker.txt"); err != nil {
 		printKV("rollback removed marker as expected", "%v", err)
 	}
 
 	if err := runStep("delete scratch file and directory", func() error {
-		if err := hub.DeleteFile(project, "scratch/notes-short.txt"); err != nil {
+		if err := hub.DeleteFileContext(ctx, project, "scratch/notes-short.txt"); err != nil {
 			return err
 		}
-		return hub.Rmdir(project, "scratch")
+		return hub.RmdirContext(ctx, project, "scratch")
 	}); err != nil {
 		return err
 	}
@@ -356,26 +350,26 @@ func previewFUSE(hub *storhub.StorHub, project string) error {
 	return nil
 }
 
-func runMaintenance(hub showcaseHub, project string) error {
+func runMaintenance(ctx context.Context, hub showcaseHub, project string) error {
 	printSection("Maintenance")
-	purge, err := hub.PurgeUntracked(project)
+	purge, err := hub.PurgeUntrackedContext(ctx, project)
 	if err != nil {
 		return fmt.Errorf("purge untracked: %w", err)
 	}
 	printKV("purged assets", "%d", purge.DeletedAssets)
 	printKV("purged releases", "%d", purge.DeletedReleases)
-	if err := hub.CleanupProject(project); err != nil {
+	if err := hub.CleanupProjectContext(ctx, project); err != nil {
 		return fmt.Errorf("cleanup project: %w", err)
 	}
 	printKV("cleanup", "%s", "done")
 	if tag := strings.TrimSpace(os.Getenv("STORHUB_DELETE_RELEASE_TAG")); tag != "" {
-		if err := hub.DeleteRelease(project, tag); err != nil {
+		if err := hub.DeleteReleaseContext(ctx, project, tag); err != nil {
 			return fmt.Errorf("delete release %s: %w", tag, err)
 		}
 		printKV("deleted release tag", "%s", tag)
 	}
 	if os.Getenv("STORHUB_DELETE_PROJECT") == "1" {
-		if err := hub.DeleteProject(project); err != nil {
+		if err := hub.DeleteProjectContext(ctx, project); err != nil {
 			return fmt.Errorf("delete project: %w", err)
 		}
 		printKV("project deletion", "%s", "deleted at end of showcase")
@@ -401,13 +395,6 @@ func stepFile(label string, fn func() (*storhub.FileMetadata, error)) (*storhub.
 	}
 	fmt.Printf("ok: %s\n", label)
 	return meta, nil
-}
-
-func runOrDie(label string, fn func() error) {
-	if err := fn(); err != nil {
-		log.Fatalf("%s: %v", label, err)
-	}
-	fmt.Printf("ok: %s\n", label)
 }
 
 func printFile(label string, meta *storhub.FileMetadata) {

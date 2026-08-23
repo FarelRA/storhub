@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -398,7 +399,7 @@ func newFakeRESTClient() *fakeRESTClient {
 	}
 }
 
-func (c *fakeRESTClient) CreateFile(project, filePath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) CreateFileContext(ctx context.Context, project, filePath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, filePath)
@@ -416,7 +417,7 @@ func (c *fakeRESTClient) CreateFile(project, filePath string) (*FileMetadata, er
 	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) Mkdir(project, dirPath string) error {
+func (c *fakeRESTClient) MkdirContext(ctx context.Context, project, dirPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p := c.project(project)
@@ -444,7 +445,7 @@ func (c *fakeRESTClient) Mkdir(project, dirPath string) error {
 	return nil
 }
 
-func (c *fakeRESTClient) DeleteFile(project, filePath string) error {
+func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -471,7 +472,7 @@ func (c *fakeRESTClient) DeleteFile(project, filePath string) error {
 	return nil
 }
 
-func (c *fakeRESTClient) Rmdir(project, dirPath string) error {
+func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -506,7 +507,7 @@ func (c *fakeRESTClient) Rmdir(project, dirPath string) error {
 	return nil
 }
 
-func (c *fakeRESTClient) Rename(project, oldPath, newPath string) error {
+func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -574,7 +575,7 @@ func (c *fakeRESTClient) Rename(project, oldPath, newPath string) error {
 	return nil
 }
 
-func (c *fakeRESTClient) TruncateFile(project, filePath string, size int64) (*FileMetadata, error) {
+func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -598,7 +599,7 @@ func (c *fakeRESTClient) TruncateFile(project, filePath string, size int64) (*Fi
 	return &FileMetadata{Size: size, Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) AppendFile(project, filePath string, data []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -615,7 +616,7 @@ func (c *fakeRESTClient) AppendFile(project, filePath string, data []byte) (*Fil
 	return &FileMetadata{Size: int64(len(node.data.bytes)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -646,15 +647,15 @@ func (c *fakeRESTClient) WriteFileAt(project, filePath string, offset int64, dat
 	return &FileMetadata{Size: int64(len(content)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*FileMetadata, error) {
+func (c *fakeRESTClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*FileMetadata, error) {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
 	}
-	return c.WriteFileAt(project, filePath, 0, data)
+	return c.WriteFileAtContext(ctx, project, filePath, 0, data)
 }
 
-func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -676,7 +677,7 @@ func (c *fakeRESTClient) PatchFile(project, filePath string, offset, deleteSize 
 	return &FileMetadata{Size: int64(len(patched)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+func (c *fakeRESTClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.readCalls = append(c.readCalls, readCall{path: filePath, offset: offset, length: length})
@@ -702,7 +703,7 @@ func (c *fakeRESTClient) takeReadCalls() []readCall {
 	return calls
 }
 
-func (c *fakeRESTClient) StatPath(project, targetPath string) (*EntryInfo, error) {
+func (c *fakeRESTClient) StatPathContext(ctx context.Context, project, targetPath string) (*EntryInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -732,7 +733,7 @@ func (c *fakeRESTClient) StatPath(project, targetPath string) (*EntryInfo, error
 	return nil, shfs.NotFound(clean)
 }
 
-func (c *fakeRESTClient) ReadDir(project, dirPath string) ([]DirEntry, error) {
+func (c *fakeRESTClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]DirEntry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -764,7 +765,7 @@ func (c *fakeRESTClient) ReadDir(project, dirPath string) ([]DirEntry, error) {
 	return entries, nil
 }
 
-func (c *fakeRESTClient) StatFS(project string) (*FSStats, error) {
+func (c *fakeRESTClient) StatFSContext(ctx context.Context, project string) (*FSStats, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -788,7 +789,7 @@ func (c *fakeRESTClient) StatFS(project string) (*FSStats, error) {
 	return &FSStats{Files: len(p.files), Directories: len(p.dirs), Inodes: inodes, Bytes: bytesTotal, Releases: len(p.revisions), Assets: len(p.files)}, nil
 }
 
-func (c *fakeRESTClient) Symlink(project, target, linkPath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, linkPath)
@@ -806,7 +807,7 @@ func (c *fakeRESTClient) Symlink(project, target, linkPath string) (*FileMetadat
 	return &FileMetadata{Symlink: target, Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) Readlink(project, linkPath string) (string, error) {
+func (c *fakeRESTClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireReadableFile(project, linkPath)
@@ -819,7 +820,7 @@ func (c *fakeRESTClient) Readlink(project, linkPath string) (string, error) {
 	return node.data.target, nil
 }
 
-func (c *fakeRESTClient) Link(project, existingPath, newPath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) LinkContext(ctx context.Context, project, existingPath, newPath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, newPath)
@@ -842,7 +843,7 @@ func (c *fakeRESTClient) Link(project, existingPath, newPath string) (*FileMetad
 	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) Chmod(project, targetPath string, mode uint32) error {
+func (c *fakeRESTClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -855,7 +856,7 @@ func (c *fakeRESTClient) Chmod(project, targetPath string, mode uint32) error {
 	return nil
 }
 
-func (c *fakeRESTClient) Chown(project, targetPath string, uid, gid uint32) error {
+func (c *fakeRESTClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -869,7 +870,7 @@ func (c *fakeRESTClient) Chown(project, targetPath string, uid, gid uint32) erro
 	return nil
 }
 
-func (c *fakeRESTClient) Chtimes(project, targetPath string, atime, mtime int64) error {
+func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -883,7 +884,7 @@ func (c *fakeRESTClient) Chtimes(project, targetPath string, atime, mtime int64)
 	return nil
 }
 
-func (c *fakeRESTClient) SetXAttr(project, targetPath, attr string, data []byte) error {
+func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -894,7 +895,7 @@ func (c *fakeRESTClient) SetXAttr(project, targetPath, attr string, data []byte)
 	return nil
 }
 
-func (c *fakeRESTClient) GetXAttr(project, targetPath, attr string) ([]byte, error) {
+func (c *fakeRESTClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -908,7 +909,7 @@ func (c *fakeRESTClient) GetXAttr(project, targetPath, attr string) ([]byte, err
 	return append([]byte(nil), value...), nil
 }
 
-func (c *fakeRESTClient) RemoveXAttr(project, targetPath, attr string) error {
+func (c *fakeRESTClient) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -922,7 +923,7 @@ func (c *fakeRESTClient) RemoveXAttr(project, targetPath, attr string) error {
 	return nil
 }
 
-func (c *fakeRESTClient) ListXAttr(project, targetPath string) ([]string, error) {
+func (c *fakeRESTClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -937,7 +938,7 @@ func (c *fakeRESTClient) ListXAttr(project, targetPath string) ([]string, error)
 	return names, nil
 }
 
-func (c *fakeRESTClient) ListMetadataRevisions(project string) ([]MetadataRevision, error) {
+func (c *fakeRESTClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]MetadataRevision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -947,7 +948,7 @@ func (c *fakeRESTClient) ListMetadataRevisions(project string) ([]MetadataRevisi
 	return append([]MetadataRevision(nil), p.revisions...), nil
 }
 
-func (c *fakeRESTClient) RollbackMetadata(project, commitSHA string) error {
+func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -963,11 +964,11 @@ func (c *fakeRESTClient) RollbackMetadata(project, commitSHA string) error {
 	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
 }
 
-func (c *fakeRESTClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+func (c *fakeRESTClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
 	return &storage.PurgeResult{}, nil
 }
 
-func (c *fakeRESTClient) DeleteProject(project string) error {
+func (c *fakeRESTClient) DeleteProjectContext(ctx context.Context, project string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.projects[project]; !ok {

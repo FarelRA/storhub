@@ -20,6 +20,11 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 	if project == "" {
 		return
 	}
+	// Atime updates are advisory; drop them once the driving request has
+	// been canceled instead of touching metadata nobody will observe.
+	if err := ctx.Err(); err != nil {
+		return
+	}
 
 	// Check if atime updates are disabled
 	if h.config.AtimePolicy == "noatime" {

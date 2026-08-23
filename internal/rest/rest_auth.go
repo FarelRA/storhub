@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -197,86 +198,86 @@ type authorizedClient struct {
 	principal *restPrincipal
 }
 
-func (c *authorizedClient) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
-	if err := c.requireCreate(project, filePath); err != nil {
+func (c *authorizedClient) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
+	if err := c.requireCreate(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.CreateFile(project, filePath)
+	return c.base.CreateFileContext(ctx, project, filePath)
 }
-func (c *authorizedClient) Mkdir(project, dirPath string) error {
-	if err := c.requireCreate(project, dirPath); err != nil {
+func (c *authorizedClient) MkdirContext(ctx context.Context, project, dirPath string) error {
+	if err := c.requireCreate(ctx, project, dirPath); err != nil {
 		return err
 	}
-	return c.base.Mkdir(project, dirPath)
+	return c.base.MkdirContext(ctx, project, dirPath)
 }
-func (c *authorizedClient) DeleteFile(project, filePath string) error {
-	if err := c.requireParentWrite(project, filePath); err != nil {
+func (c *authorizedClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
+	if err := c.requireParentWrite(ctx, project, filePath); err != nil {
 		return err
 	}
-	return c.base.DeleteFile(project, filePath)
+	return c.base.DeleteFileContext(ctx, project, filePath)
 }
-func (c *authorizedClient) Rmdir(project, dirPath string) error {
-	if err := c.requireParentWrite(project, dirPath); err != nil {
+func (c *authorizedClient) RmdirContext(ctx context.Context, project, dirPath string) error {
+	if err := c.requireParentWrite(ctx, project, dirPath); err != nil {
 		return err
 	}
-	if err := c.requireTraverse(project, dirPath); err != nil {
+	if err := c.requireTraverse(ctx, project, dirPath); err != nil {
 		return err
 	}
-	return c.base.Rmdir(project, dirPath)
+	return c.base.RmdirContext(ctx, project, dirPath)
 }
-func (c *authorizedClient) Rename(project, oldPath, newPath string) error {
-	if err := c.requireParentWrite(project, oldPath); err != nil {
+func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+	if err := c.requireParentWrite(ctx, project, oldPath); err != nil {
 		return err
 	}
-	if err := c.requireParentWrite(project, newPath); err != nil {
+	if err := c.requireParentWrite(ctx, project, newPath); err != nil {
 		return err
 	}
-	if err := c.requireTraverse(project, oldPath); err != nil {
+	if err := c.requireTraverse(ctx, project, oldPath); err != nil {
 		return err
 	}
-	return c.base.Rename(project, oldPath, newPath)
+	return c.base.RenameContext(ctx, project, oldPath, newPath)
 }
-func (c *authorizedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
-	if err := c.requireNodeWrite(project, filePath); err != nil {
+func (c *authorizedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
+	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.TruncateFile(project, filePath, size)
+	return c.base.TruncateFileContext(ctx, project, filePath, size)
 }
-func (c *authorizedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
-	if err := c.requireNodeWrite(project, filePath); err != nil {
+func (c *authorizedClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
+	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.AppendFile(project, filePath, data)
+	return c.base.AppendFileContext(ctx, project, filePath, data)
 }
-func (c *authorizedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
-	if err := c.requireNodeWrite(project, filePath); err != nil {
+func (c *authorizedClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.WriteFileAt(project, filePath, offset, data)
+	return c.base.WriteFileAtContext(ctx, project, filePath, offset, data)
 }
-func (c *authorizedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
-	if err := c.requireNodeWrite(project, filePath); err != nil {
+func (c *authorizedClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
+	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.PatchFile(project, filePath, offset, deleteSize, edit)
+	return c.base.PatchFileContext(ctx, project, filePath, offset, deleteSize, edit)
 }
-func (c *authorizedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
-	if err := c.requireNodeWrite(project, filePath); err != nil {
+func (c *authorizedClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
+	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.ReplaceFileFromReader(project, filePath, body)
+	return c.base.ReplaceFileFromReaderContext(ctx, project, filePath, body)
 }
-func (c *authorizedClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
-	if err := c.requireNodeRead(project, filePath); err != nil {
+func (c *authorizedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
+	if err := c.requireNodeRead(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.ReadFileAt(project, filePath, offset, length)
+	return c.base.ReadFileAtContext(ctx, project, filePath, offset, length)
 }
-func (c *authorizedClient) StatPath(project, targetPath string) (*shfs.EntryInfo, error) {
-	if err := c.requireTraverse(project, targetPath); err != nil {
+func (c *authorizedClient) StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
+	if err := c.requireTraverse(ctx, project, targetPath); err != nil {
 		return nil, err
 	}
-	entry, err := c.base.StatPath(project, targetPath)
+	entry, err := c.base.StatPathContext(ctx, project, targetPath)
 	if err != nil {
 		return nil, err
 	}
@@ -285,134 +286,134 @@ func (c *authorizedClient) StatPath(project, targetPath string) (*shfs.EntryInfo
 	}
 	return entry, nil
 }
-func (c *authorizedClient) ReadDir(project, dirPath string) ([]shfs.DirEntry, error) {
-	entry, err := c.base.StatPath(project, dirPath)
+func (c *authorizedClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
+	entry, err := c.base.StatPathContext(ctx, project, dirPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.requireTraverse(project, dirPath); err != nil {
+	if err := c.requireTraverse(ctx, project, dirPath); err != nil {
 		return nil, err
 	}
 	if !c.hasPerm(entry, permRead|permExec) {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.ReadDir(project, dirPath)
+	return c.base.ReadDirContext(ctx, project, dirPath)
 }
-func (c *authorizedClient) StatFS(project string) (*shfs.FSStats, error) {
-	entry, err := c.base.StatPath(project, "")
+func (c *authorizedClient) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
+	entry, err := c.base.StatPathContext(ctx, project, "")
 	if err != nil {
 		return nil, err
 	}
 	if !c.canReadMetadata(entry) {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.StatFS(project)
+	return c.base.StatFSContext(ctx, project)
 }
-func (c *authorizedClient) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
-	if err := c.requireCreate(project, linkPath); err != nil {
+func (c *authorizedClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
+	if err := c.requireCreate(ctx, project, linkPath); err != nil {
 		return nil, err
 	}
-	return c.base.Symlink(project, target, linkPath)
+	return c.base.SymlinkContext(ctx, project, target, linkPath)
 }
-func (c *authorizedClient) Readlink(project, linkPath string) (string, error) {
-	if err := c.requireTraverse(project, linkPath); err != nil {
+func (c *authorizedClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
+	if err := c.requireTraverse(ctx, project, linkPath); err != nil {
 		return "", err
 	}
-	entry, err := c.base.StatPath(project, linkPath)
+	entry, err := c.base.StatPathContext(ctx, project, linkPath)
 	if err != nil {
 		return "", err
 	}
 	if !c.canReadMetadata(entry) {
 		return "", errForbidden("permission denied")
 	}
-	return c.base.Readlink(project, linkPath)
+	return c.base.ReadlinkContext(ctx, project, linkPath)
 }
-func (c *authorizedClient) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
-	if err := c.requireNodeRead(project, existingPath); err != nil {
+func (c *authorizedClient) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
+	if err := c.requireNodeRead(ctx, project, existingPath); err != nil {
 		return nil, err
 	}
-	if err := c.requireCreate(project, newPath); err != nil {
+	if err := c.requireCreate(ctx, project, newPath); err != nil {
 		return nil, err
 	}
-	return c.base.Link(project, existingPath, newPath)
+	return c.base.LinkContext(ctx, project, existingPath, newPath)
 }
-func (c *authorizedClient) Chmod(project, targetPath string, mode uint32) error {
-	entry, err := c.base.StatPath(project, targetPath)
+func (c *authorizedClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+	entry, err := c.base.StatPathContext(ctx, project, targetPath)
 	if err != nil {
 		return err
 	}
 	if !c.principal.Admin && c.principal.UID != entry.UID {
 		return errForbidden("permission denied")
 	}
-	return c.base.Chmod(project, targetPath, mode)
+	return c.base.ChmodContext(ctx, project, targetPath, mode)
 }
-func (c *authorizedClient) Chown(project, targetPath string, uid, gid uint32) error {
+func (c *authorizedClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
 	if !c.principal.Admin {
 		return errForbidden("permission denied")
 	}
-	return c.base.Chown(project, targetPath, uid, gid)
+	return c.base.ChownContext(ctx, project, targetPath, uid, gid)
 }
-func (c *authorizedClient) Chtimes(project, targetPath string, atime, mtime int64) error {
-	entry, err := c.base.StatPath(project, targetPath)
+func (c *authorizedClient) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+	entry, err := c.base.StatPathContext(ctx, project, targetPath)
 	if err != nil {
 		return err
 	}
 	if !c.principal.Admin && c.principal.UID != entry.UID && !c.hasPerm(entry, permWrite) {
 		return errForbidden("permission denied")
 	}
-	return c.base.Chtimes(project, targetPath, atime, mtime)
+	return c.base.ChtimesContext(ctx, project, targetPath, atime, mtime)
 }
-func (c *authorizedClient) SetXAttr(project, targetPath, attr string, data []byte) error {
-	if err := c.requireNodeWrite(project, targetPath); err != nil {
+func (c *authorizedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+	if err := c.requireNodeWrite(ctx, project, targetPath); err != nil {
 		return err
 	}
-	return c.base.SetXAttr(project, targetPath, attr, data)
+	return c.base.SetXAttrContext(ctx, project, targetPath, attr, data)
 }
-func (c *authorizedClient) GetXAttr(project, targetPath, attr string) ([]byte, error) {
-	if err := c.requireNodeRead(project, targetPath); err != nil {
+func (c *authorizedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
+	if err := c.requireNodeRead(ctx, project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.base.GetXAttr(project, targetPath, attr)
+	return c.base.GetXAttrContext(ctx, project, targetPath, attr)
 }
-func (c *authorizedClient) ListXAttr(project, targetPath string) ([]string, error) {
-	if err := c.requireNodeRead(project, targetPath); err != nil {
+func (c *authorizedClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
+	if err := c.requireNodeRead(ctx, project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.base.ListXAttr(project, targetPath)
+	return c.base.ListXAttrContext(ctx, project, targetPath)
 }
-func (c *authorizedClient) RemoveXAttr(project, targetPath, attr string) error {
-	if err := c.requireNodeWrite(project, targetPath); err != nil {
+func (c *authorizedClient) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+	if err := c.requireNodeWrite(ctx, project, targetPath); err != nil {
 		return err
 	}
-	return c.base.RemoveXAttr(project, targetPath, attr)
+	return c.base.RemoveXAttrContext(ctx, project, targetPath, attr)
 }
-func (c *authorizedClient) ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error) {
-	entry, err := c.base.StatPath(project, "")
+func (c *authorizedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
+	entry, err := c.base.StatPathContext(ctx, project, "")
 	if err != nil {
 		return nil, err
 	}
 	if !c.canReadMetadata(entry) {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.ListMetadataRevisions(project)
+	return c.base.ListMetadataRevisionsContext(ctx, project)
 }
-func (c *authorizedClient) RollbackMetadata(project, commitSHA string) error {
+func (c *authorizedClient) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
 	if !c.principal.Admin {
 		return errForbidden("permission denied")
 	}
-	return c.base.RollbackMetadata(project, commitSHA)
+	return c.base.RollbackMetadataContext(ctx, project, commitSHA)
 }
-func (c *authorizedClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+func (c *authorizedClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
 	if !c.principal.Admin {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.PurgeUntracked(project)
+	return c.base.PurgeUntrackedContext(ctx, project)
 }
-func (c *authorizedClient) DeleteProject(project string) error {
+func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project string) error {
 	if !c.principal.Admin {
 		return errForbidden("permission denied")
 	}
-	return c.base.DeleteProject(project)
+	return c.base.DeleteProjectContext(ctx, project)
 }
 
 const (
@@ -421,15 +422,15 @@ const (
 	permExec  = 1
 )
 
-func (c *authorizedClient) requireCreate(project, filePath string) error {
-	return c.requireParentWrite(project, filePath)
+func (c *authorizedClient) requireCreate(ctx context.Context, project, filePath string) error {
+	return c.requireParentWrite(ctx, project, filePath)
 }
 
-func (c *authorizedClient) requireNodeRead(project, filePath string) error {
-	if err := c.requireTraverse(project, filePath); err != nil {
+func (c *authorizedClient) requireNodeRead(ctx context.Context, project, filePath string) error {
+	if err := c.requireTraverse(ctx, project, filePath); err != nil {
 		return err
 	}
-	entry, err := c.base.StatPath(project, filePath)
+	entry, err := c.base.StatPathContext(ctx, project, filePath)
 	if err != nil {
 		return err
 	}
@@ -439,11 +440,11 @@ func (c *authorizedClient) requireNodeRead(project, filePath string) error {
 	return nil
 }
 
-func (c *authorizedClient) requireNodeWrite(project, filePath string) error {
-	if err := c.requireTraverse(project, filePath); err != nil {
+func (c *authorizedClient) requireNodeWrite(ctx context.Context, project, filePath string) error {
+	if err := c.requireTraverse(ctx, project, filePath); err != nil {
 		return err
 	}
-	entry, err := c.base.StatPath(project, filePath)
+	entry, err := c.base.StatPathContext(ctx, project, filePath)
 	if err != nil {
 		return err
 	}
@@ -453,12 +454,12 @@ func (c *authorizedClient) requireNodeWrite(project, filePath string) error {
 	return nil
 }
 
-func (c *authorizedClient) requireParentWrite(project, filePath string) error {
+func (c *authorizedClient) requireParentWrite(ctx context.Context, project, filePath string) error {
 	parent := parentRESTPath(filePath)
-	if err := c.requireTraverse(project, parent); err != nil {
+	if err := c.requireTraverse(ctx, project, parent); err != nil {
 		return err
 	}
-	entry, err := c.base.StatPath(project, parent)
+	entry, err := c.base.StatPathContext(ctx, project, parent)
 	if err != nil {
 		return err
 	}
@@ -468,12 +469,12 @@ func (c *authorizedClient) requireParentWrite(project, filePath string) error {
 	return nil
 }
 
-func (c *authorizedClient) requireTraverse(project, targetPath string) error {
+func (c *authorizedClient) requireTraverse(ctx context.Context, project, targetPath string) error {
 	if c.principal.Admin {
 		return nil
 	}
 	for _, dir := range ancestorRESTPaths(targetPath) {
-		entry, err := c.base.StatPath(project, dir)
+		entry, err := c.base.StatPathContext(ctx, project, dir)
 		if err != nil {
 			return err
 		}
