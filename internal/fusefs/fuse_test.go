@@ -1386,3 +1386,33 @@ func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
 		t.Fatal("root node was evicted")
 	}
 }
+
+func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+
+	h := &storhubHandle{fs: fsys, inode: 7, id: fsys.nextHandle.Add(1)}
+	fsys.mu.Lock()
+	fsys.handles[h.id] = h
+	fsys.lockTable[7] = []lockRecord{{owner: 42, lock: fuse.FileLock{Start: 0, End: 0, Typ: syscall.F_WRLCK}}}
+	fsys.mu.Unlock()
+
+	// POSIX: once a file has no open descriptor, no locks remain — even
+	// locks recorded by owners this handle never tracked.
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release: %v", errno)
+	}
+	fsys.mu.RLock()
+	_, ok := fsys.lockTable[7]
+	alive := fsys.handles[h.id] != nil
+	fsys.mu.RUnlock()
+	if ok {
+		t.Fatal("lock records survived the last handle release")
+	}
+	if alive {
+		t.Fatal("released handle stayed registered")
+	}
+}
