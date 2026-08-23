@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"bytes"
 	"errors"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
@@ -117,4 +118,50 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 	if body := string(readBody(t, headResp)); body != "" {
 		t.Fatalf("HEAD must have empty body, got %q", body)
 	}
+}
+
+// TestShareLinksCarryShortIDs pins the round-4 registry change: URLs and
+// listing IDs are short opaque identifiers (no JWT in links), the creation
+// response alone carries the signed token for bearer use, deleted shares
+// stay dead by ID, and legacy JWT-shaped segments still resolve to their
+// live record.
+func TestShareLinksCarryShortIDs(t *testing.T) {
+	dl := true
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	var login restLoginResponse
+	decodeJSONBody(t, loginResp, &login)
+	auth := map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}
+
+	shareReq := bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: &dl}))
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareReq, auth, http.StatusCreated)
+	var created shareResponse
+	decodeJSONBody(t, shareResp, &created)
+	if created.ID == "" || strings.Contains(created.ID, ".") {
+		t.Fatalf("share URL id must be a short opaque identifier, got %q", created.ID)
+	}
+	if created.Token == "" || !strings.Contains(created.Token, ".") {
+		t.Fatalf("creation response must carry the signed token for bearer use")
+	}
+	if !strings.Contains(created.URL, created.ID) || strings.Contains(created.URL, created.Token) {
+		t.Fatalf("share url must embed the short id only: %q", created.URL)
+	}
+
+	// Download by short ID works; by signed token still works (legacy).
+	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusOK)
+	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusOK)
+
+	// Listings never leak tokens.
+	listResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/shares", nil, auth, http.StatusOK)
+	if strings.Contains(string(readBody(t, listResp)), created.Token) {
+		t.Fatal("share listing leaked the signed token")
+	}
+
+	// Revocation by ID kills both link shapes.
+	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+created.ID, nil, auth, http.StatusNoContent)
+	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
+	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
 }
