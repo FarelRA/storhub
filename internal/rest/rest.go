@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"runtime"
 	"strconv"
@@ -166,7 +167,101 @@ type shareRecord struct {
 }
 
 // restrictedClient wraps a Client and restricts access to a specific project and path
+// readOnlyShare supplies every mutating Client method as a denial. It is
+// embedded by restrictedClient so the read-only-share policy lives in
+// exactly ONE place: a future Client method cannot silently delegate to the
+// underlying client, because the compiler forces a decision here — either a
+// new denial lands in this struct (policy stays centralized) or an explicit,
+// reviewed override is written on restrictedClient itself.
+type readOnlyShare struct{}
+
+func errReadOnly() error { return errForbidden("access denied: read-only share") }
+
+func (readOnlyShare) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) MkdirContext(ctx context.Context, project, dirPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) error {
+	return errReadOnly()
+}
+
+// restrictedClient wraps a Client and restricts access to a specific project
+// and path. Read methods enforce the shared-prefix check then delegate;
+// every mutation is denied by the embedded readOnlyShare.
 type restrictedClient struct {
+	readOnlyShare
 	underlying     Client
 	allowedProject string
 	allowedPath    string
@@ -198,46 +293,6 @@ func (c *restrictedClient) checkAccess(project, targetPath string) error {
 	return errForbidden("access denied: path not shared")
 }
 
-func (c *restrictedClient) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) MkdirContext(ctx context.Context, project, dirPath string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) RmdirContext(ctx context.Context, project, dirPath string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
 func (c *restrictedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	if err := c.checkAccess(project, filePath); err != nil {
 		return nil, err
@@ -259,12 +314,14 @@ func (c *restrictedClient) ReadDirContext(ctx context.Context, project, dirPath 
 	return c.underlying.ReadDirContext(ctx, project, dirPath)
 }
 
+// StatFS and revision listing are denied with share-specific messages:
+// aggregate stats and history leak information beyond the shared subtree.
 func (c *restrictedClient) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
-func (c *restrictedClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
+func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
+	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
 func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
@@ -272,26 +329,6 @@ func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPat
 		return "", err
 	}
 	return c.underlying.ReadlinkContext(ctx, project, linkPath)
-}
-
-func (c *restrictedClient) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
-	return errForbidden("access denied: read-only share")
 }
 
 func (c *restrictedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
@@ -306,26 +343,6 @@ func (c *restrictedClient) ListXAttrContext(ctx context.Context, project, target
 		return nil, err
 	}
 	return c.underlying.ListXAttrContext(ctx, project, targetPath)
-}
-
-func (c *restrictedClient) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
-	return nil, errForbidden("access denied: share metadata is limited to the shared path")
-}
-
-func (c *restrictedClient) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
-	return errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
-	return nil, errForbidden("access denied: read-only share")
-}
-
-func (c *restrictedClient) DeleteProjectContext(ctx context.Context, project string) error {
-	return errForbidden("access denied: read-only share")
 }
 
 type restError struct {
@@ -1263,6 +1280,15 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
 }
 
+// purgeResponse is the typed result of a purge operation; it replaces the
+// former ad-hoc map so every endpoint returns a struct-shaped document.
+type purgeResponse struct {
+	Project         string `json:"project"`
+	Status          string `json:"status"`
+	DeletedReleases int    `json:"deleted_releases"`
+	DeletedAssets   int    `json:"deleted_assets"`
+}
+
 func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	result, err := h.clientFor(r).PurgeUntrackedContext(r.Context(), project)
@@ -1270,11 +1296,11 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, map[string]any{
-		"project":          project,
-		"status":           "purged",
-		"deleted_releases": result.DeletedReleases,
-		"deleted_assets":   result.DeletedAssets,
+	h.writeJSON(w, http.StatusOK, purgeResponse{
+		Project:         project,
+		Status:          "purged",
+		DeletedReleases: result.DeletedReleases,
+		DeletedAssets:   result.DeletedAssets,
 	})
 }
 
@@ -1340,7 +1366,11 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
+	// 201 with Location: a new resource was created and is addressable at
+	// the project-shares collection, consistent with REST creation
+	// semantics everywhere else in this API.
+	w.Header().Set("Location", path.Join(h.opts.BasePath, "projects", url.PathEscape(project), "shares", record.ID))
+	h.writeJSON(w, http.StatusCreated, h.shareResponse(record))
 }
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
@@ -1376,7 +1406,8 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	h.removeShare(record.ID)
-	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})
+	// 204 like every other successful delete in this API (nodes, projects).
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
