@@ -1076,9 +1076,29 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 	m.TotalFiles = v1.TotalFiles
 	m.TotalSize = v1.TotalSize
 	m.LastMod = timeToUnix(v1.LastModified)
-	m.NextInode = v1.NextInode
-	// Chunk IDs start at 1; normalizeRoot raises the counter past the live
-	// maximum after allocation.
+	// Seed the inode counter past everything the document declares so
+	// allocations during migration (synthesized parents) can never mint a
+	// colliding or zero inode.
+	maxInode := v1.Root.Inode
+	if v1.NextInode > maxInode {
+		maxInode = v1.NextInode
+	}
+	for _, d := range v1.Directories {
+		if d.Inode > maxInode {
+			maxInode = d.Inode
+		}
+	}
+	for _, r := range v1.Releases {
+		for _, f := range r.Files {
+			if f.Inode > maxInode {
+				maxInode = f.Inode
+			}
+		}
+	}
+	// +1: allocateInode returns the counter and then increments, so seeding
+	// with maxInode itself would mint a duplicate of the highest inode.
+	m.NextInode = maxInode + 1
+	// Chunk IDs start at 1; the live maximum is raised by allocation below.
 	m.NextChunkID = 1
 
 	m.Root = DirMeta{
@@ -1090,17 +1110,45 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 
 	m.Dirs = make(map[string]DirMeta, len(v1.Directories))
 	for _, d := range v1.Directories {
-		m.Dirs[d.Path] = DirMeta{
+		dirMeta := DirMeta{
 			CreatedAt: timeToUnix(d.CreatedAt), ModifiedAt: timeToUnix(d.ModifiedAt),
 			AccessedAt: timeToUnix(d.AccessedAt), ChangedAt: timeToUnix(d.ChangedAt),
 			Mode: d.Mode, UID: d.UID, GID: d.GID,
 			Inode: d.Inode, XAttrs: xattrMapFromStrings(d.XAttrs),
 		}
+		if dirMeta.Inode == 0 {
+			dirMeta.Inode = m.allocateInode()
+		}
+		m.Dirs[d.Path] = dirMeta
 	}
 
 	m.Files = make(map[string]FileMeta)
 	m.Chunks = make(map[int64]ChunkInfo)
 	m.Releases = make(map[string]ReleaseRef)
+
+	// A path must map to exactly one node; v1 documents carrying the same
+	// name twice are corrupt, and silently keeping one copy would hide
+	// which bytes survived.
+	seenFiles := make(map[string]struct{})
+
+	// ensureAncestors synthesizes any directory components a migrated path
+	// needs but the v1 document never listed, so Validate cannot trip over
+	// dangling parents.
+	now := timeToUnix(v1.LastModified)
+	ensureAncestors := func(path string) {
+		for dir := parentPath(path); dir != "" && dir != "."; dir = parentPath(dir) {
+			if _, ok := m.Dirs[dir]; ok {
+				return
+			}
+			m.Dirs[dir] = DirMeta{
+				Inode:      m.allocateInode(),
+				CreatedAt:  now,
+				ModifiedAt: now,
+				AccessedAt: now,
+				ChangedAt:  now,
+			}
+		}
+	}
 
 	for _, r := range v1.Releases {
 		ref := ReleaseRef{
@@ -1110,6 +1158,10 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 		m.Releases[r.Tag] = ref
 
 		for _, f := range r.Files {
+			if _, dup := seenFiles[f.Name]; dup {
+				return fmt.Errorf("v1 metadata lists %q more than once; refusing to guess which copy is real", f.Name)
+			}
+			seenFiles[f.Name] = struct{}{}
 			symlink := ""
 			if f.Kind == "symlink" || f.SymlinkTarget != "" {
 				symlink = f.SymlinkTarget
@@ -1144,10 +1196,27 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 				fileMeta.Size = int64(len(symlink))
 				fileMeta.Chunks = nil
 			}
+			if fileMeta.Inode == 0 {
+				fileMeta.Inode = m.allocateInode()
+			}
+			ensureAncestors(f.Name)
 			m.Files[f.Name] = fileMeta
 		}
 	}
 
+	// Declared directories may also sit under undeclared parents.
+	dirPaths := make([]string, 0, len(m.Dirs))
+	for dir := range m.Dirs {
+		dirPaths = append(dirPaths, dir)
+	}
+	sort.Strings(dirPaths) // parents before children via lexicographic order
+	for _, dir := range dirPaths {
+		ensureAncestors(dir)
+	}
+
+	// The v1 counters may be stale or absent; recompute from what actually
+	// migrated so Validate compares against reality.
+	m.RecomputeStats()
 	return nil
 }
 
@@ -1157,6 +1226,9 @@ func stableSortStrings(strs []string) {
 
 func parseNumericReleaseTag(tag string) (int, bool) {
 	trimmed := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tag)), "v")
+	if trimmed == "" || trimmed == "-" || trimmed[0] < '0' || trimmed[0] > '9' {
+		return 0, false
+	}
 	n, err := strconv.Atoi(trimmed)
 	if err != nil {
 		return 0, false

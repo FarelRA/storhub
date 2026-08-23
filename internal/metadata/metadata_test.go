@@ -507,3 +507,52 @@ func TestPruneUnreferencedChunks(t *testing.T) {
 		t.Fatalf("expected empty chunk catalog, got %d entries", len(m.Chunks))
 	}
 }
+
+func TestMigrateV1RejectsDuplicatePathsAndSynthesizesParents(t *testing.T) {
+	// Duplicate file entries are corruption: refuse to guess.
+	dup := []byte(`{"version":1,"project":"demo","last_modified":"2024-01-01T00:00:00Z",
+		"root":{"inode":1,"mode":493,"created_at":"2024-01-01T00:00:00Z","modified_at":"2024-01-01T00:00:00Z"},
+		"directories":[],"releases":[{"tag":"v1","asset_count":1,"created_at":"2024-01-01T00:00:00Z",
+		"files":[
+			{"name":"a.txt","size":1,"release":"v1","uploaded_at":"2024-01-01T00:00:00Z"},
+			{"name":"a.txt","size":2,"release":"v1","uploaded_at":"2024-01-01T00:00:00Z"}
+		]}]}`)
+	m := NewRepoMetadata("demo")
+	if err := m.migrateV1(dup); err == nil {
+		t.Fatal("expected duplicate-path migration to fail")
+	}
+
+	// A file under an undeclared directory chain gets its parents created.
+	orphan := []byte(`{"version":1,"project":"demo","last_modified":"2024-01-01T00:00:00Z",
+		"root":{"inode":1,"mode":493,"created_at":"2024-01-01T00:00:00Z","modified_at":"2024-01-01T00:00:00Z"},
+		"directories":[],"releases":[{"tag":"v1","asset_count":1,"created_at":"2024-01-01T00:00:00Z",
+		"files":[{"name":"deeply/nested/file.txt","size":4,"release":"v1","uploaded_at":"2024-01-01T00:00:00Z",
+		"chunks":[{"name":"file.txt.part001","size":4,"index":0,"offset":0,"release":"v1","asset_offset":0,"asset_id":7}]}]}]}`)
+	m = NewRepoMetadata("demo")
+	if err := m.migrateV1(orphan); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	for _, dir := range []string{"deeply", "deeply/nested"} {
+		if _, ok := m.Dirs[dir]; !ok {
+			t.Fatalf("parent %q was not synthesized", dir)
+		}
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("migrated metadata must validate: %v", err)
+	}
+}
+
+func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
+	if _, ok := parseNumericReleaseTag("v-1"); ok {
+		t.Fatal("v-1 must not parse as numeric tag")
+	}
+	if _, ok := parseNumericReleaseTag("v+2"); ok {
+		t.Fatal("v+2 must not parse as numeric tag")
+	}
+	if n, ok := parseNumericReleaseTag("V42"); !ok || n != 42 {
+		t.Fatalf("V42 should parse as 42, got %d %v", n, ok)
+	}
+	if _, ok := parseNumericReleaseTag("release-9"); ok {
+		t.Fatal("non-numeric tag must not parse")
+	}
+}
