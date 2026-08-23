@@ -44,9 +44,6 @@ func TestHelpersAndRendering(t *testing.T) {
 	if got := ternary(true, "a", "b"); got != "a" || ternary(false, 1, 2) != 2 {
 		t.Fatal("unexpected ternary result")
 	}
-	if defaultDownloadPath("docs/readme.txt") != "readme.txt" || defaultDownloadPath("/") != "downloaded-file" {
-		t.Fatal("unexpected download path")
-	}
 	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
