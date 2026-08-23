@@ -419,17 +419,23 @@ func (h *StorHub) evictIdleProjects(idleTimeout time.Duration) {
 	}
 }
 
-// Shutdown gracefully shuts down the StorHub, committing any dirty metadata
+// Shutdown gracefully shuts down the StorHub, committing any dirty metadata.
+// It is safe to call on a client that was never fully started (or twice);
+// uninitialized machinery is simply skipped.
 func (h *StorHub) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	h.shutdownOnce.Do(func() {
 		logging.Info(h.logger, "shutdown initiated")
 
-		// Stop the janitor
-		h.janitorCancel()
+		// Stop the janitor (nil when the client never started its loops).
+		if h.janitorCancel != nil {
+			h.janitorCancel()
+		}
 
-		// Signal all commit loops to stop
-		close(h.shutdownCh)
+		if h.shutdownCh != nil {
+			// Signal all commit loops to stop
+			close(h.shutdownCh)
+		}
 
 		// Wait for all commit loops to finish with timeout
 		done := make(chan struct{})

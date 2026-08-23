@@ -90,7 +90,8 @@ func TestHelpersAndRendering(t *testing.T) {
 	}
 	buf.Reset()
 	printRevisions(&buf, nil)
-	if !strings.Contains(buf.String(), "no metadata revisions") {
+	// Silence is golden: empty history renders nothing, like ls(1).
+	if buf.String() != "" {
 		t.Fatalf("unexpected empty revisions: %q", buf.String())
 	}
 	buf.Reset()

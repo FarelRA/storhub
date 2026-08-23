@@ -61,10 +61,7 @@ func printEntryInfo(w io.Writer, entry *storhub.EntryInfo) {
 }
 
 func printRevisions(w io.Writer, revisions []storhub.MetadataRevision) {
-	if len(revisions) == 0 {
-		fmt.Fprintln(w, "no metadata revisions found")
-		return
-	}
+	// Silence is golden: empty history prints nothing, like ls(1).
 	for _, rev := range revisions {
 		sha := rev.CommitSHA
 		if len(sha) > 10 {

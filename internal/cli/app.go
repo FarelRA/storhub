@@ -528,12 +528,39 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	data, err := hub.ReadFileAt(args[0], args[1], 0, entry.Size)
-	if err != nil {
-		return err
+	return streamCopyToStdout(hub, a.stdout, args[0], args[1], entry.Size)
+}
+
+// catWindowSize bounds resident memory while cat streams a stored file:
+// each iteration fetches at most this many bytes instead of buffering the
+// whole object, so multi-gigabyte files cannot OOM the CLI.
+const catWindowSize = 1 << 20
+
+func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size int64) error {
+	if size <= 0 {
+		return nil
 	}
-	_, err = a.stdout.Write(data)
-	return err
+	buf := make([]byte, catWindowSize)
+	var off int64
+	for off < size {
+		want := int64(len(buf))
+		if remaining := size - off; remaining < want {
+			want = remaining
+		}
+		n, err := hub.ReadFileAt(project, path, off, want)
+		if err != nil {
+			return err
+		}
+		if len(n) == 0 {
+			// The file shrank underneath us; serve what exists.
+			break
+		}
+		if _, err := w.Write(n); err != nil {
+			return err
+		}
+		off += int64(len(n))
+	}
+	return nil
 }
 
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
@@ -832,7 +859,35 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	return restListenAndServeFn(server)
+	return a.serveRESTUntilSignal(server, hub)
+}
+
+// serveRESTUntilSignal runs the REST server and drains it cleanly on
+// SIGINT/SIGTERM: in-flight requests finish within a bounded shutdown
+// window, then pending metadata is flushed before exit. A clean stop is not
+// reported as an error.
+func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errCh := make(chan error, 1)
+	go func() { errCh <- restListenAndServeFn(server) }()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			stop()
+			return err
+		}
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
+	}
+	if err := hub.Shutdown(shutdownCtx); err != nil {
+		fmt.Fprintf(a.stderr, "metadata flush failed: %v\n", err)
+	}
+	return nil
 }
 
 // httpLogsEnabled reports whether the configured level wants per-request
