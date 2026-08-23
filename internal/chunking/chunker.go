@@ -63,6 +63,21 @@ type StreamingChunker struct {
 	nameWidth int
 }
 
+// NormalizedSize clamps a configured chunk size into the legal range:
+// non-positive values fall back to DefaultChunkSize and values above the
+// GitHub release-asset ceiling clamp to MaxReleaseAssetSize. Every consumer
+// (config defaults, storage patch planning, fusefs overlay planning) funnels
+// through this single definition so the ceiling cannot drift.
+func NormalizedSize(chunkSize int64) int64 {
+	if chunkSize <= 0 {
+		return DefaultChunkSize
+	}
+	if chunkSize > MaxReleaseAssetSize {
+		return MaxReleaseAssetSize
+	}
+	return chunkSize
+}
+
 func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*StreamingChunker, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize

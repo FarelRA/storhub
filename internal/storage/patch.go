@@ -121,14 +121,10 @@ func inlineChunkCount(size, chunkSize int64) int {
 	return int((size + chunkSize - 1) / chunkSize)
 }
 
+// normalizedChunkSize delegates to the chunking package's single clamping
+// definition.
 func normalizedChunkSize(chunkSize int64) int64 {
-	if chunkSize <= 0 {
-		chunkSize = chunking.DefaultChunkSize
-	}
-	if chunkSize > chunking.MaxReleaseAssetSize {
-		return chunking.MaxReleaseAssetSize
-	}
-	return chunkSize
+	return chunking.NormalizedSize(chunkSize)
 }
 
 func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {

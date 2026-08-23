@@ -3046,14 +3046,10 @@ func validateProject(project string) error {
 	return nil
 }
 
+// normalizedChunkSize delegates to the chunking package's single clamping
+// definition.
 func normalizedChunkSize(chunkSize int64) int64 {
-	if chunkSize <= 0 {
-		chunkSize = chunking.DefaultChunkSize
-	}
-	if chunkSize > chunking.MaxReleaseAssetSize {
-		return chunking.MaxReleaseAssetSize
-	}
-	return chunkSize
+	return chunking.NormalizedSize(chunkSize)
 }
 
 // copyPageSize returns the buffer size for overlay copy loops. It is the
