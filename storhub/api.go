@@ -44,12 +44,9 @@ type (
 	// MetadataRevision identifies one committed state of a project's
 	// metadata history (git SHA plus commit time).
 	MetadataRevision = meta.MetadataRevision
-	// DirectoryMetadata is a directory entry; RootMetadata names the same
-	// type when referring to the tree root.
+	// DirectoryMetadata is a directory entry (including the root when
+	// addressed via the root path).
 	DirectoryMetadata = meta.DirMeta
-	// RootMetadata is DirectoryMetadata viewed as the project root; both
-	// names exist for call-site readability and are the same type.
-	RootMetadata = meta.DirMeta
 	// EntryInfo is the stat-style view of a path: kind, mode, size, owner,
 	// timestamps, link count, and inode as surfaced by StatPath.
 	EntryInfo = shfs.EntryInfo
@@ -87,11 +84,8 @@ const (
 )
 
 var (
-	// ErrFileNotFound reports a missing file path; alias of
-	// storage.ErrFileNotFound.
-	ErrFileNotFound = impl.ErrFileNotFound
-	// ErrNotFound reports a missing path of any kind; alias of
-	// fs.ErrNotFound.
+	// ErrNotFound reports a missing path of any kind (files, directories,
+	// projects); every not-found failure in the library wraps it.
 	ErrNotFound = shfs.ErrNotFound
 )
 

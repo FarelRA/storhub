@@ -74,7 +74,6 @@ const (
 
 var (
 	ErrNotFound     = shfs.ErrNotFound
-	ErrFileNotFound = shfs.ErrNotFound
 )
 
 // Client is context-first: every operation carries the request context so
