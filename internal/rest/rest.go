@@ -85,7 +85,7 @@ type Client interface {
 	CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error)
 	MkdirContext(ctx context.Context, project, dirPath string) error
 	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
-	RmdirContext(ctx context.Context, project, dirPath string) error
+	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
 	RenameContext(ctx context.Context, project, oldPath, newPath string) error
 	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
@@ -192,7 +192,7 @@ func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath st
 	return errReadOnly()
 }
 
-func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
@@ -797,28 +797,10 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 			h.writeMappedError(w, err)
 			return
 		}
-		// Resolve the If-Match flavor FIRST: a current revision token opts
-		// into backend-enforced CAS and supersedes attribute-ETag checks;
-		// anything else keeps the classic freshness semantics below.
-		revOpts, revMatched, rpErr := h.revisionPrecondition(r, project)
-		if rpErr != nil {
-			h.writeMappedError(w, rpErr)
+		revOpts, perr := h.mutationPrecondition(r, project, targetPath)
+		if perr != nil {
+			h.writeMappedError(w, perr)
 			return
-		}
-		if !revMatched {
-			eTag := restEntryETag(entry)
-			if err := h.requireMatch(r.Header.Get("If-Match"), eTag); err != nil {
-				if !isPreconditionHeaderEmpty(err) {
-					h.writeMappedError(w, err)
-					return
-				}
-			}
-			// Re-verify freshness right before the destructive call; a
-			// concurrent change since the first stat must fail closed.
-			if err := h.enforceFreshPrecondition(r, project, targetPath); err != nil {
-				h.writeMappedError(w, err)
-				return
-			}
 		}
 		if entry.IsDir {
 			if r.URL.Query().Get("recursive") == "true" {
@@ -827,7 +809,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if entry.IsDir {
-			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath)
+			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath, revOpts...)
 		} else {
 			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath, revOpts...)
 		}
@@ -940,25 +922,28 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
-	replaceRevOpts, replaceRevMatched, replaceRevErr := h.revisionPrecondition(r, project)
+	replaceRevOpts, replaceRevErr := h.mutationPrecondition(r, project, filePath)
 	if replaceRevErr != nil {
 		h.writeMappedError(w, replaceRevErr)
 		return
 	}
-	if exists && !replaceRevMatched {
-		if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
-			if !isPreconditionHeaderEmpty(err) {
-				h.writeMappedError(w, err)
-				return
-			}
-		}
-		if h.ifNoneMatchStar(r.Header.Get("If-None-Match")) {
-			h.writeMappedError(w, errPreconditionFailed("resource already exists"))
-			return
-		}
+	if exists {
+		// Type conflicts hold under both If-Match flavors.
 		if entry.IsDir {
 			h.writeError(w, http.StatusConflict, "is_directory", fmt.Sprintf("path is a directory: %s", filePath))
 			return
+		}
+		if replaceRevOpts == nil {
+			if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
+				if !isPreconditionHeaderEmpty(err) {
+					h.writeMappedError(w, err)
+					return
+				}
+			}
+			if h.ifNoneMatchStar(r.Header.Get("If-None-Match")) {
+				h.writeMappedError(w, errPreconditionFailed("resource already exists"))
+				return
+			}
 		}
 	} else if r.Header.Get("If-Match") != "" {
 		h.writeMappedError(w, errPreconditionFailed("resource does not exist"))
@@ -1004,15 +989,12 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	filePath := r.URL.Query().Get("path")
 	ifMatch := r.Header.Get("If-Match")
 	if strings.TrimSpace(ifMatch) != "" {
-		// Fail fast on an obviously stale token before reading the body;
-		// the authoritative check happens again just before mutation.
-		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		if err := h.requireMatch(ifMatch, restEntryETag(entry)); err != nil {
-			h.writeMappedError(w, err)
+		// Fail fast on a stale token before reading the body. Flavor is
+		// resolved first so a current-revision CAS token is honored rather
+		// than misjudged against attribute ETags; the authoritative check
+		// runs again just before each mutation below.
+		if _, ferr := h.mutationPrecondition(r, project, filePath); ferr != nil {
+			h.writeMappedError(w, ferr)
 			return
 		}
 	}
@@ -1049,16 +1031,11 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, readErr)
 			return
 		}
-		if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
-			h.writeMappedError(w, err)
+		revOpts, perr := h.mutationPrecondition(r, project, filePath)
+		if perr != nil {
+			h.writeMappedError(w, perr)
 			return
 		}
-		revOpts, revMatched, rpErr := h.revisionPrecondition(r, project)
-		if rpErr != nil {
-			h.writeMappedError(w, rpErr)
-			return
-		}
-		_ = revMatched
 		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...); err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -1069,13 +1046,9 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, parseErr)
 			return
 		}
-		if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		revOpts, _, rpErr := h.revisionPrecondition(r, project)
-		if rpErr != nil {
-			h.writeMappedError(w, rpErr)
+		revOpts, perr := h.mutationPrecondition(r, project, filePath)
+		if perr != nil {
+			h.writeMappedError(w, perr)
 			return
 		}
 		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size, revOpts...); err != nil {
@@ -1122,11 +1095,43 @@ func (h *restHandler) revisionPrecondition(r *http.Request, project string) (opt
 	if err != nil {
 		return nil, false, err
 	}
-	if rerr := h.requireMatch(ifMatch, rev); rerr != nil {
+	if rerr := h.requireMatch(unquoteEntityTag(ifMatch), rev); rerr != nil {
 		// Not a revision token: defer to the attribute-ETag freshness check.
 		return nil, false, nil
 	}
 	return []shfs.MutateOption{shfs.WithExpectedRevision(rev)}, true, nil
+}
+
+// unquoteEntityTag strips HTTP entity-tag quotes so tokens published via
+// X-StorHub-Revision compare equal whether or not the client quoted them
+// (RFC 9110 clients quote If-Match values).
+func unquoteEntityTag(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return v[1 : len(v)-1]
+	}
+	return v
+}
+
+// mutationPrecondition resolves the If-Match flavor ONCE and enforces it
+// for a mutating flow: a token equal to the project's CURRENT metadata
+// revision becomes backend compare-and-swap options (apply-time check,
+// immune to attribute collisions), while any other non-empty token keeps
+// classic attribute-ETag freshness against freshly-statted state. Every
+// mutating endpoint funnels through here so neither flavor can be
+// short-circuited by a stale fast path.
+func (h *restHandler) mutationPrecondition(r *http.Request, project, filePath string) (opts []shfs.MutateOption, err error) {
+	revOpts, revMatched, rerr := h.revisionPrecondition(r, project)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if revMatched {
+		return revOpts, nil
+	}
+	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
@@ -1797,12 +1802,9 @@ func (h *restHandler) streamWriteBody(w http.ResponseWriter, r *http.Request, pr
 	if err != nil {
 		return err
 	}
-	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
-		return err
-	}
-	revOptsW, _, rpErrW := h.revisionPrecondition(r, project)
-	if rpErrW != nil {
-		return rpErrW
+	revOptsW, perrW := h.mutationPrecondition(r, project, filePath)
+	if perrW != nil {
+		return perrW
 	}
 	_, err = h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOptsW...)
 	return err
@@ -1814,12 +1816,9 @@ func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, p
 	if err != nil {
 		return err
 	}
-	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
-		return err
-	}
-	revOptsA, _, rpErrA := h.revisionPrecondition(r, project)
-	if rpErrA != nil {
-		return rpErrA
+	revOptsA, perrA := h.mutationPrecondition(r, project, filePath)
+	if perrA != nil {
+		return perrA
 	}
 	_, err = h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload, revOptsA...)
 	return err

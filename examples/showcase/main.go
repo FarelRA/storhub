@@ -48,7 +48,7 @@ type showcaseHub interface {
 	ReadlinkContext(ctx context.Context, project, linkPath string) (string, error)
 	LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error)
 	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
-	RmdirContext(ctx context.Context, project, dirPath string) error
+	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
 	PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error)
 	CleanupProjectContext(ctx context.Context, project string) error
 	DeleteReleaseContext(ctx context.Context, project, tag string) error

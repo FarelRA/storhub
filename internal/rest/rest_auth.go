@@ -237,14 +237,14 @@ func (c *authorizedClient) DeleteFileContext(ctx context.Context, project, fileP
 	}
 	return c.base.DeleteFileContext(ctx, project, filePath, opts...)
 }
-func (c *authorizedClient) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (c *authorizedClient) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	if err := c.requireParentWrite(ctx, project, dirPath); err != nil {
 		return err
 	}
 	if err := c.requireTraverse(ctx, project, dirPath); err != nil {
 		return err
 	}
-	return c.base.RmdirContext(ctx, project, dirPath)
+	return c.base.RmdirContext(ctx, project, dirPath, opts...)
 }
 func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
 	if err := c.requireParentWrite(ctx, project, oldPath); err != nil {

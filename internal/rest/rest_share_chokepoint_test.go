@@ -159,3 +159,47 @@ func readETag(t *testing.T, resp *http.Response) string {
 }
 
 func quote(v string) string { return `"` + v + `"` }
+
+// TestRevisionCASOnPatchFamily pins the round-4 ordering fix: a CURRENT
+// revision token must upgrade PATCH-family mutations (append, write, patch,
+// truncate) to backend CAS instead of being false-412'd by the attribute-
+// ETag fast path, and a stale revision still fails 412 on every one of them.
+func TestRevisionCASOnPatchFamily(t *testing.T) {
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	var login restLoginResponse
+	decodeJSONBody(t, loginResp, &login)
+
+	currentRev := func() string {
+		resp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=shared/readme.txt", nil,
+			map[string]string{"Authorization": "Bearer " + login.Token}, http.StatusOK)
+		return resp.Header.Get("X-StorHub-Revision")
+	}
+
+	cases := []struct {
+		name   string
+		method string
+		target string
+		body   string
+	}{
+		{"append", http.MethodPatch, "/api/v1/projects/demo/content?path=shared/readme.txt&op=append", "more"},
+		{"write", http.MethodPatch, "/api/v1/projects/demo/content?path=shared/readme.txt&op=write&offset=0", "swap"},
+		{"patch", http.MethodPatch, "/api/v1/projects/demo/content?path=shared/readme.txt&op=patch&offset=0&delete_size=1", "X"},
+		{"truncate", http.MethodPatch, "/api/v1/projects/demo/content?path=shared/readme.txt&op=truncate&size=2", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/stale", func(t *testing.T) {
+			client.SetRevision("rev-stale-marker")
+			mustRequest(t, handler, tc.method, tc.target, strings.NewReader(tc.body),
+				map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": quote("rev-older")}, http.StatusPreconditionFailed)
+		})
+		t.Run(tc.name+"/current", func(t *testing.T) {
+			rev := currentRev()
+			mustRequest(t, handler, tc.method, tc.target, strings.NewReader(tc.body),
+				map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": quote(rev)}, http.StatusOK)
+		})
+	}
+}

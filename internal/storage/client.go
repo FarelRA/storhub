@@ -1524,7 +1524,10 @@ func (h *StorHub) Rmdir(project, dirPath string) error {
 	return h.RmdirContext(context.Background(), project, dirPath)
 }
 
-func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return err
+	}
 	return h.fsService().RmdirContext(ctx, project, dirPath)
 }
 
