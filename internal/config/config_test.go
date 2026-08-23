@@ -3,8 +3,12 @@ package config
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 func TestDefaultConfigProvidesUsableDefaults(t *testing.T) {
@@ -95,8 +99,10 @@ func TestSleepWithContext(t *testing.T) {
 }
 
 // TestWithDefaultsFillsEachFieldIndependently walks every field: starting
-// from a zero Config, each field must end up at its default value, so a
-// partially populated config can never silently drop a knob.
+// from a zero Config, each field must end up at its default value. Log
+// knobs are the deliberate exception — WithDefaults consumes them into a
+// built Logger and clears them, keeping Validate's single-mechanism
+// invariant true for every defaulted config.
 func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
 	filled := Config{}.WithDefaults()
 	defaults := Default()
@@ -109,9 +115,9 @@ func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
 		"MaxRetries":             {filled.MaxRetries, 0},
 		"BaseRetryDelay":         {filled.BaseRetryDelay, defaults.BaseRetryDelay},
 		"MaxRetryDelay":          {filled.MaxRetryDelay, defaults.MaxRetryDelay},
-		"LogLevel":               {filled.LogLevel, defaults.LogLevel},
-		"LogFormat":              {filled.LogFormat, defaults.LogFormat},
-		"LogOutput":              {(filled.LogOutput != nil), true},
+		"LogLevel":               {filled.LogLevel, ""},
+		"LogFormat":              {filled.LogFormat, ""},
+		"LogOutput":              {(filled.LogOutput != nil), false},
 		"Logger":                 {(filled.Logger != nil), true},
 		"HTTPClient":             {(filled.HTTPClient != nil), true},
 		"AtimePolicy":            {filled.AtimePolicy, defaults.AtimePolicy},
@@ -143,5 +149,32 @@ func TestValidateRejectsUnknownLogSettings(t *testing.T) {
 	cfg.LogFormat = "yaml"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unknown format must fail validation")
+	}
+}
+
+// TestValidateRejectsLoggerWithKnobs pins the single-mechanism rule:
+// supplying Logger together with any log knob fails loudly instead of
+// silently picking a winner.
+func TestValidateRejectsLoggerWithKnobs(t *testing.T) {
+	logger := logging.NewLogger(logging.Options{})
+	base := Config{Logger: logger}
+	for name, mutate := range map[string]func(*Config){
+		"LogLevel":  func(c *Config) { c.LogLevel = "info" },
+		"LogFormat": func(c *Config) { c.LogFormat = "text" },
+		"LogColor":  func(c *Config) { c.LogColor = true },
+		"LogOutput": func(c *Config) { c.LogOutput = io.Discard },
+	} {
+		cfg := base
+		mutate(&cfg)
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("Logger+%s must fail validation naming the knob, got %v", name, err)
+		}
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("bare Logger must validate: %v", err)
+	}
+	defaulted := Config{}.WithDefaults()
+	if err := defaulted.Validate(); err != nil {
+		t.Fatalf("defaulted config must validate: %v", err)
 	}
 }

@@ -36,8 +36,11 @@ const (
 )
 
 type Config struct {
-	// Logger, when set, wins over the LogLevel/LogFormat/LogColor/LogOutput
-	// knobs; those exist only to build a logger when none was supplied.
+	// Logger, when set, is the logger. Supplying it together with any of
+	// the LogLevel/LogFormat/LogColor/LogOutput knobs fails Validate
+	// loudly: silent precedence between overlapping mechanisms hides
+	// configuration mistakes. Those knobs exist only to build a logger
+	// when none was supplied.
 	Logger *slog.Logger
 	// LogOutput is the destination used when building a default logger.
 	LogOutput io.Writer
@@ -139,6 +142,10 @@ func (c Config) WithDefaults() Config {
 			Color:  c.LogColor,
 			Output: c.LogOutput,
 		})
+		// The knobs have been consumed into the logger; clearing them
+		// keeps the single-mechanism invariant (Validate rejects Logger+
+		// knobs) true for every config that went through WithDefaults.
+		c.LogLevel, c.LogFormat, c.LogColor, c.LogOutput = "", "", false, nil
 	}
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
@@ -199,6 +206,24 @@ func SleepWithContext(ctx context.Context, delay time.Duration) error {
 // behave surprisingly at operation time. Empty optional fields are fine;
 // unknown values are not.
 func (c Config) Validate() error {
+	if c.Logger != nil {
+		var conflicts []string
+		if c.LogLevel != "" {
+			conflicts = append(conflicts, "LogLevel")
+		}
+		if c.LogFormat != "" {
+			conflicts = append(conflicts, "LogFormat")
+		}
+		if c.LogColor {
+			conflicts = append(conflicts, "LogColor")
+		}
+		if c.LogOutput != nil {
+			conflicts = append(conflicts, "LogOutput")
+		}
+		if len(conflicts) > 0 {
+			return fmt.Errorf("Logger and log knobs %v are mutually exclusive: configure one mechanism", conflicts)
+		}
+	}
 	if !logging.ValidLevel(c.LogLevel) {
 		return fmt.Errorf("invalid log level %q (known: %v)", c.LogLevel, logging.KnownLevels())
 	}
