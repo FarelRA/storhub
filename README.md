@@ -117,6 +117,21 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub patch demo-project docs/specs/guide
 GITHUB_TOKEN=your_token go run ./cmd/storhub revisions demo-project
 ```
 
+`append`, `write`, and `patch` accept `-` as the data argument to read the
+payload from stdin:
+
+```bash
+echo "more text" | GITHUB_TOKEN=your_token go run ./cmd/storhub append demo-project docs/specs/guide.txt -
+```
+
+Exit codes follow shell convention: `0` on success, `1` when a well-formed
+command fails at runtime, and `2` when the command line itself is wrong
+(unknown flags, missing arguments).
+
+Environment variables: `GITHUB_TOKEN` (authentication),
+`STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
+(default level is `info`), and `STORHUB_API_BASE_URL`.
+
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 
 REST serving from the CLI:
@@ -219,17 +234,17 @@ REST endpoint groups:
 
 - `GET /api/v1/projects/{project}` - project stats
 - `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...` - stat or remove files and empty directories
-- `GET /api/v1/projects/{project}/children?path=...` - directory listing
-- `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows
+- `GET|HEAD /api/v1/projects/{project}/children?path=...` - directory listing
+- `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
 - `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
-- `POST /api/v1/projects/{project}/ops/share`, `GET /shares/{token}`, and `GET /shares/{token}/download` - shareable UI links with optional direct downloads
+- `POST /api/v1/projects/{project}/ops/share`, `GET|HEAD /shares/{token}`, and `GET|HEAD /shares/{token}/download` - shareable UI links with optional direct downloads; share lifetimes are clamped to the configured maximum (7 days by default)
 - `GET /api/v1/projects/{project}/revisions` - metadata revision history
 
 Authenticated REST:
 
-- login is `POST /api/v1/auth/login` with `username` and `password`
-- successful login returns a bearer token with the resolved StorHub identity (`uid`, `primary_gid`, `groups`, `admin`)
+- login is `POST /api/v1/auth/login` with `username` and `password`; unknown users are answered in constant work so login timing cannot enumerate accounts
+- successful login returns a bearer token with the resolved StorHub identity (`uid`, `primary_gid`, `groups`, `admin`), which is enforced by every downstream POSIX permission check
 - authenticated requests send `Authorization: Bearer <token>`
 - authorization uses StorHub owner/group/mode metadata, so REST operations follow UNIX-style checks instead of a separate ACL model
 - directory traversal requires execute/search permission on each ancestor directory
@@ -415,14 +430,23 @@ This project is licensed under the GNU General Public License v3.0. See `LICENSE
   time. Uploads and downloads are deterministic and retry-safe; the
   metadata commit loop and cache janitors are the only background work.
 - **Chunk integrity**: uploads record a per-chunk SHA-256 digest; whole-
-  chunk downloads verify it and fail loudly on bit rot.
+  chunk downloads verify it and fail loudly on bit rot. `purge` reclaims
+  orphaned remote assets and prunes the chunk catalog in the same breath,
+  so metadata cannot grow without bound.
 - **Metadata schema v3**: strict version handling (no silent migrations of
   corrupt payloads), byte-valued extended attributes, offset-ordered chunk
   lists, persisted inode/chunk counters, and real zero values (UID/GID 0
   means root).
 - **POSIX semantics**: `mv` replaces targets atomically, symlinks traverse
-  (with ELOOP protection), directory link counts follow POSIX, and errno
-  fidelity is preserved end to end.
+  (with ELOOP protection), directory link counts follow POSIX, permission
+  checks are re-verified inside each mutation transaction, errno fidelity
+  is preserved end to end, and an absent caller identity resolves to the
+  local process user — never anonymous root.
 - **Fail loudly**: invalid configurations are rejected at construction;
   operational failures are logged at error level and never silently
-  swallowed.
+  swallowed; upstream GitHub errors reach clients as sanitized 502s;
+  handler panics become clean 500s with server-side stack traces.
+- **Bounded resources**: FUSE nodes evicted on kernel FORGET, share
+  registries sweep expired entries, REST mutation bodies are capped
+  (larger payloads belong to full-file PUT), and the UI ships a vendored
+  Alpine.js with session-scoped token storage.
