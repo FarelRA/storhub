@@ -72,7 +72,6 @@ func TestChunkerErrorEdges(t *testing.T) {
 	}
 }
 
-
 func TestChunkNameWidthPast999(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wide.bin")
