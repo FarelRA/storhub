@@ -218,6 +218,34 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 	return result, nil
 }
 
+// entryForRepoPath builds the access-check view of a node from the repo
+// state visible inside an update transaction.
+func entryForRepoPath(repo *meta.RepoMetadata, targetPath string) (*shfs.EntryInfo, error) {
+	if file := repo.FindFile(targetPath); file != nil {
+		return shfs.EntryInfoFromFile(file, targetPath, repo.FileNLink(targetPath)), nil
+	}
+	if dir := repo.GetDirectory(targetPath); dir != nil {
+		return shfs.EntryInfoFromDirectory(dir, targetPath, repo.DirNLink(targetPath)), nil
+	}
+	return nil, shfs.NotFound(targetPath)
+}
+
+// reauthorizeInTransaction re-runs traversal and the operation's ownership
+// check against the metadata state inside the update transaction. The
+// pre-transaction snapshot exists for fast rejection; only the in-transaction
+// check closes the window where a concurrent rename/replace could swap the
+// node between authorize and mutate.
+func (s *Service) reauthorizeInTransaction(ctx context.Context, repo *meta.RepoMetadata, targetPath string, check func(entry *shfs.EntryInfo) error) error {
+	if err := shfs.CheckTraverse(ctx, repo, targetPath); err != nil {
+		return err
+	}
+	entry, err := entryForRepoPath(repo, targetPath)
+	if err != nil {
+		return err
+	}
+	return check(entry)
+}
+
 func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) (err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "chmod start", "path", targetPath, "mode", mode)
@@ -232,6 +260,15 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 	mode = shfs.SanitizeChmodMode(ctx, entry, mode)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			if err := shfs.CanChmod(ctx, current); err != nil {
+				return err
+			}
+			mode = shfs.SanitizeChmodMode(ctx, current, mode)
+			return nil
+		}); err != nil {
+			return err
+		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				current.Mode = mode
@@ -256,6 +293,11 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
+			return shfs.CanChown(ctx)
+		}); err != nil {
+			return err
+		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				current.UID = uid
@@ -284,6 +326,11 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			return shfs.CanSetTimes(ctx, current)
+		}); err != nil {
+			return err
+		}
 		atime = ChooseNonZeroTime(atime, now)
 		mtime = ChooseNonZeroTime(mtime, now)
 		if file != nil {
@@ -319,6 +366,11 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	value := append([]byte(nil), data...)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
+			return shfs.CheckWriteAccess(ctx, repo, targetPath)
+		}); err != nil {
+			return err
+		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				if current.XAttrs == nil {
@@ -425,6 +477,11 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
+			return shfs.CheckWriteAccess(ctx, repo, targetPath)
+		}); err != nil {
+			return err
+		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
 				delete(current.XAttrs, attr)

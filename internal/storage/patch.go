@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
-	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
 func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
@@ -233,8 +232,8 @@ func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, 
 		if chunkEnd <= start || chunk.Offset >= end {
 			continue
 		}
-		segStart := shfs.MaxInt64(chunk.Offset, start)
-		segEnd := shfs.MinInt64(chunkEnd, end)
+		segStart := max(chunk.Offset, start)
+		segEnd := min(chunkEnd, end)
 		if segStart == chunk.Offset && segEnd == chunkEnd {
 			segment := chunk
 			segment.Offset = segStart

@@ -1,6 +1,7 @@
 package posix
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -304,5 +305,41 @@ func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t
 	}
 	if hardlink.UID != 1000 || hardlink.GID != 1000 {
 		t.Fatalf("expected hardlink to preserve source owner, got %d:%d", hardlink.UID, hardlink.GID)
+	}
+}
+
+// TestXAttrBinaryValuesRoundTrip pins byte-fidelity for extended attributes:
+// values are opaque bytes, so NULs, invalid UTF-8, and empty payloads must
+// survive set/get/list unchanged.
+func TestXAttrBinaryValuesRoundTrip(t *testing.T) {
+	now := int64(300)
+	backend := newTestBackend(now)
+	backend.seedDir("docs")
+	base := backend.seedFile("docs/base.txt")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: base.UID, GID: base.GID})
+
+	payloads := [][]byte{
+		[]byte("plain"),
+		{0x00, 0x01, 0xFF, 0xFE, 0x00},
+		{},
+		bytes.Repeat([]byte{0x80}, 256),
+	}
+	for i, payload := range payloads {
+		name := fmt.Sprintf("user.bin%d", i)
+		if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", name, payload); err != nil {
+			t.Fatalf("set %s: %v", name, err)
+		}
+		got, err := svc.GetXAttrContext(ctx, "demo", "docs/base.txt", name)
+		if err != nil {
+			t.Fatalf("get %s: %v", name, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("value %s corrupted: got %x want %x", name, got, payload)
+		}
+	}
+	names, err := svc.ListXAttrContext(ctx, "demo", "docs/base.txt")
+	if err != nil || len(names) != len(payloads) {
+		t.Fatalf("list: %+v %v", names, err)
 	}
 }
