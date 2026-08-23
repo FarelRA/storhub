@@ -102,7 +102,7 @@ go run ./cmd/storhub --help
 Common commands:
 
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
-- inspection: `ls`, `stat`, `cat`, `revisions`
+- inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
 - recovery and cleanup: `rollback`
 - web: `serve-rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
@@ -192,7 +192,15 @@ POSIX conformance notes:
   POSIX "leave this owner unchanged"
 - metadata-patch timestamps are authoritative: patching mtime to the epoch
   persists (an additive marker keeps legacy zero-fill repair for old entries);
-  `Chtimes` keeps its omit-on-zero (`UTIME_NOW`/`UTIME_OMIT`-flavored) contract
+  `Chtimes` keeps its omit-on-zero contract for library callers;
+  `ChtimesExplicitContext(atime, mtime *time.Time)` expresses utimensat
+  trinary semantics exactly (nil omits, non-nil sets - epoch included),
+  and FUSE `utimens` routes through it so kernel-explicit zeros survive.
+  Filenames are byte-honest: surrounding whitespace is significant
+  everywhere (`" docs "` is one specific name), enforced by a
+  conformance test pinning both normalizers together. Metadata is
+  schema v4 with unambiguous timestamp keys (cr=created, ch=changed);
+  v3 repositories migrate transparently on load
 - FUSE advisory locks are dropped when a file's last open descriptor closes
   (POSIX last-close guarantee); per-fd close semantics depend on go-fuse
   surfacing `FUSE_RELEASE`'s lock owner, which v2.11 does not
@@ -259,7 +267,7 @@ REST endpoint groups:
 - `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap - storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
 - `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
-- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Download links: `GET|HEAD /shares/{token}` and `GET|HEAD /shares/{token}/download`
+- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry a short opaque identifier (`/shares/{id}`, `/shares/{id}/download`) rather than the signed token, so links leak no credentials; previously issued token-shaped links keep working until expiry or revocation. The creation response alone returns the signed JWT for programmatic bearer use - listings never include it
 - `GET /api/v1/projects/{project}/revisions` - metadata revision history
 
 Authenticated REST:
@@ -321,7 +329,7 @@ func main() {
 The REST handler uses HTTP preconditions where they help UNIX-like workflows:
 
 - `ETag` is returned on node and content reads; `X-StorHub-Revision` publishes the project's metadata revision
-- `If-Match` guards writes, patches, and deletes against stale metadata; a current-revision token strengthens this into compare-and-swap enforced at apply time
+- `If-Match` guards every mutating endpoint - file and directory deletes, replaces, appends, writes, patches, and truncates alike. A current-revision token strengthens the guard into true compare-and-swap enforced at apply time; tokens may be quoted per RFC 9110
 - `If-None-Match: *` supports create-only full-file uploads
 - `Range: bytes=...` supports partial reads for large files
 
