@@ -159,7 +159,11 @@ type shareRegistry struct {
 }
 
 type shareRecord struct {
+	// ID is the short opaque URL identifier (never a credential); Token
+	// keeps the signed legacy link working for clients holding an old
+	// JWT-shaped URL.
 	ID        string
+	Token     string
 	Project   string
 	Path      string
 	Download  bool
@@ -449,10 +453,13 @@ type shareResponse struct {
 	Path        string `json:"path"`
 	URL         string `json:"url"`
 	DownloadURL string `json:"download_url,omitempty"`
-	Token       string `json:"token"`
-	ExpiresAt   string `json:"expires_at"`
-	Download    bool   `json:"download"`
-	IsDir       bool   `json:"is_dir"`
+	// Token is the signed share JWT, returned ONLY on creation (programmatic
+	// bearer use); listings never carry it so capabilities do not leak
+	// through read endpoints.
+	Token     string `json:"token,omitempty"`
+	ExpiresAt string `json:"expires_at"`
+	Download  bool   `json:"download"`
+	IsDir     bool   `json:"is_dir"`
 }
 
 type shareClaims struct {
@@ -1439,7 +1446,9 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	// the project-shares collection, consistent with REST creation
 	// semantics everywhere else in this API.
 	w.Header().Set("Location", path.Join(h.opts.BasePath, "projects", url.PathEscape(project), "shares", record.ID))
-	h.writeJSON(w, http.StatusCreated, h.shareResponse(record))
+	created := h.shareResponse(record)
+	created.Token = record.Token
+	h.writeJSON(w, http.StatusCreated, created)
 }
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
@@ -1479,17 +1488,51 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
-	shareID := chi.URLParam(r, "id")
-	claims, err := h.parseShareToken(shareID)
-	if err != nil {
-		h.writeMappedError(w, err)
-		return
+// resolveShareAccess maps a /shares/{id} URL segment onto its live record.
+// New links carry the short opaque ID directly. Legacy JWT-shaped segments
+// are verified and matched back to their record so revocation still stops
+// old links immediately; the JWT itself never appears in new responses.
+func (h *restHandler) resolveShareAccess(segment string) (*shareRecord, *shareClaims, bool) {
+	if record, ok := h.lookupShare(segment); ok {
+		claims, err := h.parseShareToken(record.Token)
+		if err != nil {
+			return nil, nil, false
+		}
+		return record, claims, true
 	}
+	if !strings.Contains(segment, ".") {
+		return nil, nil, false
+	}
+	claims, err := h.parseShareToken(segment)
+	if err != nil {
+		return nil, nil, false
+	}
+	// Legacy path: find the live record this token belongs to.
+	h.shares.mu.RLock()
+	var found *shareRecord
+	for _, rec := range h.shares.items {
+		if rec.Token == segment || rec.ID == claims.ID {
+			found = rec
+			break
+		}
+	}
+	h.shares.mu.RUnlock()
+	if found == nil {
+		return nil, nil, false
+	}
+	record, ok := h.lookupShare(found.ID)
+	if !ok || record.Project != claims.Project {
+		return nil, nil, false
+	}
+	return record, claims, true
+}
+
+func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
+	segment := chi.URLParam(r, "id")
+	_, claims, ok := h.resolveShareAccess(segment)
 	// A valid signature alone is not enough: a deleted share must stop
 	// working immediately, not at token expiry.
-	record, ok := h.lookupShare(shareID)
-	if !ok || record.Project != claims.Project {
+	if !ok {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -1664,9 +1707,9 @@ func (h *restHandler) newShareRecord(project, sharePath string, download, isDir 
 	if err != nil {
 		return nil, err
 	}
-	record := &shareRecord{ID: signedToken, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
+	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
 	h.shares.mu.Lock()
-	h.shares.items[signedToken] = record
+	h.shares.items[id] = record
 	h.shares.mu.Unlock()
 	h.sweepExpiredShares()
 	return record, nil
@@ -1734,7 +1777,7 @@ func (h *restHandler) projectShareResponses(project string) []shareResponse {
 
 func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
 	url := "/shares/" + record.ID
-	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, URL: url, Token: record.ID, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
+	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, URL: url, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
 	if record.Download && !record.IsDir {
 		resp.DownloadURL = url + "/download"
 	}
