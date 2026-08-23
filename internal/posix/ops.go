@@ -10,27 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-type Backend interface {
-	ValidateProjectName(project string) error
-	EnsureRepoContext(ctx context.Context, project string) error
-	LoadRepoMetadataContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
-	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
-	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
-	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
-	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64)
-	Logger() *slog.Logger
-	Now() int64
-	AtimePolicy() storcfg.AtimePolicy
-	FileNotFound(path string) error
-	DefaultFileMode(kind meta.NodeKind) uint32
-	DefaultOwnerIDs() (uint32, uint32)
-}
+// Backend is the storage contract the POSIX facade operates against. It is
+// an alias of fs.Backend so both facades share exactly one interface
+// definition; the extra methods posix itself never calls (patch, asset
+// fills) are part of that single contract rather than a divergent copy.
+type Backend = shfs.Backend
 
 type Service struct {
 	backend Backend

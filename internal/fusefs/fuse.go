@@ -2227,63 +2227,50 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 }
 
 func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+	_ = ctx
 	if h.writeState == nil {
-		if err := h.materialize(ctx); err != nil {
+		// No write state exists for this handle: only read-oriented
+		// materialized snapshots (e.g. displaced handles) land here. The
+		// kernel never routes WRITE to such handles under enforced mode
+		// flags, and historically this branch wrote into the snapshot temp
+		// without dirty tracking — the data was acknowledged but silently
+		// discarded at commit. Fail loudly instead of pretending the write
+		// landed.
+		h.fs.debugf("write rejected path=%s inode=%d reason=no-write-state", h.path, h.inode)
+		return 0, syscall.EIO
+	}
+	h.writeState.opMu.Lock()
+	defer h.writeState.opMu.Unlock()
+	h.writeState.mu.Lock()
+	defer h.writeState.mu.Unlock()
+	if h.flags&syscall.O_APPEND != 0 {
+		off = h.writeState.logicalSize
+	}
+	if h.writeState.temp == nil {
+		if err := h.writeState.ensureTempLocked(); err != nil {
 			return 0, errnoFromError(err)
 		}
 	}
-	if h.writeState != nil {
-		h.writeState.opMu.Lock()
-		defer h.writeState.opMu.Unlock()
-		h.writeState.mu.Lock()
-		defer h.writeState.mu.Unlock()
-		if h.flags&syscall.O_APPEND != 0 {
-			off = h.writeState.logicalSize
+	if off > h.writeState.logicalSize {
+		h.writeState.markDirtyLocked(h.writeState.logicalSize, off)
+		if err := h.writeState.temp.Truncate(off); err != nil {
+			return 0, errnoFromError(err)
 		}
-		if h.writeState.temp == nil {
-			if err := h.writeState.ensureTempLocked(); err != nil {
-				return 0, errnoFromError(err)
-			}
-		}
-		if off > h.writeState.logicalSize {
-			h.writeState.markDirtyLocked(h.writeState.logicalSize, off)
-			if err := h.writeState.temp.Truncate(off); err != nil {
-				return 0, errnoFromError(err)
-			}
-			h.writeState.logicalSize = off
-		}
-		n, err := h.writeState.temp.WriteAt(data, off)
-		if err != nil {
-			return uint32(n), errnoFromError(err)
-		}
-		end := off + int64(n)
-		if end > h.writeState.logicalSize {
-			h.writeState.logicalSize = end
-			if err := h.writeState.temp.Truncate(end); err != nil {
-				return uint32(n), errnoFromError(err)
-			}
-		}
-		h.writeState.markDirtyLocked(off, end)
-		h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
-		return uint32(n), 0
+		h.writeState.logicalSize = off
 	}
-	if err := h.materialize(ctx); err != nil {
-		return 0, errnoFromError(err)
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.flags&syscall.O_APPEND != 0 {
-		info, statErr := h.temp.Stat()
-		if statErr != nil {
-			return 0, errnoFromError(statErr)
-		}
-		off = info.Size()
-	}
-	n, err := h.temp.WriteAt(data, off)
+	n, err := h.writeState.temp.WriteAt(data, off)
 	if err != nil {
 		return uint32(n), errnoFromError(err)
 	}
-	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.path, h.inode, off, n)
+	end := off + int64(n)
+	if end > h.writeState.logicalSize {
+		h.writeState.logicalSize = end
+		if err := h.writeState.temp.Truncate(end); err != nil {
+			return uint32(n), errnoFromError(err)
+		}
+	}
+	h.writeState.markDirtyLocked(off, end)
+	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
 	return uint32(n), 0
 }
 
@@ -2418,13 +2405,14 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
 func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
 	snapshotPath, err := h.writeState.createRangeSnapshotLocked(ctx, planned)
+	baseSize := h.writeState.baseSize
 	h.writeState.mu.Unlock()
 	if err != nil {
 		h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
 	defer os.Remove(snapshotPath)
-	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(planned))
+	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 	if err != nil {
 		h.fs.debugf("commit failed path=%s inode=%d step=load-metadata err=%v", targetPath, h.inode, err)
@@ -2449,6 +2437,8 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
 func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
 	snapshotPath, cleanupSnapshot, err := h.writeState.replaceInputPathLocked(ctx)
+	baseSize := h.writeState.baseSize
+	dirtyCount := len(h.writeState.dirtyRanges)
 	h.writeState.mu.Unlock()
 	if err != nil {
 		h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
@@ -2457,7 +2447,7 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	if cleanupSnapshot {
 		defer os.Remove(snapshotPath)
 	}
-	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, h.writeState.baseSize, logicalSize, len(h.writeState.dirtyRanges))
+	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
 	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
 		h.fs.debugf("commit failed path=%s inode=%d step=replace err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)

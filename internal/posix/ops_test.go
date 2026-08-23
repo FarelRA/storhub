@@ -96,6 +96,14 @@ func (b *testBackend) DefaultFileMode(kind meta.NodeKind) uint32 {
 
 func (b *testBackend) DefaultOwnerIDs() (uint32, uint32) { return 1, 2 }
 
+func (b *testBackend) PatchFileWithMetadataContext(context.Context, string, string, *meta.RepoMetadata, *meta.FileMeta, int64, int64, []byte) (*meta.FileMeta, error) {
+	panic("patch not exercised by posix tests")
+}
+
+func (b *testBackend) FillAssetRangeContext(context.Context, string, meta.ChunkInfo, []byte) error {
+	panic("asset fills not exercised by posix tests")
+}
+
 func (b *testBackend) seedDir(path string) {
 	b.repo.EnsureDirectory(path, b.now)
 }
