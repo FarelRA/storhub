@@ -70,9 +70,10 @@ func (x XAttrMap) Clone() XAttrMap {
 }
 
 type FileMeta struct {
-	// Chunks is nil-means-empty after Normalize (empty slice collapses to
-	// nil only for symlinks); callers compare with len(), never DeepEqual
-	// against []int64{}.
+	// Normalize materializes Chunks as an empty (non-nil) slice for every
+	// regular file and symlink — it is NEVER nil after normalization, and
+	// empty files carry zero chunks since the sentinel-part removal.
+	// Compare with len(), never DeepEqual against nil or []int64{}.
 	Chunks     []int64 `json:"cs,omitempty"`
 	Size       int64   `json:"s"`
 	Symlink    string  `json:"sl,omitempty"`
@@ -629,9 +630,11 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	m.invalidateIndexes()
 }
 
-// FindFile returns a SNAPSHOT of the entry: the pointer targets a copy, so
-// mutating it never changes stored state (and never dirties indexes). Apply
-// changes through UpsertFile or an UpdateRepoMetadataContext transaction.
+// FindFile returns a SNAPSHOT of the entry: the pointer targets a copy of
+// the struct, so FIELD-level mutations never reach stored state. (Slices
+// and maps inside — Chunks, XAttrs — still share backing storage; clone
+// before mutating those.) Apply changes through UpsertFile or an
+// UpdateRepoMetadataContext transaction.
 func (m *RepoMetadata) FindFile(name string) *FileMeta {
 	name = normalizeStoredPath(name)
 	if file, ok := m.Files[name]; ok {

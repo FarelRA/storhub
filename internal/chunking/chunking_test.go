@@ -71,3 +71,45 @@ func TestChunkerErrorEdges(t *testing.T) {
 		t.Fatal("expected negative chunk index error")
 	}
 }
+
+
+func TestChunkNameWidthPast999(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wide.bin")
+	buf := make([]byte, 1000)
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chunker, err := NewStreamingChunker(path, "w", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chunker.Close()
+	if got := chunker.NumChunks(); got != 1000 {
+		t.Fatalf("expected 1000 chunks, got %d", got)
+	}
+	first, err := chunker.GetChunk(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, err := chunker.GetChunk(999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Name() != "w.part0001" || last.Name() != "w.part1000" {
+		t.Fatalf("width-4 padding wrong: %q %q", first.Name(), last.Name())
+	}
+	// Lexicographic order must equal numeric order across the boundary.
+	if first.Name() >= chunker.mustName(t, 999) {
+		t.Fatal("padding does not preserve order")
+	}
+}
+
+func (s *StreamingChunker) mustName(t *testing.T, i int) string {
+	t.Helper()
+	c, err := s.GetChunk(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.Name()
+}
