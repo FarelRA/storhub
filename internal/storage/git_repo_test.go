@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	meta "github.com/FarelRA/storhub/internal/metadata"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
 // seedBareMetadataRepo builds a local bare repository holding two commits
