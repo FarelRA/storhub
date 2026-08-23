@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	shlog "github.com/FarelRA/storhub/internal/logging"
 	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
@@ -624,6 +626,11 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	opts.AllowOther = allowOther
 	opts.Debug = debug
 	opts.CacheDir = cacheDir
+	// Arm signal handling before touching FUSE: an interrupt arriving during
+	// mount setup must not fall through to the default disposition and kill
+	// the process with a half-attached mount left behind.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	fsys, err := hub.NewFUSE(args[0], opts)
 	if err != nil {
 		return err
@@ -635,17 +642,64 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	if err := fsys.Mount(args[1]); err != nil {
 		return err
 	}
+	if ctx.Err() != nil {
+		if err := fsys.Unmount(); err != nil {
+			fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", err, args[1])
+		}
+		return errors.New("interrupted while mounting " + args[0])
+	}
 	fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
 	fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	waitDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		_ = fsys.Unmount()
+		defer close(waitDone)
+		fsys.Wait()
 	}()
-	fsys.Wait()
-	return nil
+	select {
+	case <-waitDone:
+		// The server stopped on its own (unmounted externally).
+		return nil
+	case <-ctx.Done():
+		// Restore the default signal disposition first: pressing Ctrl+C
+		// again force-quits instead of queueing more polite unmounts.
+		stop()
+		unmountWithRetry(fsys, args[1], a.stderr)
+		<-waitDone
+		return nil
+	}
 }
+
+// unmountWithRetry retries the unmount until it succeeds or its retry budget
+// runs out. An unmount fails with EBUSY while any file on the mount is still
+// open, so holders get a grace period instead of either hanging forever or
+// silently leaking the mount.
+func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
+	delay := unmountRetryBaseDelay
+	deadline := time.Now().Add(unmountRetryBudget)
+	for attempt := 1; ; attempt++ {
+		err := fsys.Unmount()
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintf(report, "unmounted %s\n", target)
+			}
+			return
+		}
+		fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
+		if time.Now().After(deadline) {
+			fmt.Fprintf(report, "giving up on unmount after %d attempts; %s may still be mounted\n", attempt, target)
+			return
+		}
+		time.Sleep(delay)
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+var (
+	unmountRetryBaseDelay = time.Second
+	unmountRetryBudget    = 30 * time.Second
+)
 
 func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
@@ -702,9 +756,9 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		a.logf("http start: method=%s path=%s remote=%s", r.Method, r.URL.RequestURI(), r.RemoteAddr)
+		a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
 		next.ServeHTTP(wrapped, r)
-		a.logf("http done: method=%s path=%s status=%d duration=%s", r.Method, r.URL.RequestURI(), wrapped.status, time.Since(start).Round(time.Millisecond))
+		a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.status, time.Since(start).Round(time.Millisecond))
 	})
 }
 
