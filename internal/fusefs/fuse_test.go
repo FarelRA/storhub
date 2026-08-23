@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1077,6 +1078,7 @@ type stubHub struct {
 	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
 	renameFn     func(context.Context, string, string, string) error
 	replaceFile  func(context.Context, string, string, string) (*meta.FileMeta, error)
+	patchFile    func(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error)
 	now          int64
 	chunkSize    int64
 }
@@ -1176,7 +1178,10 @@ func (s *stubHub) ReadFileAtContext(ctx context.Context, project, target string,
 	}
 	return []byte{}, nil
 }
-func (*stubHub) PatchFileContext(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error) {
+func (s *stubHub) PatchFileContext(ctx context.Context, project, target string, off, del int64, edit []byte) (*meta.FileMeta, error) {
+	if s.patchFile != nil {
+		return s.patchFile(ctx, project, target, off, del, edit)
+	}
 	return nil, nil
 }
 func (s *stubHub) ReplaceFileContext(ctx context.Context, project, target, inputPath string) (*meta.FileMeta, error) {
@@ -1414,5 +1419,233 @@ func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
 	}
 	if alive {
 		t.Fatal("released handle stayed registered")
+	}
+}
+
+// newPatchTestState builds a write state over a baseSize-byte file whose
+// temp already holds the full working content, with dirty tracking armed.
+func newPatchTestState(t *testing.T, fsys *Filesystem, inode uint64, baseSize int64, content string) *inodeWriteState {
+	t.Helper()
+	state := &inodeWriteState{fs: fsys, inode: inode, path: "patch.bin", refs: 1}
+	fsys.mu.Lock()
+	fsys.writeStates[inode] = state
+	fsys.mu.Unlock()
+	if err := state.materializeBootstrap(baseSize); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := state.temp.WriteAt([]byte(content), 0); err != nil {
+		t.Fatalf("seed temp: %v", err)
+	}
+	state.mu.Lock()
+	state.baseSize = baseSize
+	state.logicalSize = int64(len(content))
+	state.tempAuthoritative = false
+	state.markDirtyLocked(baseSize, int64(len(content)))
+	state.mu.Unlock()
+	return state
+}
+
+func newPatchTestHandle(fsys *Filesystem, inode uint64, state *inodeWriteState) *storhubHandle {
+	h := &storhubHandle{fs: fsys, inode: inode, id: fsys.nextHandle.Add(1), flags: syscall.O_RDWR, path: state.path, writeState: state}
+	fsys.mu.Lock()
+	fsys.handles[h.id] = h
+	fsys.mu.Unlock()
+	return h
+}
+
+// TestCommitPatchRetriesResumeAfterFailure pins the idempotency contract of
+// the patch ladder: ranges are applied in REVERSE order, each successful
+// range leaves the dirty set immediately, so a mid-loop failure makes the
+// retry apply only the remainder instead of duplicating bytes.
+func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
+	var mu sync.Mutex
+	var applied []int64
+	failOnSecondCall := true
+	hub := &stubHub{chunkSize: 4}
+	hub.patchFile = func(_ context.Context, _, _ string, off, _ int64, _ []byte) (*meta.FileMeta, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(applied) == 1 && failOnSecondCall {
+			return nil, syscall.EIO
+		}
+		applied = append(applied, off)
+		return nil, nil
+	}
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+
+	const inode = uint64(21)
+	// Base 4 bytes, working content 12 bytes: chunks [4,8) and [8,12) dirty.
+	state := newPatchTestState(t, fsys, inode, 4, "ABCDEFGHIJKL")
+	planned := []ByteRange{{Start: 4, End: 8}, {Start: 8, End: 12}}
+	h := newPatchTestHandle(fsys, inode, state)
+
+	// Caller contract: hold state.mu on entry; commitPatch releases it on
+	// every return path.
+	state.mu.Lock()
+	errno := h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), planned...), shfs.MetadataPatch{})
+	if errno == 0 {
+		t.Fatal("expected the injected second-range failure to surface")
+	}
+	mu.Lock()
+	firstPass := append([]int64(nil), applied...)
+	mu.Unlock()
+	state.mu.Lock()
+	remaining := append([]ByteRange(nil), state.dirtyRanges...)
+	logical := state.logicalSize
+	state.mu.Unlock()
+	if len(firstPass) != 1 || firstPass[0] != 8 {
+		t.Fatalf("reverse order must apply [8,12) first, got %v", firstPass)
+	}
+	if len(remaining) != 1 || remaining[0] != (ByteRange{Start: 4, End: 8}) {
+		t.Fatalf("after failure only the unapplied range must remain dirty, got %+v", remaining)
+	}
+	if logical != 12 {
+		t.Fatalf("failure must not lose the logical size: %d", logical)
+	}
+
+	// Retry: only the failed range is applied; the committed one is NOT
+	// repeated.
+	failOnSecondCall = false
+	state.mu.Lock()
+	errno = h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), remaining...), shfs.MetadataPatch{})
+	if errno != 0 {
+		t.Fatalf("retry failed: %v", errno)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(applied) != 2 || applied[1] != 4 {
+		t.Fatalf("retry must apply only the remaining range, got %v", applied)
+	}
+}
+
+// TestCommitPatchCancellationKeepsRangesResumable proves a cancelled commit
+// retains the dirty set: the next Fsync/Release retries from where the
+// cancellation hit.
+func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	hub := &stubHub{chunkSize: 4}
+	hub.patchFile = func(callCtx context.Context, _, _ string, _, _ int64, _ []byte) (*meta.FileMeta, error) {
+		return nil, callCtx.Err()
+	}
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+
+	const inode = uint64(22)
+	state := newPatchTestState(t, fsys, inode, 4, "ABCDEFGH")
+	h := newPatchTestHandle(fsys, inode, state)
+
+	cancel()
+	state.mu.Lock()
+	errno := h.commitPatch(ctx, "patch.bin", 4, 8, []ByteRange{{Start: 4, End: 8}}, shfs.MetadataPatch{})
+	if errno == 0 {
+		t.Fatal("cancelled commit must fail")
+	}
+	state.mu.Lock()
+	remaining := len(state.dirtyRanges)
+	state.mu.Unlock()
+	if remaining == 0 {
+		t.Fatal("cancelled commit must retain dirty ranges for retry")
+	}
+}
+
+// TestConcurrentFDsShareWriteState exercises two handles writing through one
+// shared inodeWriteState: writes serialize on opMu, both land in the overlay,
+// and the final commit uploads the merged content exactly once.
+func TestConcurrentFDsShareWriteState(t *testing.T) {
+	var mu sync.Mutex
+	var patched []struct {
+		off    int64
+		delete int64
+		edit   string
+	}
+	hub := &stubHub{chunkSize: 64}
+	hub.patchFile = func(_ context.Context, _, _ string, off, del int64, edit []byte) (*meta.FileMeta, error) {
+		mu.Lock()
+		patched = append(patched, struct {
+			off    int64
+			delete int64
+			edit   string
+		}{off, del, string(edit)})
+		mu.Unlock()
+		return &meta.FileMeta{}, nil
+	}
+	hub.statPath = func(_ context.Context, _, _ string) (*shfs.EntryInfo, error) {
+		return &shfs.EntryInfo{Path: "shared.bin", Size: 16, Mode: 0o644}, nil
+	}
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour, Debug: true})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer fsys.Close()
+
+	const inode = uint64(30)
+	// base 16 + 10 dirty bytes keeps the ladder on the patch rung
+	// (10*2 < 26, 10*4 < 26*3), so the shared-overlay commit is a ranged
+	// patch rather than a wholesale replace.
+	state, err := fsys.acquireWriteState(context.Background(), inode, "shared.bin", &writeBootstrap{baseSize: 16})
+	if err != nil {
+		t.Fatalf("acquire write state: %v", err)
+	}
+	mkHandle := func() *storhubHandle { return newPatchTestHandle(fsys, inode, state) }
+	h1, h2 := mkHandle(), mkHandle()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, errno := h1.Write(context.Background(), []byte("HELLO"), 16); errno != 0 {
+			t.Errorf("write h1: %v", errno)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, errno := h2.Write(context.Background(), []byte("WORLD"), 21); errno != 0 {
+			t.Errorf("write h2: %v", errno)
+		}
+	}()
+	wg.Wait()
+
+	state.mu.Lock()
+	t.Logf("pre-release: base=%d logical=%d dirty=%+v dirtyBytes=%d tempAuth=%v",
+		state.baseSize, state.logicalSize, state.dirtyRanges, state.dirtyBytesLocked(), state.tempAuthoritative)
+	pl := state.plannedRangesLocked()
+	fs := maxInt64(state.baseSize, state.logicalSize)
+	db := state.dirtyBytesLocked()
+	t.Logf("planned=%+v rewrite=%v replace=%v fileSize=%d dirtyBytes=%d arms=%v,%v,%v",
+		pl, state.shouldChunkRewriteLocked(pl), state.shouldReplaceLocked(pl), fs, db,
+		db*4 >= fs*3, len(pl) >= 12 && db*3 >= fs, db*2 >= fs)
+	state.mu.Unlock()
+	if errno := h1.Release(context.Background()); errno != 0 {
+		t.Fatalf("release h1: %v", errno)
+	}
+	// h1's release must not tear down the shared overlay while h2 lives.
+	state.mu.Lock()
+	alive := state.temp != nil
+	size := state.logicalSize
+	dirtyLeft := len(state.dirtyRanges)
+	state.mu.Unlock()
+	if !alive {
+		t.Fatal("shared overlay was destroyed while a second handle still held it")
+	}
+	if size != 26 || dirtyLeft != 0 {
+		t.Fatalf("post-commit state: size=%d dirty=%d", size, dirtyLeft)
+	}
+	if errno := h2.Release(context.Background()); errno != 0 {
+		t.Fatalf("release h2: %v", errno)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(patched) != 1 {
+		t.Fatalf("expected exactly one ranged patch for the merged dirty set, got %+v", patched)
+	}
+	if patched[0].off != 16 || patched[0].delete != 0 || patched[0].edit != "HELLOWORLD" {
+		t.Fatalf("patch content mismatch: %+v", patched[0])
 	}
 }
