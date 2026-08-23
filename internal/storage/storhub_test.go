@@ -1588,19 +1588,25 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
 		t.Fatalf("upload should succeed (commit is async): %v", err)
 	}
-	// Wait for the background commit loop to process the conflict recovery
-	time.Sleep(100 * time.Millisecond)
-	if conflicts.Load() != 1 {
-		t.Fatalf("expected one metadata conflict, got %d", conflicts.Load())
-	}
-	// After conflict, the background commit loop reloaded from GitHub and discarded
-	// the conflict.txt changes. Only the committed data is visible.
-	files, err := hub.ListFiles("project-conflict")
-	if err != nil {
-		t.Fatalf("list files: %v", err)
-	}
-	if len(files) != 1 {
-		t.Fatalf("expected 1 file after conflict (uncommitted changes discarded), got %d", len(files))
+	// Wait (bounded, deterministically) for the background commit loop to
+	// process the conflict AND finish recovery: the observable contract is
+	// one conflict plus a converged single-file state, so poll that end
+	// state instead of racing the recovery window.
+	stateDeadline := time.Now().Add(5 * time.Second)
+	for {
+		conflictsSeen := conflicts.Load() >= 1
+		files, err := hub.ListFiles("project-conflict")
+		if err != nil {
+			t.Fatalf("list files: %v", err)
+		}
+		if conflictsSeen && len(files) == 1 {
+			break
+		}
+		if time.Now().After(stateDeadline) {
+			t.Fatalf("conflict recovery did not converge: conflicts=%d files=%d",
+				conflicts.Load(), len(files))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1625,10 +1631,14 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 	if _, err := hub.UploadFile("project-meta-retry", "meta-retry.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	// With batching, commit happens later. Wait for commit to trigger retry logic.
-	time.Sleep(300 * time.Millisecond) // Wait for commit, failure, and retry cycle
-	if failures.Load() != 1 {
-		t.Fatalf("expected one transient metadata failure, got %d", failures.Load())
+	// With batching, commit happens later. Poll (bounded) for the commit,
+	// failure, and retry cycle instead of sleeping a fixed duration.
+	failureDeadline := time.Now().Add(3 * time.Second)
+	for failures.Load() < 1 {
+		if time.Now().After(failureDeadline) {
+			t.Fatalf("expected one transient metadata failure, got %d", failures.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -3814,4 +3824,91 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 		t.Fatalf("download after prune: %v", err)
 	}
 	assertFileContent(t, output, []byte("completely different version two"))
+}
+
+// TestMarkProjectDirtyRevivesEvictedMetadata pins the janitor-race guard:
+// an operation that captured pm before eviction can still land its
+// acknowledged mutation — the instance is revived with a live commit loop
+// instead of silently stranding dirty state on a dead loop.
+func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, Config{
+		ChunkSize:              32 << 20,
+		BufferSize:             testSingleBufferSize,
+		MaxRetries:             0,
+		MetadataCommitInterval: 30 * time.Millisecond,
+		DisableGitBackend:      true,
+	})
+	ctx := context.Background()
+	project := "project-revive"
+	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	input := writeTempFile(t, t.TempDir(), "revive.txt", []byte("survives eviction"))
+	if _, err := hub.UploadFileContext(ctx, project, "docs/revive.txt", input); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	hub.metaMu.RLock()
+	pm := hub.metaCache[project]
+	hub.metaMu.RUnlock()
+	if pm == nil {
+		t.Fatal("project metadata missing from cache after upload")
+	}
+
+	// Let the async commit loop drain so eviction preconditions hold.
+	cleanDeadline := time.Now().Add(3 * time.Second)
+	for {
+		pm.mu.Lock()
+		dirty := pm.dirty
+		pm.mu.Unlock()
+		if !dirty {
+			break
+		}
+		if time.Now().After(cleanDeadline) {
+			t.Fatal("metadata never drained before forced eviction")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Simulate the janitor racing an in-flight operation.
+	hub.metaMu.Lock()
+	pm.mu.Lock()
+	if pm.dirty {
+		pm.mu.Unlock()
+		hub.metaMu.Unlock()
+		t.Fatal("precondition: metadata should be clean before forced eviction")
+	}
+	pm.stopped = true
+	close(pm.stopCh)
+	delete(hub.metaCache, project)
+	pm.mu.Unlock()
+	hub.metaMu.Unlock()
+
+	// Finalize a mutation against the orphaned pointer, exactly what a long
+	// operation does after its network phase.
+	pm.mu.Lock()
+	pm.meta.EnsureDirectory("late", time.Now().Unix())
+	hub.markProjectDirtyLiveLocked(project, pm)
+	if pm.stopped {
+		t.Fatal("mutation must revive the evicted instance")
+	}
+	pm.mu.Unlock()
+
+	hub.metaMu.RLock()
+	_, cached := hub.metaCache[project]
+	hub.metaMu.RUnlock()
+	if !cached {
+		t.Fatal("revived instance was not re-inserted into the cache")
+	}
+
+	// The revived commit loop must eventually publish the late change.
+	pollDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(pollDeadline) {
+		if _, err := hub.StatPathContext(ctx, project, "late"); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("revived metadata never committed the late mutation")
 }

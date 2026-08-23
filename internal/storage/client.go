@@ -98,11 +98,75 @@ type projectMetadata struct {
 	stopCh     chan struct{}
 	stoppedCh  chan struct{}
 	triggerCh  chan struct{}
+	// stopped is set when the janitor evicted this instance. A long
+	// operation that captured the pointer before eviction must not strand
+	// its acknowledged mutations on a dead commit loop; markProjectDirtyLive
+	// revives the instance instead.
+	stopped bool
 }
 
 func markProjectDirtyLocked(pm *projectMetadata) {
 	pm.dirty = true
 	pm.version++
+}
+
+// markProjectDirtyLiveLocked marks pm dirty, reviving it first if the
+// janitor evicted it while an operation was still using the pointer.
+// Revival puts the same instance back into the cache with fresh loop
+// channels, so a mutation acknowledged to the caller can never silently
+// strand on a commit loop that already stopped. When a fresher incarnation
+// owns the cache slot, the stale snapshot's changes cannot be applied and
+// this fails loudly instead of losing them silently.
+//
+// Caller must hold pm.mu; the lock is dropped and re-acquired around cache
+// bookkeeping so metaMu→pm.mu ordering stays consistent with
+// getOrCreateProjectMeta.
+func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) {
+	if !pm.stopped {
+		markProjectDirtyLocked(pm)
+		return
+	}
+	pm.mu.Unlock()
+	// Wait for the evicted commit loop to fully exit before replacing its
+	// channels: the loop reads stopCh/triggerCh unsynchronized, and the
+	// eviction close(stopCh) only requests exit — stoppedCh closes when it
+	// has actually returned.
+	select {
+	case <-pm.stoppedCh:
+	case <-time.After(5 * time.Second):
+		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; skipping metadata revival", "project", project)
+		pm.mu.Lock()
+		return
+	}
+	h.metaMu.Lock()
+	current, exists := h.metaCache[project]
+	revived := false
+	switch {
+	case exists && current != pm:
+		logging.Error(h.projectLogger(project),
+			"evicted metadata snapshot diverged from a newer reload; mutations in this window are lost",
+			"project", project)
+	default:
+		// Revive: fresh channels for a new commit loop, then re-insert.
+		pm.stopCh = make(chan struct{})
+		pm.stoppedCh = make(chan struct{})
+		pm.triggerCh = make(chan struct{}, 1)
+		pm.stopped = false
+		if !exists {
+			h.metaCache[project] = pm
+		}
+		revived = true
+	}
+	h.metaMu.Unlock()
+	if revived {
+		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
+		h.shutdownWg.Add(1)
+		go h.commitLoop(project, pm)
+	}
+	pm.mu.Lock()
+	if revived {
+		markProjectDirtyLocked(pm)
+	}
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
@@ -412,6 +476,7 @@ func (h *StorHub) evictIdleProjects(idleTimeout time.Duration) {
 	for name, pm := range h.metaCache {
 		pm.mu.Lock()
 		if !pm.dirty && now.Sub(pm.lastAccess) > idleTimeout {
+			pm.stopped = true
 			close(pm.stopCh)
 			delete(h.metaCache, name)
 		}
@@ -639,7 +704,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, latest, fileMeta, now)
-	markProjectDirtyLocked(pm)
+	h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
@@ -795,7 +860,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
-	markProjectDirtyLocked(pm)
+	h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
@@ -843,7 +908,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, rewritten, now)
-	markProjectDirtyLocked(pm)
+	h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
@@ -974,7 +1039,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.meta.UpsertFile(cleanName, fileMeta, h.config.Now().Unix())
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
-	markProjectDirtyLocked(pm)
+	h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
@@ -1322,7 +1387,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
-	markProjectDirtyLocked(pm)
+	h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	// Trigger the commit loop to wake up immediately
