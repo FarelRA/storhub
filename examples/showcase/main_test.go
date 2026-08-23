@@ -95,8 +95,10 @@ func TestRunShowcaseWorkflow(t *testing.T) {
 
 type fakeShowcaseHub struct{}
 
-func (f *fakeShowcaseHub) Owner() string                       { return "demo-owner" }
-func (f *fakeShowcaseHub) MkdirContext(ctx context.Context, project, dirPath string) error { return nil }
+func (f *fakeShowcaseHub) Owner() string { return "demo-owner" }
+func (f *fakeShowcaseHub) MkdirContext(ctx context.Context, project, dirPath string) error {
+	return nil
+}
 func (f *fakeShowcaseHub) CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte{}), nil
 }
@@ -109,7 +111,9 @@ func (f *fakeShowcaseHub) AppendFileContext(ctx context.Context, project, filePa
 func (f *fakeShowcaseHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	return []byte("alpha\nbeta\n"), nil
 }
-func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error { return nil }
+func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+	return nil
+}
 func (f *fakeShowcaseHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte("alpha")), nil
 }
@@ -134,20 +138,30 @@ func (f *fakeShowcaseHub) ListReleasesContext(ctx context.Context, project strin
 func (f *fakeShowcaseHub) ListMetadataRevisionsContext(ctx context.Context, project string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "new", CommittedAt: 2}, {CommitSHA: "facefeedcafebabe", Message: "old", CommittedAt: 1}}, nil
 }
-func (f *fakeShowcaseHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error        { return nil }
-func (f *fakeShowcaseHub) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error     { return nil }
-func (f *fakeShowcaseHub) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error { return nil }
+func (f *fakeShowcaseHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+	return nil
+}
+func (f *fakeShowcaseHub) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+	return nil
+}
+func (f *fakeShowcaseHub) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+	return nil
+}
 func (f *fakeShowcaseHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	return nil
 }
-func (f *fakeShowcaseHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error { return nil }
+func (f *fakeShowcaseHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+	return nil
+}
 func (f *fakeShowcaseHub) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
 	return []byte("enabled"), nil
 }
 func (f *fakeShowcaseHub) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
 	return []string{"user.demo"}, nil
 }
-func (f *fakeShowcaseHub) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error { return nil }
+func (f *fakeShowcaseHub) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+	return nil
+}
 func (f *fakeShowcaseHub) SymlinkContext(ctx context.Context, project, target, linkPath string) (*storhub.FileMetadata, error) {
 	meta := fileMeta(linkPath, []byte(target))
 	meta.Symlink = target
@@ -172,20 +186,28 @@ func (f *fakeShowcaseHub) StatPathContext(ctx context.Context, project, targetPa
 func (f *fakeShowcaseHub) StatFSContext(ctx context.Context, project string) (*storhub.FSStats, error) {
 	return &storhub.FSStats{Files: 2, Directories: 3, Inodes: 5, Bytes: 42, Releases: 1, Assets: 2}, nil
 }
-func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string) error { return nil }
-func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string) error       { return nil }
+func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string) error {
+	return nil
+}
+func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string) error {
+	return nil
+}
 func (f *fakeShowcaseHub) PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error) {
 	return &storhub.PurgeResult{DeletedAssets: 1, DeletedReleases: 0}, nil
 }
-func (f *fakeShowcaseHub) CleanupProjectContext(ctx context.Context, project string) error     { return nil }
-func (f *fakeShowcaseHub) DeleteReleaseContext(ctx context.Context, project, tag string) error { return nil }
-func (f *fakeShowcaseHub) DeleteProjectContext(ctx context.Context, project string) error      { return nil }
+func (f *fakeShowcaseHub) CleanupProjectContext(ctx context.Context, project string) error {
+	return nil
+}
+func (f *fakeShowcaseHub) DeleteReleaseContext(ctx context.Context, project, tag string) error {
+	return nil
+}
+func (f *fakeShowcaseHub) DeleteProjectContext(ctx context.Context, project string) error { return nil }
 
 func fileMeta(path string, data []byte) *storhub.FileMetadata {
 	return &storhub.FileMetadata{
-		Size:  int64(len(data)),
-		Inode: 1,
-		Mode:  0o644,
+		Size:   int64(len(data)),
+		Inode:  1,
+		Mode:   0o644,
 		Chunks: []int64{1},
 	}
 }

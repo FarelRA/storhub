@@ -1342,3 +1342,43 @@ func TestSetSizeRegrowServesZeros(t *testing.T) {
 		t.Fatalf("regrown region must be zeros, got %q", buf)
 	}
 }
+
+func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+
+	dirs := &shfs.EntryInfo{Path: "docs", IsDir: true, Inode: 2, Mode: 0o755}
+	files := &shfs.EntryInfo{Path: "docs/a.txt", Inode: 3, Mode: 0o644}
+	_ = fsys.EnsureNodeForTest(context.Background(), dirs)
+	file := fsys.EnsureNodeForTest(context.Background(), files)
+	fsys.mu.Lock()
+	fsys.lockTable[3] = []lockRecord{{owner: 1}}
+	fsys.mu.Unlock()
+
+	// Superseded incarnations are left alone.
+	impostor := &storhubNode{fs: fsys, inode: 3}
+	impostor.OnForget()
+	if fsys.nodes[3] != file {
+		t.Fatal("superseding OnForget must not evict the live node")
+	}
+
+	// A real forget clears path maps and unreferenced lock records.
+	file.OnForget()
+	if fsys.nodes[3] != nil || fsys.pathToInode["docs/a.txt"] != 0 {
+		t.Fatal("forgotten node bookkeeping survived eviction")
+	}
+	if _, ok := fsys.lockTable[3]; ok {
+		t.Fatal("lock records for forgotten node survived")
+	}
+	if fsys.pathToInode["docs"] != 2 {
+		t.Fatal("unrelated directory bookkeeping was disturbed")
+	}
+
+	// The root never gets evicted.
+	fsys.root.OnForget()
+	if fsys.nodes[1] == nil {
+		t.Fatal("root node was evicted")
+	}
+}
