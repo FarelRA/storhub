@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -487,14 +488,19 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	}
 	r := chi.NewRouter()
 
+	// Outermost middleware: a panic in any handler becomes a clean 500
+	// instead of a dropped connection, with the stack in the server log.
+	r.Use(h.recoverPanics)
 	r.Use(h.requestLogging)
 
 	r.Get("/", h.serveUIRoot)
 	r.Get("/styles.css", h.serveStyles)
+	r.Get("/alpine.min.js", h.serveAlpineJS)
 	r.Get("/app.js", h.serveAppJS)
 	r.Get("/config.js", h.serveConfigJS)
 
 	r.Get("/shares/{id}/download", h.serveShareDownload)
+	r.Head("/shares/{id}/download", h.serveShareDownload)
 
 	basePath := strings.TrimRight(opts.BasePath, "/")
 
@@ -589,6 +595,24 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/shares", h.handleProjectShares)
 	r.Get("/shares/{shareID}", h.handleProjectShare)
 	r.Delete("/shares/{shareID}", h.handleProjectShare)
+}
+
+func (h *restHandler) recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				stack := make([]byte, 8192)
+				n := runtime.Stack(stack, false)
+				logging.Error(h.logger, "panic serving request",
+					"method", r.Method,
+					"path", logging.RedactSensitivePath(r.URL.Path),
+					"panic", rec,
+					"stack", string(stack[:n]))
+				h.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *restHandler) requestLogging(next http.Handler) http.Handler {
@@ -1629,7 +1653,14 @@ func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
 	if r.Body == nil {
 		return errBadRequest("request body is required")
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyMemory))
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyMemory+1))
+	if err != nil {
+		return errBadRequest("unable to read request body")
+	}
+	if int64(len(payload)) > maxRequestBodyMemory {
+		return errPayloadTooLarge(fmt.Sprintf("request body exceeds %d bytes", maxRequestBodyMemory))
+	}
+	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return errBadRequest(fmt.Sprintf("invalid JSON body: %v", err))
@@ -1768,7 +1799,13 @@ func (h *restHandler) writeError(w http.ResponseWriter, status int, code, messag
 func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 	status := mappedStatus(err)
 	code := mappedCode(status)
-	h.writeError(w, status, code, err.Error())
+	message := err.Error()
+	if status == http.StatusBadGateway {
+		// Upstream (GitHub) failures can echo request URLs, tokens, and
+		// infrastructure details; sanitize what we forward to clients.
+		message = "upstream GitHub request failed"
+	}
+	h.writeError(w, status, code, message)
 }
 
 func mappedStatus(err error) int {
@@ -1969,8 +2006,4 @@ func ternaryStatus(cond bool, yes, no int) int {
 		return yes
 	}
 	return no
-}
-
-func bytesBody(data []byte) io.Reader {
-	return bytes.NewReader(data)
 }
