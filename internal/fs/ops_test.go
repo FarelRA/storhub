@@ -450,3 +450,50 @@ func TestRenamePOSIXReplaceSemantics(t *testing.T) {
 		t.Fatal("dir-over-empty-dir replace failed")
 	}
 }
+
+func TestWhitespaceNamesEndToEnd(t *testing.T) {
+	backend := newTestBackend(100)
+	svc := NewService(backend)
+	ctx := context.Background()
+	const proj = "demo"
+
+	// A directory whose name contains spaces is one specific name,
+	// distinct from any other spelling; children address it verbatim.
+	if err := svc.MkdirContext(ctx, proj, "my docs"); err != nil {
+		t.Fatalf("mkdir spaced: %v", err)
+	}
+	if _, err := svc.CreateFileContext(ctx, proj, "my docs/readme.txt "); err != nil {
+		t.Fatalf("create inside spaced dir (trailing-space filename): %v", err)
+	}
+	if _, err := svc.StatPathContext(ctx, proj, "my doc"); err == nil {
+		t.Fatal("near-miss name must not address spaced entry")
+	}
+	if _, err := svc.StatPathContext(ctx, proj, "my docs/readme.txt "); err != nil {
+		t.Fatalf("stat trailing-space filename: %v", err)
+	}
+
+	// Rename into a padded target lands on exactly that key and stays
+	// addressable and removable — regression for raw-key divergence.
+	if err := svc.MkdirContext(ctx, proj, "plain"); err != nil {
+		t.Fatalf("mkdir plain: %v", err)
+	}
+	if err := svc.RenameContext(ctx, proj, "plain", " moved "); err != nil {
+		t.Fatalf("rename to padded target: %v", err)
+	}
+	if _, err := svc.StatPathContext(ctx, proj, " moved "); err != nil {
+		t.Fatalf("stat renamed padded dir: %v", err)
+	}
+	if err := svc.RmdirContext(ctx, proj, " moved "); err != nil {
+		t.Fatalf("rmdir padded dir (raw-key integrity): %v", err)
+	}
+
+	if err := svc.RmdirContext(ctx, proj, "my docs"); !errors.Is(err, ErrNotEmpty) {
+		t.Fatalf("expected ENOTEMPTY for spaced dir with child, got %v", err)
+	}
+	if !backend.repo.RemoveFile("my docs/readme.txt ") {
+		t.Fatal("spaced file key not found for removal")
+	}
+	if err := svc.RmdirContext(ctx, proj, "my docs"); err != nil {
+		t.Fatalf("rmdir spaced dir after cleanup: %v", err)
+	}
+}

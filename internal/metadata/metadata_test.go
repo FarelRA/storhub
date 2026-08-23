@@ -2,12 +2,39 @@ package metadata
 
 import (
 	"encoding/json"
+	"errors"
+	"path"
 	"strings"
 	"testing"
 )
 
+// fsNormalizeForTest mirrors internal/fs.NormalizePath so the conformance
+// test can compare the two implementations without an import cycle
+// (internal/fs imports this package).
+func fsNormalizeForTest(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errPathRequired
+	}
+	trimmed := strings.TrimLeft(value, "/")
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", errEscapesRoot
+	}
+	return cleaned, nil
+}
+
+var (
+	errPathRequired = errors.New("path is required")
+	errEscapesRoot  = errors.New("path escapes root")
+)
+
 func TestHelpersAndPOSIXUtilities(t *testing.T) {
-	if normalizeStoredPath(" /docs/specs/../guide.txt ") != "docs/guide.txt" {
+	// Whitespace is significant: the leading-space component is part of
+	// the name (mirrors internal/fs, codified there since round 1).
+	if normalizeStoredPath(" /docs/specs/../guide.txt ") != " /docs/guide.txt " {
 		t.Fatal("unexpected normalized path")
 	}
 	if normalizeStoredPath("../escape") != "../escape" {
@@ -609,5 +636,37 @@ func TestTimesExplicitRoundTrip(t *testing.T) {
 	}
 	if legacy.TimesExplicit {
 		t.Fatal("marker must default false for legacy payloads")
+	}
+}
+
+func TestPathNormalizerConformance(t *testing.T) {
+	fsNormalize := func(v string) string {
+		cleaned, err := fsNormalizeForTest(v)
+		if err != nil {
+			return "<error:" + err.Error() + ">"
+		}
+		return cleaned
+	}
+	for _, in := range []string{
+		"", " ", "   ", "/", "//", "docs", "/docs", " docs ", "  docs",
+		"docs/", "a/b/c", "./a", "a/./b", "a//b", "/a/b/../c",
+		" /x/../y ", "..", "../esc", "a/../..", " .hidden ", "...",
+	} {
+		want := fsNormalize(in)
+		got := normalizeStoredPath(in)
+		switch {
+		case strings.HasPrefix(want, "<error:"):
+			if want == "<error:path is required>" && got != "" {
+				t.Errorf("input %q: fs rejects as required, metadata gave %q", in, got)
+			}
+			if strings.Contains(want, "escapes root") {
+				// metadata stays total; Validate rejects escaping keys.
+				continue
+			}
+		default:
+			if got != want {
+				t.Errorf("input %q: metadata %q != fs %q", in, got, want)
+			}
+		}
 	}
 }
