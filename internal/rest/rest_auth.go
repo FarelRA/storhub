@@ -408,6 +408,7 @@ func (c *authorizedClient) RemoveXAttrContext(ctx context.Context, project, targ
 	}
 	return c.base.RemoveXAttrContext(ctx, project, targetPath, attr)
 }
+
 // RevisionContext exposes the repo-level metadata revision; gated like
 // other project-wide metadata (root readability).
 func (c *authorizedClient) RevisionContext(ctx context.Context, project string) (string, error) {
