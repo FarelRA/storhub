@@ -71,35 +71,39 @@ var (
 	ErrFileNotFound = shfs.ErrNotFound
 )
 
+// Client is context-first: every operation carries the request context so
+// cancellation and deadlines propagate from the HTTP request all the way
+// down into storage. Method names mirror the storage layer's *Context
+// variants, which *storage.StorHub implements directly.
 type Client interface {
-	CreateFile(project, filePath string) (*metadata.FileMeta, error)
-	Mkdir(project, dirPath string) error
-	DeleteFile(project, filePath string) error
-	Rmdir(project, dirPath string) error
-	Rename(project, oldPath, newPath string) error
-	TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error)
-	AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error)
-	WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error)
-	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error)
-	ReadFileAt(project, filePath string, offset, length int64) ([]byte, error)
-	StatPath(project, targetPath string) (*shfs.EntryInfo, error)
-	ReadDir(project, dirPath string) ([]shfs.DirEntry, error)
-	StatFS(project string) (*shfs.FSStats, error)
-	Symlink(project, target, linkPath string) (*metadata.FileMeta, error)
-	Readlink(project, linkPath string) (string, error)
-	Link(project, existingPath, newPath string) (*metadata.FileMeta, error)
-	Chmod(project, targetPath string, mode uint32) error
-	Chown(project, targetPath string, uid, gid uint32) error
-	Chtimes(project, targetPath string, atime, mtime int64) error
-	SetXAttr(project, targetPath, attr string, data []byte) error
-	GetXAttr(project, targetPath, attr string) ([]byte, error)
-	ListXAttr(project, targetPath string) ([]string, error)
-	RemoveXAttr(project, targetPath, attr string) error
-	ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error)
-	RollbackMetadata(project, commitSHA string) error
-	PurgeUntracked(project string) (*storage.PurgeResult, error)
-	DeleteProject(project string) error
-	ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error)
+	CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error)
+	MkdirContext(ctx context.Context, project, dirPath string) error
+	DeleteFileContext(ctx context.Context, project, filePath string) error
+	RmdirContext(ctx context.Context, project, dirPath string) error
+	RenameContext(ctx context.Context, project, oldPath, newPath string) error
+	TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error)
+	AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error)
+	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error)
+	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error)
+	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
+	StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error)
+	ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error)
+	StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error)
+	SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error)
+	ReadlinkContext(ctx context.Context, project, linkPath string) (string, error)
+	LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error)
+	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
+	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
+	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
+	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error
+	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
+	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)
+	RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error
+	ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error)
+	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
+	PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error)
+	DeleteProjectContext(ctx context.Context, project string) error
+	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error)
 }
 
 type restHandler struct {
@@ -189,133 +193,133 @@ func (c *restrictedClient) checkAccess(project, targetPath string) error {
 	return errForbidden("access denied: path not shared")
 }
 
-func (c *restrictedClient) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
+func (c *restrictedClient) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Mkdir(project, dirPath string) error {
+func (c *restrictedClient) MkdirContext(ctx context.Context, project, dirPath string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) DeleteFile(project, filePath string) error {
+func (c *restrictedClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Rmdir(project, dirPath string) error {
+func (c *restrictedClient) RmdirContext(ctx context.Context, project, dirPath string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Rename(project, oldPath, newPath string) error {
+func (c *restrictedClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
+func (c *restrictedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
+func (c *restrictedClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+func (c *restrictedClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
+func (c *restrictedClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
+func (c *restrictedClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+func (c *restrictedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	if err := c.checkAccess(project, filePath); err != nil {
 		return nil, err
 	}
-	return c.underlying.ReadFileAt(project, filePath, offset, length)
+	return c.underlying.ReadFileAtContext(ctx, project, filePath, offset, length)
 }
 
-func (c *restrictedClient) StatPath(project, targetPath string) (*shfs.EntryInfo, error) {
+func (c *restrictedClient) StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
 	if err := c.checkAccess(project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.underlying.StatPath(project, targetPath)
+	return c.underlying.StatPathContext(ctx, project, targetPath)
 }
 
-func (c *restrictedClient) ReadDir(project, dirPath string) ([]shfs.DirEntry, error) {
+func (c *restrictedClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
 	if err := c.checkAccess(project, dirPath); err != nil {
 		return nil, err
 	}
-	return c.underlying.ReadDir(project, dirPath)
+	return c.underlying.ReadDirContext(ctx, project, dirPath)
 }
 
-func (c *restrictedClient) StatFS(project string) (*shfs.FSStats, error) {
+func (c *restrictedClient) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
-func (c *restrictedClient) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
+func (c *restrictedClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Readlink(project, linkPath string) (string, error) {
+func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
 	if err := c.checkAccess(project, linkPath); err != nil {
 		return "", err
 	}
-	return c.underlying.Readlink(project, linkPath)
+	return c.underlying.ReadlinkContext(ctx, project, linkPath)
 }
 
-func (c *restrictedClient) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
+func (c *restrictedClient) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Chmod(project, targetPath string, mode uint32) error {
+func (c *restrictedClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Chown(project, targetPath string, uid, gid uint32) error {
+func (c *restrictedClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) Chtimes(project, targetPath string, atime, mtime int64) error {
+func (c *restrictedClient) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) SetXAttr(project, targetPath, attr string, data []byte) error {
+func (c *restrictedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) GetXAttr(project, targetPath, attr string) ([]byte, error) {
+func (c *restrictedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
 	if err := c.checkAccess(project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.underlying.GetXAttr(project, targetPath, attr)
+	return c.underlying.GetXAttrContext(ctx, project, targetPath, attr)
 }
 
-func (c *restrictedClient) ListXAttr(project, targetPath string) ([]string, error) {
+func (c *restrictedClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
 	if err := c.checkAccess(project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.underlying.ListXAttr(project, targetPath)
+	return c.underlying.ListXAttrContext(ctx, project, targetPath)
 }
 
-func (c *restrictedClient) RemoveXAttr(project, targetPath, attr string) error {
+func (c *restrictedClient) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) ListMetadataRevisions(project string) ([]metadata.MetadataRevision, error) {
+func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
-func (c *restrictedClient) RollbackMetadata(project, commitSHA string) error {
+func (c *restrictedClient) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
 	return errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) PurgeUntracked(project string) (*storage.PurgeResult, error) {
+func (c *restrictedClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
 	return nil, errForbidden("access denied: read-only share")
 }
 
-func (c *restrictedClient) DeleteProject(project string) error {
+func (c *restrictedClient) DeleteProjectContext(ctx context.Context, project string) error {
 	return errForbidden("access denied: read-only share")
 }
 
@@ -677,14 +681,14 @@ func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	switch r.Method {
 	case http.MethodGet:
-		stats, err := h.clientFor(r).StatFS(project)
+		stats, err := h.clientFor(r).StatFSContext(r.Context(), project)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 		h.writeJSON(w, http.StatusOK, projectResponse{Project: project, Stats: stats})
 	case http.MethodDelete:
-		if err := h.clientFor(r).DeleteProject(project); err != nil {
+		if err := h.clientFor(r).DeleteProjectContext(r.Context(), project); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -699,7 +703,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 	targetPath := r.URL.Query().Get("path")
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		entry, err := h.clientFor(r).StatPath(project, targetPath)
+		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -716,7 +720,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		h.writeJSON(w, http.StatusOK, nodeResponse{Project: project, Entry: entry, ETag: eTag})
 	case http.MethodDelete:
-		entry, err := h.clientFor(r).StatPath(project, targetPath)
+		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -733,9 +737,9 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 				h.writeError(w, http.StatusNotImplemented, "recursive_delete_unsupported", "recursive directory deletion is not supported")
 				return
 			}
-			err = h.clientFor(r).Rmdir(project, targetPath)
+			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath)
 		} else {
-			err = h.clientFor(r).DeleteFile(project, targetPath)
+			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath)
 		}
 		if err != nil {
 			h.writeMappedError(w, err)
@@ -750,7 +754,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	dirPath := r.URL.Query().Get("path")
-	entries, err := h.clientFor(r).ReadDir(project, dirPath)
+	entries, err := h.clientFor(r).ReadDirContext(r.Context(), project, dirPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -761,7 +765,7 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
-	entry, err := h.clientFor(r).StatPath(project, filePath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -771,7 +775,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if entry.IsSymlink {
-		target, readErr := h.clientFor(r).Readlink(project, filePath)
+		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, filePath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return
@@ -818,7 +822,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
-		chunk, readErr := h.clientFor(r).ReadFileAt(project, filePath, offset, readLen)
+		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return
 		}
@@ -861,22 +865,22 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 
 	created := !exists
 	if !exists {
-		if _, err := h.clientFor(r).CreateFile(project, filePath); err != nil {
+		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 	} else if entry.IsSymlink {
-		if err := h.clientFor(r).DeleteFile(project, filePath); err != nil {
+		if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
-		if _, err := h.clientFor(r).CreateFile(project, filePath); err != nil {
+		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 	}
 
-	if _, err := h.clientFor(r).ReplaceFileFromReader(project, filePath, r.Body); err != nil {
+	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -886,7 +890,7 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
-	entry, err := h.clientFor(r).StatPath(project, filePath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -930,7 +934,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, readErr)
 			return
 		}
-		if _, err := h.clientFor(r).PatchFile(project, filePath, offset, deleteSize, edit); err != nil {
+		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -940,7 +944,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, parseErr)
 			return
 		}
-		if _, err := h.clientFor(r).TruncateFile(project, filePath, size); err != nil {
+		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -953,7 +957,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	names, err := h.clientFor(r).ListXAttr(project, targetPath)
+	names, err := h.clientFor(r).ListXAttrContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -967,7 +971,7 @@ func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	switch r.Method {
 	case http.MethodGet:
-		value, err := h.clientFor(r).GetXAttr(project, targetPath, name)
+		value, err := h.clientFor(r).GetXAttrContext(r.Context(), project, targetPath, name)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -986,13 +990,13 @@ func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusRequestEntityTooLarge, "xattr_too_large", "xattr value exceeds the configured limit")
 			return
 		}
-		if err := h.clientFor(r).SetXAttr(project, targetPath, name, payload); err != nil {
+		if err := h.clientFor(r).SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
-		if err := h.clientFor(r).RemoveXAttr(project, targetPath, name); err != nil {
+		if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -1004,7 +1008,7 @@ func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	revisions, err := h.clientFor(r).ListMetadataRevisions(project)
+	revisions, err := h.clientFor(r).ListMetadataRevisionsContext(r.Context(), project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1019,7 +1023,7 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.clientFor(r).CreateFile(project, req.Path); err != nil {
+	if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1033,7 +1037,7 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Mkdir(project, req.Path); err != nil {
+	if err := h.clientFor(r).MkdirContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1047,7 +1051,7 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Rmdir(project, req.Path); err != nil {
+	if err := h.clientFor(r).RmdirContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1061,7 +1065,7 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).DeleteFile(project, req.Path); err != nil {
+	if err := h.clientFor(r).DeleteFileContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1075,7 +1079,7 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Rename(project, req.OldPath, req.NewPath); err != nil {
+	if err := h.clientFor(r).RenameContext(r.Context(), project, req.OldPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1089,7 +1093,7 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.clientFor(r).Link(project, req.ExistingPath, req.NewPath); err != nil {
+	if _, err := h.clientFor(r).LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1103,7 +1107,7 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := h.clientFor(r).Symlink(project, req.Target, req.LinkPath); err != nil {
+	if _, err := h.clientFor(r).SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1117,7 +1121,7 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Chmod(project, req.Path, req.Mode); err != nil {
+	if err := h.clientFor(r).ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1131,7 +1135,7 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Chown(project, req.Path, req.UID, req.GID); err != nil {
+	if err := h.clientFor(r).ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1145,7 +1149,7 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).Chtimes(project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
+	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1159,7 +1163,7 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).RollbackMetadata(project, req.CommitSHA); err != nil {
+	if err := h.clientFor(r).RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1168,7 +1172,7 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	result, err := h.clientFor(r).PurgeUntracked(project)
+	result, err := h.clientFor(r).PurgeUntrackedContext(r.Context(), project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1217,7 +1221,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, errBadRequest("invalid share path"))
 		return
 	}
-	entry, err := h.clientFor(r).StatPath(project, sharePath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1247,7 +1251,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
-	if _, err := h.clientFor(r).StatFS(project); err != nil {
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1261,7 +1265,7 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	if _, err := h.clientFor(r).StatFS(project); err != nil {
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1274,7 +1278,7 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	if _, err := h.clientFor(r).StatFS(project); err != nil {
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1324,7 +1328,7 @@ func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (str
 }
 
 func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, project, targetPath string) {
-	entry, err := h.clientFor(r).StatPath(project, targetPath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1335,7 +1339,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
 	if entry.IsSymlink {
-		target, readErr := h.clientFor(r).Readlink(project, targetPath)
+		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, targetPath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return
@@ -1379,7 +1383,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
-		chunk, readErr := h.clientFor(r).ReadFileAt(project, targetPath, offset, readLen)
+		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, targetPath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", targetPath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
 			return
@@ -1547,7 +1551,7 @@ func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
 }
 
 func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, project, targetPath string, status int) {
-	entry, err := h.clientFor(r).StatPath(project, targetPath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1556,7 +1560,7 @@ func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string) (*shfs.EntryInfo, bool, error) {
-	entry, err := h.clientFor(r).StatPath(project, targetPath)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
 	if err == nil {
 		return entry, true, nil
 	}
@@ -1571,7 +1575,7 @@ func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string,
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, writeErr := h.clientFor(r).WriteFileAt(project, filePath, offset, append([]byte(nil), buf[:n]...)); writeErr != nil {
+			if _, writeErr := h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, append([]byte(nil), buf[:n]...)); writeErr != nil {
 				return writeErr
 			}
 			offset += int64(n)
@@ -1590,7 +1594,7 @@ func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, appendErr := h.clientFor(r).AppendFile(project, filePath, append([]byte(nil), buf[:n]...)); appendErr != nil {
+			if _, appendErr := h.clientFor(r).AppendFileContext(r.Context(), project, filePath, append([]byte(nil), buf[:n]...)); appendErr != nil {
 				return appendErr
 			}
 		}

@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -172,67 +173,67 @@ func boolPtr(v bool) *bool {
 
 func seedProjectForAuth(t *testing.T, client *fakeRESTClient) {
 	t.Helper()
-	if err := client.Mkdir("demo", "public"); err != nil {
+	if err := client.MkdirContext(context.Background(), "demo", "public"); err != nil {
 		t.Fatalf("mkdir public: %v", err)
 	}
-	if err := client.Mkdir("demo", "private"); err != nil {
+	if err := client.MkdirContext(context.Background(), "demo", "private"); err != nil {
 		t.Fatalf("mkdir private: %v", err)
 	}
-	if _, err := client.CreateFile("demo", "public/note.txt"); err != nil {
+	if _, err := client.CreateFileContext(context.Background(), "demo", "public/note.txt"); err != nil {
 		t.Fatalf("create public file: %v", err)
 	}
-	if _, err := client.WriteFileAt("demo", "public/note.txt", 0, []byte("hello")); err != nil {
+	if _, err := client.WriteFileAtContext(context.Background(), "demo", "public/note.txt", 0, []byte("hello")); err != nil {
 		t.Fatalf("write public file: %v", err)
 	}
-	if _, err := client.CreateFile("demo", "shared/readme.txt"); err == nil {
+	if _, err := client.CreateFileContext(context.Background(), "demo", "shared/readme.txt"); err == nil {
 		t.Fatal("expected missing parent for shared/readme.txt before mkdir")
 	}
-	if err := client.Mkdir("demo", "shared"); err != nil {
+	if err := client.MkdirContext(context.Background(), "demo", "shared"); err != nil {
 		t.Fatalf("mkdir shared: %v", err)
 	}
-	if _, err := client.CreateFile("demo", "shared/readme.txt"); err != nil {
+	if _, err := client.CreateFileContext(context.Background(), "demo", "shared/readme.txt"); err != nil {
 		t.Fatalf("create shared file: %v", err)
 	}
-	if _, err := client.WriteFileAt("demo", "shared/readme.txt", 0, []byte("shared data")); err != nil {
+	if _, err := client.WriteFileAtContext(context.Background(), "demo", "shared/readme.txt", 0, []byte("shared data")); err != nil {
 		t.Fatalf("write shared file: %v", err)
 	}
-	if _, err := client.CreateFile("demo", "private/secret.txt"); err != nil {
+	if _, err := client.CreateFileContext(context.Background(), "demo", "private/secret.txt"); err != nil {
 		t.Fatalf("create secret file: %v", err)
 	}
-	if _, err := client.WriteFileAt("demo", "private/secret.txt", 0, []byte("secret data")); err != nil {
+	if _, err := client.WriteFileAtContext(context.Background(), "demo", "private/secret.txt", 0, []byte("secret data")); err != nil {
 		t.Fatalf("write secret file: %v", err)
 	}
-	if err := client.Chmod("demo", "", 0o755); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "", 0o755); err != nil {
 		t.Fatalf("chmod root: %v", err)
 	}
-	if err := client.Chmod("demo", "public", 0o777); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "public", 0o777); err != nil {
 		t.Fatalf("chmod public dir: %v", err)
 	}
-	if err := client.Chmod("demo", "public/note.txt", 0o666); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "public/note.txt", 0o666); err != nil {
 		t.Fatalf("chmod public file: %v", err)
 	}
-	if err := client.Chmod("demo", "shared", 0o755); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "shared", 0o755); err != nil {
 		t.Fatalf("chmod shared dir: %v", err)
 	}
-	if err := client.Chown("demo", "shared", 0, 2001); err != nil {
+	if err := client.ChownContext(context.Background(), "demo", "shared", 0, 2001); err != nil {
 		t.Fatalf("chown shared dir: %v", err)
 	}
-	if err := client.Chmod("demo", "shared/readme.txt", 0o640); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "shared/readme.txt", 0o640); err != nil {
 		t.Fatalf("chmod shared file: %v", err)
 	}
-	if err := client.Chown("demo", "shared/readme.txt", 0, 2001); err != nil {
+	if err := client.ChownContext(context.Background(), "demo", "shared/readme.txt", 0, 2001); err != nil {
 		t.Fatalf("chown shared file: %v", err)
 	}
-	if err := client.Chmod("demo", "private", 0o700); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "private", 0o700); err != nil {
 		t.Fatalf("chmod private dir: %v", err)
 	}
-	if err := client.Chown("demo", "private", 0, 0); err != nil {
+	if err := client.ChownContext(context.Background(), "demo", "private", 0, 0); err != nil {
 		t.Fatalf("chown private dir: %v", err)
 	}
-	if err := client.Chmod("demo", "private/secret.txt", 0o600); err != nil {
+	if err := client.ChmodContext(context.Background(), "demo", "private/secret.txt", 0o600); err != nil {
 		t.Fatalf("chmod secret file: %v", err)
 	}
-	if err := client.Chown("demo", "private/secret.txt", 0, 0); err != nil {
+	if err := client.ChownContext(context.Background(), "demo", "private/secret.txt", 0, 0); err != nil {
 		t.Fatalf("chown secret file: %v", err)
 	}
 }
