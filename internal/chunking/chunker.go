@@ -24,6 +24,9 @@ const (
 	DefaultBufferSize         = 1 * 1024 * 1024
 )
 
+// ChunkReader reads one chunk-sized window of the underlying file. It is a
+// section reader: Seek is supported, Read stops at the window end, and the
+// window's wire name/index travel with it via Name/Index.
 type ChunkReader struct {
 	reader    *io.SectionReader
 	offset    int64
@@ -40,22 +43,29 @@ func (c *ChunkReader) Seek(offset int64, whence int) (int64, error) {
 	return c.reader.Seek(offset, whence)
 }
 
+// Size reports the window length in bytes (the final chunk may be short).
 func (c *ChunkReader) Size() int64 {
 	return c.size
 }
 
+// Offset reports the window start within the source file.
 func (c *ChunkReader) Offset() int64 {
 	return c.offset
 }
 
+// Name reports the asset name this chunk uploads under (baseName.partNNN,
+// zero-padded to keep lexicographic == numeric order).
 func (c *ChunkReader) Name() string {
 	return c.chunkName
 }
 
+// Index reports this chunk's zero-based position in upload order.
 func (c *ChunkReader) Index() int {
 	return c.index
 }
 
+// StreamingChunker plans fixed-size windows over one open file. It is not
+// safe for concurrent use; each GetChunk reader seeks its own section.
 type StreamingChunker struct {
 	file      *os.File
 	fileSize  int64
@@ -80,13 +90,10 @@ func NormalizedSize(chunkSize int64) int64 {
 	return chunkSize
 }
 
+// NewStreamingChunker opens filePath and plans chunk windows for it.
+// chunkSize is clamped through NormalizedSize.
 func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*StreamingChunker, error) {
-	if chunkSize <= 0 {
-		chunkSize = DefaultChunkSize
-	}
-	if chunkSize > MaxReleaseAssetSize {
-		chunkSize = MaxReleaseAssetSize
-	}
+	chunkSize = NormalizedSize(chunkSize)
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
@@ -116,6 +123,8 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 	}, nil
 }
 
+// GetChunk returns the reader for zero-based chunk index, or an error when
+// index falls outside [0, NumChunks).
 func (s *StreamingChunker) GetChunk(index int) (*ChunkReader, error) {
 	if index < 0 || index >= s.numChunks {
 		return nil, fmt.Errorf("chunk index out of range: %d", index)
@@ -134,6 +143,7 @@ func (s *StreamingChunker) GetChunk(index int) (*ChunkReader, error) {
 	}, nil
 }
 
+// NumChunks reports ceil(fileSize/chunkSize): zero for an empty file.
 func (s *StreamingChunker) NumChunks() int {
 	return s.numChunks
 }
