@@ -280,6 +280,11 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	if err := shfs.CanChown(ctx); err != nil {
 		return err
 	}
+	// POSIX chown(2): an owner value of (uid_t)-1 means "leave unchanged".
+	// uid_t is unsigned, so -1's wire encoding is all-ones; accept it per
+	// field. The kernel resolves these before FUSE CHOWN, so this only
+	// affects direct library callers.
+	const keepOwner = ^uint32(0)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
 		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
@@ -287,16 +292,25 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 		}); err != nil {
 			return err
 		}
-		if file != nil {
-			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
+		applyOwner := func(current *meta.FileMeta) {
+			if uid != keepOwner {
 				current.UID = uid
+			}
+			if gid != keepOwner {
 				current.GID = gid
-				current.Mode &^= 0o6000
-				current.ChangedAt = now
-			})
+			}
+			current.Mode &^= 0o6000
+			current.ChangedAt = now
 		}
-		dir.UID = uid
-		dir.GID = gid
+		if file != nil {
+			return UpdateFileFamily(repo, file.Inode, applyOwner)
+		}
+		if uid != keepOwner {
+			dir.UID = uid
+		}
+		if gid != keepOwner {
+			dir.GID = gid
+		}
 		dir.ChangedAt = now
 		return nil
 	})
@@ -604,6 +618,9 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 					if !patch.MTime.IsZero() {
 						current.ModifiedAt = patch.MTime.Unix()
 					}
+					// Patched timestamps are authoritative, zeros included
+					// (the epoch is a real POSIX value).
+					current.TimesExplicit = true
 				}
 				current.ChangedAt = now
 			})
@@ -623,6 +640,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			if !patch.MTime.IsZero() {
 				dir.ModifiedAt = patch.MTime.Unix()
 			}
+			dir.TimesExplicit = true
 		}
 		dir.ChangedAt = now
 		return nil

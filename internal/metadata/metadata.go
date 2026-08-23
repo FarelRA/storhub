@@ -82,6 +82,10 @@ type FileMeta struct {
 	GID        uint32   `json:"g,omitempty"`
 	Inode      uint64   `json:"i,omitempty"`
 	XAttrs     XAttrMap `json:"x,omitempty"`
+	// TimesExplicit marks timestamps as authoritative: zero means the
+	// epoch (e.g. an explicit patch), not "unset", so Normalize must not
+	// backfill. Additive v3 field; omitted for legacy entries.
+	TimesExplicit bool `json:"tsx,omitempty"`
 }
 
 func (f FileMeta) Clone() FileMeta {
@@ -103,6 +107,8 @@ type DirMeta struct {
 	GID        uint32   `json:"g,omitempty"`
 	Inode      uint64   `json:"i,omitempty"`
 	XAttrs     XAttrMap `json:"x,omitempty"`
+	// See FileMeta.TimesExplicit.
+	TimesExplicit bool `json:"tsx,omitempty"`
 }
 
 func (d DirMeta) Clone() DirMeta {
@@ -417,17 +423,20 @@ func (d *DirMeta) Normalize(now int64) {
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
 	}
-	if d.CreatedAt == 0 {
-		d.CreatedAt = now
-	}
-	if d.ModifiedAt == 0 {
-		d.ModifiedAt = d.CreatedAt
-	}
-	if d.AccessedAt == 0 {
-		d.AccessedAt = d.ModifiedAt
-	}
-	if d.ChangedAt == 0 {
-		d.ChangedAt = d.ModifiedAt
+	// Explicit-timestamp entries (metadata patch) keep their zeros.
+	if !d.TimesExplicit {
+		if d.CreatedAt == 0 {
+			d.CreatedAt = now
+		}
+		if d.ModifiedAt == 0 {
+			d.ModifiedAt = d.CreatedAt
+		}
+		if d.AccessedAt == 0 {
+			d.AccessedAt = d.ModifiedAt
+		}
+		if d.ChangedAt == 0 {
+			d.ChangedAt = d.ModifiedAt
+		}
 	}
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
@@ -436,17 +445,21 @@ func (f *FileMeta) Normalize(now int64) {
 	if f.Mode == 0 {
 		f.Mode = defaultFileMode(NodeKindFile)
 	}
-	if f.UploadedAt == 0 {
-		f.UploadedAt = now
-	}
-	if f.ModifiedAt == 0 {
-		f.ModifiedAt = f.UploadedAt
-	}
-	if f.AccessedAt == 0 {
-		f.AccessedAt = f.ModifiedAt
-	}
-	if f.ChangedAt == 0 {
-		f.ChangedAt = f.ModifiedAt
+	// Explicit-timestamp entries (metadata patch) keep their zeros: the
+	// epoch is a real value there, not a legacy gap to repair.
+	if !f.TimesExplicit {
+		if f.UploadedAt == 0 {
+			f.UploadedAt = now
+		}
+		if f.ModifiedAt == 0 {
+			f.ModifiedAt = f.UploadedAt
+		}
+		if f.AccessedAt == 0 {
+			f.AccessedAt = f.ModifiedAt
+		}
+		if f.ChangedAt == 0 {
+			f.ChangedAt = f.ModifiedAt
+		}
 	}
 	if f.Chunks == nil {
 		f.Chunks = make([]int64, 0)

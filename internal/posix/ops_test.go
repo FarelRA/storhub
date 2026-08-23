@@ -351,3 +351,40 @@ func TestXAttrBinaryValuesRoundTrip(t *testing.T) {
 		t.Fatalf("list: %+v %v", names, err)
 	}
 }
+
+// TestChownKeepOwnerSentinel pins POSIX chown(2) semantics: (uid_t)-1
+// (all-ones) leaves that owner field unchanged instead of setting it to
+// 4294967295.
+func TestChownKeepOwnerSentinel(t *testing.T) {
+	backend := newTestBackend(500)
+	backend.seedDir("docs")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+
+	if err := svc.ChownContext(ctx, "demo", "docs", 1000, 2000); err != nil {
+		t.Fatalf("initial chown: %v", err)
+	}
+	assertOwners := func(label string, wantUID, wantGID uint32) {
+		t.Helper()
+		repo, _, _, dir, err := svc.lookupPath(ctx, "demo", "docs")
+		if err != nil {
+			t.Fatalf("%s: lookup: %v", label, err)
+		}
+		_ = repo
+		if dir.UID != wantUID || dir.GID != wantGID {
+			t.Fatalf("%s: uid=%d gid=%d, want %d/%d", label, dir.UID, dir.GID, wantUID, wantGID)
+		}
+	}
+	assertOwners("precondition", 1000, 2000)
+
+	const keep = ^uint32(0)
+	if err := svc.ChownContext(ctx, "demo", "docs", keep, 3000); err != nil {
+		t.Fatalf("chown keep-uid: %v", err)
+	}
+	assertOwners("keep-uid", 1000, 3000)
+
+	if err := svc.ChownContext(ctx, "demo", "docs", 1500, keep); err != nil {
+		t.Fatalf("chown keep-gid: %v", err)
+	}
+	assertOwners("keep-gid", 1500, 3000)
+}
