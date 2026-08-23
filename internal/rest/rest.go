@@ -20,13 +20,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/golang-jwt/jwt/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -67,7 +67,7 @@ const (
 )
 
 var (
-	ErrNotFound    = shfs.ErrNotFound
+	ErrNotFound     = shfs.ErrNotFound
 	ErrFileNotFound = shfs.ErrNotFound
 )
 
@@ -410,7 +410,7 @@ type shareRequest struct {
 	// the Duration-as-nanoseconds JSON trap. Takes precedence over
 	// ExpiresIn when set.
 	ExpiresInSeconds int64 `json:"expires_in_seconds,omitempty"`
-	Download  *bool         `json:"download,omitempty"`
+	Download         *bool `json:"download,omitempty"`
 }
 
 type shareResponse struct {
@@ -1227,8 +1227,8 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"project":         project,
-		"status":          "purged",
+		"project":          project,
+		"status":           "purged",
 		"deleted_releases": result.DeletedReleases,
 		"deleted_assets":   result.DeletedAssets,
 	})

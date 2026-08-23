@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
