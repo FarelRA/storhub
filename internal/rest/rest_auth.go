@@ -231,11 +231,11 @@ func (c *authorizedClient) MkdirContext(ctx context.Context, project, dirPath st
 	}
 	return c.base.MkdirContext(ctx, project, dirPath)
 }
-func (c *authorizedClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
+func (c *authorizedClient) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
 	if err := c.requireParentWrite(ctx, project, filePath); err != nil {
 		return err
 	}
-	return c.base.DeleteFileContext(ctx, project, filePath)
+	return c.base.DeleteFileContext(ctx, project, filePath, opts...)
 }
 func (c *authorizedClient) RmdirContext(ctx context.Context, project, dirPath string) error {
 	if err := c.requireParentWrite(ctx, project, dirPath); err != nil {
@@ -258,35 +258,35 @@ func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, 
 	}
 	return c.base.RenameContext(ctx, project, oldPath, newPath)
 }
-func (c *authorizedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
+func (c *authorizedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.TruncateFileContext(ctx, project, filePath, size)
+	return c.base.TruncateFileContext(ctx, project, filePath, size, opts...)
 }
-func (c *authorizedClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
+func (c *authorizedClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.AppendFileContext(ctx, project, filePath, data)
+	return c.base.AppendFileContext(ctx, project, filePath, data, opts...)
 }
-func (c *authorizedClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+func (c *authorizedClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.WriteFileAtContext(ctx, project, filePath, offset, data)
+	return c.base.WriteFileAtContext(ctx, project, filePath, offset, data, opts...)
 }
-func (c *authorizedClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
+func (c *authorizedClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.PatchFileContext(ctx, project, filePath, offset, deleteSize, edit)
+	return c.base.PatchFileContext(ctx, project, filePath, offset, deleteSize, edit, opts...)
 }
-func (c *authorizedClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
+func (c *authorizedClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
-	return c.base.ReplaceFileFromReaderContext(ctx, project, filePath, body)
+	return c.base.ReplaceFileFromReaderContext(ctx, project, filePath, body, opts...)
 }
 func (c *authorizedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	if err := c.requireNodeRead(ctx, project, filePath); err != nil {
@@ -408,6 +408,22 @@ func (c *authorizedClient) RemoveXAttrContext(ctx context.Context, project, targ
 	}
 	return c.base.RemoveXAttrContext(ctx, project, targetPath, attr)
 }
+// RevisionContext exposes the repo-level metadata revision; gated like
+// other project-wide metadata (root readability).
+func (c *authorizedClient) RevisionContext(ctx context.Context, project string) (string, error) {
+	entry, err := c.base.StatPathContext(ctx, project, "")
+	if err != nil {
+		return "", err
+	}
+	if !c.canReadMetadata(entry) {
+		return "", errForbidden("permission denied")
+	}
+	if rs, ok := c.base.(shfs.RevisionSource); ok {
+		return rs.RevisionContext(ctx, project)
+	}
+	return "", errForbidden("revision preconditions unsupported by backend")
+}
+
 func (c *authorizedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
 	entry, err := c.base.StatPathContext(ctx, project, "")
 	if err != nil {

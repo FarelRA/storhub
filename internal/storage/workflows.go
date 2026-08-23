@@ -556,6 +556,7 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 	pm.meta = &clone
 	pm.sha = sha
 	pm.dirty = false // Just stored, so not dirty
+	pm.hydrated = true
 	pm.mu.Unlock()
 }
 

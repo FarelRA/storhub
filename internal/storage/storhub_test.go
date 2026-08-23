@@ -3844,8 +3844,8 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	input := writeTempFile(t, t.TempDir(), "revive.txt", []byte("survives eviction"))
-	if _, err := hub.UploadFileContext(ctx, project, "docs/revive.txt", input); err != nil {
+	seed := writeTempFile(t, t.TempDir(), "revive.txt", []byte("survives eviction"))
+	if _, err := hub.UploadFileContext(ctx, project, "docs/revive.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 
@@ -3911,4 +3911,136 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("revived metadata never committed the late mutation")
+}
+
+// TestExpectedRevisionCAS pins the compare-and-swap primitive: a mutation
+// carrying WithExpectedRevision succeeds only while the remote metadata
+// revision still matches the declared one.
+func TestExpectedRevisionCAS(t *testing.T) {
+	backend := newMockGitHub(t)
+	cfg := Config{
+		ChunkSize:              32 << 20,
+		BufferSize:             testSingleBufferSize,
+		MaxRetries:             0,
+		MetadataCommitInterval: time.Hour, // keep commits manual
+		DisableGitBackend:      true,
+	}
+	hub := backend.newClient(t, cfg)
+	ctx := context.Background()
+	project := "project-cas"
+
+	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	rev, err := hub.RevisionContext(ctx, project)
+	if err != nil || rev == "" {
+		t.Fatalf("revision: %q %v", rev, err)
+	}
+
+	seed := writeTempFile(t, t.TempDir(), "cas.txt", []byte("guarded payload"))
+	if _, err := hub.UploadFileContext(ctx, project, "docs/cas.txt", seed); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush seed: %v", err)
+	}
+	// Capture AFTER all seeding so the expectation matches current HEAD.
+	guardedRev, err := hub.RevisionContext(ctx, project)
+	if err != nil {
+		t.Fatalf("guarded revision: %v", err)
+	}
+	if _, err := hub.AppendFileContext(ctx, project, "docs/cas.txt", []byte("x"), shfs.WithExpectedRevision(guardedRev)); err != nil {
+		t.Fatalf("mutation under matching revision must succeed: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush guarded change: %v", err)
+	}
+
+	// Advance the remote behind the first client's back.
+	other := backend.newClient(t, cfg)
+	if err := other.MkdirContext(ctx, project, "competing"); err != nil {
+		t.Fatalf("competing mkdir: %v", err)
+	}
+	if err := other.FlushMetadata(ctx); err != nil {
+		t.Fatalf("competing flush: %v", err)
+	}
+
+	staleRev := rev // captured before the competing writer advanced HEAD
+	err = hub.DeleteFileContext(ctx, project, "docs/cas.txt", shfs.WithExpectedRevision(staleRev))
+	if !errors.Is(err, shfs.ErrPreconditionFailed) {
+		t.Fatalf("stale revision must fail with ErrPreconditionFailed, got %v", err)
+	}
+
+	// Re-reading and retrying converges.
+	freshRev, err := hub.RevisionContext(ctx, project)
+	if err != nil {
+		t.Fatalf("fresh revision: %v", err)
+	}
+	if freshRev == staleRev {
+		t.Fatal("remote revision should have advanced")
+	}
+	observer := backend.newClient(t, cfg)
+	files, _ := observer.ListFiles(project)
+	t.Logf("remote files after competing write: %v", files)
+	if _, err := hub.StatPathContext(ctx, project, "docs/cas.txt"); err != nil {
+		t.Fatalf("precondition debug: cas.txt visibility: %v", err)
+	}
+	if err := hub.DeleteFileContext(ctx, project, "docs/cas.txt", shfs.WithExpectedRevision(freshRev)); err != nil {
+		t.Fatalf("mutation under fresh revision must succeed: %+v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush delete: %v", err)
+	}
+}
+
+// TestColdCacheMutationDoesNotClobberRemote pins the hydration guard: a
+// mutation issued from a process that never loaded the project must adopt
+// remote state instead of committing an empty tree over it.
+func TestColdCacheMutationDoesNotClobberRemote(t *testing.T) {
+	backend := newMockGitHub(t)
+	cfg := Config{
+		ChunkSize:              32 << 20,
+		BufferSize:             testSingleBufferSize,
+		MaxRetries:             0,
+		MetadataCommitInterval: time.Hour,
+		DisableGitBackend:      true,
+	}
+	writer := backend.newClient(t, cfg)
+	ctx := context.Background()
+	project := "project-cold-cache"
+
+	if err := writer.MkdirContext(ctx, project, "docs"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	input := writeTempFile(t, t.TempDir(), "keep.txt", []byte("precious"))
+	if _, err := writer.UploadFileContext(ctx, project, "docs/keep.txt", input); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if err := writer.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// A second, completely cold client mutates the same project.
+	cold := backend.newClient(t, cfg)
+	if err := cold.MkdirContext(ctx, project, "latecomer"); err != nil {
+		t.Fatalf("cold mkdir: %v", err)
+	}
+	if err := cold.FlushMetadata(ctx); err != nil {
+		t.Fatalf("cold flush: %v", err)
+	}
+
+	observer := backend.newClient(t, cfg)
+	entry, err := observer.StatPathContext(ctx, project, "docs/keep.txt")
+	if err != nil {
+		t.Fatalf("cold-cache mutation clobbered remote state; docs/keep.txt missing: %v", err)
+	}
+	if entry.Size != int64(len("precious")) {
+		t.Fatalf("kept file corrupted by cold-cache mutation: %+v", entry)
+	}
+	if _, err := observer.StatPathContext(ctx, project, "latecomer"); err != nil {
+		t.Fatalf("cold mutation did not land: %v", err)
+	}
 }

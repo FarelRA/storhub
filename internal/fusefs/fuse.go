@@ -249,7 +249,7 @@ type Hub interface {
 	MkdirContext(context.Context, string, string) error
 	UnlinkContext(context.Context, string, string) error
 	RmdirContext(context.Context, string, string) error
-	TruncateFileContext(context.Context, string, string, int64) (*metadata.FileMeta, error)
+	TruncateFileContext(context.Context, string, string, int64, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	ChmodContext(context.Context, string, string, uint32) error
 	ChownContext(context.Context, string, string, uint32, uint32) error
 	ChtimesContext(context.Context, string, string, int64, int64) error
@@ -263,8 +263,8 @@ type Hub interface {
 	ApplyMetadataPatchContext(context.Context, string, string, shfs.MetadataPatch) error
 	DownloadFileContext(context.Context, string, string, string) error
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
-	PatchFileContext(context.Context, string, string, int64, int64, []byte) (*metadata.FileMeta, error)
-	ReplaceFileContext(context.Context, string, string, string) (*metadata.FileMeta, error)
+	PatchFileContext(context.Context, string, string, int64, int64, []byte, ...shfs.MutateOption) (*metadata.FileMeta, error)
+	ReplaceFileContext(context.Context, string, string, string, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)

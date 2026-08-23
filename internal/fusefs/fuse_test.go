@@ -1113,7 +1113,7 @@ func (s *stubHub) CreateFileContext(ctx context.Context, project, target string)
 func (*stubHub) MkdirContext(context.Context, string, string) error  { return nil }
 func (*stubHub) UnlinkContext(context.Context, string, string) error { return nil }
 func (*stubHub) RmdirContext(context.Context, string, string) error  { return nil }
-func (s *stubHub) TruncateFileContext(ctx context.Context, project, target string, size int64) (*meta.FileMeta, error) {
+func (s *stubHub) TruncateFileContext(ctx context.Context, project, target string, size int64, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
 	if s.truncateFile != nil {
 		return s.truncateFile(ctx, project, target, size)
 	}
@@ -1178,13 +1178,13 @@ func (s *stubHub) ReadFileAtContext(ctx context.Context, project, target string,
 	}
 	return []byte{}, nil
 }
-func (s *stubHub) PatchFileContext(ctx context.Context, project, target string, off, del int64, edit []byte) (*meta.FileMeta, error) {
+func (s *stubHub) PatchFileContext(ctx context.Context, project, target string, off, del int64, edit []byte, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
 	if s.patchFile != nil {
 		return s.patchFile(ctx, project, target, off, del, edit)
 	}
 	return nil, nil
 }
-func (s *stubHub) ReplaceFileContext(ctx context.Context, project, target, inputPath string) (*meta.FileMeta, error) {
+func (s *stubHub) ReplaceFileContext(ctx context.Context, project, target, inputPath string, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
 	if s.replaceFile != nil {
 		return s.replaceFile(ctx, project, target, inputPath)
 	}

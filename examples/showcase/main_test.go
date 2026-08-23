@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -102,10 +103,10 @@ func (f *fakeShowcaseHub) MkdirContext(ctx context.Context, project, dirPath str
 func (f *fakeShowcaseHub) CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte{}), nil
 }
-func (f *fakeShowcaseHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, append(make([]byte, offset), data...)), nil
 }
-func (f *fakeShowcaseHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, data), nil
 }
 func (f *fakeShowcaseHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
@@ -114,16 +115,16 @@ func (f *fakeShowcaseHub) ReadFileAtContext(ctx context.Context, project, filePa
 func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte("alpha")), nil
 }
 func (f *fakeShowcaseHub) UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error) {
 	return fileMeta(remotePath, []byte("StorHub guide\n")), nil
 }
-func (f *fakeShowcaseHub) ReplaceFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(remotePath, []byte("StorHub guide v2\n")), nil
 }
-func (f *fakeShowcaseHub) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte("StorHub showcase guide\n")), nil
 }
 func (f *fakeShowcaseHub) DownloadFileContext(ctx context.Context, project, remotePath, localPath string) error {
@@ -186,7 +187,7 @@ func (f *fakeShowcaseHub) StatPathContext(ctx context.Context, project, targetPa
 func (f *fakeShowcaseHub) StatFSContext(ctx context.Context, project string) (*storhub.FSStats, error) {
 	return &storhub.FSStats{Files: 2, Directories: 3, Inodes: 5, Bytes: 42, Releases: 1, Assets: 2}, nil
 }
-func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string) error {
+func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
 	return nil
 }
 func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string) error {
