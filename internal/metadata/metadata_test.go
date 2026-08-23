@@ -556,3 +556,58 @@ func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
 		t.Fatal("non-numeric tag must not parse")
 	}
 }
+
+// TestNormalizeRespectsExplicitTimestamps pins the additive v3 marker: once
+// timestamps are authoritative (metadata patch), zero means the epoch and
+// must survive load-time backfill.
+func TestNormalizeRespectsExplicitTimestamps(t *testing.T) {
+	f := &FileMeta{TimesExplicit: true}
+	f.Normalize(1700000000)
+	if f.UploadedAt != 0 || f.ModifiedAt != 0 || f.AccessedAt != 0 || f.ChangedAt != 0 {
+		t.Fatalf("explicit zeros were backfilled: %+v", f)
+	}
+
+	d := &DirMeta{TimesExplicit: true}
+	d.Normalize(1700000000)
+	if d.CreatedAt != 0 || d.ModifiedAt != 0 {
+		t.Fatalf("dir explicit zeros were backfilled: %+v", d)
+	}
+
+	// Legacy entries without the marker keep the repair behavior.
+	legacy := &FileMeta{}
+	legacy.Normalize(1700000000)
+	if legacy.UploadedAt != 1700000000 {
+		t.Fatalf("legacy backfill broken: %+v", legacy)
+	}
+	if legacy.TimesExplicit {
+		t.Fatal("normalize must not set the marker itself")
+	}
+}
+
+// TestTimesExplicitRoundTrip verifies JSON encoding keeps the marker and
+// that old readers ignoring "tsx" still decode the entry.
+func TestTimesExplicitRoundTrip(t *testing.T) {
+	f := &FileMeta{TimesExplicit: true, Size: 3}
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back FileMeta
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !back.TimesExplicit {
+		t.Fatal("marker lost across JSON")
+	}
+	if !strings.Contains(string(data), `"tsx":true`) {
+		t.Fatalf("expected compact tsx field, got %s", data)
+	}
+	// Legacy payload without the field decodes cleanly.
+	var legacy FileMeta
+	if err := json.Unmarshal([]byte(`{"s":1,"ua":5}`), &legacy); err != nil {
+		t.Fatalf("legacy decode: %v", err)
+	}
+	if legacy.TimesExplicit {
+		t.Fatal("marker must default false for legacy payloads")
+	}
+}
