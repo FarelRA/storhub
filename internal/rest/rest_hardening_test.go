@@ -65,6 +65,33 @@ func TestUpstreamErrorsAreSanitized(t *testing.T) {
 	}
 }
 
+func TestUpstreamNotFoundSanitizedAndCoded(t *testing.T) {
+	err := &ghapi.APIError{StatusCode: 404, Message: `{"message":"Not Found","documentation_url":"https://docs.github.com"}`}
+	if status := mappedStatus(err); status != http.StatusNotFound {
+		t.Fatalf("upstream 404 should map to 404, got %d", status)
+	}
+	handler := &restHandler{
+		client: newFakeRESTClient(),
+		opts:   Options{AllowAnonymous: true}.withDefaults(),
+		shares: &shareRegistry{items: map[string]*shareRecord{}},
+	}
+	rec := httptest.NewRecorder()
+	handler.writeMappedError(rec, err)
+	body := rec.Body.String()
+	if strings.Contains(body, "documentation_url") || strings.Contains(body, "Not Found") {
+		t.Fatalf("upstream body leaked to client: %s", body)
+	}
+	if !strings.Contains(body, `"code":"not_found"`) || !strings.Contains(body, "upstream GitHub request failed") {
+		t.Fatalf("unexpected sanitized error envelope: %s", body)
+	}
+}
+
+func TestMappedCodeNamesBadGateway(t *testing.T) {
+	if code := mappedCode(http.StatusBadGateway); code != "bad_gateway" {
+		t.Fatalf("502 must map to bad_gateway, got %q", code)
+	}
+}
+
 func TestShareDownloadSupportsHead(t *testing.T) {
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{

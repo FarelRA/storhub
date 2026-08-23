@@ -908,13 +908,15 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(status)
-	for offset := start; offset < end; offset += h.opts.StreamChunkSize {
+	sent := int64(0)
+	for offset := start; offset < end; {
 		readLen := h.opts.StreamChunkSize
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
 		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
 			return
 		}
 		if len(chunk) == 0 {
@@ -923,6 +925,10 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		if _, writeErr := w.Write(chunk); writeErr != nil {
 			return
 		}
+		// Advance by the bytes actually read: short reads must not skip
+		// data (a concurrent shrink clamps ReadFileAt to live size).
+		offset += int64(len(chunk))
+		sent += int64(len(chunk))
 	}
 }
 
@@ -1898,9 +1904,12 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 	status := mappedStatus(err)
 	code := mappedCode(status)
 	message := err.Error()
-	if status == http.StatusBadGateway {
+	var apiErr *ghapi.APIError
+	if errors.As(err, &apiErr) {
 		// Upstream (GitHub) failures can echo request URLs, tokens, and
-		// infrastructure details; sanitize what we forward to clients.
+		// infrastructure details in their bodies and Error() text; the
+		// client learns the upstream class through the mapped status, so
+		// no raw upstream message is ever forwarded.
 		message = "upstream GitHub request failed"
 	}
 	h.writeError(w, status, code, message)
@@ -1918,9 +1927,9 @@ func mappedStatus(err error) int {
 		switch {
 		case apiErr.NotFound():
 			return http.StatusNotFound
-		case apiErr.IsRetryable():
-			return http.StatusBadGateway
 		default:
+			// Every other upstream answer is GitHub's failure, not this
+			// server's: surface it as a gateway-class error.
 			return http.StatusBadGateway
 		}
 	}
@@ -1960,6 +1969,8 @@ func mappedCode(status int) string {
 		return "range_not_satisfiable"
 	case http.StatusMethodNotAllowed:
 		return "method_not_allowed"
+	case http.StatusBadGateway:
+		return "bad_gateway"
 	case http.StatusNotImplemented:
 		return "not_implemented"
 	default:
