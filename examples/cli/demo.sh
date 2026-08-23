@@ -31,37 +31,37 @@ cd "$REPO_ROOT"
 
 echo
 echo "== Create directories =="
-"${CLI[@]}" mkdir --token "$GITHUB_TOKEN" "$PROJECT" docs
-"${CLI[@]}" mkdir --token "$GITHUB_TOKEN" "$PROJECT" docs/specs
+"${CLI[@]}" mkdir "$PROJECT" docs
+"${CLI[@]}" mkdir "$PROJECT" docs/specs
 
 echo
 echo "== Upload and replace =="
-"${CLI[@]}" upload --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt "$TMP_DIR/readme-v1.txt"
-"${CLI[@]}" replace --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt "$TMP_DIR/readme-v2.txt"
+"${CLI[@]}" upload "$PROJECT" docs/specs/readme.txt "$TMP_DIR/readme-v1.txt"
+"${CLI[@]}" replace "$PROJECT" docs/specs/readme.txt "$TMP_DIR/readme-v2.txt"
 
 echo
 echo "== Patch and inspect =="
-"${CLI[@]}" patch --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt 6 4 there
-"${CLI[@]}" ls --token "$GITHUB_TOKEN" "$PROJECT" docs/specs
-"${CLI[@]}" stat --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt
-"${CLI[@]}" cat --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt
+"${CLI[@]}" patch "$PROJECT" docs/specs/readme.txt 6 4 there
+"${CLI[@]}" ls "$PROJECT" docs/specs
+"${CLI[@]}" stat "$PROJECT" docs/specs/readme.txt
+"${CLI[@]}" cat "$PROJECT" docs/specs/readme.txt
 
 echo
 echo "== Rename and download =="
-"${CLI[@]}" mv --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/readme.txt docs/specs/guide.txt
-"${CLI[@]}" download --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/guide.txt "$TMP_DIR/downloaded.txt"
+"${CLI[@]}" mv "$PROJECT" docs/specs/readme.txt docs/specs/guide.txt
+"${CLI[@]}" download "$PROJECT" docs/specs/guide.txt "$TMP_DIR/downloaded.txt"
 cat "$TMP_DIR/downloaded.txt"
 
 echo
 echo "== Revisions =="
-"${CLI[@]}" revisions --token "$GITHUB_TOKEN" "$PROJECT"
+"${CLI[@]}" revisions "$PROJECT"
 
 echo
 echo "== Cleanup one file =="
-"${CLI[@]}" rm --token "$GITHUB_TOKEN" "$PROJECT" docs/specs/guide.txt
+"${CLI[@]}" rm "$PROJECT" docs/specs/guide.txt
 
 if [ -n "${STORHUB_MOUNT_POINT:-}" ]; then
   echo
   echo "== Optional mount command =="
-  echo "go run ./cmd/storhub mount --token \"$GITHUB_TOKEN\" \"$PROJECT\" \"$STORHUB_MOUNT_POINT\""
+  echo "GITHUB_TOKEN is set; run: go run ./cmd/storhub mount \"$PROJECT\" \"$STORHUB_MOUNT_POINT\""
 fi

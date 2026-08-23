@@ -26,6 +26,7 @@ import (
 var version = "dev"
 
 type App struct {
+	stdin   io.Reader
 	stdout  *os.File
 	stderr  *os.File
 	rootCmd *cobra.Command
@@ -63,7 +64,7 @@ type storhubClient struct {
 }
 
 var (
-	cliLogLevel  = envOrDefault("STORHUB_LOG_LEVEL", "debug")
+	cliLogLevel  = envOrDefault("STORHUB_LOG_LEVEL", "info")
 	cliLogFormat = envOrDefault("STORHUB_LOG_FORMAT", "pretty")
 	cliLogColor  = parseEnvBool("STORHUB_LOG_COLOR", true)
 )
@@ -108,7 +109,7 @@ func normalizeCLIChunkSize(size int64) int64 {
 }
 
 func New() *App {
-	a := &App{stdout: os.Stdout, stderr: os.Stderr}
+	a := &App{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
 	a.buildRootCmd()
 	return a
 }
@@ -135,12 +136,17 @@ Examples:
 		Version:       version,
 	}
 	rootCmd.SetVersionTemplate("storhub {{.Version}}\n")
+	// Flag misuse is a usage error: main exits 2 and the shell knows the
+	// difference between "bad command line" and "operation failed".
+	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return &usageError{err}
+	})
 
 	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
-	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL")
-	rootCmd.PersistentFlags().StringVar(&cliLogLevel, "log-level", cliLogLevel, "Log level: debug, info, warn, error")
-	rootCmd.PersistentFlags().StringVar(&cliLogFormat, "log-format", cliLogFormat, "Log format: pretty, text")
-	rootCmd.PersistentFlags().BoolVar(&cliLogColor, "log-color", cliLogColor, "Enable ANSI colors in logs")
+	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
+	rootCmd.PersistentFlags().StringVar(&cliLogLevel, "log-level", cliLogLevel, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
+	rootCmd.PersistentFlags().StringVar(&cliLogFormat, "log-format", cliLogFormat, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
+	rootCmd.PersistentFlags().BoolVar(&cliLogColor, "log-color", cliLogColor, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
 
 	rootCmd.AddCommand(a.newUploadCmd())
 	rootCmd.AddCommand(a.newReplaceCmd())
@@ -167,7 +173,7 @@ func (a *App) newUploadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upload [flags] <project> <remote-path> <local-path>",
 		Short: "Upload a file",
-		Args:  cobra.ExactArgs(3),
+		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
 	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
@@ -179,7 +185,7 @@ func (a *App) newReplaceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replace [flags] <project> <remote-path> <local-path>",
 		Short: "Replace an existing file",
-		Args:  cobra.ExactArgs(3),
+		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
 	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
@@ -191,7 +197,7 @@ func (a *App) newDownloadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "download [flags] <project> <remote-path> <local-path>",
 		Short: "Download a file",
-		Args:  cobra.ExactArgs(3),
+		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runDownload,
 	}
 }
@@ -200,7 +206,7 @@ func (a *App) newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ls [flags] <project> [path]",
 		Short: "List directory contents",
-		Args:  cobra.RangeArgs(1, 2),
+		Args:  usageArgs(cobra.RangeArgs(1, 2)),
 		RunE:  a.runList,
 	}
 	cmd.Flags().BoolP("long", "l", false, "Show detailed listing")
@@ -211,7 +217,7 @@ func (a *App) newStatCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stat [flags] <project> <path>",
 		Short: "Show file/directory metadata",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runStat,
 	}
 }
@@ -220,7 +226,7 @@ func (a *App) newCatCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cat [flags] <project> <path>",
 		Short: "Print file contents to stdout",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runCat,
 	}
 }
@@ -229,7 +235,7 @@ func (a *App) newMkdirCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mkdir [flags] <project> <path>",
 		Short: "Create a directory",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runMkdir,
 	}
 }
@@ -238,7 +244,7 @@ func (a *App) newRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rm [flags] <project> <path>",
 		Short: "Remove a file or directory",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runRemove,
 	}
 	cmd.Flags().BoolP("recursive", "r", false, "Remove directory instead of file")
@@ -249,7 +255,7 @@ func (a *App) newMoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mv [flags] <project> <old-path> <new-path>",
 		Short: "Move or rename a file/directory",
-		Args:  cobra.ExactArgs(3),
+		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runMove,
 	}
 }
@@ -258,7 +264,7 @@ func (a *App) newAppendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "append [flags] <project> <path> <text>",
 		Short: "Append text to a file",
-		Args:  cobra.ExactArgs(3),
+		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runAppend,
 	}
 }
@@ -267,7 +273,7 @@ func (a *App) newWriteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "write [flags] <project> <path> <offset> <text>",
 		Short: "Write data at a byte offset",
-		Args:  cobra.ExactArgs(4),
+		Args:  usageArgs(cobra.ExactArgs(4)),
 		RunE:  a.runWrite,
 	}
 }
@@ -276,7 +282,7 @@ func (a *App) newPatchCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "patch [flags] <project> <path> <offset> <delete-size> <text>",
 		Short: "Delete and insert at an offset",
-		Args:  cobra.ExactArgs(5),
+		Args:  usageArgs(cobra.ExactArgs(5)),
 		RunE:  a.runPatch,
 	}
 }
@@ -285,7 +291,7 @@ func (a *App) newRevisionsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "revisions [flags] <project>",
 		Short: "List metadata revision history",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE:  a.runRevisions,
 	}
 }
@@ -294,7 +300,7 @@ func (a *App) newRollbackCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rollback [flags] <project> <commit-sha>",
 		Short: "Rollback metadata to a commit",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runRollback,
 	}
 }
@@ -306,7 +312,7 @@ func (a *App) newPurgeCmd() *cobra.Command {
 		Long: `Purge deletes GitHub releases and assets that are not tracked in the project metadata.
 
 This cleans up orphaned releases and assets (e.g. from interrupted writes or manual interference).`,
-		Args: cobra.ExactArgs(1),
+		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runPurge,
 	}
 }
@@ -315,11 +321,11 @@ func (a *App) newMountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mount [flags] <project> <mount-point>",
 		Short: "FUSE mount a project",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runMount,
 	}
 	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
-	cmd.Flags().Bool("debug", true, "Enable FUSE debug logging")
+	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
 	cmd.Flags().String("cache-dir", "", "Optional cache directory")
 	return cmd
 }
@@ -357,12 +363,77 @@ func (a *App) logf(format string, args ...any) {
 	_, _ = fmt.Fprintf(a.stderr, "%s storhub: %s\n", stamp, fmt.Sprintf(format, args...))
 }
 
+// readDataArg treats the literal "-" as "read the payload from stdin",
+// matching standard filter convention.
+func readDataArg(a *App, value string) ([]byte, error) {
+	if value != "-" {
+		return []byte(value), nil
+	}
+	data, err := io.ReadAll(a.stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read stdin: %w", err)
+	}
+	return data, nil
+}
+
+// usageError marks flag/argument misuse so main can exit with 2 instead of 1.
+type usageError struct{ err error }
+
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }
+
+// IsUsageError reports whether err stems from flag or argument misuse.
+func IsUsageError(err error) bool {
+	var u *usageError
+	return errors.As(err, &u)
+}
+
+func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := validate(cmd, args); err != nil {
+			return &usageError{err}
+		}
+		return nil
+	}
+}
+
 type restAuthFile struct {
 	Realm           string        `json:"realm"`
 	TokenSigningKey string        `json:"token_signing_key"`
-	TokenTTL        time.Duration `json:"token_ttl"`
+	TokenTTL        flexDuration  `json:"token_ttl"`
 	Users           []shrest.User `json:"users"`
 }
+
+// flexDuration accepts either a Go duration string ("2h", "30m") or a bare
+// JSON number meaning SECONDS. time.Duration's own unmarshaler would read a
+// number as nanoseconds — the difference between an hour and 3.6
+// microseconds, silently.
+type flexDuration time.Duration
+
+func (d *flexDuration) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "null" {
+		*d = 0
+		return nil
+	}
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		parsed, err := time.ParseDuration(strings.Trim(raw, `"`))
+		if err != nil {
+			return fmt.Errorf("token_ttl: %w", err)
+		}
+		*d = flexDuration(parsed)
+		return nil
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fmt.Errorf("token_ttl must be a duration string or seconds: %w", err)
+	}
+	*d = flexDuration(time.Duration(seconds * float64(time.Second)))
+	return nil
+}
+
+// Duration exposes the parsed value.
+func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 
 func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
@@ -400,9 +471,12 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	if err := hub.DownloadFile(args[0], args[1], args[2]); err != nil {
 		return err
 	}
+	// The size in the status line is a nicety; a failed stat of the file we
+	// just wrote must not turn success into exit code 1.
 	info, err := os.Stat(args[2])
 	if err != nil {
-		return err
+		fmt.Fprintf(a.stderr, "downloaded %s to %s\n", args[1], args[2])
+		return nil
 	}
 	fmt.Fprintf(a.stderr, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
 	return nil
@@ -517,7 +591,11 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.AppendFile(args[0], args[1], []byte(args[2]))
+	payload, err := readDataArg(a, args[2])
+	if err != nil {
+		return err
+	}
+	meta, err := hub.AppendFile(args[0], args[1], payload)
 	if err != nil {
 		return err
 	}
@@ -536,7 +614,11 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.WriteFileAt(args[0], args[1], offset, []byte(args[3]))
+	payload, err := readDataArg(a, args[3])
+	if err != nil {
+		return err
+	}
+	meta, err := hub.WriteFileAt(args[0], args[1], offset, payload)
 	if err != nil {
 		return err
 	}
@@ -559,7 +641,11 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.PatchFile(args[0], args[1], offset, deleteSize, []byte(args[4]))
+	edit, err := readDataArg(a, args[4])
+	if err != nil {
+		return err
+	}
+	meta, err := hub.PatchFile(args[0], args[1], offset, deleteSize, edit)
 	if err != nil {
 		return err
 	}
@@ -749,6 +835,13 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	return restListenAndServeFn(server)
 }
 
+// httpLogsEnabled reports whether the configured level wants per-request
+// HTTP lines; at error level they are pure noise.
+func httpLogsEnabled() bool {
+	level := shlog.NormalizeLevel(cliLogLevel)
+	return level == shlog.LevelDebug || level == shlog.LevelInfo || level == shlog.LevelWarn
+}
+
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	if next == nil {
 		return nil
@@ -756,9 +849,13 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
+		if httpLogsEnabled() {
+			a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
+		}
 		next.ServeHTTP(wrapped, r)
-		a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.status, time.Since(start).Round(time.Millisecond))
+		if httpLogsEnabled() {
+			a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.status, time.Since(start).Round(time.Millisecond))
+		}
 	})
 }
 
@@ -789,7 +886,7 @@ func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 		Realm:           file.Realm,
 		Users:           file.Users,
 		TokenSigningKey: key,
-		TokenTTL:        file.TokenTTL,
+		TokenTTL:        file.TokenTTL.Duration(),
 	}, nil
 }
 
@@ -803,6 +900,10 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*stor
 		cfg.APIBaseURL = apiBase
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
+		if normalized != chunkSize {
+			fmt.Fprintf(os.Stderr, "%s storhub: warning: --chunk-size %d below floor %d; using %d\n",
+				time.Now().UTC().Format(time.RFC3339), chunkSize, minCLIChunkSize, normalized)
+		}
 		cfg.ChunkSize = normalized
 	}
 	cfg.CreatePublicRepo = public

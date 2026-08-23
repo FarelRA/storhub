@@ -39,6 +39,8 @@ func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {
 }
 
 func printEntryInfo(w io.Writer, entry *storhub.EntryInfo) {
+	// Defensive: production callers bail out on stat errors first, but the
+	// renderer stays total so a nil can never panic a future caller.
 	if entry == nil {
 		fmt.Fprintln(w, "not found")
 		return
