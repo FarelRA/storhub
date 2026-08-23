@@ -28,7 +28,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer fsys.Close()
-	if fsys.Options().PageSize != DefaultOptions().PageSize {
+	if fsys.Options().OverlayBufferSize != DefaultOptions().OverlayBufferSize {
 		t.Fatalf("expected defaults to be applied: %+v", fsys.Options())
 	}
 	if got := strings.Join(fsys.Options().ExtraMountOpts, ","); got != "noatime" {
@@ -69,7 +69,7 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 
 func TestWriteStateAndRangeHelpers(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 
 func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 
 func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 
 func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 
 func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 
 func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 			}
 			return append([]byte(nil), data[off:end]...), nil
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1317,7 +1317,7 @@ func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 // Shrinking then regrowing must serve zeros for the regrown region, never
 // stale bytes from before the shrink.
 func TestSetSizeRegrowServesZeros(t *testing.T) {
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), PageSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4, CleanupInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}

@@ -353,8 +353,8 @@ func runShowcase(ctx context.Context, hub showcaseHub, workspace, project string
 func previewFUSE(hub *storhub.StorHub, project string) error {
 	storhubOpts := storhub.DefaultFUSEOptions()
 	fuseOpts := storfuse.DefaultOptions()
-	if storhubOpts.PageSize != fuseOpts.PageSize {
-		return fmt.Errorf("fuse default mismatch: storhub=%d fuse=%d", storhubOpts.PageSize, fuseOpts.PageSize)
+	if storhubOpts.OverlayBufferSize != fuseOpts.OverlayBufferSize {
+		return fmt.Errorf("fuse default mismatch: storhub=%d fuse=%d", storhubOpts.OverlayBufferSize, fuseOpts.OverlayBufferSize)
 	}
 	fsys, err := storfuse.New(hub, project, fuseOpts)
 	if err != nil {
@@ -362,7 +362,7 @@ func previewFUSE(hub *storhub.StorHub, project string) error {
 	}
 	defer fsys.Close()
 	printSection("FUSE Preview")
-	printKV("page size", "%d", fsys.Options().PageSize)
+	printKV("page size", "%d", fsys.Options().OverlayBufferSize)
 	printKV("cache dir", "%s", fsys.Options().CacheDir)
 	fmt.Println()
 	return nil

@@ -48,16 +48,16 @@ type Options struct {
 	AttrTimeout     time.Duration
 	NegativeTimeout time.Duration
 	CleanupInterval time.Duration
-	// PageSize is the size of each buffer allocated by overlay copy loops
+	// OverlayBufferSize is the size of each buffer allocated by overlay copy loops
 	// (snapshot materialization, range reads). It bounds resident memory per
 	// copying handle and is independent of the storage chunk size, which
 	// only governs how dirty ranges align to remote chunks.
-	PageSize       int64
-	ExtraMountOpts []string
-	CacheDir       string
-	AllowOther     bool
-	Debug          bool
-	Logger         *slog.Logger
+	OverlayBufferSize int64
+	ExtraMountOpts    []string
+	CacheDir          string
+	AllowOther        bool
+	Debug             bool
+	Logger            *slog.Logger
 }
 
 type Filesystem struct {
@@ -80,10 +80,15 @@ type Filesystem struct {
 	handles     map[uint64]*storhubHandle
 	nextHandle  atomic.Uint64
 	cacheDir    string
-	stopJanitor chan struct{}
-	janitorDone chan struct{}
-	closing     bool
-	unmounted   bool
+	// protectedTemps holds paths of in-flight commit snapshots
+	// (inode-commit-*, inode-ranges-*) so the janitor cannot unlink a
+	// file that a network step is still consuming by path.
+	protectedMu    sync.Mutex
+	protectedTemps map[string]struct{}
+	stopJanitor    chan struct{}
+	janitorDone    chan struct{}
+	closing        bool
+	unmounted      bool
 }
 
 type lockRecord struct {
@@ -213,19 +218,19 @@ type (
 	TestHandle = storhubHandle
 )
 
-// defaultPageSize bounds each overlay copy-loop allocation when the embedder
-// did not configure Options.PageSize.
-const defaultPageSize = 128 * 1024
+// defaultOverlayBufferSize bounds each overlay copy-loop allocation when
+// the embedder did not configure Options.OverlayBufferSize.
+const defaultOverlayBufferSize = 128 * 1024
 
 func DefaultOptions() Options {
 	return Options{
-		EntryTimeout:    60 * time.Second,
-		AttrTimeout:     60 * time.Second,
-		NegativeTimeout: 10 * time.Second,
-		CleanupInterval: 30 * time.Second,
-		PageSize:        defaultPageSize,
-		ExtraMountOpts:  []string{"noatime"},
-		Debug:           true,
+		EntryTimeout:      60 * time.Second,
+		AttrTimeout:       60 * time.Second,
+		NegativeTimeout:   10 * time.Second,
+		CleanupInterval:   30 * time.Second,
+		OverlayBufferSize: defaultOverlayBufferSize,
+		ExtraMountOpts:    []string{"noatime"},
+		Debug:             true,
 	}
 }
 
@@ -290,8 +295,8 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if opts.CleanupInterval <= 0 {
 		opts.CleanupInterval = defaults.CleanupInterval
 	}
-	if opts.PageSize <= 0 {
-		opts.PageSize = defaults.PageSize
+	if opts.OverlayBufferSize <= 0 {
+		opts.OverlayBufferSize = defaults.OverlayBufferSize
 	}
 	if len(opts.ExtraMountOpts) == 0 {
 		opts.ExtraMountOpts = append([]string(nil), defaults.ExtraMountOpts...)
@@ -903,11 +908,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
-	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
-	var nlink int
-	if repo != nil {
-		nlink = repo.FileNLink(childPath)
-	}
+	nlink := n.fs.nlinkForEntry(childPath)
 	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
@@ -1173,11 +1174,7 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
-	var nlink int
-	if repo != nil {
-		nlink = repo.FileNLink(childPath)
-	}
+	nlink := n.fs.nlinkForEntry(childPath)
 	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
@@ -1205,11 +1202,7 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 		return nil, errnoFromError(err)
 	}
 	linkPath := path.Join(n.currentPath(), name)
-	repo, _, _ := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
-	var nlink int
-	if repo != nil {
-		nlink = repo.FileNLink(linkPath)
-	}
+	nlink := n.fs.nlinkForEntry(linkPath)
 	entry := entryInfoFromFile(linked, linkPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
@@ -1344,7 +1337,23 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 
 	// Network calls without lock
 	entry, err := h.fs.hub.StatPathContext(ctx, h.fs.project, targetPath)
-	if err == nil && entry.Size > 0 {
+	if err != nil {
+		// Propagate: silently treating stat failure as "empty file"
+		// would serve EOF for a readable handle whose remote stat
+		// merely hiccupped (same contract as the writeState twin).
+		if rmErr := temp.Close(); rmErr != nil {
+			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
+		}
+		if rmErr := os.Remove(temp.Name()); rmErr != nil {
+			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
+		}
+		h.mu.Lock()
+		h.temp = nil
+		h.tempPath = ""
+		h.mu.Unlock()
+		return err
+	}
+	if entry.Size > 0 {
 		if dlErr := h.fs.hub.DownloadFileContext(ctx, h.fs.project, targetPath, temp.Name()); dlErr != nil {
 			if err := temp.Close(); err != nil {
 				logging.Error(nil, "failed to close temp file after download error", "path", temp.Name(), "err", err)
@@ -2443,7 +2452,11 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 		h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
-	defer os.Remove(snapshotPath)
+	releaseSnapshot := h.fs.protectTemp(snapshotPath)
+	defer func() {
+		os.Remove(snapshotPath)
+		releaseSnapshot()
+	}()
 	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 	if err != nil {
@@ -2476,8 +2489,13 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 		h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
+	var releaseSnapshot func()
 	if cleanupSnapshot {
-		defer os.Remove(snapshotPath)
+		releaseSnapshot = h.fs.protectTemp(snapshotPath)
+		defer func() {
+			os.Remove(snapshotPath)
+			releaseSnapshot()
+		}()
 	}
 	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
 	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
@@ -2659,6 +2677,10 @@ func (h *storhubHandle) Setlk(ctx context.Context, owner uint64, lk *fuse.FileLo
 // filesystem's lock condition variable and are woken by any lock-table
 // change (or context cancellation) instead of polling.
 func (h *storhubHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	// flags carries FUSE_LK intent knobs beyond shared/exclusive type.
+	// Blocking semantics here are driven by lk.Type alone; honoring the
+	// remaining bits stays deferred until go-fuse round-trips them (see
+	// Getlk/Setlk, same discard).
 	_ = flags
 	if ctx != nil && ctx.Done() != nil {
 		// Wake the waiter promptly on cancellation.
@@ -2877,6 +2899,45 @@ func (s *Filesystem) runJanitor() {
 	}
 }
 
+// protectTemp marks a commit snapshot as janitor-immune until the returned
+// release func runs. Every creator of inode-commit-*/inode-ranges-* temps
+// must wrap its consumption window; otherwise a slow metadata load or
+// upload lets cleanupExpiredCache delete the file mid-commit.
+// nlinkForEntry reports the hard-link count for a freshly created entry.
+// A metadata load failure is logged and reported as 1 rather than silently
+// fabricated as 0; getattr refreshes the value on the next lookup anyway.
+func (s *Filesystem) nlinkForEntry(entryPath string) int {
+	repo, _, err := s.hub.LoadRepoMetadataReadonlyContext(context.Background(), s.project)
+	if err != nil {
+		s.errorf("nlink lookup failed path=%s err=%v", entryPath, err)
+		return 1
+	}
+	if repo == nil {
+		return 1
+	}
+	if n := repo.FileNLink(entryPath); n > 0 {
+		return n
+	}
+	return 1
+}
+
+func (s *Filesystem) protectTemp(p string) func() {
+	s.protectedMu.Lock()
+	if s.protectedTemps == nil {
+		s.protectedTemps = make(map[string]struct{})
+	}
+	s.protectedTemps[p] = struct{}{}
+	s.protectedMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.protectedMu.Lock()
+			delete(s.protectedTemps, p)
+			s.protectedMu.Unlock()
+		})
+	}
+}
+
 func (s *Filesystem) cleanupExpiredCache() {
 	s.mu.RLock()
 	handles := make([]*storhubHandle, 0, len(s.handles))
@@ -2908,6 +2969,11 @@ func (s *Filesystem) cleanupExpiredCache() {
 		}
 		writeState.mu.Unlock()
 	}
+	s.protectedMu.Lock()
+	for p := range s.protectedTemps {
+		openTemps[p] = struct{}{}
+	}
+	s.protectedMu.Unlock()
 	graceThreshold := time.Now().Add(-5 * time.Minute)
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
@@ -3053,12 +3119,12 @@ func normalizedChunkSize(chunkSize int64) int64 {
 }
 
 // copyPageSize returns the buffer size for overlay copy loops. It is the
-// configured PageSize (default applied at mount), capped by the normalized
+// configured OverlayBufferSize (default applied at mount), capped by the normalized
 // chunk size so it can never exceed a single chunk window.
 func (s *Filesystem) copyPageSize() int64 {
-	size := s.opts.PageSize
+	size := s.opts.OverlayBufferSize
 	if size <= 0 {
-		size = defaultPageSize
+		size = defaultOverlayBufferSize
 	}
 	if capSize := normalizedChunkSize(s.hub.ChunkSize()); size > capSize {
 		return capSize

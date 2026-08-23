@@ -88,7 +88,7 @@ func TestNewStorHubAndFUSEDefaults(t *testing.T) {
 		t.Fatalf("expected lazy owner resolution, got %q", hub.Owner())
 	}
 	defaults := fusefs.DefaultOptions()
-	if defaults.PageSize == 0 {
+	if defaults.OverlayBufferSize == 0 {
 		t.Fatalf("unexpected fuse defaults: %+v", defaults)
 	}
 	fs, err := hub.NewFUSE("valid-project", fusefs.Options{})
@@ -96,7 +96,7 @@ func TestNewStorHubAndFUSEDefaults(t *testing.T) {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	opts := fs.Options()
-	if opts.PageSize != defaults.PageSize || opts.EntryTimeout != defaults.EntryTimeout {
+	if opts.OverlayBufferSize != defaults.OverlayBufferSize || opts.EntryTimeout != defaults.EntryTimeout {
 		t.Fatalf("expected fuse defaults applied: %+v", opts)
 	}
 	if _, err := hub.NewFUSE("bad/name", fusefs.Options{}); err == nil {
