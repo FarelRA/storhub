@@ -670,3 +670,80 @@ func TestPathNormalizerConformance(t *testing.T) {
 		}
 	}
 }
+
+func TestSchemaV4KeysRoundTrip(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.EnsureDirectory("d", 1)
+	m.UpsertFile("d/f.txt", FileMeta{Size: 1, Chunks: []int64{7}, UploadedAt: 5, ModifiedAt: 6, AccessedAt: 7, ChangedAt: 8, Inode: 9}, 1)
+	blob, err := m.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(blob)
+	for _, legacy := range []string{`"ca"`, `"cha"`} {
+		if strings.Contains(s, legacy) {
+			t.Fatalf("legacy key %s must not be written by v4", legacy)
+		}
+	}
+	for _, want := range []string{`"cr":`, `"ch":`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("v4 key %s missing from output", want)
+		}
+	}
+	var back RepoMetadata
+	if err := back.FromJSON(blob); err != nil {
+		t.Fatal(err)
+	}
+	f := back.FindFile("d/f.txt")
+	if f == nil {
+		t.Fatal("file missing after round trip")
+	}
+	if f.ChangedAt != 8 || f.ModifiedAt != 6 || f.AccessedAt != 7 {
+		t.Fatalf("file timestamps lost in round trip: %+v", f)
+	}
+	if d, ok := back.Dirs["d"]; !ok || d.CreatedAt <= 0 || d.ChangedAt <= 0 {
+		t.Fatalf("dir timestamps lost in round trip: %+v", d)
+	}
+}
+
+func TestV3PayloadMigratesTimestamps(t *testing.T) {
+	v3 := `{
+	  "v":3,"p":"demo","tf":1,"ts":1,"lm":10,
+	  "rt":{"ca":100,"ma":101,"aa":102,"cha":103,"i":1},
+	  "d":{"olddir":{"ca":200,"ma":201,"cha":202}},
+	  "f":{"old.txt":{"s":1,"cs":[1],"ua":300,"ma":301,"aa":302,"ca":303,"i":5}},
+	  "r":{"v1":{"ac":1,"ca":400}},
+	  "ni":6,"nc":2
+	}`
+	var m RepoMetadata
+	if err := m.FromJSON([]byte(v3)); err != nil {
+		t.Fatalf("migrate v3: %v", err)
+	}
+	if m.Version != maxMetadataVersion {
+		t.Fatalf("version not advanced: %d", m.Version)
+	}
+	if m.Root.CreatedAt != 100 || m.Root.ChangedAt != 103 {
+		t.Fatalf("root legacy keys unmapped: %+v", m.Root)
+	}
+	d := m.Dirs["olddir"]
+	if d.CreatedAt != 200 || d.ChangedAt != 202 {
+		t.Fatalf("dir legacy keys unmapped: %+v", d)
+	}
+	f, ok := m.Files["old.txt"]
+	if !ok || f.ChangedAt != 303 || f.ModifiedAt != 301 {
+		t.Fatalf("file legacy ca (ChangedAt) unmapped: %+v", f)
+	}
+	r := m.Releases["v1"]
+	if r.CreatedAt != 400 {
+		t.Fatalf("release legacy key unmapped: %+v", r)
+	}
+	// Re-serialization must emit v4 spellings only.
+	blob, err := m.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(blob)
+	if strings.Contains(out, `"ca"`) || strings.Contains(out, `"cha"`) {
+		t.Fatal("migrated metadata still carries legacy keys")
+	}
+}

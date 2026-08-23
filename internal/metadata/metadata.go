@@ -79,7 +79,7 @@ type FileMeta struct {
 	UploadedAt int64   `json:"ua"`
 	ModifiedAt int64   `json:"ma,omitempty"`
 	AccessedAt int64   `json:"aa,omitempty"`
-	ChangedAt  int64   `json:"ca,omitempty"`
+	ChangedAt  int64   `json:"ch,omitempty"`
 	Mode       uint32  `json:"md,omitempty"`
 	UID        uint32  `json:"u,omitempty"`
 	GID        uint32  `json:"g,omitempty"`
@@ -103,10 +103,10 @@ func (f FileMeta) Clone() FileMeta {
 }
 
 type DirMeta struct {
-	CreatedAt  int64    `json:"ca"`
+	CreatedAt  int64    `json:"cr"`
 	ModifiedAt int64    `json:"ma"`
 	AccessedAt int64    `json:"aa,omitempty"`
-	ChangedAt  int64    `json:"cha,omitempty"`
+	ChangedAt  int64    `json:"ch,omitempty"`
 	Mode       uint32   `json:"m,omitempty"`
 	UID        uint32   `json:"u,omitempty"`
 	GID        uint32   `json:"g,omitempty"`
@@ -124,7 +124,63 @@ func (d DirMeta) Clone() DirMeta {
 
 type ReleaseRef struct {
 	AssetCount int   `json:"ac"`
-	CreatedAt  int64 `json:"ca"`
+	CreatedAt  int64 `json:"cr"`
+}
+
+// Schema v4 gave every timestamp an unambiguous key (cr/ch uniformly);
+// the legacy readers below keep v3 payloads ("ca"/"cha", where "ca"
+// meant ChangedAt on files but CreatedAt on dirs) loadable. Writers
+// always emit the new spelling.
+func (f *FileMeta) UnmarshalJSON(data []byte) error {
+	type alias FileMeta
+	var wire struct {
+		alias
+		LegacyChangedAt int64 `json:"ca"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*f = FileMeta(wire.alias)
+	if f.ChangedAt == 0 && !f.TimesExplicit {
+		f.ChangedAt = wire.LegacyChangedAt
+	}
+	return nil
+}
+
+func (d *DirMeta) UnmarshalJSON(data []byte) error {
+	type alias DirMeta
+	var wire struct {
+		alias
+		LegacyCreatedAt int64 `json:"ca"`
+		LegacyChangedAt int64 `json:"cha"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*d = DirMeta(wire.alias)
+	if d.CreatedAt == 0 {
+		d.CreatedAt = wire.LegacyCreatedAt
+	}
+	if d.ChangedAt == 0 {
+		d.ChangedAt = wire.LegacyChangedAt
+	}
+	return nil
+}
+
+func (r *ReleaseRef) UnmarshalJSON(data []byte) error {
+	type alias ReleaseRef
+	var wire struct {
+		alias
+		LegacyCreatedAt int64 `json:"ca"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*r = ReleaseRef(wire.alias)
+	if r.CreatedAt == 0 {
+		r.CreatedAt = wire.LegacyCreatedAt
+	}
+	return nil
 }
 
 func (r ReleaseRef) Clone() ReleaseRef {
@@ -162,7 +218,7 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().Unix()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
-		Version:     3,
+		Version:     maxMetadataVersion,
 		Project:     project,
 		NextInode:   2,
 		NextChunkID: 1,
@@ -243,7 +299,7 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 }
 
 // maxMetadataVersion is the newest schema version this build reads and writes.
-const maxMetadataVersion = 3
+const maxMetadataVersion = 4
 
 // xattrMapFromStrings converts legacy string-valued xattrs from v1/v2
 // payloads into the v3 byte representation.
