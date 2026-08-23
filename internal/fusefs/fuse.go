@@ -128,19 +128,34 @@ func (s *Filesystem) forgetNodeBookkeeping(n *storhubNode) {
 	}
 	// Lock records die with the node only once nothing can still exercise
 	// them: no open handle and no pending write state.
-	if s.hasOpenHandleFor(n.inode) || s.writeStates[n.inode] != nil {
+	if s.hasOpenHandleForLocked(n.inode) || s.writeStates[n.inode] != nil {
 		return
 	}
 	delete(s.lockTable, n.inode)
 }
 
-func (s *Filesystem) hasOpenHandleFor(inode uint64) bool {
+// hasOpenHandleForLocked reports whether any unclosed handle exists for the
+// inode; callers must hold s.mu for reading.
+func (s *Filesystem) hasOpenHandleForLocked(inode uint64) bool {
 	for _, handle := range s.handles {
 		if handle.inode == inode && !handle.closed {
 			return true
 		}
 	}
 	return false
+}
+
+// dropAllLocksForInode removes every lock record for the inode and wakes
+// blocked waiters. Called when the last open handle disappears.
+func (s *Filesystem) dropAllLocksForInode(inode uint64) {
+	s.lockCond.L.Lock()
+	_, existed := s.lockTable[inode]
+	delete(s.lockTable, inode)
+	if existed {
+		// A released lock may unblock F_SETLKW waiters.
+		s.lockCond.Broadcast()
+	}
+	s.lockCond.L.Unlock()
 }
 
 type storhubHandle struct {
@@ -189,6 +204,10 @@ type writeBootstrap struct {
 	baseSize int64
 }
 
+// Integration-test seam, deliberately exported: the storage↔FUSE
+// integration suite lives in internal/storage (storhub_test.go) and must
+// construct and drive handles/nodes across the package boundary. These
+// aliases exist only for that suite; do not use them in production code.
 type (
 	TestNode   = storhubNode
 	TestHandle = storhubHandle
@@ -2307,7 +2326,18 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	}
 	h.fs.mu.Lock()
 	delete(h.fs.handles, h.id)
+	noHandlesLeft := !h.fs.hasOpenHandleForLocked(h.inode)
 	h.fs.mu.Unlock()
+	if noHandlesLeft {
+		// POSIX: all of a process's locks on a file are gone once it has
+		// no open descriptor left. The kernel enforces this itself for the
+		// owning process; mirroring it here prevents locks from other
+		// (crashed or sloppy) owners from lingering on the inode forever.
+		// go-fuse does not surface FUSE_RELEASE's LockOwner (fs API v2.11),
+		// so per-fd close semantics cannot be mirrored exactly — last
+		// close is the guarantee that matters in practice.
+		h.fs.dropAllLocksForInode(h.inode)
+	}
 	if h.writeState != nil {
 		h.fs.releaseWriteState(h.writeState)
 		h.writeState = nil
