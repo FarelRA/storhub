@@ -1,9 +1,19 @@
+// Package chunking splits files into immutable, asset-sized chunks for
+// upload to GitHub releases and reassembles them on download.
+//
+// A StreamingChunker walks a local file sequentially and hands out
+// ChunkReaders, each covering one chunk-sized window of the file. Chunk
+// sizes are clamped to the release-asset ceiling; a zero size means "use
+// the default". Empty files yield a single zero-length chunk so every
+// uploaded file has at least one observable part.
 package chunking
 
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 )
 
 const (
@@ -50,6 +60,7 @@ type StreamingChunker struct {
 	baseName  string
 	chunkSize int64
 	numChunks int
+	nameWidth int
 }
 
 func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*StreamingChunker, error) {
@@ -68,16 +79,25 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 		file.Close()
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
-	chunks := int((info.Size() + chunkSize - 1) / chunkSize)
-	if chunks == 0 {
-		chunks = 1
+	// Count in 64-bit; a naive int() cast would wrap around on 32-bit
+	// platforms for large files with small chunks.
+	count := (info.Size() + chunkSize - 1) / chunkSize
+	if count == 0 {
+		count = 1
+	}
+	if count > math.MaxInt32 {
+		file.Close()
+		return nil, fmt.Errorf("file needs %d chunks; the maximum supported count is %d", count, math.MaxInt32)
 	}
 	return &StreamingChunker{
 		file:      file,
 		fileSize:  info.Size(),
 		baseName:  baseName,
 		chunkSize: chunkSize,
-		numChunks: chunks,
+		numChunks: int(count),
+		// Zero-pad chunk names to a width that keeps lexicographic order
+		// equal to numeric order even past 999 parts.
+		nameWidth: len(strconv.FormatInt(count, 10)),
 	}, nil
 }
 
@@ -94,7 +114,7 @@ func (s *StreamingChunker) GetChunk(index int) (*ChunkReader, error) {
 		reader:    io.NewSectionReader(s.file, offset, size),
 		offset:    offset,
 		size:      size,
-		chunkName: fmt.Sprintf("%s.part%03d", s.baseName, index+1),
+		chunkName: fmt.Sprintf("%s.part%0*d", s.baseName, max(s.nameWidth, 3), index+1),
 		index:     index,
 	}, nil
 }
