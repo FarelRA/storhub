@@ -25,8 +25,11 @@ import (
 )
 
 const (
-	maxAPIErrorBodyBytes = 64 << 10
-	pageSize             = 100
+	maxAPIErrorBodyBytes   = 64 << 10
+	pageSize               = 100
+	defaultRequestTimeout  = 5 * time.Minute
+	defaultBaseRetryDelay  = 500 * time.Millisecond
+	defaultMaxRetryDelay   = 8 * time.Second
 )
 
 type Client struct {
@@ -97,16 +100,39 @@ type commitResponse struct {
 	} `json:"commit"`
 }
 
+// putFileRequest is the GitHub contents-API create/update payload.
+type putFileRequest struct {
+	Message string `json:"message"`
+	SHA     string `json:"sha,omitempty"`
+	Content string `json:"content"` // base64-encoded file bytes
+}
+
 func NewClient(token string, cfg storcfg.Config) *Client {
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultRequestTimeout}
+	}
+	sleep := cfg.Sleep
+	if sleep == nil {
+		sleep = storcfg.SleepWithContext
+	}
+	baseDelay := cfg.BaseRetryDelay
+	if baseDelay <= 0 {
+		baseDelay = defaultBaseRetryDelay
+	}
+	maxDelay := cfg.MaxRetryDelay
+	if maxDelay <= 0 {
+		maxDelay = defaultMaxRetryDelay
+	}
 	return &Client{
 		token:          token,
 		apiBaseURL:     strings.TrimRight(cfg.APIBaseURL, "/"),
 		apiVersion:     cfg.APIVersion,
-		client:         cfg.HTTPClient,
+		client:         client,
 		maxRetries:     cfg.MaxRetries,
-		baseRetryDelay: cfg.BaseRetryDelay,
-		maxRetryDelay:  cfg.MaxRetryDelay,
-		sleep:          cfg.Sleep,
+		baseRetryDelay: baseDelay,
+		maxRetryDelay:  maxDelay,
+		sleep:          sleep,
 		logger:         logging.WithComponent(cfg.Logger, "github"),
 	}
 }
@@ -247,6 +273,10 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 	return 0, fmt.Errorf("upload asset: %w", err)
 }
 
+// DownloadAssetStream fetches [start,end] bytes of an asset. The returned
+// size is the server-declared Content-Length and may be -1 when the server
+// does not declare a length; readers must therefore rely on their own byte
+// accounting rather than on the reported size.
 func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
 	rangeHeader := ""
 	switch {
@@ -295,35 +325,25 @@ func computeGitBlobSHA(data []byte) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// PutFileContent creates or updates filePath with payload, using previousSHA
+// as an optimistic-concurrency precondition (empty means create). It returns
+// the commit SHA and the new blob content SHA.
 func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath string, payload []byte, previousSHA, message string) (string, string, error) {
-	msgJSON, err := json.Marshal(message)
+	body, err := json.Marshal(putFileRequest{
+		Message: message,
+		SHA:     previousSHA,
+		Content: base64.StdEncoding.EncodeToString(payload),
+	})
 	if err != nil {
-		return "", "", fmt.Errorf("marshal message: %w", err)
+		return "", "", fmt.Errorf("marshal put-file request: %w", err)
 	}
-	var buf bytes.Buffer
-	buf.WriteString(`{"message":`)
-	buf.Write(msgJSON)
-	if previousSHA != "" {
-		shaJSON, _ := json.Marshal(previousSHA)
-		buf.WriteString(`,"sha":`)
-		buf.Write(shaJSON)
-	}
-	buf.WriteString(`,"content":"`)
-	encoder := base64.NewEncoder(base64.StdEncoding, &buf)
-	if _, err := encoder.Write(payload); err != nil {
-		return "", "", fmt.Errorf("base64 encode payload: %w", err)
-	}
-	if err := encoder.Close(); err != nil {
-		return "", "", fmt.Errorf("close base64 encoder: %w", err)
-	}
-	buf.WriteString(`"}`)
 	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
 	resp, err := c.doRequest(ctx, http.MethodPut, endpoint, func() (io.Reader, error) {
-		return bytes.NewReader(buf.Bytes()), nil
+		return bytes.NewReader(body), nil
 	}, requestOptions{
 		contentType: "application/json",
 		accept:      "application/vnd.github+json",
-		contentSize: int64(buf.Len()),
+		contentSize: int64(len(body)),
 		retryable:   true,
 	})
 	if err != nil {
