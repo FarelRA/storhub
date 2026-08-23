@@ -73,20 +73,20 @@ type FileMeta struct {
 	// Chunks is nil-means-empty after Normalize (empty slice collapses to
 	// nil only for symlinks); callers compare with len(), never DeepEqual
 	// against []int64{}.
-	Chunks     []int64  `json:"cs,omitempty"`
-	Size       int64    `json:"s"`
-	Symlink    string   `json:"sl,omitempty"`
-	UploadedAt int64    `json:"ua"`
-	ModifiedAt int64    `json:"ma,omitempty"`
-	AccessedAt int64    `json:"aa,omitempty"`
-	ChangedAt  int64    `json:"ca,omitempty"`
-	Mode       uint32   `json:"md,omitempty"`
-	UID        uint32   `json:"u,omitempty"`
-	GID        uint32   `json:"g,omitempty"`
-	Inode      uint64   `json:"i,omitempty"`
+	Chunks     []int64 `json:"cs,omitempty"`
+	Size       int64   `json:"s"`
+	Symlink    string  `json:"sl,omitempty"`
+	UploadedAt int64   `json:"ua"`
+	ModifiedAt int64   `json:"ma,omitempty"`
+	AccessedAt int64   `json:"aa,omitempty"`
+	ChangedAt  int64   `json:"ca,omitempty"`
+	Mode       uint32  `json:"md,omitempty"`
+	UID        uint32  `json:"u,omitempty"`
+	GID        uint32  `json:"g,omitempty"`
+	Inode      uint64  `json:"i,omitempty"`
 	// XAttrs is nil-means-empty: normalizeXAttrs collapses empty maps to
 	// nil so serialized metadata omits the field.
-	XAttrs     XAttrMap `json:"x,omitempty"`
+	XAttrs XAttrMap `json:"x,omitempty"`
 	// TimesExplicit marks timestamps as authoritative: zero means the
 	// epoch (e.g. an explicit patch), not "unset", so Normalize must not
 	// backfill. Additive v3 field; omitted for legacy entries.
