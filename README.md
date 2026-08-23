@@ -105,8 +105,9 @@ Common commands:
 - inspection: `ls`, `stat`, `cat`, `revisions`
 - filesystem: `mkdir`, `mv`, `rm`
 - recovery and cleanup: `rollback`
-- web: `serve-rest`
+- web: `serve-rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
 - mount: `mount`
+- `cat` streams through a fixed 1 MiB window, so piping multi-GB files never buffers them whole; `revisions` prints nothing for empty history, like `ls(1)`
 
 Typical workflow:
 
@@ -177,6 +178,25 @@ POSIX-style APIs:
 - `Symlink`, `Readlink`, `Link`
 - `SetXAttr`, `GetXAttr`, `ListXAttr`, `RemoveXAttr`
 
+Precondition (compare-and-swap) APIs:
+
+- `(*StorHub).RevisionContext` - current remote metadata revision
+- `fs.WithExpectedRevision(rev)` as a trailing option on `PatchFileContext`,
+  `TruncateFileContext`, `AppendFileContext`, `WriteFileAtContext`,
+  `DeleteFileContext`, `ReplaceFileContext`, and `ReplaceFileFromReaderContext`;
+  the mutation fails with `fs.ErrPreconditionFailed` when remote HEAD moved
+
+POSIX conformance notes:
+
+- `Chown`/`ChownContext` accept `(uid_t)-1` (Go `^uint32(0)`) per field as
+  POSIX "leave this owner unchanged"
+- metadata-patch timestamps are authoritative: patching mtime to the epoch
+  persists (an additive marker keeps legacy zero-fill repair for old entries);
+  `Chtimes` keeps its omit-on-zero (`UTIME_NOW`/`UTIME_OMIT`-flavored) contract
+- FUSE advisory locks are dropped when a file's last open descriptor closes
+  (POSIX last-close guarantee); per-fd close semantics depend on go-fuse
+  surfacing `FUSE_RELEASE`'s lock owner, which v2.11 does not
+
 Revision and maintenance APIs:
 
 - `ListMetadataRevisions`
@@ -236,9 +256,10 @@ REST endpoint groups:
 - `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...` - stat or remove files and empty directories
 - `GET|HEAD /api/v1/projects/{project}/children?path=...` - directory listing
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
+- `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap - storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
 - `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
-- `POST /api/v1/projects/{project}/ops/share`, `GET|HEAD /shares/{token}`, and `GET|HEAD /shares/{token}/download` - shareable UI links with optional direct downloads; share lifetimes are clamped to the configured maximum (7 days by default)
+- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Download links: `GET|HEAD /shares/{token}` and `GET|HEAD /shares/{token}/download`
 - `GET /api/v1/projects/{project}/revisions` - metadata revision history
 
 Authenticated REST:
@@ -299,12 +320,17 @@ func main() {
 
 The REST handler uses HTTP preconditions where they help UNIX-like workflows:
 
-- `ETag` is returned on node and content reads
-- `If-Match` guards writes, patches, and deletes against stale metadata
+- `ETag` is returned on node and content reads; `X-StorHub-Revision` publishes the project's metadata revision
+- `If-Match` guards writes, patches, and deletes against stale metadata; a current-revision token strengthens this into compare-and-swap enforced at apply time
 - `If-None-Match: *` supports create-only full-file uploads
 - `Range: bytes=...` supports partial reads for large files
 
 ## Examples
+
+Every example deletes the GitHub repository it created once it finishes -
+including on failures and Ctrl+C - so demo runs never litter your account.
+
+
 
 Full showcase:
 
