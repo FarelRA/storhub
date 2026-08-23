@@ -4,8 +4,10 @@
 // A StreamingChunker walks a local file sequentially and hands out
 // ChunkReaders, each covering one chunk-sized window of the file. Chunk
 // sizes are clamped to the release-asset ceiling; a zero size means "use
-// the default". Empty files yield a single zero-length chunk so every
-// uploaded file has at least one observable part.
+// the default". Empty files yield zero chunks: NumChunks()==0 and every
+// GetChunk index is out of range — there is nothing to store, and callers
+// that need an observable artifact for an empty upload handle that above
+// the chunker (storage already does).
 package chunking
 
 import (
@@ -95,11 +97,9 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 	// Count in 64-bit; a naive int() cast would wrap around on 32-bit
-	// platforms for large files with small chunks.
+	// platforms for large files with small chunks. An empty file yields
+	// zero chunks — no sentinel part is minted.
 	count := (info.Size() + chunkSize - 1) / chunkSize
-	if count == 0 {
-		count = 1
-	}
 	if count > math.MaxInt32 {
 		file.Close()
 		return nil, fmt.Errorf("file needs %d chunks; the maximum supported count is %d", count, math.MaxInt32)

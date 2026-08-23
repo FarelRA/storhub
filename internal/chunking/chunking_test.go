@@ -61,9 +61,11 @@ func TestChunkerErrorEdges(t *testing.T) {
 		t.Fatalf("new empty chunker: %v", err)
 	}
 	defer chunker.Close()
-	chunk, err := chunker.GetChunk(0)
-	if err != nil || chunk.Size() != 0 {
-		t.Fatalf("unexpected empty chunk: %+v %v", chunk, err)
+	if chunker.NumChunks() != 0 {
+		t.Fatalf("empty file must yield zero chunks, got %d", chunker.NumChunks())
+	}
+	if _, err := chunker.GetChunk(0); err == nil {
+		t.Fatal("expected out-of-range error for empty file chunk 0")
 	}
 	if _, err := chunker.GetChunk(-1); err == nil {
 		t.Fatal("expected negative chunk index error")
