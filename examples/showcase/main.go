@@ -86,13 +86,30 @@ func main() {
 	defer os.RemoveAll(workspace)
 
 	project := fmt.Sprintf("storhub-showcase-%d", os.Getpid())
+	failed := false
+	defer func() {
+		// A half-finished showcase is pure litter: delete the project when
+		// the run failed. On success the STORHUB_DELETE_PROJECT policy in
+		// runMaintenance decides retention.
+		if !failed {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := hub.DeleteProjectContext(cleanupCtx, project); err != nil {
+			fmt.Fprintf(os.Stderr, "cleanup: deleting %s: %v\n", project, err)
+		}
+	}()
 	if err := runShowcase(ctx, hub, workspace, project); err != nil {
+		failed = true
 		log.Fatal(err)
 	}
 	if err := previewFUSE(hub, project); err != nil {
+		failed = true
 		log.Fatal(err)
 	}
 	if err := runMaintenance(ctx, hub, project); err != nil {
+		failed = true
 		log.Fatal(err)
 	}
 
