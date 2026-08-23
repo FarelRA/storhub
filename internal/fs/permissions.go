@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -379,17 +379,9 @@ func uniqueGIDs(groups []uint32) []uint32 {
 	if len(groups) == 0 {
 		return nil
 	}
-	sorted := append([]uint32(nil), groups...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	result := sorted[:0]
-	var last uint32
-	for i, gid := range sorted {
-		if i == 0 || gid != last {
-			result = append(result, gid)
-			last = gid
-		}
-	}
-	return append([]uint32(nil), result...)
+	sorted := slices.Clone(groups)
+	slices.Sort(sorted)
+	return slices.Compact(sorted)
 }
 
 func currentIdentity() Identity {

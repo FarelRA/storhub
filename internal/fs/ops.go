@@ -498,8 +498,8 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 		if chunkEnd <= offset || chunk.Size == 0 {
 			continue
 		}
-		start := MaxInt64(offset, chunk.Offset)
-		stop := MinInt64(end, chunkEnd)
+		start := max(offset, chunk.Offset)
+		stop := min(end, chunkEnd)
 		segment := chunk
 		segment.Offset = start
 		segment.AssetOffset = chunk.AssetOffset + (start - chunk.Offset)
@@ -631,20 +631,6 @@ func RequireParentDirectory(repo *meta.RepoMetadata, filePath string) error {
 		return fmt.Errorf("%w: parent directory does not exist: %s", ErrNotFound, parent)
 	}
 	return nil
-}
-
-func MinInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func MaxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func EntryInfoFromFile(file *meta.FileMeta, path string, nlink int) *EntryInfo {

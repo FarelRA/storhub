@@ -1546,8 +1546,8 @@ func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[int64]metad
 		if chunkEnd <= offset || chunk.Size == 0 {
 			continue
 		}
-		segmentStart := shfs.MaxInt64(offset, chunk.Offset)
-		segmentEnd := shfs.MinInt64(end, chunkEnd)
+		segmentStart := max(offset, chunk.Offset)
+		segmentEnd := min(end, chunkEnd)
 		segment := chunk
 		segment.Offset = segmentStart
 		segment.AssetOffset = chunk.AssetOffset + (segmentStart - chunk.Offset)

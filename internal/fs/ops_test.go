@@ -237,7 +237,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	if DirEntryFromFile(*seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")).Path != "docs/readme.txt" || !DirEntryFromDirectory(meta.DirMeta{}, "docs/sub", 2).IsDir {
 		t.Fatal("dir entry helper conversion failed")
 	}
-	if CountUniqueInodes(backend.repo) == 0 || MinInt64(1, 2) != 1 || MaxInt64(1, 2) != 2 {
+	if CountUniqueInodes(backend.repo) == 0 || min(int64(1), int64(2)) != 1 || max(int64(1), int64(2)) != 2 {
 		t.Fatal("helper counts/min/max failed")
 	}
 	if err := svc.RmdirContext(ctx, "demo", "docs/archive"); err == nil {
