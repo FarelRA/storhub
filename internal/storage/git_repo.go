@@ -26,6 +26,9 @@ type gitRepo struct {
 	owner   string
 	project string
 	token   string
+	// remoteBase overrides the https://github.com default. Empty in
+	// production; the unit harness points it at a local bare repository.
+	remoteBase string
 
 	mu   sync.Mutex
 	repo *git.Repository
@@ -41,6 +44,9 @@ func newGitRepo(cacheDir, owner, project, token string) *gitRepo {
 }
 
 func (r *gitRepo) remoteURL() string {
+	if r.remoteBase != "" {
+		return r.remoteBase
+	}
 	return fmt.Sprintf("https://github.com/%s/%s.git", r.owner, r.project)
 }
 
