@@ -356,13 +356,20 @@ func assertErrorCode(t *testing.T, resp *http.Response, want string) {
 }
 
 type fakeRESTClient struct {
-	mu        sync.Mutex
-	nextInode uint64
-	projects  map[string]*fakeRESTProject
-	deleted   map[string]bool
-	now       int64
-	rollbacks []string
-	readCalls []readCall
+	mu                   sync.Mutex
+	nextInode            uint64
+	projects             map[string]*fakeRESTProject
+	deleted              map[string]bool
+	now                  int64
+	rollbacks            []string
+	readCalls            []readCall
+	failReplaceFromReader error
+}
+
+func (c *fakeRESTClient) failNextReplace(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failReplaceFromReader = err
 }
 
 type readCall struct {
@@ -652,7 +659,18 @@ func (c *fakeRESTClient) ReplaceFileFromReaderContext(ctx context.Context, proje
 	if err != nil {
 		return nil, err
 	}
+	if fail := c.takeReplaceFailure(); fail != nil {
+		return nil, fail
+	}
 	return c.WriteFileAtContext(ctx, project, filePath, 0, data)
+}
+
+func (c *fakeRESTClient) takeReplaceFailure() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.failReplaceFromReader
+	c.failReplaceFromReader = nil
+	return err
 }
 
 func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
