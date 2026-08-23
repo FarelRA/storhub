@@ -472,3 +472,38 @@ func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 		t.Fatalf("zero owner was clobbered by normalize: %+v", m.Dirs["rooted"])
 	}
 }
+
+func TestPruneUnreferencedChunks(t *testing.T) {
+	m := NewRepoMetadata("demo")
+	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100)
+	m.Chunks[10] = ChunkInfo{Offset: 0, Size: 4}
+	m.Chunks[11] = ChunkInfo{Offset: 4, Size: 4}
+	// Stale entries from an overwrite and a deleted file.
+	m.Chunks[12] = ChunkInfo{Offset: 0, Size: 8}
+
+	if removed := m.PruneUnreferencedChunks(); removed != 1 {
+		t.Fatalf("expected 1 pruned chunk, got %d", removed)
+	}
+	if _, ok := m.Chunks[12]; ok {
+		t.Fatal("unreferenced chunk survived pruning")
+	}
+	for _, id := range []int64{10, 11} {
+		if _, ok := m.Chunks[id]; !ok {
+			t.Fatalf("referenced chunk %d was pruned", id)
+		}
+	}
+
+	// Pruning is idempotent and a no-op when everything is referenced.
+	if again := m.PruneUnreferencedChunks(); again != 0 {
+		t.Fatalf("expected idempotent prune, got %d", again)
+	}
+
+	// Deleting the last file frees every chunk.
+	m.Files = map[string]FileMeta{}
+	if removed := m.PruneUnreferencedChunks(); removed != 2 {
+		t.Fatalf("expected all chunks pruned after file deletion, got %d", removed)
+	}
+	if len(m.Chunks) != 0 {
+		t.Fatalf("expected empty chunk catalog, got %d entries", len(m.Chunks))
+	}
+}

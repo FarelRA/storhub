@@ -34,13 +34,13 @@ const maxMetadataBytes = 8 << 20
 var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type (
-	Config            = storcfg.Config
-	ChunkInfo         = metadata.ChunkInfo
-	FileMeta          = metadata.FileMeta
-	RepoMetadata      = metadata.RepoMetadata
-	MetadataRevision  = metadata.MetadataRevision
-	DirMeta           = metadata.DirMeta
-	NodeKind          = metadata.NodeKind
+	Config           = storcfg.Config
+	ChunkInfo        = metadata.ChunkInfo
+	FileMeta         = metadata.FileMeta
+	RepoMetadata     = metadata.RepoMetadata
+	MetadataRevision = metadata.MetadataRevision
+	DirMeta          = metadata.DirMeta
+	NodeKind         = metadata.NodeKind
 )
 
 const (
@@ -74,8 +74,8 @@ type StorHub struct {
 	metaCache map[string]*projectMetadata
 
 	// Git repository cache for metadata operations
-	gitMu     sync.Mutex
-	gitRepos  map[string]*gitRepo
+	gitMu    sync.Mutex
+	gitRepos map[string]*gitRepo
 
 	// Shutdown coordination
 	shutdownOnce  sync.Once
@@ -920,8 +920,8 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		}
 	}
 	fileMeta := FileMeta{
-		Size:    fileInfo.Size(),
-		Chunks:  nil,
+		Size:   fileInfo.Size(),
+		Chunks: nil,
 	}
 	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().Unix())
 	if existing == nil {

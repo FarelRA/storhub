@@ -367,7 +367,6 @@ func (m *RepoMetadata) RecomputeStats() {
 			assetCounts[chunk.Release]++
 		}
 	}
-
 	for _, file := range m.Files {
 		if file.Symlink == "" {
 			totalFiles++
@@ -387,6 +386,31 @@ func (m *RepoMetadata) RecomputeStats() {
 		m.Version = maxMetadataVersion
 	}
 	m.RebuildIndexes()
+}
+
+// PruneUnreferencedChunks drops chunk records that no file references
+// anymore. Overwrites and deletions otherwise leave stale entries behind,
+// and the catalog grows monotonically until metadata hits the size ceiling
+// and every subsequent commit fails permanently. Callers must only prune at
+// points where no retained history still needs the records (storhub prunes
+// immediately before squashing git history, after PurgeUntracked has
+// reclaimed the corresponding remote assets) — a rollback to an older
+// revision restores its own chunk catalog wholesale.
+func (m *RepoMetadata) PruneUnreferencedChunks() int {
+	referenced := make(map[int64]struct{})
+	for _, file := range m.Files {
+		for _, id := range file.Chunks {
+			referenced[id] = struct{}{}
+		}
+	}
+	removed := 0
+	for id := range m.Chunks {
+		if _, ok := referenced[id]; !ok {
+			delete(m.Chunks, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 func (d *DirMeta) Normalize(now int64) {
@@ -980,13 +1004,13 @@ func (f FileMeta) Validate() error {
 
 func (m *RepoMetadata) migrateV1(data []byte) error {
 	var v1 struct {
-		Version     int    `json:"version"`
-		Project     string `json:"project"`
-		NextInode   uint64 `json:"next_inode,omitempty"`
-		TotalFiles  int    `json:"total_files"`
-		TotalSize   int64  `json:"total_size"`
+		Version      int       `json:"version"`
+		Project      string    `json:"project"`
+		NextInode    uint64    `json:"next_inode,omitempty"`
+		TotalFiles   int       `json:"total_files"`
+		TotalSize    int64     `json:"total_size"`
 		LastModified time.Time `json:"last_modified"`
-		Root struct {
+		Root         struct {
 			Inode      uint64            `json:"inode"`
 			Mode       uint32            `json:"mode"`
 			UID        uint32            `json:"uid"`

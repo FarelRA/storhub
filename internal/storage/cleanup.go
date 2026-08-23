@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
+	metadata "github.com/FarelRA/storhub/internal/metadata"
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
@@ -223,6 +225,28 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 		}
 	}
 	result.DeletedAssets = len(assetTasks)
+
+	// Drop chunk records nothing references anymore. This is only safe at
+	// this exact point: the purge above has reclaimed the remote assets of
+	// unreferenced chunks, so no retained revision can still download them
+	// (rollback across a purge is already destructive by design). Without
+	// pruning, the catalog grows monotonically until metadata hits the
+	// size ceiling and every subsequent commit fails permanently.
+	var pruned int
+	if _, err := h.UpdateRepoMetadataContext(ctx, project, func(meta *metadata.RepoMetadata) error {
+		pruned = meta.PruneUnreferencedChunks()
+		return nil
+	}, "storhub: prune unreferenced chunks"); err != nil {
+		return nil, fmt.Errorf("prune unreferenced chunks: %w", err)
+	}
+	if pruned > 0 {
+		logging.Info(h.projectLogger(project), "pruned unreferenced chunks", "count", pruned)
+	}
+	// Commit the prune synchronously so the squash below cannot race it and
+	// preserve a stale catalog in HEAD.
+	if err := h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project)); err != nil {
+		return nil, fmt.Errorf("commit pruned metadata: %w", err)
+	}
 
 	// Squash the entire metadata git history into a single orphan commit.
 	// Since we cannot roll back individual files (content-addressed storage),

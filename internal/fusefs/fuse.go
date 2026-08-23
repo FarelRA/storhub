@@ -92,6 +92,50 @@ type storhubNode struct {
 	isDir bool
 }
 
+// OnForget evicts bookkeeping for a node the kernel has completely
+// forgotten. Without this the nodes/inodePaths/pathToInode/lockTable maps
+// grow without bound over the lifetime of a long-lived mount: every path
+// ever looked up or listed stays resident. Bookkeeping is keyed by inode
+// number, so if this eviction ever races a fresh lookup (go-fuse can fire
+// spurious OnForget around RmChild/AddChild), the next ensureNode simply
+// re-registers the paths and operations self-heal.
+func (n *storhubNode) OnForget() {
+	n.fs.forgetNodeBookkeeping(n)
+}
+
+func (s *Filesystem) forgetNodeBookkeeping(n *storhubNode) {
+	if n == nil || n.inode == 1 {
+		return // root lives for the mount's lifetime
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nodes[n.inode] != n {
+		return // superseded by a newer incarnation for this inode number
+	}
+	delete(s.nodes, n.inode)
+	delete(s.inodePaths, n.inode)
+	for p, ino := range s.pathToInode {
+		if ino == n.inode {
+			delete(s.pathToInode, p)
+		}
+	}
+	// Lock records die with the node only once nothing can still exercise
+	// them: no open handle and no pending write state.
+	if s.hasOpenHandleFor(n.inode) || s.writeStates[n.inode] != nil {
+		return
+	}
+	delete(s.lockTable, n.inode)
+}
+
+func (s *Filesystem) hasOpenHandleFor(inode uint64) bool {
+	for _, handle := range s.handles {
+		if handle.inode == inode && !handle.closed {
+			return true
+		}
+	}
+	return false
+}
+
 type storhubHandle struct {
 	fs    *Filesystem
 	inode uint64

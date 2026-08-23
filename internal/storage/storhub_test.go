@@ -909,16 +909,27 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	if repo.releasesByTag[trackedRelease] == nil {
 		t.Fatalf("expected tracked release to remain")
 	}
-	// Get the revision that contained orphan.txt (middle commit) to test rollback failure after purge
+	// Find a revision that still contained orphan.txt (whose assets the
+	// purge destroyed) to prove rollback after purge fails destructively.
 	revisions, err := hub.ListMetadataRevisions("project-purge")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
-	if len(revisions) < 2 {
-		t.Fatalf("expected at least 2 metadata revisions, got %d", len(revisions))
+	var orphanRevision string
+	for _, rev := range revisions {
+		snap, err := hub.getMetadataRevision(context.Background(), "project-purge", rev.CommitSHA)
+		if err != nil {
+			t.Fatalf("fetch revision %s: %v", rev.CommitSHA, err)
+		}
+		if _, ok := snap.Files["orphan.txt"]; ok {
+			orphanRevision = rev.CommitSHA
+			break
+		}
 	}
-	orphanRevision := revisions[1] // Middle revision that had orphan.txt (revisions ordered newest-first)
-	if err := hub.RollbackMetadata("project-purge", orphanRevision.CommitSHA); err == nil {
+	if orphanRevision == "" {
+		t.Fatal("expected a metadata revision containing orphan.txt")
+	}
+	if err := hub.RollbackMetadata("project-purge", orphanRevision); err == nil {
 		t.Fatal("expected rollback after purge to fail because purge is destructive")
 	}
 }
@@ -3752,4 +3763,53 @@ func mustBytes(t *testing.T, res fuse.ReadResult, buf []byte) []byte {
 		t.Fatalf("read result bytes: %v", status)
 	}
 	return got
+}
+
+func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+
+	inputV1 := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version one payload"))
+	if _, err := hub.UploadFile("project-prune", "file.txt", inputV1); err != nil {
+		t.Fatalf("upload v1: %v", err)
+	}
+	inputV2 := writeTempFile(t, t.TempDir(), "v2.txt", []byte("completely different version two"))
+	if _, err := hub.ReplaceFile("project-prune", "file.txt", inputV2); err != nil {
+		t.Fatalf("replace with v2: %v", err)
+	}
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush metadata: %v", err)
+	}
+
+	before, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
+	totalBefore := len(before.Chunks)
+	if totalBefore < 2 {
+		t.Fatalf("expected stale chunk records before purge, got %d", totalBefore)
+	}
+
+	if _, err := hub.PurgeUntracked("project-prune"); err != nil {
+		t.Fatalf("purge untracked: %v", err)
+	}
+
+	after, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
+	referenced := make(map[int64]bool)
+	for _, file := range after.Files {
+		for _, id := range file.Chunks {
+			referenced[id] = true
+		}
+	}
+	for id := range after.Chunks {
+		if !referenced[id] {
+			t.Fatalf("chunk %d survived purge despite no live references", id)
+		}
+	}
+	if len(after.Chunks) >= totalBefore {
+		t.Fatalf("expected chunk catalog to shrink from %d, got %d", totalBefore, len(after.Chunks))
+	}
+
+	output := filepath.Join(t.TempDir(), "out.txt")
+	if err := hub.DownloadFile("project-prune", "file.txt", output); err != nil {
+		t.Fatalf("download after prune: %v", err)
+	}
+	assertFileContent(t, output, []byte("completely different version two"))
 }

@@ -545,6 +545,11 @@ func (o Options) withDefaults() Options {
 	if o.ShareTTL <= 0 {
 		o.ShareTTL = defaultRESTShareTTL
 	}
+	// A zero MaxShareTTL must not mean "unbounded": default it so the
+	// client-requested-lifetime clamp is always armed.
+	if o.MaxShareTTL <= 0 {
+		o.MaxShareTTL = defaultRESTShareTTL
+	}
 	return o
 }
 
@@ -1524,6 +1529,7 @@ func (h *restHandler) newShareRecord(project, sharePath string, download, isDir 
 	h.shares.mu.Lock()
 	h.shares.items[signedToken] = record
 	h.shares.mu.Unlock()
+	h.sweepExpiredShares()
 	return record, nil
 }
 
@@ -1540,6 +1546,26 @@ func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
 	}
 	copy := *record
 	return &copy, true
+}
+
+// sweepExpiredShares bounds registry memory: expired records are dropped
+// whenever live-plus-expired entries exceed the threshold, so a burst of
+// short-lived shares cannot accumulate without limit even if nobody ever
+// looks them up again.
+const shareSweepThreshold = 128
+
+func (h *restHandler) sweepExpiredShares() {
+	now := time.Now()
+	h.shares.mu.Lock()
+	defer h.shares.mu.Unlock()
+	if len(h.shares.items) < shareSweepThreshold {
+		return
+	}
+	for shareID, record := range h.shares.items {
+		if !record.ExpiresAt.After(now) {
+			delete(h.shares.items, shareID)
+		}
+	}
 }
 
 func (h *restHandler) removeShare(shareID string) {
