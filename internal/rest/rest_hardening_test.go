@@ -78,7 +78,7 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("payload"), nil, http.StatusCreated)
 	createResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		shareRequest{Path: "docs/f.txt", Download: &download}, http.StatusOK)
+		shareRequest{Path: "docs/f.txt", Download: &download}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, createResp, &share)
 

@@ -70,7 +70,7 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 	decodeJSONBody(t, loginResp, &login)
 
 	shareReq := bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: ""}))
-	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareReq, map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareReq, map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 
@@ -97,7 +97,7 @@ func TestRESTShareBearerCannotEscapeSharedPath(t *testing.T) {
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
-	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 
@@ -118,7 +118,7 @@ func TestRESTShareBearerCannotCreateNestedShares(t *testing.T) {
 	decodeJSONBody(t, loginResp, &login)
 
 	download := false
-	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: &download})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusOK)
+	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: &download})), map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 

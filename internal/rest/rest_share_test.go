@@ -25,7 +25,7 @@ func TestShareTTLDefaultClamp(t *testing.T) {
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("x"), nil, http.StatusCreated)
 
 	resp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		shareRequest{Path: "docs/f.txt", ExpiresInSeconds: 100 * 365 * 24 * 3600}, http.StatusOK)
+		shareRequest{Path: "docs/f.txt", ExpiresInSeconds: 100 * 365 * 24 * 3600}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, resp, &share)
 

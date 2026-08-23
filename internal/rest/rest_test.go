@@ -223,7 +223,7 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 	if share.ID == "" || share.URL != "/shares/"+share.ID || share.DownloadURL != "/shares/"+share.ID+"/download" {
@@ -249,7 +249,7 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
 	download := false
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt", Download: &download}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt", Download: &download}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 	if share.Download {
@@ -266,7 +266,7 @@ func TestRESTShareCanonicalizesPath(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "docs/../hello.txt"}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "docs/../hello.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 	if share.Path != "hello.txt" {
@@ -285,7 +285,7 @@ func TestRESTProjectShareListAndDelete(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusOK)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
 	listResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/shares", nil, nil, http.StatusOK)
@@ -294,7 +294,7 @@ func TestRESTProjectShareListAndDelete(t *testing.T) {
 	if len(listing.Shares) != 1 || listing.Shares[0].ID != share.ID {
 		t.Fatalf("unexpected share listing: %+v", listing)
 	}
-	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+share.ID, nil, nil, http.StatusOK)
+	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+share.ID, nil, nil, http.StatusNoContent)
 	missing := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusNotFound)
 	assertErrorCode(t, missing, "not_found")
 }
