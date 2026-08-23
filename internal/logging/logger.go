@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -45,9 +44,12 @@ func NewLogger(opts Options) *slog.Logger {
 	return slog.New(logger)
 }
 
+// WithComponent returns a logger tagged with the component name. A nil
+// logger resolves to the process-default logger — operational context must
+// never be dropped just because a caller skipped logger setup.
 func WithComponent(logger *slog.Logger, component string) *slog.Logger {
 	if logger == nil {
-		logger = NewLogger(Options{})
+		logger = slog.Default()
 	}
 	if strings.TrimSpace(component) == "" {
 		return logger
@@ -78,10 +80,6 @@ func Warn(logger *slog.Logger, msg string, args ...any) {
 
 func Error(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Error(msg, args...)
-}
-
-func Enabled(logger *slog.Logger, level slog.Level) bool {
-	return resolve(logger).Enabled(context.Background(), level)
 }
 
 func NormalizeLevel(level string) string {
@@ -117,6 +115,8 @@ func parseLevel(level string) charmlog.Level {
 }
 
 func parseFormatter(format string) charmlog.Formatter {
+	// normalizeFormat already maps unknown values to the default, so the
+	// switch is exhaustive over its outputs.
 	switch normalizeFormat(format) {
 	case FormatText:
 		return charmlog.LogfmtFormatter

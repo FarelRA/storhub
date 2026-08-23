@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FarelRA/storhub/internal/logging"
@@ -31,6 +32,18 @@ const (
 )
 
 type Config struct {
+	// Logger, when set, wins over the LogLevel/LogFormat/LogColor/LogOutput
+	// knobs; those exist only to build a logger when none was supplied.
+	Logger *slog.Logger
+	// LogOutput is the destination used when building a default logger.
+	LogOutput io.Writer
+	// LogLevel/LogFormat are normalized (trimmed, lowercased) by
+	// WithDefaults and validated by Validate; unknown values fail loudly
+	// instead of silently mapping to something else.
+	LogLevel  string
+	LogFormat string
+	LogColor  bool
+
 	APIBaseURL             string
 	APIVersion             string
 	HTTPClient             *http.Client
@@ -41,11 +54,6 @@ type Config struct {
 	MaxRetries             int
 	BaseRetryDelay         time.Duration
 	MaxRetryDelay          time.Duration
-	Logger                 *slog.Logger
-	LogOutput              io.Writer
-	LogLevel               string
-	LogFormat              string
-	LogColor               bool
 	AtimePolicy            AtimePolicy
 	MetadataCommitInterval time.Duration
 	GitCacheDir            string
@@ -110,11 +118,13 @@ func (c Config) WithDefaults() Config {
 	if c.LogOutput == nil {
 		c.LogOutput = defaults.LogOutput
 	}
-	c.LogLevel = logging.NormalizeLevel(c.LogLevel)
+	// Normalize case/whitespace but never map unknown values to something
+	// else: Validate rejects them loudly.
+	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
 	if c.LogLevel == "" {
 		c.LogLevel = defaults.LogLevel
 	}
-	c.LogFormat = logging.NormalizeFormat(c.LogFormat)
+	c.LogFormat = strings.ToLower(strings.TrimSpace(c.LogFormat))
 	if c.LogFormat == "" {
 		c.LogFormat = defaults.LogFormat
 	}
@@ -144,12 +154,22 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
+// defaultGitCacheDir returns a per-process cache directory. A shared
+// /tmp/storhub would let concurrent processes (or other users on multi-user
+// machines) collide on the same git workspaces.
 func defaultGitCacheDir() string {
-	return filepath.Join(os.TempDir(), "storhub")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("storhub-git-%d", os.Getpid()))
 }
 
 func newDefaultHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Clone the default transport when possible; never assume its concrete
+	// type, a custom DefaultTransport must not panic the process.
+	var transport *http.Transport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = t.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
 	// Transfers are strictly sequential: a couple of pooled connections
 	// per host is plenty, and small pools avoid socket buildup.
 	transport.MaxIdleConns = 4

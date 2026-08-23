@@ -93,3 +93,55 @@ func TestSleepWithContext(t *testing.T) {
 		t.Fatalf("expected timer completion, got %v", err)
 	}
 }
+
+// TestWithDefaultsFillsEachFieldIndependently walks every field: starting
+// from a zero Config, each field must end up at its default value, so a
+// partially populated config can never silently drop a knob.
+func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
+	filled := Config{}.WithDefaults()
+	defaults := Default()
+	checks := map[string]struct{ got, want any }{
+		"APIBaseURL":             {filled.APIBaseURL, defaults.APIBaseURL},
+		"APIVersion":             {filled.APIVersion, defaults.APIVersion},
+		"ChunkSize":              {filled.ChunkSize, defaults.ChunkSize},
+		"BufferSize":             {filled.BufferSize, defaults.BufferSize},
+		"RepoDescription":        {filled.RepoDescription, defaults.RepoDescription},
+		"MaxRetries":             {filled.MaxRetries, 0},
+		"BaseRetryDelay":         {filled.BaseRetryDelay, defaults.BaseRetryDelay},
+		"MaxRetryDelay":          {filled.MaxRetryDelay, defaults.MaxRetryDelay},
+		"LogLevel":               {filled.LogLevel, defaults.LogLevel},
+		"LogFormat":              {filled.LogFormat, defaults.LogFormat},
+		"LogOutput":              {(filled.LogOutput != nil), true},
+		"Logger":                 {(filled.Logger != nil), true},
+		"HTTPClient":             {(filled.HTTPClient != nil), true},
+		"AtimePolicy":            {filled.AtimePolicy, defaults.AtimePolicy},
+		"MetadataCommitInterval": {filled.MetadataCommitInterval, defaults.MetadataCommitInterval},
+		"GitCacheDir":            {(filled.GitCacheDir != ""), true},
+		"Now":                    {(filled.Now != nil), true},
+		"Sleep":                  {(filled.Sleep != nil), true},
+	}
+	for name, check := range checks {
+		if check.got != check.want {
+			t.Fatalf("%s not defaulted: got %v want %v", name, check.got, check.want)
+		}
+	}
+}
+
+// TestValidateRejectsUnknownLogSettings pins the loud-failure contract for
+// unknown log levels and formats after normalization.
+func TestValidateRejectsUnknownLogSettings(t *testing.T) {
+	defaulted := Config{}.WithDefaults()
+	if err := defaulted.Validate(); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+	cfg := Config{}.WithDefaults()
+	cfg.LogLevel = "loud"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown level must fail validation")
+	}
+	cfg = Config{}.WithDefaults()
+	cfg.LogFormat = "yaml"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown format must fail validation")
+	}
+}
