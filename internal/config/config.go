@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FarelRA/storhub/internal/chunking"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -19,8 +20,11 @@ const (
 	defaultAPIVersion      = "2022-11-28"
 	defaultRequestTimeout  = 5 * time.Minute
 	defaultRepoDescription = "StorHub storage project"
-	DefaultChunkSize       = int64(2*1024*1024*1024) - 1
-	DefaultBufferSize      = 1 * 1024 * 1024
+	// DefaultChunkSize and DefaultBufferSize are aliases of the chunking
+	// package's constants: the GitHub release-asset ceiling has one owner,
+	// so a limit change cannot drift between the two spellings.
+	DefaultChunkSize  = chunking.DefaultChunkSize
+	DefaultBufferSize = chunking.DefaultBufferSize
 )
 
 type AtimePolicy string
