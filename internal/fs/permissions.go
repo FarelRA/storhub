@@ -64,7 +64,11 @@ func IdentityFromContext(ctx context.Context) Identity {
 			return normalizeIdentity(id)
 		}
 	}
-	return Identity{UID: 0, GID: 0, Admin: true}
+	// Fail closed: an absent identity means the local process operating its
+	// own repository — never an anonymous superuser. Multi-user surfaces
+	// (FUSE, REST) must attach the real caller via WithIdentity; only a
+	// process that genuinely runs as root normalizes to Admin.
+	return normalizeIdentity(Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())})
 }
 
 func IdentityPresent(ctx context.Context) bool {

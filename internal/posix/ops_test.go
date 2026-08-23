@@ -108,48 +108,51 @@ func (b *testBackend) seedFile(path string) *meta.FileMeta {
 }
 
 func TestServicePOSIXWorkflow(t *testing.T) {
+	// The workflow runs as an explicitly identified root caller; absent
+	// identities fail closed to the process user and own nothing here.
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	now := int64(300)
 	backend := newTestBackend(now)
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
 	svc := NewService(backend)
 
-	linked, err := svc.LinkContext(context.Background(), "demo", "docs/base.txt", "docs/alias.txt")
+	linked, err := svc.LinkContext(ctx, "demo", "docs/base.txt", "docs/alias.txt")
 	if err != nil || linked.Inode == 0 {
 		t.Fatalf("link: %+v %v", linked, err)
 	}
-	if err := svc.ChmodContext(context.Background(), "demo", "docs/base.txt", 0o600); err != nil {
+	if err := svc.ChmodContext(ctx, "demo", "docs/base.txt", 0o600); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	if err := svc.ChownContext(context.Background(), "demo", "docs/base.txt", 9, 10); err != nil {
+	if err := svc.ChownContext(ctx, "demo", "docs/base.txt", 9, 10); err != nil {
 		t.Fatalf("chown: %v", err)
 	}
-	if err := svc.ChtimesContext(context.Background(), "demo", "docs/base.txt", int64(1), int64(2)); err != nil {
+	if err := svc.ChtimesContext(ctx, "demo", "docs/base.txt", int64(1), int64(2)); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	if err := svc.SetXAttrContext(context.Background(), "demo", "docs/base.txt", "user.note", []byte("hello")); err != nil {
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.note", []byte("hello")); err != nil {
 		t.Fatalf("setxattr: %v", err)
 	}
-	value, err := svc.GetXAttrContext(context.Background(), "demo", "docs/alias.txt", "user.note")
+	value, err := svc.GetXAttrContext(ctx, "demo", "docs/alias.txt", "user.note")
 	if err != nil || string(value) != "hello" {
 		t.Fatalf("getxattr family: %q %v", value, err)
 	}
-	attrs, err := svc.ListXAttrContext(context.Background(), "demo", "docs/base.txt")
+	attrs, err := svc.ListXAttrContext(ctx, "demo", "docs/base.txt")
 	if err != nil || len(attrs) != 1 || attrs[0] != "user.note" {
 		t.Fatalf("listxattr: %v %v", attrs, err)
 	}
-	if err := svc.RemoveXAttrContext(context.Background(), "demo", "docs/base.txt", "user.note"); err != nil {
+	if err := svc.RemoveXAttrContext(ctx, "demo", "docs/base.txt", "user.note"); err != nil {
 		t.Fatalf("removexattr: %v", err)
 	}
-	attrs, err = svc.ListXAttrContext(context.Background(), "demo", "docs/base.txt")
+	attrs, err = svc.ListXAttrContext(ctx, "demo", "docs/base.txt")
 	if err != nil || len(attrs) != 0 {
 		t.Fatalf("listxattr after remove: %v %v", attrs, err)
 	}
-	symlink, err := svc.SymlinkContext(context.Background(), "demo", "docs/base.txt", "docs/base.link")
+	symlink, err := svc.SymlinkContext(ctx, "demo", "docs/base.txt", "docs/base.link")
 	if err != nil || symlink.Symlink != "docs/base.txt" {
 		t.Fatalf("symlink: %+v %v", symlink, err)
 	}
-	target, err := svc.ReadlinkContext(context.Background(), "demo", "docs/base.link")
+	target, err := svc.ReadlinkContext(ctx, "demo", "docs/base.link")
 	if err != nil || target != "docs/base.txt" {
 		t.Fatalf("readlink: %q %v", target, err)
 	}
@@ -157,18 +160,18 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 	if info.Mode != 0o600 || info.UID != 9 || info.GID != 10 || info.Inode != base.Inode {
 		t.Fatalf("hardlink family metadata not propagated: %+v", info)
 	}
-	rootAttrsBefore, err := svc.ListXAttrContext(context.Background(), "demo", "")
+	rootAttrsBefore, err := svc.ListXAttrContext(ctx, "demo", "")
 	if err != nil || len(rootAttrsBefore) != 0 {
 		t.Fatalf("expected empty root xattrs: %v %v", rootAttrsBefore, err)
 	}
-	if err := svc.SetXAttrContext(context.Background(), "demo", "", "user.root", []byte("ok")); err != nil {
+	if err := svc.SetXAttrContext(ctx, "demo", "", "user.root", []byte("ok")); err != nil {
 		t.Fatalf("set root xattr: %v", err)
 	}
-	rootValue, err := svc.GetXAttrContext(context.Background(), "demo", "", "user.root")
+	rootValue, err := svc.GetXAttrContext(ctx, "demo", "", "user.root")
 	if err != nil || string(rootValue) != "ok" {
 		t.Fatalf("get root xattr: %q %v", rootValue, err)
 	}
-	if err := svc.RemoveXAttrContext(context.Background(), "demo", "", "user.root"); err != nil {
+	if err := svc.RemoveXAttrContext(ctx, "demo", "", "user.root"); err != nil {
 		t.Fatalf("remove root xattr: %v", err)
 	}
 	if !shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).IsDir && shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).Path != "docs/base.txt" {
