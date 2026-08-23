@@ -710,6 +710,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		eTag := restEntryETag(entry)
 		if h.ifNoneMatchSatisfied(r.Header.Get("If-None-Match"), eTag) {
+			w.Header().Set("ETag", eTag)
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -737,6 +738,15 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 				h.writeError(w, http.StatusNotImplemented, "recursive_delete_unsupported", "recursive directory deletion is not supported")
 				return
 			}
+		}
+		// Re-verify the precondition against current state right before the
+		// destructive call; a concurrent change since the first stat must
+		// fail closed.
+		if err := h.enforceFreshPrecondition(r, project, targetPath); err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
+		if entry.IsDir {
 			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath)
 		} else {
 			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath)
@@ -793,6 +803,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 
 	eTag := restEntryETag(entry)
 	if h.ifNoneMatchSatisfied(r.Header.Get("If-None-Match"), eTag) {
+		w.Header().Set("ETag", eTag)
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -870,6 +881,8 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	} else if entry.IsSymlink {
+		// A symlink is replaced by a regular file, not followed; clear it
+		// first because create refuses existing nodes.
 		if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -879,8 +892,16 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-
+	// The create call above leaves an empty placeholder behind when the path
+	// did not exist (or clobbers a symlink). If the body transfer then
+	// fails, remove the placeholder instead of stranding an orphan the
+	// client believes was never created.
 	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body); err != nil {
+		if created || (exists && entry.IsSymlink) {
+			if cleanupErr := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); cleanupErr != nil {
+				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
+			}
+		}
 		h.writeMappedError(w, err)
 		return
 	}
@@ -890,13 +911,16 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
-	if err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
-		if !isPreconditionHeaderEmpty(err) {
+	ifMatch := r.Header.Get("If-Match")
+	if strings.TrimSpace(ifMatch) != "" {
+		// Fail fast on an obviously stale token before reading the body;
+		// the authoritative check happens again just before mutation.
+		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
+		if err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
+		if err := h.requireMatch(ifMatch, restEntryETag(entry)); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -904,7 +928,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	op := strings.TrimSpace(r.URL.Query().Get("op"))
 	switch op {
 	case "append":
-		if err := h.streamAppendBody(r, project, filePath, r.Body); err != nil {
+		if err := h.streamAppendBody(w, r, project, filePath, r.Body); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -914,7 +938,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, parseErr)
 			return
 		}
-		if err := h.streamWriteBody(r, project, filePath, r.Body, offset); err != nil {
+		if err := h.streamWriteBody(w, r, project, filePath, r.Body, offset); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -934,6 +958,10 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, readErr)
 			return
 		}
+		if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
 		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit); err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -944,6 +972,10 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, parseErr)
 			return
 		}
+		if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
 		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size); err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -952,6 +984,23 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusBadRequest, "invalid_patch_op", "query parameter op must be one of append, write, patch, truncate")
 		return
 	}
+}
+
+// enforceFreshPrecondition restates the client's If-Match requirement against
+// the resource's current state immediately before a mutating call. Checking
+// only a snapshot taken earlier in the request would apply mutations to a
+// state the client never saw; failing closed with 412 here closes most of
+// that window.
+func (h *restHandler) enforceFreshPrecondition(r *http.Request, project, targetPath string) error {
+	ifMatch := r.Header.Get("If-Match")
+	if strings.TrimSpace(ifMatch) == "" {
+		return nil
+	}
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	if err != nil {
+		return err
+	}
+	return h.requireMatch(ifMatch, restEntryETag(entry))
 }
 
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
@@ -1570,41 +1619,45 @@ func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string
 	return nil, false, err
 }
 
-func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
-	buf := make([]byte, h.opts.StreamChunkSize)
-	for {
-		n, err := body.Read(buf)
-		if n > 0 {
-			if _, writeErr := h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, append([]byte(nil), buf[:n]...)); writeErr != nil {
-				return writeErr
-			}
-			offset += int64(n)
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+// streamWriteBody applies an entire write atomically by buffering the body
+// up to MaxPatchBodySize and issuing a single WriteFileAt call. Chunked
+// multi-call writes would expose torn intermediate states to concurrent
+// readers and leave partial data committed on failure; bodies beyond the
+// cap are rejected so clients fall back to the atomic full-file PUT.
+func (h *restHandler) streamWriteBody(w http.ResponseWriter, r *http.Request, project, filePath string, body io.Reader, offset int64) error {
+	payload, err := h.readMutationBody(w, r, body)
+	if err != nil {
+		return err
 	}
+	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
+		return err
+	}
+	_, err = h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload)
+	return err
 }
 
-func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
-	buf := make([]byte, h.opts.StreamChunkSize)
-	for {
-		n, err := body.Read(buf)
-		if n > 0 {
-			if _, appendErr := h.clientFor(r).AppendFileContext(r.Context(), project, filePath, append([]byte(nil), buf[:n]...)); appendErr != nil {
-				return appendErr
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+// streamAppendBody mirrors streamWriteBody: one AppendFile call, or 413.
+func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, project, filePath string, body io.Reader) error {
+	payload, err := h.readMutationBody(w, r, body)
+	if err != nil {
+		return err
 	}
+	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
+		return err
+	}
+	_, err = h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload)
+	return err
+}
+
+func (h *restHandler) readMutationBody(w http.ResponseWriter, r *http.Request, body io.Reader) ([]byte, error) {
+	payload, err := io.ReadAll(io.LimitReader(body, h.opts.MaxPatchBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > h.opts.MaxPatchBodySize {
+		return nil, errPayloadTooLarge(fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
+	}
+	return payload, nil
 }
 
 func (h *restHandler) readPatchBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
