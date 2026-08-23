@@ -25,11 +25,11 @@ import (
 )
 
 const (
-	maxAPIErrorBodyBytes   = 64 << 10
-	pageSize               = 100
-	defaultRequestTimeout  = 5 * time.Minute
-	defaultBaseRetryDelay  = 500 * time.Millisecond
-	defaultMaxRetryDelay   = 8 * time.Second
+	maxAPIErrorBodyBytes  = 64 << 10
+	pageSize              = 100
+	defaultRequestTimeout = 5 * time.Minute
+	defaultBaseRetryDelay = 500 * time.Millisecond
+	defaultMaxRetryDelay  = 8 * time.Second
 )
 
 type Client struct {
