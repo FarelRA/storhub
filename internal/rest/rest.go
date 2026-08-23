@@ -35,6 +35,10 @@ const (
 	defaultRESTPatchBodySize = 8 << 20
 	defaultRESTShareTTL      = 7 * 24 * time.Hour
 	maxRequestBodyMemory     = 32 << 10
+	// nobodyUID/nobodyGID is the POSIX "nobody" account: share-link visitors
+	// get no identity beyond what path permissions grant them.
+	nobodyUID = uint32(65534)
+	nobodyGID = uint32(65534)
 )
 
 type Options struct {
@@ -614,7 +618,16 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 
 			principal, err := auth.parseToken(token)
 			if err == nil {
-				ctx := context.WithValue(r.Context(), clientCtxKey, &authorizedClient{base: h.client, principal: principal})
+				// Attach the caller's identity for the storage layers below:
+				// downstream permission checks must see the authenticated
+				// principal, never the server process's own credentials.
+				identity := shfs.WithIdentity(r.Context(), shfs.Identity{
+					UID:    principal.UID,
+					GID:    principal.PrimaryGID,
+					Groups: principal.Groups,
+					Admin:  principal.Admin,
+				})
+				ctx := context.WithValue(identity, clientCtxKey, &authorizedClient{base: h.client, principal: principal})
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -626,7 +639,9 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 					h.writeError(w, http.StatusForbidden, "forbidden", "share links cannot manage shares")
 					return
 				}
-				ctx := context.WithValue(r.Context(), clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
+				// Share links act as an unauthenticated read-only visitor.
+				identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
+				ctx := context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

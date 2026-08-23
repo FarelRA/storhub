@@ -59,7 +59,9 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 	if !shfs.AtimeSuppressed(ctx) {
 		t.Fatal("expected FUSE caller context to suppress atime")
 	}
-	if identity := shfs.IdentityFromContext(ctx); identity.UID != 0 {
+	// Without a kernel caller, the context falls back to the process
+	// identity (fail closed), never to anonymous root.
+	if identity := shfs.IdentityFromContext(ctx); identity.UID != uint32(os.Getuid()) {
 		t.Fatalf("unexpected identity in background context: %+v", identity)
 	}
 }

@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"errors"
+	"os"
 	"syscall"
 	"testing"
 
@@ -47,5 +48,26 @@ func TestShouldUpdateAtimePolicy(t *testing.T) {
 	}
 	if !ShouldUpdateAtime(storcfg.AtimeRelatime, old, old, old, now) {
 		t.Fatal("expected relatime to update stale atime")
+	}
+}
+
+func TestIdentityFromContextFailsClosed(t *testing.T) {
+	// An absent identity must never masquerade as anonymous root: it
+	// resolves to the local process user, and only a process that genuinely
+	// runs as root normalizes to Admin.
+	id := IdentityFromContext(context.Background())
+	if id.UID != uint32(os.Getuid()) || id.GID != uint32(os.Getgid()) {
+		t.Fatalf("expected process identity, got %+v", id)
+	}
+	if os.Getuid() != 0 && id.Admin {
+		t.Fatal("non-root process must not inherit Admin from an absent identity")
+	}
+
+	root := IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 1000}))
+	if root.Admin {
+		t.Fatalf("explicit non-root identity must stay unprivileged: %+v", root)
+	}
+	if !IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 0})).Admin {
+		t.Fatal("uid 0 must normalize to Admin")
 	}
 }

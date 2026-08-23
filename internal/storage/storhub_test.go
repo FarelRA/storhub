@@ -1765,7 +1765,9 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	ctx := context.Background()
+	// Ownership and chown operations require an explicitly identified
+	// privileged caller; absent identities fail closed to the process user.
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 
 	if err := hub.MkdirContext(ctx, "project-posix", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)

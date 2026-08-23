@@ -175,57 +175,60 @@ func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {
 }
 
 func TestServiceWorkflowAndHelpers(t *testing.T) {
+	// The workflow runs as an explicitly identified root caller; absent
+	// identities fail closed to the process user and own nothing here.
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
 	now := int64(100)
 	backend := newTestBackend(now)
 	svc := NewService(backend)
 	backend.seedDir("docs")
 	seeded := backend.seedFile("docs/readme.txt", []byte("hello"))
 
-	created, err := svc.CreateFileContext(context.Background(), "demo", "docs/empty.txt")
+	created, err := svc.CreateFileContext(ctx, "demo", "docs/empty.txt")
 	if err != nil || created.Size != 0 {
 		returnFail(t, "create file", err, created)
 	}
-	if err := svc.MkdirContext(context.Background(), "demo", "docs/sub"); err != nil {
+	if err := svc.MkdirContext(ctx, "demo", "docs/sub"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if _, err := svc.AppendFileContext(context.Background(), "demo", "docs/readme.txt", []byte(" world")); err != nil {
+	if _, err := svc.AppendFileContext(ctx, "demo", "docs/readme.txt", []byte(" world")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if _, err := svc.WriteFileAtContext(context.Background(), "demo", "docs/readme.txt", 0, []byte("H")); err != nil {
+	if _, err := svc.WriteFileAtContext(ctx, "demo", "docs/readme.txt", 0, []byte("H")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := svc.TruncateFileContext(context.Background(), "demo", "docs/readme.txt", 5); err != nil {
+	if _, err := svc.TruncateFileContext(ctx, "demo", "docs/readme.txt", 5); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	data, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/readme.txt", 0, 5)
+	data, err := svc.ReadFileAtContext(ctx, "demo", "docs/readme.txt", 0, 5)
 	if err != nil || string(data) != "Hello" {
 		t.Fatalf("read after writes: %q %v", data, err)
 	}
-	if err := svc.RenameContext(context.Background(), "demo", "docs/readme.txt", "docs/sub/final.txt"); err != nil {
+	if err := svc.RenameContext(ctx, "demo", "docs/readme.txt", "docs/sub/final.txt"); err != nil {
 		t.Fatalf("rename file: %v", err)
 	}
-	if err := svc.RenameContext(context.Background(), "demo", "docs/sub", "docs/archive"); err != nil {
+	if err := svc.RenameContext(ctx, "demo", "docs/sub", "docs/archive"); err != nil {
 		t.Fatalf("rename dir: %v", err)
 	}
-	entry, err := svc.StatPathContext(context.Background(), "demo", "docs/archive/final.txt")
+	entry, err := svc.StatPathContext(ctx, "demo", "docs/archive/final.txt")
 	if err != nil || entry.Path != "docs/archive/final.txt" || entry.Size != 5 {
 		t.Fatalf("stat path: %+v %v", entry, err)
 	}
-	dirs, err := svc.ReadDirContext(context.Background(), "demo", "docs")
+	dirs, err := svc.ReadDirContext(ctx, "demo", "docs")
 	if err != nil || len(dirs) != 2 {
 		t.Fatalf("readdir: %+v %v", dirs, err)
 	}
-	stats, err := svc.StatFSContext(context.Background(), "demo")
+	stats, err := svc.StatFSContext(ctx, "demo")
 	if err != nil || stats.Files < 2 || stats.Directories < 2 {
 		t.Fatalf("statfs: %+v %v", stats, err)
 	}
-	if err := svc.RmdirContext(context.Background(), "demo", "docs/archive"); err == nil {
+	if err := svc.RmdirContext(ctx, "demo", "docs/archive"); err == nil {
 		t.Fatal("expected non-empty rmdir failure")
 	}
-	if err := svc.RenameContext(context.Background(), "demo", "docs", "docs/archive/nested"); err == nil {
+	if err := svc.RenameContext(ctx, "demo", "docs", "docs/archive/nested"); err == nil {
 		t.Fatal("expected self-rename failure")
 	}
-	if _, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/archive/final.txt", 99, 1); !errors.Is(err, io.EOF) {
+	if _, err := svc.ReadFileAtContext(ctx, "demo", "docs/archive/final.txt", 99, 1); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected eof, got %v", err)
 	}
 	if info := EntryInfoFromFile(seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")); info.Path != "docs/readme.txt" || !EntryInfoFromDirectory(&meta.DirMeta{Inode: 2, Mode: 0o755}, "docs", 2).IsDir {
@@ -237,7 +240,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	if CountUniqueInodes(backend.repo) == 0 || MinInt64(1, 2) != 1 || MaxInt64(1, 2) != 2 {
 		t.Fatal("helper counts/min/max failed")
 	}
-	if err := svc.RmdirContext(context.Background(), "demo", "docs/archive"); err == nil {
+	if err := svc.RmdirContext(ctx, "demo", "docs/archive"); err == nil {
 		t.Fatal("expected archive to remain non-empty")
 	}
 }
