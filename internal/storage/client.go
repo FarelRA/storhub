@@ -48,8 +48,6 @@ const (
 	NodeKindSymlink = metadata.NodeKindSymlink
 )
 
-var ErrFileNotFound = shfs.ErrNotFound
-
 func DefaultConfig() Config {
 	return storcfg.Default()
 }
@@ -637,7 +635,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	}
 	existing := repoMeta.FindFile(cleanName)
 	if existing == nil {
-		return "", "", fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return "", "", fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
@@ -720,7 +718,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}
 	current := repoMeta.FindFile(cleanName)
 	if current == nil {
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	// Trim chunks beyond the logical file size.
 	// Kernel writeback cache may flush stale dirty pages from the previous
@@ -751,7 +749,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
 		pm.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, latest, fileMeta, now)
@@ -859,7 +857,7 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	}
 	fileMeta := repoMeta.FindFile(cleanName)
 	if fileMeta == nil {
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	if fileMeta.Symlink != "" {
 		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
@@ -906,7 +904,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	// The pre-network validation ran against a snapshot; the file may have
 	// changed since. Re-check the edited range against current state before
@@ -961,7 +959,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	current := pm.meta.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, rewritten, now)
@@ -1132,7 +1130,7 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	}
 	fileMeta := repoMeta.FindFile(cleanName)
 	if fileMeta == nil {
-		return fmt.Errorf("%w: %s", ErrFileNotFound, cleanName)
+		return fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
@@ -1655,7 +1653,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	}
 	file := repo.FindFile(cleanPath)
 	if file == nil {
-		return 0, fmt.Errorf("%w: %s", ErrFileNotFound, cleanPath)
+		return 0, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanPath)
 	}
 	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return 0, err

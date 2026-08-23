@@ -32,7 +32,7 @@ func TestPublicAliasesAndConstants(t *testing.T) {
 	if NodeKindFile != meta.NodeKindFile || NodeKindSymlink != meta.NodeKindSymlink {
 		t.Fatal("node kind constants mismatch")
 	}
-	if ErrFileNotFound.Error() != shfs.ErrNotFound.Error() || ErrNotFound.Error() != shfs.ErrNotFound.Error() {
+	if ErrNotFound.Error() != shfs.ErrNotFound.Error() {
 		t.Fatal("public errors mismatch")
 	}
 }
