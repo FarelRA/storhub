@@ -48,9 +48,10 @@ type Options struct {
 	AttrTimeout     time.Duration
 	NegativeTimeout time.Duration
 	CleanupInterval time.Duration
-	// PageSize is the buffer size used for overlay reads and writes of a
-	// single chunk window; it bounds memory per in-flight handle, not the
-	// storage chunk size (which lives in storage config).
+	// PageSize is the size of each buffer allocated by overlay copy loops
+	// (snapshot materialization, range reads). It bounds resident memory per
+	// copying handle and is independent of the storage chunk size, which
+	// only governs how dirty ranges align to remote chunks.
 	PageSize       int64
 	ExtraMountOpts []string
 	CacheDir       string
@@ -193,13 +194,17 @@ type (
 	TestHandle = storhubHandle
 )
 
+// defaultPageSize bounds each overlay copy-loop allocation when the embedder
+// did not configure Options.PageSize.
+const defaultPageSize = 128 * 1024
+
 func DefaultOptions() Options {
 	return Options{
 		EntryTimeout:    60 * time.Second,
 		AttrTimeout:     60 * time.Second,
 		NegativeTimeout: 10 * time.Second,
 		CleanupInterval: 30 * time.Second,
-		PageSize:        128 * 1024,
+		PageSize:        defaultPageSize,
 		ExtraMountOpts:  []string{"noatime"},
 		Debug:           true,
 	}
@@ -1523,11 +1528,7 @@ func (w *inodeWriteState) refreshBaseSnapshotLocked() error {
 	if err := w.baseTemp.Truncate(w.logicalSize); err != nil {
 		return err
 	}
-	bufSize := normalizedChunkSize(w.fs.hub.ChunkSize())
-	if bufSize <= 0 {
-		bufSize = w.fs.opts.PageSize
-	}
-	buf := make([]byte, bufSize)
+	buf := make([]byte, w.fs.copyPageSize())
 	for _, dirty := range w.dirtyRanges {
 		for offset := dirty.Start; offset < dirty.End; {
 			want := int64(len(buf))
@@ -1835,9 +1836,6 @@ func (w *inodeWriteState) overlayEntryLocked(entry *shfs.EntryInfo) {
 
 func (w *inodeWriteState) plannedRangesLocked() []ByteRange {
 	chunkSize := normalizedChunkSize(w.fs.hub.ChunkSize())
-	if chunkSize <= 0 {
-		chunkSize = w.fs.opts.PageSize
-	}
 	planned := make([]ByteRange, 0, len(w.dirtyRanges))
 	for _, dirty := range w.dirtyRanges {
 		start := dirty.Start
@@ -1899,6 +1897,18 @@ func totalByteRanges(ranges []ByteRange) int64 {
 	return total
 }
 
+// shouldReplaceLocked decides whether pending writes escalate to a
+// full-file replace (one atomic remote rewrite) instead of ranged patching.
+//
+// The ladder, checked top to bottom — every arm is live policy, tuned for
+// when ranged patching costs more than replacing:
+//
+//   - dirty ≥ 75% of the file: patching would rewrite most of the file a
+//     range at a time; replace once instead.
+//   - ≥12 dirty ranges covering ≥ 1/3 of the file: per-range overhead
+//     (one metadata commit each) dominates at this fragmentation.
+//   - dirty ≥ 50% of the file: half the file rewritten is the break-even
+//     point where replace wins unconditionally.
 func (w *inodeWriteState) shouldReplaceLocked(planned []ByteRange) bool {
 	fileSize := maxInt64(w.baseSize, w.logicalSize)
 	if fileSize == 0 {
@@ -1908,9 +1918,8 @@ func (w *inodeWriteState) shouldReplaceLocked(planned []ByteRange) bool {
 	if dirtyBytes*4 >= fileSize*3 {
 		return true
 	}
-	if len(planned) >= 24 && dirtyBytes*2 >= fileSize {
-		return true
-	}
+	// Note: an earlier draft also had "planned >= 24 && dirtyBytes*2 >=
+	// fileSize"; it was strictly subsumed by the final arm and removed.
 	if len(planned) >= 12 && dirtyBytes*3 >= fileSize {
 		return true
 	}
@@ -1934,11 +1943,7 @@ func (w *inodeWriteState) shouldChunkRewriteLocked(planned []ByteRange) bool {
 }
 
 func (w *inodeWriteState) writeRangeToLocked(ctx context.Context, out *os.File, start, end int64) error {
-	bufSize := normalizedChunkSize(w.fs.hub.ChunkSize())
-	if bufSize <= 0 {
-		bufSize = w.fs.opts.PageSize
-	}
-	buf := make([]byte, bufSize)
+	buf := make([]byte, w.fs.copyPageSize())
 	for offset := start; offset < end; {
 		want := int64(len(buf))
 		if remaining := end - offset; want > remaining {
@@ -1960,11 +1965,7 @@ func (w *inodeWriteState) writeRangeToLocked(ctx context.Context, out *os.File, 
 }
 
 func (w *inodeWriteState) writeWorkingRangeToLocked(out *os.File, start, end int64) error {
-	bufSize := normalizedChunkSize(w.fs.hub.ChunkSize())
-	if bufSize <= 0 {
-		bufSize = w.fs.opts.PageSize
-	}
-	buf := make([]byte, bufSize)
+	buf := make([]byte, w.fs.copyPageSize())
 	for offset := start; offset < end; {
 		want := int64(len(buf))
 		if remaining := end - offset; want > remaining {
@@ -2064,10 +2065,7 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 		}
 		return "", err
 	}
-	buf := make([]byte, normalizedChunkSize(w.fs.hub.ChunkSize()))
-	if len(buf) == 0 {
-		buf = make([]byte, w.fs.opts.PageSize)
-	}
+	buf := make([]byte, w.fs.copyPageSize())
 	for _, r := range ranges {
 		for offset := r.Start; offset < r.End; {
 			want := int64(len(buf))
@@ -2392,6 +2390,10 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 		return 0
 	}
 	planned := h.writeState.plannedRangesLocked()
+	// Rung order: chunk-rewrite (rebuild the touched chunks wholesale) is
+	// preferred when fragmentation is high but the affected byte volume is
+	// modest; full replace when the ladder in shouldReplaceLocked says
+	// ranged work cannot pay; otherwise patch each dirty range in place.
 	if h.writeState.shouldChunkRewriteLocked(planned) {
 		return h.commitChunkRewrite(ctx, targetPath, logicalSize, planned, pending)
 	}
@@ -3022,6 +3024,20 @@ func normalizedChunkSize(chunkSize int64) int64 {
 		return chunking.MaxReleaseAssetSize
 	}
 	return chunkSize
+}
+
+// copyPageSize returns the buffer size for overlay copy loops. It is the
+// configured PageSize (default applied at mount), capped by the normalized
+// chunk size so it can never exceed a single chunk window.
+func (s *Filesystem) copyPageSize() int64 {
+	size := s.opts.PageSize
+	if size <= 0 {
+		size = defaultPageSize
+	}
+	if capSize := normalizedChunkSize(s.hub.ChunkSize()); size > capSize {
+		return capSize
+	}
+	return size
 }
 
 func minInt64(a, b int64) int64 {
