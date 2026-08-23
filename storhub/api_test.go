@@ -50,7 +50,7 @@ func TestDefaultConfigAndConstructors(t *testing.T) {
 	if _, err := NewStorHubWithContext(context.Background(), "", Config{}); err == nil {
 		t.Fatal("expected context constructor to reject empty token")
 	}
-	if DefaultFUSEOptions().PageSize == 0 {
+	if DefaultFUSEOptions().OverlayBufferSize == 0 {
 		t.Fatal("expected fuse defaults")
 	}
 }

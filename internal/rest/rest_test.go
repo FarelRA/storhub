@@ -525,7 +525,11 @@ func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePat
 	return nil
 }
 
-func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)

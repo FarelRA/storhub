@@ -1110,9 +1110,9 @@ func (s *stubHub) CreateFileContext(ctx context.Context, project, target string)
 	}
 	return nil, io.EOF
 }
-func (*stubHub) MkdirContext(context.Context, string, string) error  { return nil }
-func (*stubHub) UnlinkContext(context.Context, string, string) error { return nil }
-func (*stubHub) RmdirContext(context.Context, string, string) error  { return nil }
+func (*stubHub) MkdirContext(context.Context, string, string) error                       { return nil }
+func (*stubHub) UnlinkContext(context.Context, string, string) error                      { return nil }
+func (*stubHub) RmdirContext(context.Context, string, string, ...shfs.MutateOption) error { return nil }
 func (s *stubHub) TruncateFileContext(ctx context.Context, project, target string, size int64, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
 	if s.truncateFile != nil {
 		return s.truncateFile(ctx, project, target, size)

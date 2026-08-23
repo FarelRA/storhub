@@ -190,7 +190,7 @@ func (f *fakeShowcaseHub) StatFSContext(ctx context.Context, project string) (*s
 func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
 	return nil
 }
-func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string) error {
+func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	return nil
 }
 func (f *fakeShowcaseHub) PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error) {

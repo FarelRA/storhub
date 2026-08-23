@@ -253,7 +253,7 @@ type Hub interface {
 	CreateFileContext(context.Context, string, string) (*metadata.FileMeta, error)
 	MkdirContext(context.Context, string, string) error
 	UnlinkContext(context.Context, string, string) error
-	RmdirContext(context.Context, string, string) error
+	RmdirContext(context.Context, string, string, ...shfs.MutateOption) error
 	TruncateFileContext(context.Context, string, string, int64, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	ChmodContext(context.Context, string, string, uint32) error
 	ChownContext(context.Context, string, string, uint32, uint32) error

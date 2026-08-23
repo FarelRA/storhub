@@ -7,7 +7,7 @@ import (
 )
 
 func TestDefaultOptionsAndNewValidation(t *testing.T) {
-	if DefaultOptions().PageSize == 0 {
+	if DefaultOptions().OverlayBufferSize == 0 {
 		t.Fatal("expected non-zero fuse defaults")
 	}
 	hub, err := public.NewStorHub("token")
