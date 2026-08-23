@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -210,16 +209,19 @@ func (a *App) newListCmd() *cobra.Command {
 		RunE:  a.runList,
 	}
 	cmd.Flags().BoolP("long", "l", false, "Show detailed listing")
+	cmd.Flags().Bool("json", false, "Emit machine-readable JSON (array of entries)")
 	return cmd
 }
 
 func (a *App) newStatCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "stat [flags] <project> <path>",
 		Short: "Show file/directory metadata",
 		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runStat,
 	}
+	cmd.Flags().Bool("json", false, "Emit machine-readable JSON object")
+	return cmd
 }
 
 func (a *App) newCatCmd() *cobra.Command {
@@ -288,12 +290,14 @@ func (a *App) newPatchCmd() *cobra.Command {
 }
 
 func (a *App) newRevisionsCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "revisions [flags] <project>",
 		Short: "List metadata revision history",
 		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE:  a.runRevisions,
 	}
+	cmd.Flags().Bool("json", false, "Emit machine-readable JSON (array of revisions)")
+	return cmd
 }
 
 func (a *App) newRollbackCmd() *cobra.Command {
@@ -334,12 +338,12 @@ func (a *App) newServeRESTCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve-rest [flags]",
 		Short: "Start the REST API server",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE:  a.runServeREST,
 	}
 	cmd.Flags().String("listen", ":8080", "Listen address")
 	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
-	cmd.Flags().String("auth-file", os.Getenv("STORHUB_REST_AUTH_FILE"), "Optional JSON auth config file")
+	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
 	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
 	return cmd
 }
@@ -486,6 +490,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	long, _ := cmd.Flags().GetBool("long")
+	jsonOut, _ := cmd.Flags().GetBool("json")
 	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -497,6 +502,12 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	entries, err := hub.ReadDir(args[0], dir)
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		if entries == nil {
+			entries = []storhub.DirEntry{}
+		}
+		return json.NewEncoder(a.stdout).Encode(entries)
 	}
 	printDirEntries(a.stdout, entries, long)
 	return nil
@@ -513,8 +524,16 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutStat(cmd) {
+		return json.NewEncoder(a.stdout).Encode(entry)
+	}
 	printEntryInfo(a.stdout, entry)
 	return nil
+}
+
+func jsonOutStat(cmd *cobra.Command) bool {
+	v, _ := cmd.Flags().GetBool("json")
+	return v
 }
 
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
@@ -691,6 +710,12 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if v, _ := cmd.Flags().GetBool("json"); v {
+		if revs == nil {
+			revs = []storhub.MetadataRevision{}
+		}
+		return json.NewEncoder(a.stdout).Encode(revs)
+	}
 	printRevisions(a.stdout, revs)
 	return nil
 }
@@ -820,6 +845,9 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	listen, _ := cmd.Flags().GetString("listen")
 	basePath, _ := cmd.Flags().GetString("base-path")
 	authFile, _ := cmd.Flags().GetString("auth-file")
+	if authFile == "" {
+		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
+	}
 	hub, err := newRESTHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -1015,13 +1043,6 @@ func ternary[T any](cond bool, left, right T) T {
 		return left
 	}
 	return right
-}
-
-func defaultDownloadPath(remotePath string) string {
-	if base := filepath.Base(remotePath); base != "." && base != "/" {
-		return base
-	}
-	return "downloaded-file"
 }
 
 func formatTime(t int64) string {
