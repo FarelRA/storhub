@@ -70,6 +70,9 @@ func (x XAttrMap) Clone() XAttrMap {
 }
 
 type FileMeta struct {
+	// Chunks is nil-means-empty after Normalize (empty slice collapses to
+	// nil only for symlinks); callers compare with len(), never DeepEqual
+	// against []int64{}.
 	Chunks     []int64  `json:"cs,omitempty"`
 	Size       int64    `json:"s"`
 	Symlink    string   `json:"sl,omitempty"`
@@ -81,6 +84,8 @@ type FileMeta struct {
 	UID        uint32   `json:"u,omitempty"`
 	GID        uint32   `json:"g,omitempty"`
 	Inode      uint64   `json:"i,omitempty"`
+	// XAttrs is nil-means-empty: normalizeXAttrs collapses empty maps to
+	// nil so serialized metadata omits the field.
 	XAttrs     XAttrMap `json:"x,omitempty"`
 	// TimesExplicit marks timestamps as authoritative: zero means the
 	// epoch (e.g. an explicit patch), not "unset", so Normalize must not
@@ -527,6 +532,11 @@ func (m *RepoMetadata) RemoveDirectory(path string) bool {
 
 func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	path = normalizeStoredPath(path)
+	// Deliberately eager: structural map writes also happen OUTSIDE this
+	// package (fs rename swaps Dirs entries directly; posix patch copies
+	// do the same), so a lazily invalidated index cache would silently go
+	// stale. Rebuilding here keeps every read correct at O(entries) per
+	// call — readdir frequencies make that the right trade.
 	m.RebuildIndexes()
 	return m.childDirs[path], m.childFiles[path]
 }
@@ -563,6 +573,9 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	m.invalidateIndexes()
 }
 
+// FindFile returns a SNAPSHOT of the entry: the pointer targets a copy, so
+// mutating it never changes stored state (and never dirties indexes). Apply
+// changes through UpsertFile or an UpdateRepoMetadataContext transaction.
 func (m *RepoMetadata) FindFile(name string) *FileMeta {
 	name = normalizeStoredPath(name)
 	if file, ok := m.Files[name]; ok {
