@@ -102,11 +102,42 @@ type projectMetadata struct {
 	// (or a confirmed-new project). Cold caches must hydrate before any
 	// mutation, or the mutation commits an empty tree over remote state.
 	hydrated bool
+	// reviving guards the eviction-revival critical section under metaMu:
+	// without it two concurrent mutators can both pass the stopped check
+	// and swap channels under a freshly started commit loop.
+	reviving bool
 	// stopped is set when the janitor evicted this instance. A long
 	// operation that captured the pointer before eviction must not strand
 	// its acknowledged mutations on a dead commit loop; markProjectDirtyLive
 	// revives the instance instead.
 	stopped bool
+}
+
+// ensureHydratedLocked applies the cold-cache guard to direct metadata
+// writers that bypass UpdateRepoMetadataContext (advisory atime queueing).
+// Caller holds pm.mu; the lock is dropped and re-acquired around the
+// remote load, mirroring the transaction path. A load failure fails
+// closed: the caller must not touch an unhydrated tree.
+func (h *StorHub) ensureHydratedLocked(ctx context.Context, project string, pm *projectMetadata) error {
+	if pm.hydrated {
+		return nil
+	}
+	pm.mu.Unlock()
+	loaded, loadedSHA, loadErr := h.loadRepoMetadataFresh(ctx, project)
+	pm.mu.Lock()
+	switch {
+	case loadErr == nil:
+		if !pm.hydrated && !pm.dirty {
+			pm.meta = loaded
+			pm.sha = loadedSHA
+		}
+		pm.hydrated = true
+	case errors.Is(loadErr, shfs.ErrNotFound):
+		pm.hydrated = true
+	default:
+		return fmt.Errorf("hydrate metadata before atime update: %w", loadErr)
+	}
+	return nil
 }
 
 func markProjectDirtyLocked(pm *projectMetadata) {
@@ -145,13 +176,23 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	h.metaMu.Lock()
 	current, exists := h.metaCache[project]
 	revived := false
+	live := false
 	switch {
 	case exists && current != pm:
 		logging.Error(h.projectLogger(project),
 			"evicted metadata snapshot diverged from a newer reload; mutations in this window are lost",
 			"project", project)
+	case exists && current == pm && !current.stopped:
+		// Another goroutine completed the revival while we waited on
+		// stoppedCh/metaMu; the instance is live again — just mark dirty.
+		live = true
+	case pm.reviving:
+		// A concurrent revival is between channel swap and loop start;
+		// touching channels here would orphan its fresh commit loop.
+		live = true
 	default:
 		// Revive: fresh channels for a new commit loop, then re-insert.
+		pm.reviving = true
 		pm.stopCh = make(chan struct{})
 		pm.stoppedCh = make(chan struct{})
 		pm.triggerCh = make(chan struct{}, 1)
@@ -166,9 +207,12 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
 		h.shutdownWg.Add(1)
 		go h.commitLoop(project, pm)
+		h.metaMu.Lock()
+		pm.reviving = false
+		h.metaMu.Unlock()
 	}
 	pm.mu.Lock()
-	if revived {
+	if revived || live {
 		markProjectDirtyLocked(pm)
 	}
 }
