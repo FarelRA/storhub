@@ -48,12 +48,15 @@ type Options struct {
 	AttrTimeout     time.Duration
 	NegativeTimeout time.Duration
 	CleanupInterval time.Duration
-	PageSize        int64
-	ExtraMountOpts  []string
-	CacheDir        string
-	AllowOther      bool
-	Debug           bool
-	Logger          *slog.Logger
+	// PageSize is the buffer size used for overlay reads and writes of a
+	// single chunk window; it bounds memory per in-flight handle, not the
+	// storage chunk size (which lives in storage config).
+	PageSize       int64
+	ExtraMountOpts []string
+	CacheDir       string
+	AllowOther     bool
+	Debug          bool
+	Logger         *slog.Logger
 }
 
 type Filesystem struct {
@@ -69,6 +72,9 @@ type Filesystem struct {
 	inodePaths  map[uint64]map[string]struct{}
 	pathToInode map[string]uint64
 	lockTable   map[uint64][]lockRecord
+	// lockCond wakes blocking (F_SETLKW) lock waiters whenever any lock
+	// record changes; its Locker is s.mu so waiters re-check under it.
+	lockCond    *sync.Cond
 	writeStates map[uint64]*inodeWriteState
 	handles     map[uint64]*storhubHandle
 	nextHandle  atomic.Uint64
@@ -292,6 +298,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
+	fsys.lockCond = sync.NewCond(&fsys.mu)
 	go fsys.runJanitor()
 	return fsys, nil
 }
@@ -442,12 +449,19 @@ func (s *Filesystem) soleWriteStateRef(state *inodeWriteState) bool {
 }
 
 func (s *Filesystem) Invalidate() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Snapshot the nodes under the lock, but issue kernel notifications
+	// after releasing it: NotifyContent writes to the FUSE connection and
+	// must not run while filesystem bookkeeping is locked.
+	s.mu.RLock()
+	nodes := make([]*storhubNode, 0, len(s.nodes))
 	for ino, node := range s.nodes {
 		if ino == 1 {
 			continue
 		}
+		nodes = append(nodes, node)
+	}
+	s.mu.RUnlock()
+	for _, node := range nodes {
 		safeNotifyContent(node)
 	}
 }
@@ -733,7 +747,10 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 
 func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino *gofusefs.Inode) {
 	defer func() {
+		// go-fuse panics on malformed trees; degrade to "no cached child"
+		// loudly instead of taking the request goroutine down.
 		if recover() != nil {
+			n.fs.debugf("attachChild recovered from panic path=%s inode=%d", n.currentPath(), child.inode)
 			ino = nil
 		}
 	}()
@@ -2338,12 +2355,7 @@ func (h *storhubHandle) quarantineTemps() {
 
 func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	if h.writeState == nil {
-		h.mu.Lock()
-		if h.temp == nil || h.deleted || strings.TrimSpace(h.path) == "" {
-			h.mu.Unlock()
-			return 0
-		}
-		h.mu.Unlock()
+		// Read-only or detached handle: provably nothing to commit.
 		return 0
 	}
 	h.mu.Lock()
@@ -2621,24 +2633,45 @@ func (h *storhubHandle) Setlk(ctx context.Context, owner uint64, lk *fuse.FileLo
 	return errno
 }
 
+// Setlkw blocks until the lock can be granted. Waiters sleep on the
+// filesystem's lock condition variable and are woken by any lock-table
+// change (or context cancellation) instead of polling.
 func (h *storhubHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
 	_ = flags
+	if ctx != nil && ctx.Done() != nil {
+		// Wake the waiter promptly on cancellation.
+		context.AfterFunc(ctx, h.fs.lockCond.Broadcast)
+	}
+	s := h.fs
+	s.lockCond.L.Lock()
+	defer s.lockCond.L.Unlock()
 	for {
-		if errno := h.fs.setLock(h.inode, owner, *lk); errno == 0 {
+		errno := s.setLockLocked(h.inode, owner, *lk)
+		if errno == 0 {
 			h.trackLockOwner(owner, lk.Typ)
 			return 0
 		}
-		select {
-		case <-ctx.Done():
-			return errnoFromError(ctx.Err())
-		case <-time.After(25 * time.Millisecond):
+		if err := ctx.Err(); err != nil {
+			return errnoFromError(err)
 		}
+		s.lockCond.Wait()
 	}
 }
 
 func (s *Filesystem) setLock(inode, owner uint64, lk fuse.FileLock) syscall.Errno {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockCond.L.Lock()
+	defer s.lockCond.L.Unlock()
+	errno := s.setLockLocked(inode, owner, lk)
+	if errno == 0 {
+		// A release may unblock F_SETLKW waiters.
+		s.lockCond.Broadcast()
+	}
+	return errno
+}
+
+// setLockLocked applies a lock operation; callers must hold lockCond's
+// locker (s.mu).
+func (s *Filesystem) setLockLocked(inode, owner uint64, lk fuse.FileLock) syscall.Errno {
 	locks := s.lockTable[inode]
 	if lk.Typ == syscall.F_UNLCK {
 		filtered := locks[:0]
@@ -2908,6 +2941,10 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	attr.Mode = mode
 }
 
+// errnoFromError maps storage-layer errors onto POSIX errnos. The ladder
+// is ordered most-specific first: raw Errno passthrough, context
+// cancellation/deadline, then the fs sentinel family, with EIO as the
+// honest catch-all for anything unmapped (never success, never ENOENT).
 func errnoFromError(err error) syscall.Errno {
 	if err == nil {
 		return 0

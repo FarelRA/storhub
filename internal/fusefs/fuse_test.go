@@ -868,7 +868,9 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 	}
 }
 
-func TestOpenUsesDirectIO(t *testing.T) {
+// TestOpenReturnsKernelCachedFlags pins that opens hand the kernel
+// page-cached IO (zero FOPEN flags); direct IO would bypass our overlay.
+func TestOpenReturnsKernelCachedFlags(t *testing.T) {
 	now := int64(36)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
