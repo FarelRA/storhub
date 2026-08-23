@@ -41,14 +41,19 @@ func TestRestrictedClientDeniesEverything(t *testing.T) {
 			t.Fatalf("restrictedClient does not implement Client.%s", method.Name)
 		}
 		mt := m.Type()
-		args := make([]reflect.Value, mt.NumIn())
-		for j := 0; j < mt.NumIn(); j++ {
+		tail := mt.NumIn()
+		if mt.IsVariadic() {
+			// Call packs the variadic tail itself; supply none.
+			tail--
+		}
+		args := make([]reflect.Value, 0, tail)
+		for j := 0; j < tail; j++ {
 			argType := mt.In(j)
 			if argType == reflect.TypeOf((*context.Context)(nil)).Elem() {
-				args[j] = reflect.ValueOf(context.Background())
+				args = append(args, reflect.ValueOf(context.Background()))
 				continue
 			}
-			args[j] = reflect.Zero(argType)
+			args = append(args, reflect.Zero(argType))
 		}
 		results := m.Call(args)
 		denied := false
@@ -90,3 +95,67 @@ func TestShareCreateLocationHeader(t *testing.T) {
 		t.Fatalf("Location header: got %q want %q", got, want)
 	}
 }
+
+// TestRevisionPreconditionEndToEnd drives the If-Match revision CAS through
+// the HTTP surface: stat publishes X-StorHub-Revision, a mutation carrying
+// that revision is enforced against the backend (stale revision fails 412),
+// and classic attribute ETags keep their freshness semantics.
+func TestRevisionPreconditionEndToEnd(t *testing.T) {
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	var login restLoginResponse
+	decodeJSONBody(t, loginResp, &login)
+	auth := map[string]string{"Authorization": "Bearer " + login.Token}
+
+	statResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=shared", nil, auth, http.StatusOK)
+	rev := statResp.Header.Get("X-StorHub-Revision")
+	if rev == "" {
+		t.Fatal("stat response did not publish X-StorHub-Revision")
+	}
+	nodeETag := readETag(t, statResp)
+
+	// Advance the remote behind the client's back; the old revision token
+	// is now stale.
+	client.SetRevision("rev-advanced")
+
+	mustRequest(t, handler, http.MethodDelete,
+		"/api/v1/projects/demo/nodes?path=shared/readme.txt",
+		nil, map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": rev}, http.StatusPreconditionFailed)
+
+	// A CURRENT revision token enforces CAS at the backend and succeeds.
+	fresh := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=shared", nil, auth, http.StatusOK)
+	currentRev := fresh.Header.Get("X-StorHub-Revision")
+	if currentRev != "rev-advanced" {
+		t.Fatalf("stale revision header: %q", currentRev)
+	}
+	mustRequest(t, handler, http.MethodDelete,
+		"/api/v1/projects/demo/nodes?path=shared/readme.txt",
+		nil, map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": currentRev}, http.StatusNoContent)
+
+	// Classic attribute ETags keep working (freshness-only flow).
+	mustRequest(t, handler, http.MethodDelete,
+		"/api/v1/projects/demo/nodes?path=shared",
+		nil, map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": nodeETag}, http.StatusNoContent)
+}
+
+func readETag(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	for _, v := range resp.Header.Values("X-StorHub-Node") {
+		_ = v
+	}
+	var body struct {
+		ETag string `json:"etag"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode node response: %v", err)
+	}
+	if body.ETag == "" {
+		t.Fatal("node response missing etag")
+	}
+	return body.ETag
+}
+
+func quote(v string) string { return `"` + v + `"` }

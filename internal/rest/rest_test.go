@@ -364,6 +364,36 @@ type fakeRESTClient struct {
 	rollbacks             []string
 	readCalls             []readCall
 	failReplaceFromReader error
+	revision              string
+	optErr                error
+}
+
+// SetRevision seeds the fake's metadata revision (used by precondition
+// tests). Mutations carrying a stale WithExpectedRevision fail with
+// fs.ErrPreconditionFailed.
+func (c *fakeRESTClient) SetRevision(rev string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.revision = rev
+	c.optErr = nil
+}
+
+// RevisionContext implements the Client contract.
+func (c *fakeRESTClient) RevisionContext(context.Context, string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.revision == "" {
+		return "rev-0", nil
+	}
+	return c.revision, nil
+}
+
+func (c *fakeRESTClient) consumeOptErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.optErr
+	c.optErr = nil
+	return err
 }
 
 func (c *fakeRESTClient) failNextReplace(err error) {
@@ -395,6 +425,18 @@ type fakeRESTData struct {
 	nlink  uint32
 	kind   NodeKind
 	target string
+}
+
+// recordOpts captures mutate options so tests can assert precondition
+// threading; when an expected revision is declared it is ENFORCED against
+// the fake's current revision, mirroring storage behavior.
+func (c *fakeRESTClient) recordOpts(opts []shfs.MutateOption) {
+	cfg := shfs.ApplyMutateOptions(opts)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cfg.ExpectedRevision() != "" && c.revision != "" && cfg.ExpectedRevision() != c.revision {
+		c.optErr = shfs.ErrPreconditionFailed
+	}
 }
 
 func newFakeRESTClient() *fakeRESTClient {
@@ -452,7 +494,11 @@ func (c *fakeRESTClient) MkdirContext(ctx context.Context, project, dirPath stri
 	return nil
 }
 
-func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePath string) error {
+func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -582,7 +628,11 @@ func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, ne
 	return nil
 }
 
-func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*FileMetadata, error) {
+func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -606,7 +656,11 @@ func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, fileP
 	return &FileMetadata{Size: size, Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -623,7 +677,11 @@ func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePat
 	return &FileMetadata{Size: int64(len(node.data.bytes)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)
@@ -654,7 +712,11 @@ func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePa
 	return &FileMetadata{Size: int64(len(content)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*FileMetadata, error) {
+func (c *fakeRESTClient) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
@@ -673,7 +735,11 @@ func (c *fakeRESTClient) takeReplaceFailure() error {
 	return err
 }
 
-func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*FileMetadata, error) {
+func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireWritableFile(project, filePath)

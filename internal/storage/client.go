@@ -98,6 +98,10 @@ type projectMetadata struct {
 	stopCh     chan struct{}
 	stoppedCh  chan struct{}
 	triggerCh  chan struct{}
+	// hydrated records that this instance's meta reflects a remote load
+	// (or a confirmed-new project). Cold caches must hydrate before any
+	// mutation, or the mutation commits an empty tree over remote state.
+	hydrated bool
 	// stopped is set when the janitor evicted this instance. A long
 	// operation that captured the pointer before eviction must not strand
 	// its acknowledged mutations on a dead commit loop; markProjectDirtyLive
@@ -558,7 +562,10 @@ func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMeta, e
 	return h.ReplaceFileContext(context.Background(), project, fileName, inputPath)
 }
 
-func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
+func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string, opts ...shfs.MutateOption) (*FileMeta, error) {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
+	}
 	return h.putFileContext(ctx, project, fileName, inputPath, true)
 }
 
@@ -720,9 +727,12 @@ func (h *StorHub) ReplaceFileFromReader(project, filePath string, body io.Reader
 	return h.ReplaceFileFromReaderContext(context.Background(), project, filePath, body)
 }
 
-func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (result *metadata.FileMeta, err error) {
+func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (result *metadata.FileMeta, err error) {
 	if body == nil {
 		return nil, fmt.Errorf("request body is nil")
+	}
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
 	}
 	chunkSize := h.ChunkSize()
 
@@ -771,11 +781,14 @@ func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, 
 	return h.PatchFileContext(context.Background(), project, fileName, offset, deleteSize, edit)
 }
 
-func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte) (result *FileMeta, err error) {
+func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (result *FileMeta, err error) {
 	started := h.logOpStart(project, "patch-file", "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
 	defer func() {
 		h.logOpFinish(project, "patch-file", started, err, "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
 	}()
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
+	}
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -1379,6 +1392,31 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	started := h.config.Now().UTC()
 	h.debugf("metadata update start project=%s message=%q", project, message)
 
+	// Hydration guard: a freshly created projectMetadata starts EMPTY. If
+	// the project exists remotely, applying a mutation to that empty tree
+	// and committing would replace the entire remote state (files, dirs,
+	// chunk catalog) with just this one change. Load remote truth first;
+	// only a confirmed-new project may proceed on an empty tree.
+	if !pm.hydrated {
+		pm.mu.Unlock()
+		loaded, loadedSHA, loadErr := h.loadRepoMetadataFresh(ctx, project)
+		pm.mu.Lock()
+		switch {
+		case loadErr == nil:
+			if !pm.hydrated && !pm.dirty {
+				pm.meta = loaded
+				pm.sha = loadedSHA
+			}
+			pm.hydrated = true
+		case errors.Is(loadErr, shfs.ErrNotFound):
+			// Confirmed-new project: empty tree is the truth.
+			pm.hydrated = true
+		default:
+			pm.mu.Unlock()
+			return nil, fmt.Errorf("hydrate metadata before mutation: %w", loadErr)
+		}
+	}
+
 	// Apply mutation to in-memory metadata
 	if err := fn(pm.meta); err != nil {
 		pm.mu.Unlock()
@@ -1502,7 +1540,10 @@ func (h *StorHub) TruncateFile(project, filePath string, size int64) (*metadata.
 	return h.TruncateFileContext(context.Background(), project, filePath, size)
 }
 
-func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
+func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
+	}
 	return h.fsService().TruncateFileContext(ctx, project, filePath, size)
 }
 
@@ -1510,7 +1551,10 @@ func (h *StorHub) AppendFile(project, filePath string, data []byte) (*metadata.F
 	return h.AppendFileContext(context.Background(), project, filePath, data)
 }
 
-func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
+func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
+	}
 	return h.fsService().AppendFileContext(ctx, project, filePath, data)
 }
 
@@ -1518,7 +1562,10 @@ func (h *StorHub) WriteFileAt(project, filePath string, offset int64, data []byt
 	return h.WriteFileAtContext(context.Background(), project, filePath, offset, data)
 }
 
-func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return nil, err
+	}
 	return h.fsService().WriteFileAtContext(ctx, project, filePath, offset, data)
 }
 

@@ -22,7 +22,10 @@ func (h *StorHub) DeleteFile(project, fileName string) error {
 	return h.DeleteFileContext(context.Background(), project, fileName)
 }
 
-func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName string) error {
+func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName string, opts ...shfs.MutateOption) error {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return err
+	}
 	if err := validateProject(project); err != nil {
 		return err
 	}

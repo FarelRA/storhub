@@ -84,13 +84,13 @@ var (
 type Client interface {
 	CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error)
 	MkdirContext(ctx context.Context, project, dirPath string) error
-	DeleteFileContext(ctx context.Context, project, filePath string) error
+	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
 	RmdirContext(ctx context.Context, project, dirPath string) error
 	RenameContext(ctx context.Context, project, oldPath, newPath string) error
-	TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error)
-	AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error)
-	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error)
-	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error)
+	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
+	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
+	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
+	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
 	StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error)
 	ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error)
@@ -105,11 +105,14 @@ type Client interface {
 	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
 	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)
 	RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error
+	// RevisionContext reports the project's current metadata revision for
+	// use with fs.WithExpectedRevision preconditions.
+	RevisionContext(ctx context.Context, project string) (string, error)
 	ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
 	PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error)
 	DeleteProjectContext(ctx context.Context, project string) error
-	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error)
+	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 }
 
 type restHandler struct {
@@ -185,7 +188,7 @@ func (readOnlyShare) MkdirContext(ctx context.Context, project, dirPath string) 
 	return errReadOnly()
 }
 
-func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath string) error {
+func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
@@ -197,23 +200,23 @@ func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPat
 	return errReadOnly()
 }
 
-func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (*metadata.FileMeta, error) {
+func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (*metadata.FileMeta, error) {
+func (readOnlyShare) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
+func (readOnlyShare) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
+func (readOnlyShare) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
+func (readOnlyShare) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
@@ -322,6 +325,12 @@ func (c *restrictedClient) StatFSContext(ctx context.Context, project string) (*
 
 func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+// Share visitors never learn the project's revision: like stats and
+// history, it is metadata beyond the shared subtree.
+func (c *restrictedClient) RevisionContext(ctx context.Context, project string) (string, error) {
+	return "", errForbidden("access denied: share metadata is limited to the shared path")
 }
 
 func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
@@ -770,6 +779,7 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		eTag := restEntryETag(entry)
+		h.setRevisionHeader(w, r, project)
 		if h.ifNoneMatchSatisfied(r.Header.Get("If-None-Match"), eTag) {
 			w.Header().Set("ETag", eTag)
 			w.WriteHeader(http.StatusNotModified)
@@ -787,9 +797,25 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 			h.writeMappedError(w, err)
 			return
 		}
-		eTag := restEntryETag(entry)
-		if err := h.requireMatch(r.Header.Get("If-Match"), eTag); err != nil {
-			if !isPreconditionHeaderEmpty(err) {
+		// Resolve the If-Match flavor FIRST: a current revision token opts
+		// into backend-enforced CAS and supersedes attribute-ETag checks;
+		// anything else keeps the classic freshness semantics below.
+		revOpts, revMatched, rpErr := h.revisionPrecondition(r, project)
+		if rpErr != nil {
+			h.writeMappedError(w, rpErr)
+			return
+		}
+		if !revMatched {
+			eTag := restEntryETag(entry)
+			if err := h.requireMatch(r.Header.Get("If-Match"), eTag); err != nil {
+				if !isPreconditionHeaderEmpty(err) {
+					h.writeMappedError(w, err)
+					return
+				}
+			}
+			// Re-verify freshness right before the destructive call; a
+			// concurrent change since the first stat must fail closed.
+			if err := h.enforceFreshPrecondition(r, project, targetPath); err != nil {
 				h.writeMappedError(w, err)
 				return
 			}
@@ -800,17 +826,10 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Re-verify the precondition against current state right before the
-		// destructive call; a concurrent change since the first stat must
-		// fail closed.
-		if err := h.enforceFreshPrecondition(r, project, targetPath); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
 		if entry.IsDir {
 			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath)
 		} else {
-			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath)
+			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath, revOpts...)
 		}
 		if err != nil {
 			h.writeMappedError(w, err)
@@ -915,7 +934,12 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
-	if exists {
+	replaceRevOpts, replaceRevMatched, replaceRevErr := h.revisionPrecondition(r, project)
+	if replaceRevErr != nil {
+		h.writeMappedError(w, replaceRevErr)
+		return
+	}
+	if exists && !replaceRevMatched {
 		if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
 			if !isPreconditionHeaderEmpty(err) {
 				h.writeMappedError(w, err)
@@ -957,7 +981,7 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	// did not exist (or clobbers a symlink). If the body transfer then
 	// fails, remove the placeholder instead of stranding an orphan the
 	// client believes was never created.
-	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body); err != nil {
+	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body, replaceRevOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
 			if cleanupErr := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); cleanupErr != nil {
 				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
@@ -1023,7 +1047,13 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, err)
 			return
 		}
-		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit); err != nil {
+		revOpts, revMatched, rpErr := h.revisionPrecondition(r, project)
+		if rpErr != nil {
+			h.writeMappedError(w, rpErr)
+			return
+		}
+		_ = revMatched
+		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -1037,7 +1067,12 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			h.writeMappedError(w, err)
 			return
 		}
-		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size); err != nil {
+		revOpts, _, rpErr := h.revisionPrecondition(r, project)
+		if rpErr != nil {
+			h.writeMappedError(w, rpErr)
+			return
+		}
+		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size, revOpts...); err != nil {
 			h.writeMappedError(w, err)
 			return
 		}
@@ -1062,6 +1097,30 @@ func (h *restHandler) enforceFreshPrecondition(r *http.Request, project, targetP
 		return err
 	}
 	return h.requireMatch(ifMatch, restEntryETag(entry))
+}
+
+// revisionPrecondition implements the revision flavor of If-Match. When the
+// header carries the project's CURRENT metadata revision, it is returned as
+// an fs.WithExpectedRevision option so storage re-verifies against remote
+// HEAD immediately before applying — true compare-and-swap. Header values
+// that are not the current revision (e.g. classic attribute ETags from
+// earlier clients) yield no options here; those flows keep their existing
+// freshness semantics via enforceFreshPrecondition, which still answers 412
+// on staleness. Absent If-Match yields no options.
+func (h *restHandler) revisionPrecondition(r *http.Request, project string) (opts []shfs.MutateOption, matched bool, err error) {
+	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+	if ifMatch == "" {
+		return nil, false, nil
+	}
+	rev, err := h.clientFor(r).RevisionContext(r.Context(), project)
+	if err != nil {
+		return nil, false, err
+	}
+	if rerr := h.requireMatch(ifMatch, rev); rerr != nil {
+		// Not a revision token: defer to the attribute-ETag freshness check.
+		return nil, false, nil
+	}
+	return []shfs.MutateOption{shfs.WithExpectedRevision(rev)}, true, nil
 }
 
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
@@ -1735,7 +1794,11 @@ func (h *restHandler) streamWriteBody(w http.ResponseWriter, r *http.Request, pr
 	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
 		return err
 	}
-	_, err = h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload)
+	revOptsW, _, rpErrW := h.revisionPrecondition(r, project)
+	if rpErrW != nil {
+		return rpErrW
+	}
+	_, err = h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOptsW...)
 	return err
 }
 
@@ -1748,7 +1811,11 @@ func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, p
 	if err := h.enforceFreshPrecondition(r, project, filePath); err != nil {
 		return err
 	}
-	_, err = h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload)
+	revOptsA, _, rpErrA := h.revisionPrecondition(r, project)
+	if rpErrA != nil {
+		return rpErrA
+	}
+	_, err = h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload, revOptsA...)
 	return err
 }
 
@@ -1843,6 +1910,9 @@ func mappedStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
+	if errors.Is(err, shfs.ErrPreconditionFailed) {
+		return http.StatusPreconditionFailed
+	}
 	var apiErr *ghapi.APIError
 	if errors.As(err, &apiErr) {
 		switch {
@@ -1895,6 +1965,17 @@ func mappedCode(status int) string {
 	default:
 		return "internal_error"
 	}
+}
+
+// setRevisionHeader publishes the project's current metadata revision as a
+// response header so clients can obtain CAS tokens for later If-Match use.
+// Best effort: a revision fetch failure never fails the read.
+func (h *restHandler) setRevisionHeader(w http.ResponseWriter, r *http.Request, project string) {
+	rev, err := h.clientFor(r).RevisionContext(r.Context(), project)
+	if err != nil || rev == "" {
+		return
+	}
+	w.Header().Set("X-StorHub-Revision", rev)
 }
 
 func restEntryETag(entry *shfs.EntryInfo) string {
