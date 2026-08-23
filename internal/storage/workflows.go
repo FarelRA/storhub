@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
@@ -568,7 +569,9 @@ func isMetadataNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if strings.Contains(err.Error(), "file not found") {
+	// The git backend surfaces a missing metadata file as an fs-not-exist
+	// error chain; match sentinels, never message text.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, shfs.ErrNotFound) {
 		return true
 	}
 	var apiErr *ghapi.APIError

@@ -464,16 +464,15 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 	}
 	h.metaMu.RUnlock()
 
-	var firstErr error
+	// Collect every failure: stopping at the first error would leave other
+	// projects' dirty metadata unflushed with no diagnostic.
+	var errs []error
 	for _, p := range projects {
 		if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			errs = append(errs, fmt.Errorf("flush %s: %w", p.name, err))
 		}
 	}
-
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, error) {
@@ -1231,13 +1230,6 @@ func validateProject(project string) error {
 		return fmt.Errorf("invalid project name: %s", project)
 	}
 	return nil
-}
-
-func metadataCommitMessage(fileName string, replace bool) string {
-	if replace {
-		return fmt.Sprintf("storhub: replace %s", fileName)
-	}
-	return fmt.Sprintf("storhub: add %s", fileName)
 }
 
 func shortSHA(value string) string {

@@ -60,18 +60,20 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
-	if !pm.meta.RemoveFile(cleanName) {
-		pm.mu.Unlock()
-		return shfs.NotFound(cleanName)
-	}
+	// Run every fallible operation before the irreversible removal so an
+	// error can never leave the file deleted while the caller believes the
+	// delete failed.
+	now := h.config.Now().Unix()
+	shfs.TouchParentDirectory(pm.meta, cleanName, now)
 	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
-		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
-		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, h.config.Now().Unix()); err != nil {
+		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, now); err != nil {
 			pm.mu.Unlock()
 			return err
 		}
-	} else {
-		shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
+	}
+	if !pm.meta.RemoveFile(cleanName) {
+		pm.mu.Unlock()
+		return shfs.NotFound(cleanName)
 	}
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()

@@ -35,9 +35,6 @@ func TestHelperUtilities(t *testing.T) {
 	if !shfs.IsParentOrSame("docs", "docs/guide.txt") || shfs.IsParentOrSame("images", "docs/guide.txt") {
 		t.Fatal("unexpected parent/same result")
 	}
-	if metadataCommitMessage("file.txt", false) != "storhub: add file.txt" || metadataCommitMessage("file.txt", true) != "storhub: replace file.txt" {
-		t.Fatal("unexpected metadata commit message")
-	}
 	if shortSHA("1234567890123456") != "123456789012" || shortSHA("short") != "short" {
 		t.Fatal("unexpected short sha")
 	}

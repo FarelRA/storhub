@@ -320,10 +320,8 @@ func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error
 
 	// 4. Update HEAD reference to the new orphan commit
 	refName := plumbing.ReferenceName("refs/heads/" + defaultBranch)
-	if err := storer.RemoveReference(refName); err != nil {
-		if !strings.Contains(err.Error(), "not found") {
-			return fmt.Errorf("remove ref: %w", err)
-		}
+	if err := storer.RemoveReference(refName); err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("remove ref: %w", err)
 	}
 	ref := plumbing.NewHashReference(refName, commitHash)
 	if err := storer.SetReference(ref); err != nil {
