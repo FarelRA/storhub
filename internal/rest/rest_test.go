@@ -356,13 +356,13 @@ func assertErrorCode(t *testing.T, resp *http.Response, want string) {
 }
 
 type fakeRESTClient struct {
-	mu                   sync.Mutex
-	nextInode            uint64
-	projects             map[string]*fakeRESTProject
-	deleted              map[string]bool
-	now                  int64
-	rollbacks            []string
-	readCalls            []readCall
+	mu                    sync.Mutex
+	nextInode             uint64
+	projects              map[string]*fakeRESTProject
+	deleted               map[string]bool
+	now                   int64
+	rollbacks             []string
+	readCalls             []readCall
 	failReplaceFromReader error
 }
 
