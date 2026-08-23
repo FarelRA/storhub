@@ -1754,6 +1754,12 @@ func (h *StorHub) ChtimesContext(ctx context.Context, project, targetPath string
 	return h.posixService().ChtimesContext(ctx, project, targetPath, atime, mtime)
 }
 
+// ChtimesExplicitContext forwards utimensat-style trinary semantics:
+// nil omits a timestamp, non-nil sets it exactly (epoch included).
+func (h *StorHub) ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) error {
+	return h.posixService().ChtimesExplicitContext(ctx, project, targetPath, atime, mtime)
+}
+
 func (h *StorHub) SetXAttr(project, targetPath, attr string, data []byte) error {
 	return h.SetXAttrContext(context.Background(), project, targetPath, attr, data)
 }

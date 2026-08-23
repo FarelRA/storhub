@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"syscall"
 	"testing"
+	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -387,4 +388,41 @@ func TestChownKeepOwnerSentinel(t *testing.T) {
 		t.Fatalf("chown keep-gid: %v", err)
 	}
 	assertOwners("keep-gid", 1500, 3000)
+}
+
+// TestChtimesExplicitSemantics pins utimensat trinary behavior: nil omits,
+// non-nil sets exactly (epoch zero included and marked authoritative).
+func TestChtimesExplicitSemantics(t *testing.T) {
+	backend := newTestBackend(500)
+	backend.seedFile("ts.txt")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	epoch := time.Unix(0, 0)
+	if err := svc.ChtimesExplicitContext(ctx, "demo", "ts.txt", &epoch, nil); err != nil {
+		t.Fatalf("explicit chtimes: %v", err)
+	}
+	entry, err := svc.lookupEntryForAccess(ctx, "demo", "ts.txt")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if entry.AccessedAt != 0 {
+		t.Fatalf("explicit epoch atime rewritten to %d", entry.AccessedAt)
+	}
+	before := entry.ModifiedAt
+	if err := svc.ChtimesExplicitContext(ctx, "demo", "ts.txt", nil, &epoch); err != nil {
+		t.Fatalf("second explicit chtimes: %v", err)
+	}
+	entry2, _ := svc.lookupEntryForAccess(ctx, "demo", "ts.txt")
+	if entry2.ModifiedAt != 0 || entry2.AccessedAt != 0 {
+		t.Fatalf("omit must not touch fields: %+v", entry2)
+	}
+	_ = before
+	// Legacy verb keeps omit-on-zero contract.
+	if err := svc.ChtimesContext(ctx, "demo", "ts.txt", 0, 0); err != nil {
+		t.Fatalf("legacy chtimes: %v", err)
+	}
+	entry3, _ := svc.lookupEntryForAccess(ctx, "demo", "ts.txt")
+	if entry3.AccessedAt == 0 && entry3.AccessedAt != svc.backend.Now() && entry3.AccessedAt < 1_000_000_000 {
+		t.Fatalf("legacy zero should map to now-ish, got %d", entry3.AccessedAt)
+	}
 }

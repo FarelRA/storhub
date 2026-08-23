@@ -258,6 +258,7 @@ type Hub interface {
 	ChmodContext(context.Context, string, string, uint32) error
 	ChownContext(context.Context, string, string, uint32, uint32) error
 	ChtimesContext(context.Context, string, string, int64, int64) error
+	ChtimesExplicitContext(context.Context, string, string, *time.Time, *time.Time) error
 	SymlinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	ReadlinkContext(context.Context, string, string) (string, error)
 	LinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
@@ -1141,7 +1142,19 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 			state.mu.Unlock()
 			state.opMu.Unlock()
 		} else {
-			if err := n.fs.hub.ChtimesContext(ctx, n.fs.project, targetPath, atime.Unix(), mtime.Unix()); err != nil {
+			// go-fuse already resolves UTIME_NOW to time.Now(); ok=false
+			// is UTIME_OMIT. Passing pointers preserves explicit epoch
+			// timestamps that ChtimesContext's omit-on-zero would rewrite.
+			var atimePtr, mtimePtr *time.Time
+			if atimeOK {
+				t := atime
+				atimePtr = &t
+			}
+			if mtimeOK {
+				t := mtime
+				mtimePtr = &t
+			}
+			if err := n.fs.hub.ChtimesExplicitContext(ctx, n.fs.project, targetPath, atimePtr, mtimePtr); err != nil {
 				return errnoFromError(err)
 			}
 		}

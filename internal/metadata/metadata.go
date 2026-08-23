@@ -835,14 +835,19 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	if file.GID == 0 {
 		file.GID = gid
 	}
-	if file.UploadedAt == 0 {
-		file.UploadedAt = now
-	}
-	if file.ModifiedAt == 0 {
-		file.ModifiedAt = file.UploadedAt
-	}
-	if file.AccessedAt == 0 {
-		file.AccessedAt = file.ModifiedAt
+	// TimesExplicit entries carry authoritative zeros (epoch); backfilling
+	// them here would rewrite an explicit utimensat value on the
+	// remove-and-reinsert path UpdateFileFamily uses for family updates.
+	if !file.TimesExplicit {
+		if file.UploadedAt == 0 {
+			file.UploadedAt = now
+		}
+		if file.ModifiedAt == 0 {
+			file.ModifiedAt = file.UploadedAt
+		}
+		if file.AccessedAt == 0 {
+			file.AccessedAt = file.ModifiedAt
+		}
 	}
 	if file.ChangedAt == 0 {
 		file.ChangedAt = file.ModifiedAt

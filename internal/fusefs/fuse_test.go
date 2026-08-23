@@ -1132,6 +1132,9 @@ func (s *stubHub) ApplyMetadataPatchContext(ctx context.Context, project, target
 	return nil
 }
 func (*stubHub) ChownContext(context.Context, string, string, uint32, uint32) error { return nil }
+func (*stubHub) ChtimesExplicitContext(context.Context, string, string, *time.Time, *time.Time) error {
+	return nil
+}
 func (*stubHub) ChtimesContext(context.Context, string, string, int64, int64) error {
 	return nil
 }
