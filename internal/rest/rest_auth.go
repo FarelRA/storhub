@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -21,6 +22,17 @@ const (
 	restTokenIssuer     = "storhub"
 	restTokenAudience   = "storhub-rest"
 )
+
+// dummyPasswordHash lazily builds a valid bcrypt hash of a value nobody
+// logs in with; unknown users are verified against it so login timing does
+// not enumerate usernames.
+var dummyPasswordHash = sync.OnceValue(func() string {
+	hash, err := bcrypt.GenerateFromPassword([]byte("storhub:"+strings.Repeat("x", 32)), bcrypt.DefaultCost)
+	if err != nil {
+		return ""
+	}
+	return "bcrypt$" + string(hash)
+})
 
 type AuthOptions struct {
 	Realm           string
@@ -118,7 +130,10 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 			user.PasswordHash = hash
 		}
 		user.Password = ""
-		user.Groups = uniqueGIDs(append(user.Groups, user.PrimaryGID))
+		// Copy before appending: the caller owns the slice we were handed.
+		groups := make([]uint32, 0, len(user.Groups)+1)
+		groups = append(groups, user.Groups...)
+		user.Groups = uniqueGIDs(append(groups, user.PrimaryGID))
 		users[user.Username] = user
 	}
 	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), tokenTTL: opts.TokenTTL, now: opts.Now}, nil
@@ -126,7 +141,13 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 
 func (a *restAuthenticator) login(username, password string) (restPrincipal, string, time.Duration, error) {
 	user, ok := a.users[username]
-	if !ok || user.Disabled || !verifyPassword(password, user.PasswordHash) {
+	if !ok {
+		// Verify against a dummy hash anyway: skipping bcrypt for unknown
+		// users makes the response time reveal which usernames exist.
+		verifyPassword(password, dummyPasswordHash())
+		return restPrincipal{}, "", 0, errors.New("invalid credentials")
+	}
+	if user.Disabled || !verifyPassword(password, user.PasswordHash) {
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
 	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin}

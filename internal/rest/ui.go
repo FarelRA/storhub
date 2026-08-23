@@ -9,7 +9,7 @@ const uiDocument = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StorHub Console</title>
   <link rel="stylesheet" href="/styles.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+  <script defer src="/alpine.min.js"></script>
   <script src="/config.js"></script>
   <script src="/app.js"></script>
 </head>
@@ -348,7 +348,7 @@ textarea { min-height: 360px; resize: vertical; margin-top: 10px; }
 const uiScript = `window.storhubConsole = function () {
   return {
     config: window.STORHUB_UI_CONFIG || { basePath: '/api/v1', authEnabled: false },
-    token: localStorage.getItem('storhub.token') || '',
+    token: sessionStorage.getItem('storhub.token') || '',
     shareToken: '',
     shareRequested: false,
     shareRootPath: '',
@@ -561,7 +561,7 @@ const uiScript = `window.storhubConsole = function () {
           body: JSON.stringify({ username: this.auth.username, password: this.auth.password })
         })
         this.token = payload.token
-        localStorage.setItem('storhub.token', this.token)
+        sessionStorage.setItem('storhub.token', this.token)
         this.auth.password = ''
         this.statusText = 'Authenticated.'
         if (this.project) await this.refreshAll()
@@ -572,7 +572,7 @@ const uiScript = `window.storhubConsole = function () {
     logout() {
       if (this.isSharedMode) return
       this.token = ''
-      localStorage.removeItem('storhub.token')
+      sessionStorage.removeItem('storhub.token')
       this.statusText = 'Signed out.'
     },
     requireProject() {
