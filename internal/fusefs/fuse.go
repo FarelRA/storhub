@@ -169,13 +169,13 @@ type storhubHandle struct {
 	id    uint64
 	flags uint32
 
-	// pinnedSHA is the metadata commit captured at open time. The lazy
-	// read fallback resolves content against that immutable snapshot, so
-	// renames or unlinks after open can never change what this handle
-	// returns (POSIX open semantics). pinnedMeta caches the historical
-	// document after its first materialization.
-	pinnedSHA  string
-	pinnedMeta *metadata.RepoMetadata
+	// pinned holds the content identity captured at open time: the file
+	// entry plus the chunk descriptors it referenced. The lazy read
+	// fallback resolves bytes against it, so renames or unlinks after
+	// open can never change what this handle returns (POSIX open
+	// semantics). Pure metadata - a few dozen bytes even for large files;
+	// no network at pin time.
+	pinned *pinnedContent
 
 	mu         sync.Mutex
 	temp       *os.File
@@ -187,6 +187,13 @@ type storhubHandle struct {
 	writeState *inodeWriteState
 }
 
+// pinnedContent is an immutable, self-contained view of one file's data
+// layout. Chunk assets are content-addressed, so the descriptors stay
+// valid for the handle's lifetime regardless of later metadata changes.
+type pinnedContent struct {
+	file   metadata.FileMeta
+	chunks map[int64]metadata.ChunkInfo
+}
 type inodeWriteState struct {
 	fs    *Filesystem
 	inode uint64
@@ -294,9 +301,7 @@ type Hub interface {
 	PatchFileContext(context.Context, string, string, int64, int64, []byte, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	ReplaceFileContext(context.Context, string, string, string, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
-	HeadMetadataSnapshotContext(context.Context, string) (*metadata.RepoMetadata, string, error)
-	LoadRepoMetadataAtCommitContext(context.Context, string, string) (*metadata.RepoMetadata, error)
-	ReadFileSnapshotContext(context.Context, string, *metadata.RepoMetadata, uint64, int64, int64) ([]byte, error)
+	ReadPinnedFileContext(context.Context, string, *metadata.FileMeta, map[int64]metadata.ChunkInfo, int64, int64) ([]byte, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
 	RenameContext(context.Context, string, string, string) error
@@ -877,23 +882,34 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if entry.IsSymlink {
 		return nil, 0, syscall.ELOOP
 	}
-	// Pin the metadata snapshot at open time as a guaranteed (meta, sha)
-	// pair from the head commit. With a sha, the historical document is
-	// fetched lazily on first fallback read; without one (brand-new
-	// project) the empty tree is already the pin. A failed capture fails
-	// the open loudly - silently degrading to path-live reads would
-	// reintroduce the rename-over race this pin exists to prevent.
-	pinnedMeta, pinnedSHA, shaErr := n.fs.hub.HeadMetadataSnapshotContext(ctx, n.fs.project)
-	if shaErr != nil {
-		return nil, 0, errnoFromError(shaErr)
+	// Pin the content layout at open time from the (cached) readonly
+	// metadata view: a file entry clone plus the chunk descriptors it
+	// references. Pure metadata copying - no network beyond what the
+	// stat already did. If the file vanished between stat and pin, the
+	// open fails with ENOENT rather than degrading to path-live reads,
+	// which would reintroduce the rename-over race this pin prevents.
+	repoMeta, _, metaErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
+	if metaErr != nil {
+		return nil, 0, errnoFromError(metaErr)
 	}
-	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil, pinnedSHA)
+	file := repoMeta.FindFile(targetPath)
+	if file == nil {
+		return nil, 0, syscall.ENOENT
+	}
+	pin := &pinnedContent{
+		file:   file.Clone(),
+		chunks: make(map[int64]metadata.ChunkInfo, len(file.Chunks)),
+	}
+	for _, id := range file.Chunks {
+		if chunk, ok := repoMeta.Chunks[id]; ok {
+			pin.chunks[id] = chunk
+		}
+	}
+	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
 	if err != nil {
 		return nil, 0, errnoFromError(err)
 	}
-	if pinnedSHA == "" {
-		h.pinnedMeta = pinnedMeta
-	}
+	h.pinned = pin
 	if err != nil {
 		return nil, 0, errnoFromError(err)
 	}
@@ -942,7 +958,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size}, "")
+	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
@@ -1316,11 +1332,11 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 	return 0
 }
 
-func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap, pinnedSHA string) (*storhubHandle, error) {
+func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap) (*storhubHandle, error) {
 	if strings.TrimSpace(targetPath) == "" {
 		targetPath = s.pathForInode(inode)
 	}
-	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{}), pinnedSHA: pinnedSHA}
+	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{})}
 	s.mu.Lock()
 	s.handles[h.id] = h
 	s.mu.Unlock()
@@ -2240,43 +2256,20 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 	return fuse.ReadResultData(data), 0
 }
 
-// readFromPinned resolves bytes against the metadata snapshot captured at
-// open time. The historical document is fetched once and cached on the
-// handle; git history is immutable, so every later read of this handle
-// sees exactly the content that existed when it was opened - regardless
-// of renames, replacements, or unlinks that happened in between.
+// readFromPinned resolves bytes against the content layout captured at
+// open time. The pinned file entry and chunk descriptors are immutable,
+// and chunk assets are content-addressed, so every later read of this
+// handle sees exactly the content that existed when it was opened -
+// regardless of renames, replacements, or unlinks that happened in
+// between. Zero network at pin time; asset ranges only on actual reads.
 func (h *storhubHandle) readFromPinned(ctx context.Context, off, length int64) ([]byte, error) {
 	h.mu.Lock()
-	sha := h.pinnedSHA
-	pm := h.pinnedMeta
-	inode := h.inode
+	pin := h.pinned
 	h.mu.Unlock()
-	fmt.Println("PROBE rp sha=", short(sha), "inode=", inode, "cached=", pm != nil)
-	if sha == "" {
+	if pin == nil {
 		return nil, syscall.EIO
 	}
-	if pm == nil {
-		loaded, err := h.fs.hub.LoadRepoMetadataAtCommitContext(ctx, h.fs.project, sha)
-		if err != nil {
-			return nil, err
-		}
-		h.mu.Lock()
-		if h.pinnedMeta == nil {
-			h.pinnedMeta = loaded
-		}
-		pm = h.pinnedMeta
-		h.mu.Unlock()
-	}
-	names := pm.FindFilesByInode(h.inode)
-	fmt.Println("PROBE snap names=", names)
-	return h.fs.hub.ReadFileSnapshotContext(ctx, h.fs.project, pm, h.inode, off, length)
-}
-
-func short(s string) string {
-	if len(s) > 7 {
-		return s[:7]
-	}
-	return s
+	return h.fs.hub.ReadPinnedFileContext(ctx, h.fs.project, &pin.file, pin.chunks, off, length)
 }
 
 func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {

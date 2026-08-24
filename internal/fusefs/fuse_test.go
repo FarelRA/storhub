@@ -341,10 +341,7 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	snapshot := meta.NewRepoMetadata("demo")
-	snapshot.UpsertFile("demo.bin", meta.FileMeta{Inode: 7, Size: 16}, 0)
-	snapshot.RebuildIndexes()
-	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin", pinnedSHA: "sha", pinnedMeta: snapshot}
+	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin", pinned: &pinnedContent{file: meta.FileMeta{Inode: 7, Size: 16}}}
 	for _, off := range []int64{0, 4, 8} {
 		res, errno := h.Read(context.Background(), make([]byte, 4), off)
 		if errno != 0 {
@@ -379,7 +376,7 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
@@ -821,6 +818,12 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 	patchCalls := 0
 	chmodCalls := 0
 	fake := &stubHub{
+		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+			repo := meta.NewRepoMetadata("demo")
+			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 10}, now)
+			repo.RebuildIndexes()
+			return repo, "sha-1", nil
+		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
 				return &shfs.EntryInfo{Path: target, Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
@@ -877,6 +880,12 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 func TestOpenReturnsKernelCachedFlags(t *testing.T) {
 	now := int64(36)
 	fake := &stubHub{
+		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+			repo := meta.NewRepoMetadata("demo")
+			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 10}, now)
+			repo.RebuildIndexes()
+			return repo, "sha-1", nil
+		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
 				return &shfs.EntryInfo{Path: target, Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
@@ -983,6 +992,12 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 	var replaced []byte
 	backendSize := int64(len("abcdefghij"))
 	fake := &stubHub{
+		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+			repo := meta.NewRepoMetadata("demo")
+			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: backendSize}, now)
+			repo.RebuildIndexes()
+			return repo, "sha-1", nil
+		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target != "docs/file.txt" {
 				return nil, syscall.ENOENT
@@ -1204,31 +1219,9 @@ func (s *stubHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 	clone.RebuildIndexes()
 	return clone, "sha", nil
 }
-func (s *stubHub) HeadMetadataSnapshotContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error) {
-	meta, _, err := s.LoadRepoMetadataReadonlyContext(ctx, project)
-	if err != nil {
-		return nil, "", err
-	}
-	return meta, "sha", nil
-}
-func (s *stubHub) LoadRepoMetadataAtCommitContext(ctx context.Context, project, commitSHA string) (*meta.RepoMetadata, error) {
-	if s.loadReadonly != nil {
-		meta, _, err := s.loadReadonly(ctx, project)
-		return meta, err
-	}
-	clone := meta.NewRepoMetadata(project)
-	clone.RebuildIndexes()
-	return clone, nil
-}
-func (s *stubHub) ReadFileSnapshotContext(ctx context.Context, project string, snapshot *meta.RepoMetadata, inode uint64, offset, length int64) ([]byte, error) {
+func (s *stubHub) ReadPinnedFileContext(ctx context.Context, project string, file *meta.FileMeta, chunks map[int64]meta.ChunkInfo, offset, length int64) ([]byte, error) {
 	if s.readFileAt != nil {
-		path := "stub"
-		if snapshot != nil {
-			if names := snapshot.FindFilesByInode(inode); len(names) > 0 {
-				path = names[0]
-			}
-		}
-		data, err := s.readFileAt(ctx, project, path, offset, length)
+		data, err := s.readFileAt(ctx, project, "stub", offset, length)
 		return data, err
 	}
 	return []byte{}, nil
@@ -1271,7 +1264,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
@@ -1319,7 +1312,7 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}

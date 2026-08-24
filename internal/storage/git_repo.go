@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	gitclient "github.com/go-git/go-git/v6/plumbing/client"
@@ -163,42 +162,6 @@ func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error)
 	data, err := io.ReadAll(content)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	return data, nil
-}
-
-// readFileAtCommit reads a file's contents as of a specific commit,
-// straight from the local object store. Used to materialize historical
-// metadata snapshots for pinned open handles; no network involved.
-func (r *gitRepo) readFileAtCommit(ctx context.Context, commitSHA, path string) ([]byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.ensure(ctx); err != nil {
-		return nil, err
-	}
-	commit, err := r.repo.CommitObject(plumbing.NewHash(commitSHA))
-	if err != nil {
-		return nil, fmt.Errorf("resolve commit %s: %w", commitSHA, err)
-	}
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("commit tree %s: %w", commitSHA, err)
-	}
-	file, err := tree.File(path)
-	if err != nil {
-		if errors.Is(err, object.ErrFileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
-			return nil, shfs.NotFound(fmt.Sprintf("%s at commit %s", path, commitSHA))
-		}
-		return nil, fmt.Errorf("tree file %s: %w", path, err)
-	}
-	reader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("blob reader %s: %w", path, err)
-	}
-	defer func() { _ = reader.Close() }()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("read blob %s: %w", path, err)
 	}
 	return data, nil
 }
