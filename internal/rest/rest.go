@@ -160,8 +160,7 @@ type shareRegistry struct {
 
 type shareRecord struct {
 	// ID is the short opaque URL identifier (never a credential); Token
-	// keeps the signed legacy link working for clients holding an old
-	// JWT-shaped URL.
+	// holds the signed JWT for bearer authentication of scoped reads.
 	ID        string
 	Token     string
 	Project   string
@@ -438,11 +437,10 @@ type rollbackRequest struct {
 }
 
 type shareRequest struct {
-	Path      string        `json:"path"`
-	ExpiresIn time.Duration `json:"expires_in,omitempty"`
-	// ExpiresInSeconds expresses the lifetime in plain seconds, avoiding
-	// the Duration-as-nanoseconds JSON trap. Takes precedence over
-	// ExpiresIn when set.
+	Path string `json:"path"`
+	// ExpiresInSeconds expresses the lifetime in plain seconds. There is
+	// deliberately no time.Duration field: JSON numbers for a Duration are
+	// nanoseconds, a trap no client should be able to fall into.
 	ExpiresInSeconds int64 `json:"expires_in_seconds,omitempty"`
 	Download         *bool `json:"download,omitempty"`
 }
@@ -1421,10 +1419,8 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, err)
 		return
 	}
-	expiresIn := req.ExpiresIn
+	expiresIn := time.Duration(0)
 	if req.ExpiresInSeconds > 0 {
-		// seconds field wins: JSON numbers for a Duration field are
-		// nanoseconds, which is a trap nobody should fall into.
 		expiresIn = time.Duration(req.ExpiresInSeconds) * time.Second
 	}
 	if expiresIn <= 0 {
@@ -1489,39 +1485,16 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 }
 
 // resolveShareAccess maps a /shares/{id} URL segment onto its live record.
-// New links carry the short opaque ID directly. Legacy JWT-shaped segments
-// are verified and matched back to their record so revocation still stops
-// old links immediately; the JWT itself never appears in new responses.
+// Links carry ONLY the short opaque identifier; a signed token in the URL
+// is not recognized — tokens authenticate bearers (Authorization header),
+// they never act as resource locators.
 func (h *restHandler) resolveShareAccess(segment string) (*shareRecord, *shareClaims, bool) {
-	if record, ok := h.lookupShare(segment); ok {
-		claims, err := h.parseShareToken(record.Token)
-		if err != nil {
-			return nil, nil, false
-		}
-		return record, claims, true
-	}
-	if !strings.Contains(segment, ".") {
+	record, ok := h.lookupShare(segment)
+	if !ok {
 		return nil, nil, false
 	}
-	claims, err := h.parseShareToken(segment)
+	claims, err := h.parseShareToken(record.Token)
 	if err != nil {
-		return nil, nil, false
-	}
-	// Legacy path: find the live record this token belongs to.
-	h.shares.mu.RLock()
-	var found *shareRecord
-	for _, rec := range h.shares.items {
-		if rec.Token == segment || rec.ID == claims.ID {
-			found = rec
-			break
-		}
-	}
-	h.shares.mu.RUnlock()
-	if found == nil {
-		return nil, nil, false
-	}
-	record, ok := h.lookupShare(found.ID)
-	if !ok || record.Project != claims.Project {
 		return nil, nil, false
 	}
 	return record, claims, true

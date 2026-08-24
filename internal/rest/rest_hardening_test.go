@@ -150,9 +150,9 @@ func TestShareLinksCarryShortIDs(t *testing.T) {
 		t.Fatalf("share url must embed the short id only: %q", created.URL)
 	}
 
-	// Download by short ID works; by signed token still works (legacy).
+	// Download by short ID works; a token in the URL is NOT a locator.
 	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusOK)
-	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusOK)
+	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
 
 	// Listings never leak tokens.
 	listResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/shares", nil, auth, http.StatusOK)
@@ -160,8 +160,7 @@ func TestShareLinksCarryShortIDs(t *testing.T) {
 		t.Fatal("share listing leaked the signed token")
 	}
 
-	// Revocation by ID kills both link shapes.
+	// Revocation kills the link immediately.
 	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+created.ID, nil, auth, http.StatusNoContent)
 	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
-	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
 }
