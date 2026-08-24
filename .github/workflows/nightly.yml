@@ -61,6 +61,20 @@ jobs:
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           args: release --snapshot --clean
+      - name: prune previous nightly assets
+        # allow_updates only adds/overwrites; it never removes. Without
+        # this, every night accumulates another generation of binaries
+        # and checksums stop matching the newest set.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly" --jq '.id' 2>/dev/null) || true
+          if [ -n "$RELEASE_ID" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+              --jq '.[].id' | while read -r asset_id; do
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              done
+          fi
       - name: publish rolling nightly prerelease
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

@@ -9,10 +9,17 @@ StorHub is a Go library and CLI for storing files in GitHub repositories while e
 
 Supported platforms: linux (`386`, `amd64`, `armv6`, `armv7`, `arm64`) and macOS (`amd64`, `Apple silicon`).
 
-Install the latest release (downloads the right binary and verifies its SHA256):
+The repository is private, so downloads need a token. Install the latest nightly or stable release - the script resolves the right asset via the API, verifies its SHA256, and installs it:
 
 ```bash
+export GITHUB_TOKEN=ghp_your_token_here
 curl -fsSL https://raw.githubusercontent.com/FarelRA/storhub/main/scripts/install.sh | bash
+```
+
+Pin a specific tag with `--version`:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- --version v0.1.0
 ```
 
 Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases) - every release ships per-platform archives, `checksums.txt`, SBOMs, and build provenance attestations. A rolling `nightly` prerelease is refreshed from `main` every night at 03:00 UTC.

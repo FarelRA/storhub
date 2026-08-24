@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# StorHub installer: fetches the latest release for this platform,
-# verifies the SHA256 checksum, and installs the binary.
+# StorHub installer: fetches the latest release (or the rolling nightly)
+# for this platform, verifies the SHA256 checksum, and installs the binary.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/FarelRA/storhub/main/scripts/install.sh | bash
 #
 # Environment / flags:
+#   GITHUB_TOKEN         required for private repos; optional otherwise
 #   STORHUB_INSTALL_DIR  override install destination (default /usr/local/bin)
-#   --version vX.Y.Z     pin a specific release instead of latest
+#   --version vX.Y.Z     pin a specific release instead of nightly/stable
 
 set -euo pipefail
 
@@ -38,9 +39,9 @@ need() {
 need curl
 need tar
 if command -v sha256sum >/dev/null 2>&1; then
-	SUMTOOL=(sha256sum -c)
+	digest() { sha256sum "$1" | cut -d' ' -f1; }
 elif command -v shasum >/dev/null 2>&1; then
-	SUMTOOL=(shasum -a 256 -c)
+	digest() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else
 	echo "install.sh: need sha256sum or shasum to verify checksums" >&2
 	exit 1
@@ -64,34 +65,84 @@ i386 | i686) ARCH="386" ;;
 	;;
 esac
 
-API="https://api.github.com/repos/${REPO}/releases"
-if [ -n "$PINNED" ]; then
-	URL="$API/tags/${PINNED}"
-else
-	URL="$API/latest"
+API="https://api.github.com/repos/${REPO}"
+AUTH=()
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+	AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 fi
 
-echo "==> resolving release from ${URL}"
-RELEASE_JSON="$(curl -fsSL "$URL")"
+if [ -n "$PINNED" ]; then
+	RELEASE_URL="$API/releases/tags/${PINNED}"
+else
+	# /releases/latest excludes prereleases; the rolling "nightly" is one,
+	# so prefer it explicitly, then fall back to stable.
+	NIGHTLY_ID="$(curl -fsSL "${AUTH[@]}" "$API/releases/tags/nightly" |
+		sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -n1 || true)"
+	if [ -n "$NIGHTLY_ID" ]; then
+		RELEASE_JSON="$(curl -fsSL "${AUTH[@]}" "$API/releases/tags/nightly")"
+	else
+		RELEASE_JSON="$(curl -fsSL "${AUTH[@]}" "$API/releases/latest")"
+	fi
+fi
+if [ -z "${RELEASE_JSON:-}" ]; then
+	RELEASE_JSON="$(curl -fsSL "${AUTH[@]}" "$RELEASE_URL")"
+fi
+
 TAG="$(printf '%s' "$RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 [ -n "$TAG" ] || {
 	echo "install.sh: could not determine release tag" >&2
 	exit 1
 }
 
-ASSET="storhub_${TAG}_${OS}_${ARCH}.tar.gz"
-BASE="https://github.com/${REPO}/releases/download/${TAG}"
+# Asset names embed the goreleaser version, not the tag - and private
+# repos require authenticated API downloads anyway. Resolve both files
+# by scanning this release's asset list instead of guessing URLs.
+# GitHub emits each asset as: "id":N,"node_id":"…","name":"…",… so
+# compacting the document makes every (id, name) pair adjacent.
+ASSETS_JSON="$(printf '%s' "$RELEASE_JSON" | tr -d '\n ')"
+
+asset_id_for() {
+	needle="$1"
+	printf '%s' "$ASSETS_JSON" | grep -oE \
+		"\"id\": ?[0-9]+,\"node_id\": ?\"[^\"]*\",\"name\": ?\"${needle}\"" |
+		sed -n 's/^"id": *\([0-9]*\).*/\1/p' | head -n1
+}
+
+ASSET_ID="$(asset_id_for "storhub_[^\"]*_${OS}_${ARCH}\.tar\.gz")"
+CHECKSUM_ID="$(asset_id_for "checksums\.txt")"
+[ -n "$ASSET_ID" ] || {
+	echo "install.sh: release ${TAG} has no storhub_*_${OS}_${ARCH}.tar.gz asset" >&2
+	exit 1
+}
+[ -n "$CHECKSUM_ID" ] || {
+	echo "install.sh: release ${TAG} has no checksums.txt asset" >&2
+	exit 1
+}
+
 TMPDIR_DL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_DL"' EXIT
 
-echo "==> downloading ${ASSET} (${TAG})"
-curl -fSL --retry 3 -o "${TMPDIR_DL}/${ASSET}" "${BASE}/${ASSET}"
-curl -fSL --retry 3 -o "${TMPDIR_DL}/checksums.txt" "${BASE}/checksums.txt"
+echo "==> downloading storhub for ${OS}/${ARCH} (${TAG})"
+fetch_asset() {
+	curl -fsSL --retry 3 "${AUTH[@]}" -H "Accept: application/octet-stream" \
+		-o "$2" "$API/releases/assets/$1"
+}
+fetch_asset "$ASSET_ID" "${TMPDIR_DL}/storhub.tar.gz"
+fetch_asset "$CHECKSUM_ID" "${TMPDIR_DL}/checksums.txt"
 
 echo "==> verifying checksum"
-(cd "$TMPDIR_DL" && grep " ${ASSET}\$" checksums.txt | "${SUMTOOL[@]}")
+EXPECTED="$(grep "_${OS}_${ARCH}\.tar\.gz\$" "${TMPDIR_DL}/checksums.txt" | head -n1 | cut -d' ' -f1)"
+[ -n "$EXPECTED" ] || {
+	echo "install.sh: checksums.txt has no entry for ${OS}/${ARCH}" >&2
+	exit 1
+}
+ACTUAL="$(digest "${TMPDIR_DL}/storhub.tar.gz")"
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+	echo "install.sh: checksum mismatch (expected ${EXPECTED}, got ${ACTUAL})" >&2
+	exit 1
+fi
 
-tar -xzf "${TMPDIR_DL}/${ASSET}" -C "$TMPDIR_DL"
+tar -xzf "${TMPDIR_DL}/storhub.tar.gz" -C "$TMPDIR_DL"
 
 install_binary() {
 	local target="$1"
