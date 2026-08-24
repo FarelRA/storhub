@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"os"
 	"path"
 	"runtime"
@@ -2320,6 +2321,67 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	return uint32(n), 0
 }
 
+// fallocate mode flags from linux/falloc.h, kept here because the only
+// consumers are the overlay handlers below.
+const (
+	fallocFlKeepSize      = 0x01
+	fallocFlPunchHole     = 0x02
+	fallocFlNoHideStale   = 0x04
+	fallocFlCollapseRange = 0x08
+	fallocFlZeroRange     = 0x10
+	fallocFlInsertRange   = 0x20
+	fallocFlUnshare       = 0x40
+)
+
+// Allocate implements fs.FileAllocater: posix_fallocate-style space
+// reservation on the open handle. Only plain allocation and
+// FALLOC_FL_KEEP_SIZE map cleanly onto the overlay temp file - blocks
+// are reserved locally so disk exhaustion surfaces at allocation time
+// instead of mid-write. Hole punching and range collapsing would
+// rewrite chunk layout semantics the overlay cannot express, so they
+// return EOPNOTSUPP rather than pretending. A read-only handle has
+// nothing to allocate against and returns EBADF, matching POSIX.
+func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
+	_ = ctx
+	if h.writeState == nil {
+		return syscall.EBADF
+	}
+	if off > math.MaxInt64 || size > math.MaxInt64 {
+		return syscall.EINVAL
+	}
+	start := int64(off)
+	length := int64(size)
+	if start+length < start {
+		return syscall.EINVAL
+	}
+	switch {
+	case mode&^(fallocFlKeepSize|fallocFlPunchHole|fallocFlNoHideStale|fallocFlCollapseRange|fallocFlZeroRange|fallocFlInsertRange|fallocFlUnshare) != 0:
+		return syscall.EINVAL
+	case mode&(fallocFlPunchHole|fallocFlCollapseRange|fallocFlInsertRange|fallocFlUnshare|fallocFlZeroRange) != 0:
+		if mode&fallocFlPunchHole != 0 && mode&fallocFlKeepSize == 0 {
+			return syscall.EINVAL
+		}
+		return syscall.EOPNOTSUPP
+	}
+	h.writeState.opMu.Lock()
+	defer h.writeState.opMu.Unlock()
+	h.writeState.mu.Lock()
+	defer h.writeState.mu.Unlock()
+	if err := h.writeState.ensureTempLocked(); err != nil {
+		return errnoFromError(err)
+	}
+	if err := reserveSpace(h.writeState.temp, mode, start, length); err != nil {
+		return errnoFromError(err)
+	}
+	end := start + length
+	if mode&fallocFlKeepSize == 0 && end > h.writeState.logicalSize {
+		h.writeState.markDirtyLocked(h.writeState.logicalSize, end)
+		h.writeState.logicalSize = end
+	}
+	h.fs.debugf("fallocate path=%s inode=%d off=%d size=%d mode=%#x", h.path, h.inode, start, length, mode)
+	return 0
+}
+
 // retrieveKernelCache has been removed.
 // The kernel guarantees it sends FUSE_WRITE for dirty pages (including mmap)
 // before FUSE_RELEASE via filemap_write_and_wait_range in fuse_flush().
@@ -2854,6 +2916,26 @@ func (s *Filesystem) notifyKernelContentChanged(inode uint64) {
 	safeNotifyContent(node)
 }
 
+// fsConnected reports whether the filesystem is currently served over a
+// FUSE connection. Kernel cache notifications are meaningless without a
+// mount, and calling them on a detached filesystem - as tests do when
+// they drive nodes directly - panics inside go-fuse on the nil
+// connection state. Callers skip notification entirely in that case.
+var fsConnectedFunc = (*Filesystem).connected
+
+func (s *Filesystem) connected() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.server != nil
+}
+
+func fsConnected(fs *Filesystem) bool {
+	return fsConnectedFunc(fs)
+}
+
 func safeNotifyContent(node *storhubNode) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2862,14 +2944,14 @@ func safeNotifyContent(node *storhubNode) {
 			logging.Error(nil, "panic in NotifyContent", "panic", r, "stack", string(buf[:n]))
 		}
 	}()
-	if node == nil {
+	if node == nil || !fsConnected(node.fs) {
 		return
 	}
 	_ = node.NotifyContent(0, 0)
 }
 
 func safeNotifyEntry(node *storhubNode, name string) {
-	if node == nil {
+	if node == nil || !fsConnected(node.fs) {
 		return
 	}
 	entryFn := notifyEntryFunc
@@ -2886,7 +2968,7 @@ func safeNotifyEntry(node *storhubNode, name string) {
 }
 
 func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
-	if parent == nil {
+	if parent == nil || !fsConnected(parent.fs) {
 		return
 	}
 	entryFn := notifyEntryFunc
