@@ -188,6 +188,21 @@ Precondition (compare-and-swap) APIs:
   `ReplaceFileFromReaderContext`; the mutation fails with
   `storhub.ErrPreconditionFailed` when remote HEAD moved
 
+Compare-and-swap in action - append only if nobody else changed the
+project meanwhile:
+
+```go
+rev, err := hub.RevisionContext(ctx, project)
+if err != nil {
+	log.Fatal(err)
+}
+_, err = hub.AppendFileContext(ctx, project, "docs/log.txt", []byte("entry\n"),
+	storhub.WithExpectedRevision(rev))
+if errors.Is(err, storhub.ErrPreconditionFailed) {
+	// Remote moved under us: refetch the revision and retry.
+}
+```
+
 POSIX conformance notes:
 
 - `Chown`/`ChownContext` accept `(uid_t)-1` (Go `^uint32(0)`) per field as
@@ -237,36 +252,6 @@ REST APIs:
 - `rest.DefaultOptions`
 - `rest.New`
 - `rest.HashPassword`
-
-Minimal REST server:
-
-```go
-package main
-
-import (
-	"log"
-	"net/http"
-	"os"
-
-	shrest "github.com/FarelRA/storhub/rest"
-	"github.com/FarelRA/storhub/storhub"
-)
-
-func main() {
-	hub, err := storhub.NewStorHub(os.Getenv("GITHUB_TOKEN"))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	handler, err := shrest.New(hub, shrest.DefaultOptions())
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Fatal(http.ListenAndServe(":8080", handler))
-}
-```
-
-The handler also serves a browser UI at `/` and `/ui`.
 
 REST endpoint groups:
 
@@ -336,6 +321,8 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", handler))
 }
 ```
+
+The handler also serves a browser UI at `/` and `/ui`.
 
 The REST handler uses HTTP preconditions where they help UNIX-like workflows:
 
