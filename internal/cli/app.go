@@ -29,6 +29,7 @@ type App struct {
 	stdout  *os.File
 	stderr  *os.File
 	rootCmd *cobra.Command
+	hub     hubClient
 }
 
 type fuseMount interface {
@@ -375,7 +376,57 @@ func (a *App) Run(args []string) error {
 	a.rootCmd.SetOut(a.stdout)
 	a.rootCmd.SetErr(a.stderr)
 	_, err := a.rootCmd.ExecuteC()
+	a.flushHub()
 	return err
+}
+
+// shutdowner is satisfied by real clients; test fakes skip the flush.
+type shutdowner interface{ Shutdown(context.Context) error }
+
+// flushHub blocks until any pending metadata commit lands. The writer is
+// asynchronous, so a CLI mutation that exits without this loses data -
+// exactly what the released-binary smoke test caught.
+func (a *App) flushHub() {
+	if a.hub == nil {
+		return
+	}
+	s, ok := a.hub.(shutdowner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil && a.stderr != nil {
+		_, _ = fmt.Fprintf(a.stderr, "warning: metadata flush failed: %v\n", err)
+	}
+}
+
+// Hub constructors record the client so Run can always flush it on exit.
+
+func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public)
+	if err == nil {
+		a.hub = hub
+	}
+	return hub, err
+}
+
+func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
+	hub, err := newMountHubFromFlagsFn(token, apiBase)
+	if err == nil {
+		a.hub = hub
+	}
+	return hub, err
+}
+
+func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+	hub, err := newRESTHubFromFlagsFn(token, apiBase, chunkSize, public)
+	if err == nil {
+		// serve-rest needs the raw *StorHub for shrest.New; track the
+		// wrapped form so Run can still flush pending metadata.
+		a.hub = storhubClient{StorHub: hub}
+	}
+	return hub, err
 }
 
 func (a *App) logf(format string, args ...any) {
@@ -464,7 +515,7 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 	public, _ := cmd.Flags().GetBool("public")
 
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, chunkSize, public)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, chunkSize, public)
 	if err != nil {
 		return err
 	}
@@ -487,7 +538,7 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newMountHubFromFlagsFn(resolveToken(token), apiBase)
+	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
 	if err != nil {
 		return err
 	}
@@ -510,7 +561,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	long, _ := cmd.Flags().GetBool("long")
 	jsonOut, _ := cmd.Flags().GetBool("json")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -535,7 +586,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -558,7 +609,7 @@ func jsonOutStat(cmd *cobra.Command) bool {
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -604,7 +655,7 @@ func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size i
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -619,7 +670,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	recursive, _ := cmd.Flags().GetBool("recursive")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -638,7 +689,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -652,7 +703,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -675,7 +726,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid offset %q: %w", args[2], err)
 	}
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -702,7 +753,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid delete-size %q: %w", args[3], err)
 	}
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -721,7 +772,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -742,7 +793,7 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -756,7 +807,7 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -775,7 +826,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
-	hub, err := newHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -867,7 +918,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	if authFile == "" {
 		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
 	}
-	hub, err := newRESTHubFromFlagsFn(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
