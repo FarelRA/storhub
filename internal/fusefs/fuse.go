@@ -169,6 +169,14 @@ type storhubHandle struct {
 	id    uint64
 	flags uint32
 
+	// pinnedSHA is the metadata commit captured at open time. The lazy
+	// read fallback resolves content against that immutable snapshot, so
+	// renames or unlinks after open can never change what this handle
+	// returns (POSIX open semantics). pinnedMeta caches the historical
+	// document after its first materialization.
+	pinnedSHA  string
+	pinnedMeta *metadata.RepoMetadata
+
 	mu         sync.Mutex
 	temp       *os.File
 	tempPath   string
@@ -246,6 +254,20 @@ func (s *Filesystem) EnsureNodeForTest(ctx context.Context, entry *shfs.EntryInf
 	return s.ensureNode(ctx, entry)
 }
 
+// ResetNodeForTest drops any cached node bound to the given path, so a
+// subsequent EnsureNodeForTest observes hub-level identity changes (the
+// inode of a deleted-and-recreated file differs). Real mounts get this
+// for free: the kernel re-runs Lookup after invalidation instead of
+// replaying a stale node handle.
+func (s *Filesystem) ResetNodeForTest(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.pathToInode[path]; ok {
+		delete(s.nodes, old)
+	}
+	delete(s.pathToInode, path)
+}
+
 type Hub interface {
 	StatPathContext(context.Context, string, string) (*shfs.EntryInfo, error)
 	ReadDirContext(context.Context, string, string) ([]shfs.DirEntry, error)
@@ -272,6 +294,9 @@ type Hub interface {
 	PatchFileContext(context.Context, string, string, int64, int64, []byte, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	ReplaceFileContext(context.Context, string, string, string, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
+	HeadMetadataSnapshotContext(context.Context, string) (*metadata.RepoMetadata, string, error)
+	LoadRepoMetadataAtCommitContext(context.Context, string, string) (*metadata.RepoMetadata, error)
+	ReadFileSnapshotContext(context.Context, string, *metadata.RepoMetadata, uint64, int64, int64) ([]byte, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
 	RenameContext(context.Context, string, string, string) error
@@ -852,7 +877,23 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if entry.IsSymlink {
 		return nil, 0, syscall.ELOOP
 	}
-	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
+	// Pin the metadata snapshot at open time as a guaranteed (meta, sha)
+	// pair from the head commit. With a sha, the historical document is
+	// fetched lazily on first fallback read; without one (brand-new
+	// project) the empty tree is already the pin. A failed capture fails
+	// the open loudly - silently degrading to path-live reads would
+	// reintroduce the rename-over race this pin exists to prevent.
+	pinnedMeta, pinnedSHA, shaErr := n.fs.hub.HeadMetadataSnapshotContext(ctx, n.fs.project)
+	if shaErr != nil {
+		return nil, 0, errnoFromError(shaErr)
+	}
+	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil, pinnedSHA)
+	if err != nil {
+		return nil, 0, errnoFromError(err)
+	}
+	if pinnedSHA == "" {
+		h.pinnedMeta = pinnedMeta
+	}
 	if err != nil {
 		return nil, 0, errnoFromError(err)
 	}
@@ -901,7 +942,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
+	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size}, "")
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
@@ -1275,11 +1316,11 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 	return 0
 }
 
-func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap) (*storhubHandle, error) {
+func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap, pinnedSHA string) (*storhubHandle, error) {
 	if strings.TrimSpace(targetPath) == "" {
 		targetPath = s.pathForInode(inode)
 	}
-	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{})}
+	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{}), pinnedSHA: pinnedSHA}
 	s.mu.Lock()
 	s.handles[h.id] = h
 	s.mu.Unlock()
@@ -2099,24 +2140,6 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 	return temp.Name(), nil
 }
 
-func (h *storhubHandle) readFromHub(ctx context.Context, off, length int64) ([]byte, error) {
-	h.mu.Lock()
-	if length <= 0 {
-		h.mu.Unlock()
-		return []byte{}, nil
-	}
-	path := h.path
-	project := h.fs.project
-	hub := h.fs.hub
-	h.mu.Unlock()
-
-	data, err := hub.ReadFileAtContext(ctx, project, path, off, length)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	return data, nil
-}
-
 func (w *inodeWriteState) closeTemp() {
 	w.mu.Lock()
 	if w.closed {
@@ -2210,11 +2233,50 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		}
 		return fuse.ReadResultData(buf[:n]), 0
 	}
-	data, err := h.readFromHub(ctx, off, int64(len(dest)))
+	data, err := h.readFromPinned(ctx, off, int64(len(dest)))
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
 	return fuse.ReadResultData(data), 0
+}
+
+// readFromPinned resolves bytes against the metadata snapshot captured at
+// open time. The historical document is fetched once and cached on the
+// handle; git history is immutable, so every later read of this handle
+// sees exactly the content that existed when it was opened - regardless
+// of renames, replacements, or unlinks that happened in between.
+func (h *storhubHandle) readFromPinned(ctx context.Context, off, length int64) ([]byte, error) {
+	h.mu.Lock()
+	sha := h.pinnedSHA
+	pm := h.pinnedMeta
+	inode := h.inode
+	h.mu.Unlock()
+	fmt.Println("PROBE rp sha=", short(sha), "inode=", inode, "cached=", pm != nil)
+	if sha == "" {
+		return nil, syscall.EIO
+	}
+	if pm == nil {
+		loaded, err := h.fs.hub.LoadRepoMetadataAtCommitContext(ctx, h.fs.project, sha)
+		if err != nil {
+			return nil, err
+		}
+		h.mu.Lock()
+		if h.pinnedMeta == nil {
+			h.pinnedMeta = loaded
+		}
+		pm = h.pinnedMeta
+		h.mu.Unlock()
+	}
+	names := pm.FindFilesByInode(h.inode)
+	fmt.Println("PROBE snap names=", names)
+	return h.fs.hub.ReadFileSnapshotContext(ctx, h.fs.project, pm, h.inode, off, length)
+}
+
+func short(s string) string {
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
 }
 
 func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {

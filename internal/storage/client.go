@@ -1664,6 +1664,146 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	return int(end - offset), nil
 }
 
+// LoadRepoMetadataAtCommitContext returns the metadata exactly as committed
+// at commitSHA, bypassing all caches. Open handles pin this snapshot so
+// later renames or unlinks of their path can never change what they read:
+// git history is immutable and the chunk assets it references are
+// content-addressed.
+func (h *StorHub) LoadRepoMetadataAtCommitContext(ctx context.Context, project, commitSHA string) (*RepoMetadata, error) {
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(commitSHA) == "" {
+		return nil, errors.New("commit sha is required")
+	}
+	if repo := h.getGitRepo(project); repo != nil {
+		return h.loadMetadataFromGitAt(ctx, repo, project, commitSHA)
+	}
+	if err := h.ensureOwner(ctx); err != nil {
+		return nil, err
+	}
+	data, _, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
+	if err != nil {
+		var apiErr *ghapi.APIError
+		if errors.As(err, &apiErr) && apiErr.NotFound() {
+			return nil, shfs.NotFound(fmt.Sprintf("metadata at commit %s", shortSHA(commitSHA)))
+		}
+		return nil, err
+	}
+	return decodeSnapshot(project, data)
+}
+
+func (h *StorHub) loadMetadataFromGitAt(ctx context.Context, repo *gitRepo, project, commitSHA string) (*RepoMetadata, error) {
+	data, err := repo.readFileAtCommit(ctx, commitSHA, metadataFilePath)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSnapshot(project, data)
+}
+
+// HeadMetadataSnapshotContext returns the current metadata together with
+// the COMMIT sha that produced it - a guaranteed (data, ref) pair. The
+// generic readonly loader may serve cached pairs whose sha lags the data,
+// which is useless for pinning: a ref must resolve to exactly this
+// document. An empty sha means the project has no commits yet; meta is
+// then the empty tree and callers must treat it as already-materialized.
+func (h *StorHub) HeadMetadataSnapshotContext(ctx context.Context, project string) (*RepoMetadata, string, error) {
+	if err := validateProject(project); err != nil {
+		return nil, "", err
+	}
+	if repo := h.getGitRepo(project); repo != nil {
+		sha := repo.headCommitSHA()
+		if sha == "" {
+			meta := NewRepoMetadata(project)
+			return meta, "", nil
+		}
+		meta, err := h.loadMetadataFromGitAt(ctx, repo, project, sha)
+		if err != nil {
+			return nil, "", err
+		}
+		return meta, sha, nil
+	}
+	if err := h.ensureOwner(ctx); err != nil {
+		return nil, "", err
+	}
+	commits, err := h.gh.ListFileCommits(ctx, h.owner, project, metadataFilePath)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(commits) == 0 {
+		exists, existsErr := h.repoExists(ctx, project)
+		if existsErr != nil {
+			return nil, "", existsErr
+		}
+		if !exists {
+			return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
+		}
+		return NewRepoMetadata(project), "", nil
+	}
+	head := commits[0].SHA
+	data, _, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, head)
+	if err != nil {
+		return nil, "", err
+	}
+	meta, err := decodeSnapshot(project, data)
+	if err != nil {
+		return nil, "", err
+	}
+	return meta, head, nil
+}
+
+func decodeSnapshot(project string, data []byte) (*RepoMetadata, error) {
+	meta := NewRepoMetadata(project)
+	if err := meta.FromJSON(data); err != nil {
+		return nil, fmt.Errorf("parse metadata: %w", err)
+	}
+	// Normalize builds the inode index FindFilesByInode needs. The now
+	// timestamp only fills fields absent in the historical document; the
+	// snapshot's own committed values are authoritative for reads.
+	meta.Normalize(project, 0)
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("validate metadata: %w", err)
+	}
+	return meta, nil
+}
+
+// ReadFileSnapshotContext reads bytes for a file identified by its inode
+// within a caller-held metadata snapshot (see
+// LoadRepoMetadataAtCommitContext). Path changes after the snapshot was
+// taken are irrelevant by construction. Access was already authorized at
+// open time, so no permission re-check happens here; atime is left alone
+// because a historical read must not refresh the live entry.
+func (h *StorHub) ReadFileSnapshotContext(ctx context.Context, project string, snapshot *RepoMetadata, inode uint64, offset, length int64) ([]byte, error) {
+	if length < 0 {
+		return nil, errors.New("read offset and length must be non-negative")
+	}
+	names := snapshot.FindFilesByInode(inode)
+	if len(names) == 0 {
+		return nil, shfs.NotFound(fmt.Sprintf("inode %d in metadata snapshot", inode))
+	}
+	file := snapshot.FindFile(names[0])
+	if file == nil {
+		return nil, shfs.NotFound(names[0])
+	}
+	if file.Symlink != "" {
+		return nil, shfs.InvalidSymlink(names[0])
+	}
+	if length == 0 || offset >= file.Size {
+		return []byte{}, nil
+	}
+	result := make([]byte, length)
+	end := offset + length
+	if end > file.Size {
+		end = file.Size
+	}
+	for _, segment := range overlappingFileSegments(file, snapshot.Chunks, offset, end) {
+		if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
+			return nil, err
+		}
+	}
+	return result[:end-offset], nil
+}
+
 type fileReadSegment struct {
 	chunk metadata.ChunkInfo
 	start int

@@ -341,7 +341,10 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin"}
+	snapshot := meta.NewRepoMetadata("demo")
+	snapshot.UpsertFile("demo.bin", meta.FileMeta{Inode: 7, Size: 16}, 0)
+	snapshot.RebuildIndexes()
+	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin", pinnedSHA: "sha", pinnedMeta: snapshot}
 	for _, off := range []int64{0, 4, 8} {
 		res, errno := h.Read(context.Background(), make([]byte, 4), off)
 		if errno != 0 {
@@ -376,7 +379,7 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
@@ -1201,6 +1204,35 @@ func (s *stubHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 	clone.RebuildIndexes()
 	return clone, "sha", nil
 }
+func (s *stubHub) HeadMetadataSnapshotContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error) {
+	meta, _, err := s.LoadRepoMetadataReadonlyContext(ctx, project)
+	if err != nil {
+		return nil, "", err
+	}
+	return meta, "sha", nil
+}
+func (s *stubHub) LoadRepoMetadataAtCommitContext(ctx context.Context, project, commitSHA string) (*meta.RepoMetadata, error) {
+	if s.loadReadonly != nil {
+		meta, _, err := s.loadReadonly(ctx, project)
+		return meta, err
+	}
+	clone := meta.NewRepoMetadata(project)
+	clone.RebuildIndexes()
+	return clone, nil
+}
+func (s *stubHub) ReadFileSnapshotContext(ctx context.Context, project string, snapshot *meta.RepoMetadata, inode uint64, offset, length int64) ([]byte, error) {
+	if s.readFileAt != nil {
+		path := "stub"
+		if snapshot != nil {
+			if names := snapshot.FindFilesByInode(inode); len(names) > 0 {
+				path = names[0]
+			}
+		}
+		data, err := s.readFileAt(ctx, project, path, offset, length)
+		return data, err
+	}
+	return []byte{}, nil
+}
 func (s *stubHub) UpdateRepoMetadataContext(ctx context.Context, project string, apply func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error) {
 	if s.updateMeta != nil {
 		return s.updateMeta(ctx, project, apply, message)
@@ -1239,7 +1271,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
@@ -1287,7 +1319,7 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0}, "")
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}

@@ -2369,6 +2369,10 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restat victim: %v", err)
 	}
+	// The re-upload minted a fresh inode for the recreated file; drop the
+	// mount's cached node for the old identity the same way a kernel
+	// re-Lookup would after invalidation.
+	fsys.ResetNodeForTest("docs/victim.txt")
 	victimNode = fsys.EnsureNodeForTest(ctx, victimEntry)
 	roAny, _, errno = victimNode.Open(ctx, syscall.O_RDONLY)
 	if errno != 0 {
@@ -2379,14 +2383,9 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 		t.Fatalf("rename replacement over victim: %v", errno)
 	}
 	res, errno = ro.Read(ctx, buf, 0)
-	// Known race under full-suite load: the snapshot materialization of a
-	// just-reopened handle may still be settling when the rename lands.
-	// TODO(phase10): rework the handle-lifecycle test harness to make this
-	// deterministic instead of retrying.
-	for retries := 0; errno == 0 && string(mustBytes(t, res, buf)) != "old-data" && retries < 3; retries++ {
-		time.Sleep(10 * time.Millisecond)
-		res, errno = ro.Read(ctx, buf, 0)
-	}
+	// Pinned reads are deterministic: the handle captured its metadata
+	// snapshot at open, so a rename over the path cannot change what this
+	// returns. No settling window exists anymore.
 	if errno != 0 {
 		t.Fatalf("read readonly replaced handle: %v", errno)
 	}
