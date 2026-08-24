@@ -71,6 +71,4 @@ dockers_v2:
       - "linux/amd64"
       - "linux/arm64"
       - "linux/arm/v7"
-      # No linux/386 here: gcr.io/distroless/static-debian12 publishes no
-      # i386 variant, so the base image itself cannot resolve. The 386
-      # binary still ships in every archive; it just gets no container.
+      - "linux/386"

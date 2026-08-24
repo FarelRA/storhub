@@ -1,9 +1,19 @@
 # Used exclusively by goreleaser (dockerfile: in .goreleaser.yaml).
-# Its docker context is isolated: binaries live under their platform
-# directory, so linux/amd64/storhub, linux/arm/v7/storhub, etc.
-# $TARGETPLATFORM resolves to that same path prefix inside BuildKit,
-# which is how one line serves every platform in the manifest.
-FROM gcr.io/distroless/static-debian12:nonroot
+# Its isolated context holds binaries under <os>/<arch>/..., exposed
+# here as $TARGETPLATFORM.
+#
+# Base is scratch so every target platform resolves - distroless ships
+# no i386 image. storhub talks TLS to api.github.com, so CA
+# certificates come from the Go toolchain image pinned to BUILDPLATFORM
+# (the files are identical across platforms; only one pull happens).
+# The numeric USER matches distroless' nonroot UID without needing an
+# /etc/passwd, which scratch does not have.
+FROM --platform=$BUILDPLATFORM golang:1.26.7-alpine AS ca
+RUN apk add --no-cache ca-certificates
+
+FROM scratch
 ARG TARGETPLATFORM
+COPY --from=ca /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY $TARGETPLATFORM/storhub /usr/bin/storhub
+USER 65532:65532
 ENTRYPOINT ["/usr/bin/storhub"]
