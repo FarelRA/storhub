@@ -83,7 +83,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("create workspace: %v", err)
 	}
-	defer os.RemoveAll(workspace)
+	defer func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			fmt.Fprintf(os.Stderr, "workspace cleanup: %v\n", err)
+		}
+	}()
 
 	project := fmt.Sprintf("storhub-showcase-%d", os.Getpid())
 	failed := false
@@ -359,7 +363,11 @@ func previewFUSE(hub *storhub.StorHub, project string) error {
 	if err != nil {
 		return fmt.Errorf("create FUSE filesystem: %w", err)
 	}
-	defer fsys.Close()
+	defer func() {
+		if err := fsys.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "fs cleanup: %v\n", err)
+		}
+	}()
 	printSection("FUSE Preview")
 	printKV("overlay buffer size", "%d", fsys.Options().OverlayBufferSize)
 	printKV("cache dir", "%s", fsys.Options().CacheDir)

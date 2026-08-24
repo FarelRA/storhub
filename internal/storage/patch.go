@@ -145,7 +145,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	if err != nil {
 		return nil, "", fmt.Errorf("open snapshot: %w", err)
 	}
-	defer snapshot.Close()
+	defer func() { _ = snapshot.Close() }()
 	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
 	for offset := int64(0); offset < finalSize; offset += chunkSize {
 		end := offset + chunkSize

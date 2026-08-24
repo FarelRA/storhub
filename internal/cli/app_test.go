@@ -131,7 +131,7 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 func TestPrintRootHelp(t *testing.T) {
 	app, stdout, _ := newTestApp(t)
 	app.rootCmd.SetOut(app.stdout)
-	app.rootCmd.Help()
+	_ = app.rootCmd.Help()
 	if !strings.Contains(stdout(), "StorHub CLI") {
 		t.Fatalf("unexpected root help output: %q", stdout())
 	}

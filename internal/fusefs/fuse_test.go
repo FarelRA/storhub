@@ -27,7 +27,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	if fsys.Options().OverlayBufferSize != DefaultOptions().OverlayBufferSize {
 		t.Fatalf("expected defaults to be applied: %+v", fsys.Options())
 	}
@@ -54,7 +54,7 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	ctx := fsys.callerContext(context.Background())
 	if !shfs.AtimeSuppressed(ctx) {
@@ -73,7 +73,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	temp, err := os.CreateTemp(cacheDir, "inode-*")
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
@@ -131,7 +131,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -176,7 +176,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -197,7 +197,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create committed snapshot: %v", err)
 	}
-	defer os.Remove(snapshotPath)
+	defer func() { _ = os.Remove(snapshotPath) }()
 	got, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatalf("read committed snapshot: %v", err)
@@ -214,7 +214,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -236,7 +236,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 	if err != nil {
 		t.Fatalf("create committed snapshot after truncate: %v", err)
 	}
-	defer os.Remove(snapshotPath)
+	defer func() { _ = os.Remove(snapshotPath) }()
 	got, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatalf("read committed snapshot: %v", err)
@@ -253,7 +253,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -273,7 +273,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create committed snapshot from sparse authoritative temp: %v", err)
 	}
-	defer os.Remove(snapshotPath)
+	defer func() { _ = os.Remove(snapshotPath) }()
 	got, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatalf("read committed snapshot: %v", err)
@@ -291,7 +291,7 @@ func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -340,7 +340,7 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	h := &storhubHandle{fs: fsys, inode: 7, path: "demo.bin"}
 	for _, off := range []int64{0, 4, 8} {
 		res, errno := h.Read(context.Background(), make([]byte, 4), off)
@@ -375,7 +375,7 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
@@ -400,7 +400,7 @@ func TestLockAndErrorHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	lock := fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK}
 	if errno := fsys.setLock(1, 10, lock); errno != 0 {
 		t.Fatalf("set first lock: %v", errno)
@@ -447,7 +447,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 	}
 	var out fuse.EntryOut
 	fillEntryOut(&out, entry, DefaultOptions())
-	if out.Attr.Ino != 4 {
+	if out.Ino != 4 {
 		t.Fatalf("unexpected filled entry out: %+v", out)
 	}
 	file := &meta.FileMeta{Symlink: "target", Inode: 9, Size: 2, Mode: 0o777, UID: 1, GID: 2, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
@@ -484,7 +484,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirNode := &storhubNode{fs: fsys, inode: 1, isDir: true}
 	stream, errno := dirNode.Readdir(context.Background())
 	if errno != 0 || stream == nil {
@@ -572,7 +572,7 @@ func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	oldFileMeta := metaState.FindFile("docs/old.txt")
 	fsys.rememberPath(oldFileMeta.Inode, "docs/old.txt")
 
@@ -643,7 +643,7 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	var out fuse.EntryOut
 	_, handleAny, _, errno := dirNode.Create(context.Background(), "new.txt", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL, 0o644, &out)
@@ -706,7 +706,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	var out fuse.EntryOut
 	_, handleAny, _, errno := dirNode.Create(context.Background(), "new.txt", syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL, 0o664, &out)
@@ -746,7 +746,7 @@ func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	ctx := fuse.NewContext(context.Background(), &fuse.Caller{Owner: fuse.Owner{Uid: 123, Gid: 456}, Pid: 789})
 	var out fuse.EntryOut
@@ -779,7 +779,7 @@ func TestAccessChecksCallerPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Mode: 0o640, UID: 10, GID: 20, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	denied := fuse.NewContext(context.Background(), &fuse.Caller{Owner: fuse.Owner{Uid: 99, Gid: 99}, Pid: 1})
 	if errno := node.Access(denied, 0x4); errno != syscall.EACCES {
@@ -805,7 +805,7 @@ func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	var out fuse.EntryOut
 	if _, errno := dirNode.Mknod(context.Background(), "pipe", syscall.S_IFIFO|0o644, 0, &out); errno != syscall.ENOTSUP {
@@ -840,7 +840,7 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	hAny, _, errno := node.Open(context.Background(), syscall.O_WRONLY)
 	if errno != 0 {
@@ -885,7 +885,7 @@ func TestOpenReturnsKernelCachedFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 10, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	h, flags, errno := node.Open(context.Background(), syscall.O_RDONLY)
 	if errno != 0 {
@@ -961,12 +961,12 @@ func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	base, err := os.CreateTemp(t.TempDir(), "base-*")
 	if err != nil {
 		t.Fatalf("create base temp: %v", err)
 	}
-	defer os.Remove(base.Name())
+	defer func() { _ = os.Remove(base.Name()) }()
 	state := &inodeWriteState{fs: fsys, inode: 1, baseTemp: base, baseTempPath: base.Name(), baseSize: 4, logicalSize: 4}
 	buf := make([]byte, 4)
 	if _, err := state.readIntoLocked(context.Background(), buf, 0); !errors.Is(err, io.ErrNoProgress) {
@@ -1016,7 +1016,7 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: backendSize, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
 	hAny, _, errno := node.Open(context.Background(), syscall.O_WRONLY)
 	if errno != 0 {
@@ -1033,8 +1033,8 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 	if truncates != 0 {
 		t.Fatalf("expected setattr to avoid backend truncate, got %d calls", truncates)
 	}
-	if out.Attr.Size != 0 {
-		t.Fatalf("expected local setattr size 0, got %d", out.Attr.Size)
+	if out.Size != 0 {
+		t.Fatalf("expected local setattr size 0, got %d", out.Size)
 	}
 	if written, errno := h.Write(context.Background(), []byte("hello"), 0); errno != 0 || written != 5 {
 		t.Fatalf("write after local truncate: written=%d errno=%v", written, errno)
@@ -1055,8 +1055,8 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 	if errno := node.Getattr(context.Background(), nil, &getattr); errno != 0 {
 		t.Fatalf("getattr after commit: %v", errno)
 	}
-	if getattr.Attr.Size != 5 {
-		t.Fatalf("expected getattr size 5 after commit, got %d", getattr.Attr.Size)
+	if getattr.Size != 5 {
+		t.Fatalf("expected getattr size 5 after commit, got %d", getattr.Size)
 	}
 }
 
@@ -1238,7 +1238,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 0})
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
@@ -1324,7 +1324,7 @@ func TestSetSizeRegrowServesZeros(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	state := &inodeWriteState{fs: fsys, inode: 9, path: "grow.bin", refs: 1}
 	fsys.mu.Lock()
 	fsys.writeStates[9] = state
@@ -1400,7 +1400,7 @@ func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	h := &storhubHandle{fs: fsys, inode: 7, id: fsys.nextHandle.Add(1)}
 	fsys.mu.Lock()
@@ -1478,7 +1478,7 @@ func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	const inode = uint64(21)
 	// Base 4 bytes, working content 12 bytes: chunks [4,8) and [8,12) dirty.
@@ -1538,7 +1538,7 @@ func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	const inode = uint64(22)
 	state := newPatchTestState(t, fsys, inode, 4, "ABCDEFGH")
@@ -1586,7 +1586,7 @@ func TestConcurrentFDsShareWriteState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	const inode = uint64(30)
 	// base 16 + 10 dirty bytes keeps the ladder on the patch rung

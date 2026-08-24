@@ -29,7 +29,7 @@ func TestHelperUtilities(t *testing.T) {
 	if _, err := shfs.NormalizePath("../escape"); err == nil {
 		t.Fatal("expected path escape error")
 	}
-	if "docs/guide.txt" != "docs/guide.txt" || shfs.ParentPath("docs/guide.txt") != "docs" {
+	if shfs.ParentPath("docs/guide.txt") != "docs" {
 		t.Fatal("unexpected stored path helpers")
 	}
 	if !shfs.IsParentOrSame("docs", "docs/guide.txt") || shfs.IsParentOrSame("images", "docs/guide.txt") {

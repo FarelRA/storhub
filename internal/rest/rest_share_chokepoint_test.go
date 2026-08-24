@@ -17,8 +17,6 @@ type panickingClient struct {
 	Client
 }
 
-func (panickingClient) methodCalled() {}
-
 // TestRestrictedClientDeniesEverything exercises the chokepoint contract:
 // every method of the Client interface, invoked with zero arguments, must
 // return an access-denied error and never delegate to the underlying

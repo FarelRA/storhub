@@ -10,14 +10,14 @@ import (
 
 func printFileSummary(w io.Writer, action string, meta *storhub.FileMetadata) {
 	if meta == nil {
-		fmt.Fprintf(w, "%s\n", action)
+		_, _ = fmt.Fprintf(w, "%s\n", action)
 		return
 	}
-	fmt.Fprintf(w, "%s\n", action)
-	fmt.Fprintf(w, "  size: %d bytes\n", meta.Size)
-	fmt.Fprintf(w, "  inode: %d\n", meta.Inode)
-	fmt.Fprintf(w, "  mode: %#o\n", meta.Mode)
-	fmt.Fprintf(w, "  chunks: %d\n", len(meta.Chunks))
+	_, _ = fmt.Fprintf(w, "%s\n", action)
+	_, _ = fmt.Fprintf(w, "  size: %d bytes\n", meta.Size)
+	_, _ = fmt.Fprintf(w, "  inode: %d\n", meta.Inode)
+	_, _ = fmt.Fprintf(w, "  mode: %#o\n", meta.Mode)
+	_, _ = fmt.Fprintf(w, "  chunks: %d\n", len(meta.Chunks))
 }
 
 func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {
@@ -31,10 +31,10 @@ func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {
 			kind = "symlink"
 		}
 		if long {
-			fmt.Fprintf(w, "%s\t%#o\t%d\t%s\n", kind, entry.Mode, entry.Size, entry.Path)
+			_, _ = fmt.Fprintf(w, "%s\t%#o\t%d\t%s\n", kind, entry.Mode, entry.Size, entry.Path)
 			continue
 		}
-		fmt.Fprintln(w, entry.Name)
+		_, _ = fmt.Fprintln(w, entry.Name)
 	}
 }
 
@@ -42,21 +42,21 @@ func printEntryInfo(w io.Writer, entry *storhub.EntryInfo) {
 	// Defensive: production callers bail out on stat errors first, but the
 	// renderer stays total so a nil can never panic a future caller.
 	if entry == nil {
-		fmt.Fprintln(w, "not found")
+		_, _ = fmt.Fprintln(w, "not found")
 		return
 	}
-	fmt.Fprintf(w, "path: %s\n", entry.Path)
-	fmt.Fprintf(w, "kind: %s\n", entryKind(entry))
-	fmt.Fprintf(w, "inode: %d\n", entry.Inode)
-	fmt.Fprintf(w, "size: %d\n", entry.Size)
-	fmt.Fprintf(w, "mode: %#o\n", entry.Mode)
-	fmt.Fprintf(w, "uid/gid: %d/%d\n", entry.UID, entry.GID)
-	fmt.Fprintf(w, "links: %d\n", entry.NLink)
-	fmt.Fprintf(w, "modified: %s\n", formatTime(entry.ModifiedAt))
-	fmt.Fprintf(w, "accessed: %s\n", formatTime(entry.AccessedAt))
-	fmt.Fprintf(w, "changed: %s\n", formatTime(entry.ChangedAt))
+	_, _ = fmt.Fprintf(w, "path: %s\n", entry.Path)
+	_, _ = fmt.Fprintf(w, "kind: %s\n", entryKind(entry))
+	_, _ = fmt.Fprintf(w, "inode: %d\n", entry.Inode)
+	_, _ = fmt.Fprintf(w, "size: %d\n", entry.Size)
+	_, _ = fmt.Fprintf(w, "mode: %#o\n", entry.Mode)
+	_, _ = fmt.Fprintf(w, "uid/gid: %d/%d\n", entry.UID, entry.GID)
+	_, _ = fmt.Fprintf(w, "links: %d\n", entry.NLink)
+	_, _ = fmt.Fprintf(w, "modified: %s\n", formatTime(entry.ModifiedAt))
+	_, _ = fmt.Fprintf(w, "accessed: %s\n", formatTime(entry.AccessedAt))
+	_, _ = fmt.Fprintf(w, "changed: %s\n", formatTime(entry.ChangedAt))
 	if entry.SymlinkTarget != "" {
-		fmt.Fprintf(w, "target: %s\n", entry.SymlinkTarget)
+		_, _ = fmt.Fprintf(w, "target: %s\n", entry.SymlinkTarget)
 	}
 }
 
@@ -68,7 +68,7 @@ func printRevisions(w io.Writer, revisions []storhub.MetadataRevision) {
 			sha = sha[:10]
 		}
 		committedAt := rev.CommittedAt
-		fmt.Fprintf(w, "%s  %s  %s\n", sha, formatTime(committedAt), rev.Message)
+		_, _ = fmt.Fprintf(w, "%s  %s  %s\n", sha, formatTime(committedAt), rev.Message)
 	}
 }
 

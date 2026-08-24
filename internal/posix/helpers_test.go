@@ -74,7 +74,6 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	if CloneStringMap(nil) != nil || CloneStringMap(map[string]string{"a": "b"})["a"] != "b" {
 		t.Fatal("unexpected map clone")
 	}
-	if uid, gid := DefaultOwnerIDs(); uid == 0 && gid == 0 {
-		// Valid on some systems; just exercise the helper.
-	}
+	// Exercise the helper; a both-zero result is valid on some systems.
+	_, _ = DefaultOwnerIDs()
 }

@@ -327,7 +327,7 @@ func mustRequest(t *testing.T, handler http.Handler, method, target string, body
 
 func decodeJSONBody(t *testing.T, resp *http.Response, dst any) {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
@@ -335,7 +335,7 @@ func decodeJSONBody(t *testing.T, resp *http.Response, dst any) {
 
 func readBody(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
@@ -345,7 +345,7 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 
 func assertErrorCode(t *testing.T, resp *http.Response, want string) {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var payload restError
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode error body: %v", err)

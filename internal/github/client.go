@@ -74,13 +74,6 @@ type requestOptions struct { //nolint:revive // internal request options bundle
 	retryable   bool
 }
 
-type content struct {
-	SHA         string `json:"sha"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding"`
-	DownloadURL string `json:"download_url"`
-}
-
 type putContentResponse struct {
 	Content struct {
 		SHA string `json:"sha"`
@@ -162,7 +155,7 @@ func (c *Client) CreateRepo(ctx context.Context, project, description string, pr
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
@@ -175,7 +168,7 @@ func (c *Client) RepoExists(ctx context.Context, owner, project string) (bool, e
 		}
 		return false, err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return true, nil
 }
 
@@ -209,7 +202,7 @@ func (c *Client) CreateRelease(ctx context.Context, owner, project, tag, name st
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var release Release
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return nil, fmt.Errorf("decode release response: %w", err)
@@ -224,7 +217,7 @@ func (c *Client) DeleteReleaseByID(ctx context.Context, owner, project string, r
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
@@ -235,7 +228,7 @@ func (c *Client) DeleteAssetByID(ctx context.Context, owner, project string, ass
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
@@ -244,7 +237,7 @@ func (c *Client) DeleteRepo(ctx context.Context, owner, project string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
@@ -308,7 +301,7 @@ func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, r
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("read content: %w", err)
@@ -349,7 +342,7 @@ func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath st
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var result putContentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", "", fmt.Errorf("decode content response: %w", err)
@@ -414,7 +407,7 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
@@ -456,7 +449,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 				logging.Debug(c.logger, "http request complete", "method", method, "url", endpoint, "attempt", attempt+1, "status", resp.StatusCode, "elapsed", time.Now().UTC().Sub(started))
 				return resp, nil
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			lastErr = apiErr
 			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "err", apiErr)
 			if attempt == c.maxRetries || !opts.retryable || !apiErr.IsRetryable() {
@@ -495,7 +488,7 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var asset struct {
 		ID int64 `json:"id"`
 	}

@@ -479,10 +479,10 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	// just wrote must not turn success into exit code 1.
 	info, err := os.Stat(args[2])
 	if err != nil {
-		fmt.Fprintf(a.stderr, "downloaded %s to %s\n", args[1], args[2])
+		_, _ = fmt.Fprintf(a.stderr, "downloaded %s to %s\n", args[1], args[2])
 		return nil
 	}
-	fmt.Fprintf(a.stderr, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
+	_, _ = fmt.Fprintf(a.stderr, "downloaded %s to %s (%d bytes)\n", args[1], args[2], info.Size())
 	return nil
 }
 
@@ -592,7 +592,7 @@ func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	if err := hub.Mkdir(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "created directory %s\n", args[1])
+	_, _ = fmt.Fprintf(a.stderr, "created directory %s\n", args[1])
 	return nil
 }
 
@@ -612,7 +612,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "removed %s\n", args[1])
+	_, _ = fmt.Fprintf(a.stderr, "removed %s\n", args[1])
 	return nil
 }
 
@@ -626,7 +626,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	if err := hub.Rename(args[0], args[1], args[2]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "moved %s -> %s\n", args[1], args[2])
+	_, _ = fmt.Fprintf(a.stderr, "moved %s -> %s\n", args[1], args[2])
 	return nil
 }
 
@@ -730,7 +730,7 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	if err := hub.RollbackMetadata(args[0], args[1]); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
+	_, _ = fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
 	return nil
 }
 
@@ -745,7 +745,7 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stderr, "purged %s: %d releases, %d assets deleted\n",
+	_, _ = fmt.Fprintf(a.stderr, "purged %s: %d releases, %d assets deleted\n",
 		args[0], result.DeletedReleases, result.DeletedAssets)
 	return nil
 }
@@ -773,7 +773,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	if err := os.MkdirAll(args[1], 0o755); err != nil {
 		return err
 	}
@@ -782,12 +782,12 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	}
 	if ctx.Err() != nil {
 		if err := fsys.Unmount(); err != nil {
-			fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", err, args[1])
+			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", err, args[1])
 		}
 		return errors.New("interrupted while mounting " + args[0])
 	}
-	fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
-	fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
+	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
+	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)
@@ -818,13 +818,13 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 		err := fsys.Unmount()
 		if err == nil {
 			if attempt > 1 {
-				fmt.Fprintf(report, "unmounted %s\n", target)
+				_, _ = fmt.Fprintf(report, "unmounted %s\n", target)
 			}
 			return
 		}
-		fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
+		_, _ = fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
 		if time.Now().After(deadline) {
-			fmt.Fprintf(report, "giving up on unmount after %d attempts; %s may still be mounted\n", attempt, target)
+			_, _ = fmt.Fprintf(report, "giving up on unmount after %d attempts; %s may still be mounted\n", attempt, target)
 			return
 		}
 		time.Sleep(delay)
@@ -878,7 +878,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	if opts.Auth != nil {
 		mode = "with auth"
 	}
-	fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
+	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           handler,
@@ -910,10 +910,10 @@ func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) er
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
+		_, _ = fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
 	}
 	if err := hub.Shutdown(shutdownCtx); err != nil {
-		fmt.Fprintf(a.stderr, "metadata flush failed: %v\n", err)
+		_, _ = fmt.Fprintf(a.stderr, "metadata flush failed: %v\n", err)
 	}
 	return nil
 }

@@ -36,7 +36,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(workspace)
+	defer func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			fmt.Fprintln(os.Stderr, "workspace cleanup:", err)
+		}
+	}()
 	project := fmt.Sprintf("storhub-files-%d", os.Getpid())
 	// A demo repository is garbage once the demo ends — delete it even when
 	// something below fails, so runs never litter the account.

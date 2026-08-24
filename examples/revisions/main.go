@@ -35,7 +35,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(workspace)
+	defer func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			fmt.Fprintln(os.Stderr, "workspace cleanup:", err)
+		}
+	}()
 	project := fmt.Sprintf("storhub-revisions-%d", os.Getpid())
 	// A half-finished demo is pure litter: always delete when the run
 	// failed after creation. On success the env vars below decide retention.

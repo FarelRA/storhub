@@ -183,7 +183,7 @@ func migrateV1ToV2(data []byte) ([]byte, error) {
 		out.Chunks[id] = chunkToDoc(c)
 	}
 	for tag, r := range m.Releases {
-		out.Releases[tag] = docRelease{AssetCount: r.AssetCount, CreatedAt: r.CreatedAt}
+		out.Releases[tag] = docRelease(r)
 	}
 	return json.Marshal(out)
 }
@@ -321,7 +321,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 		}
 	}
 	for tag, r := range in.Releases {
-		m.Releases[tag] = ReleaseRef{AssetCount: r.AssetCount, CreatedAt: r.CreatedAt}
+		m.Releases[tag] = ReleaseRef(r)
 	}
 	m.NextInode = in.NextInode
 	m.NextChunkID = in.NextChunkID

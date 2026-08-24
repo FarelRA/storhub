@@ -1100,9 +1100,9 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hijack response: %v", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		payload := []byte("download retry payload")
-		_, _ = rw.WriteString(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload)))
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload))
 		_, _ = rw.Write(payload[:len(payload)/2])
 		_ = rw.Flush()
 		return true
@@ -1378,9 +1378,9 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hijack response: %v", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		payload := []byte("cdefgh")
-		_, _ = rw.WriteString(fmt.Sprintf("HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload)))
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload))
 		_, _ = rw.Write(payload[:3])
 		_ = rw.Flush()
 		return true
@@ -1421,9 +1421,9 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hijack response: %v", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		payload := []byte("ab")
-		_, _ = rw.WriteString(fmt.Sprintf("HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload)))
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(payload))
 		_, _ = rw.Write(payload[:1])
 		_ = rw.Flush()
 		return true
@@ -1904,7 +1904,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 
 	var rootOut fuse.EntryOut
 	_, errno := fsys.RootNode().Lookup(ctx, "docs", &rootOut)
@@ -2102,7 +2102,7 @@ func TestFUSEOptionalMountLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	mountPoint := filepath.Join(t.TempDir(), "mnt")
 	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
 		t.Fatalf("mkdir mountpoint: %v", err)
@@ -2223,7 +2223,7 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	dirEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir")
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
@@ -2327,7 +2327,7 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	victimEntry, err := hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt")
 	if err != nil {
 		t.Fatalf("stat victim: %v", err)
@@ -2416,7 +2416,7 @@ func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, "project-fuse-shared-writes", "shared.txt")
 	if err != nil {
 		t.Fatalf("stat shared file: %v", err)
@@ -2478,7 +2478,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, "project-fuse-partial-writeback", "large.txt")
 	if err != nil {
 		t.Fatalf("stat large file: %v", err)
@@ -2535,7 +2535,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, "project-fuse-append-writeback", "append.txt")
 	if err != nil {
 		t.Fatalf("stat append file: %v", err)
@@ -2588,7 +2588,7 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, "project-fuse-truncate-writeback", "truncate.txt")
 	if err != nil {
 		t.Fatalf("stat truncate file: %v", err)
@@ -2710,7 +2710,7 @@ func testFUSEEditorSaveCycleWithSetattrHandle(t *testing.T, projectSuffix string
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, project, "editor.txt")
 	if err != nil {
 		t.Fatalf("stat editor file: %v", err)
@@ -2798,7 +2798,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	entry, err := hub.StatPathContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt")
 	if err != nil {
 		t.Fatalf("stat fragmented file: %v", err)
@@ -2866,7 +2866,7 @@ func TestFUSEFlagsAndLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
-	defer fsys.Close()
+	defer func() { _ = fsys.Close() }()
 	docsEntry, err := hub.StatPathContext(ctx, "project-fuse-flags", "docs")
 	if err != nil {
 		t.Fatalf("stat docs: %v", err)
@@ -3024,7 +3024,7 @@ func (m *mockGitHub) newClient(t *testing.T, cfg Config) *StorHub {
 		t.Fatalf("new client: %v", err)
 	}
 	t.Cleanup(func() {
-		hub.Shutdown(context.Background())
+		_ = hub.Shutdown(context.Background())
 	})
 	return hub
 }
@@ -3150,7 +3150,7 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 				if acceptRaw {
 					w.Header().Set("Content-Type", "application/octet-stream")
 					w.WriteHeader(http.StatusOK)
-					w.Write(commit.data)
+					_, _ = w.Write(commit.data)
 				} else {
 					m.writeJSON(w, http.StatusOK, map[string]any{
 						"name":     filepath.Base(filePath),
@@ -3174,7 +3174,7 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 	if acceptRaw {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write(file.data)
+		_, _ = w.Write(file.data)
 	} else {
 		m.writeJSON(w, http.StatusOK, map[string]any{
 			"name":     filepath.Base(filePath),
@@ -3440,17 +3440,6 @@ func (m *mockGitHub) repo(name string) *mockRepo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.repos[name]
-}
-
-func (m *mockGitHub) corruptAsset(assetID int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, repo := range m.repos {
-		if asset := repo.assets[assetID]; asset != nil && len(asset.data) > 0 {
-			asset.data[0] ^= 0xFF
-			return
-		}
-	}
 }
 
 func (m *mockGitHub) addRelease(t *testing.T, project, tag string) *mockRelease {

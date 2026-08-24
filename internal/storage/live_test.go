@@ -965,7 +965,7 @@ func createSparseZeroFile(path string, size int64) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return file.Truncate(size)
 }
 
