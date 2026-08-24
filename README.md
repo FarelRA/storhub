@@ -1,6 +1,29 @@
 # StorHub
 
+[![CI](https://github.com/FarelRA/storhub/actions/workflows/ci.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/ci.yml)
+[![Nightly](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml)
+
 StorHub is a Go library and CLI for storing files in GitHub repositories while exposing a logical filesystem-style view over that content. It stores file data as GitHub release assets and keeps the logical catalog in `.storhub/metadata.json`.
+
+## Install
+
+Supported platforms: linux (`386`, `amd64`, `armv6`, `armv7`, `arm64`) and macOS (`amd64`, `Apple silicon`).
+
+Install the latest release (downloads the right binary and verifies its SHA256):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FarelRA/storhub/main/scripts/install.sh | bash
+```
+
+Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases) - every release ships per-platform archives, `checksums.txt`, SBOMs, and build provenance attestations. A rolling `nightly` prerelease is refreshed from `main` every night at 03:00 UTC.
+
+Docker images are published to `ghcr.io` for `amd64`, `arm64`, `arm/v7`, and `386`:
+
+```bash
+docker run --rm ghcr.io/farelra/storhub:latest --help
+```
+
+Check the installed version with `storhub --version`.
 
 ## What StorHub Is
 
