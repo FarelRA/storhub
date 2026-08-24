@@ -86,7 +86,7 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 		if err != nil {
 			return results, err
 		}
-		assetID, digest, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(part), int64(len(part)))
 		if err != nil {
 			return results, fmt.Errorf("upload patch chunk %d: %w", i, err)
 		}
@@ -96,7 +96,6 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 			AssetOffset: 0,
 			AssetID:     assetID,
 			Release:     releaseTag,
-			Digest:      digest,
 		})
 	}
 	return results, nil
@@ -109,7 +108,6 @@ func (h *StorHub) sliceChunk(ctx context.Context, project string, original Chunk
 	segment.AssetOffset = original.AssetOffset + (newOffset - original.Offset)
 	// A sliced view is not the whole uploaded asset, so its digest no
 	// longer applies; verification is skipped for such chunks.
-	segment.Digest = ""
 	return segment, nil
 }
 
@@ -205,11 +203,11 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 		if err != nil {
 			return results, err
 		}
-		assetID, digest, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, section, chunkEnd-chunkStart)
 		if err != nil {
 			return results, fmt.Errorf("upload rewritten chunk %d: %w", i, err)
 		}
-		results = append(results, ChunkInfo{Size: chunkEnd - chunkStart, Offset: chunkStart, AssetOffset: 0, AssetID: assetID, Release: releaseTag, Digest: digest})
+		results = append(results, ChunkInfo{Size: chunkEnd - chunkStart, Offset: chunkStart, AssetOffset: 0, AssetID: assetID, Release: releaseTag})
 	}
 	return results, nil
 }

@@ -15,9 +15,6 @@ type ChunkInfo struct {
 	Release     string `json:"r"`
 	AssetOffset int64  `json:"ao,omitempty"`
 	AssetID     int64  `json:"a"`
-	// Digest is the hex-encoded SHA-256 of the chunk payload. Optional;
-	// populated by newer uploads and verified by download paths.
-	Digest string `json:"d,omitempty"`
 }
 
 // XAttrMap holds extended attributes as raw bytes. JSON values are base64

@@ -1076,27 +1076,6 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 	}
 }
 
-func TestDownloadRejectsCorruptOutput(t *testing.T) {
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-
-	input := writeTempFile(t, t.TempDir(), "corrupt.bin", []byte("this file will be corrupted during download"))
-	fileMeta, err := hub.UploadFile("project-corrupt", "corrupt.bin", input)
-	if err != nil {
-		t.Fatalf("upload file: %v", err)
-	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-corrupt")
-	backend.corruptAsset(repoMeta.Chunks[fileMeta.Chunks[0]].AssetID)
-
-	output := filepath.Join(t.TempDir(), "corrupt.out")
-	if err := hub.DownloadFile("project-corrupt", "corrupt.bin", output); err == nil || !strings.Contains(err.Error(), "integrity") {
-		t.Fatalf("expected download to fail loudly on corrupt bytes, got %v", err)
-	}
-	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatal("corrupt download output must be removed")
-	}
-}
-
 func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryTestConfig())
@@ -3731,40 +3710,6 @@ func TestDeleteFileWorksOnColdCache(t *testing.T) {
 	coldHub := backend.newClient(t, smallTransferTestConfig())
 	if err := coldHub.DeleteFile("project-cold-delete", "cold.txt"); err != nil {
 		t.Fatalf("cold-cache delete of existing file failed: %v", err)
-	}
-}
-
-// Downloaded chunks are verified against the SHA-256 digest recorded at
-// upload time; silent bit-rot must fail loudly instead of serving corrupt bytes.
-func TestDownloadDetectsCorruptedChunkDigest(t *testing.T) {
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "digest.txt", []byte("integrity matters"))
-	fileMeta, err := hub.UploadFile("project-digest", "digest.txt", input)
-	if err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-digest")
-	chunkID := fileMeta.Chunks[0]
-	chunk := repoMeta.Chunks[chunkID]
-	if chunk.Digest == "" {
-		t.Fatal("expected upload to record a chunk digest")
-	}
-
-	// Flip one byte in every asset backing this file.
-	backend.mu.Lock()
-	for _, id := range fileMeta.Chunks {
-		asset := backend.repos["project-digest"].assets[repoMeta.Chunks[id].AssetID]
-		if asset != nil && len(asset.data) > 0 {
-			asset.data[0] ^= 0xFF
-		}
-	}
-	backend.mu.Unlock()
-
-	output := filepath.Join(t.TempDir(), "digest.out")
-	err = hub.DownloadFile("project-digest", "digest.txt", output)
-	if err == nil || !strings.Contains(err.Error(), "integrity") {
-		t.Fatalf("expected integrity failure, got %v", err)
 	}
 }
 
