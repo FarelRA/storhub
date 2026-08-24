@@ -26,26 +26,52 @@ import (
 )
 
 const (
-	maxAPIErrorBodyBytes  = 64 << 10
-	pageSize              = 100
+	maxAPIErrorBodyBytes = 64 << 10
+	pageSize             = 100
+	// defaultRequestTimeout bounds small API exchanges; sized transfers
+	// use transferDeadline instead, which scales with bytes.
 	defaultRequestTimeout = 5 * time.Minute
 	defaultBaseRetryDelay = 500 * time.Millisecond
 	defaultMaxRetryDelay  = 8 * time.Second
+	// Conservative upstream/downstream throughput assumption for sizing
+	// transfer deadlines; capped links are the target environment.
+	defaultTransferThroughput = int64(1 << 20) // 1 MiB/s
 )
 
+// transferDeadline converts a payload size into a request deadline:
+// size divided by an assumed throughput floor, never below the general
+// request timeout. A 1.7 GiB chunk over a capped 5 MiB/s link needs
+// ~5.5 minutes of pure transfer, so deadlines must scale instead of
+// amputating every large transfer at a fixed wall.
+func (c *Client) transferDeadline(size int64) time.Duration {
+	tp := c.transferThroughput
+	if tp <= 0 {
+		tp = defaultTransferThroughput
+	}
+	if size <= 0 {
+		return defaultRequestTimeout
+	}
+	deadline := time.Duration(size/tp)*time.Second + 2*time.Second
+	if deadline < defaultRequestTimeout {
+		deadline = defaultRequestTimeout
+	}
+	return deadline
+}
+
 type Client struct {
-	token          string
-	apiBaseURL     string
-	apiVersion     string
-	client         *http.Client
-	noFollow       *http.Client
-	cdn            *http.Client
-	maxRetries     int
-	baseRetryDelay time.Duration
-	maxRetryDelay  time.Duration
-	sleep          func(context.Context, time.Duration) error
-	logger         *slog.Logger
-	governor       *rateGovernor
+	token              string
+	apiBaseURL         string
+	apiVersion         string
+	client             *http.Client
+	noFollow           *http.Client
+	cdn                *http.Client
+	maxRetries         int
+	baseRetryDelay     time.Duration
+	maxRetryDelay      time.Duration
+	transferThroughput int64
+	sleep              func(context.Context, time.Duration) error
+	logger             *slog.Logger
+	governor           *rateGovernor
 
 	assetMu   sync.Mutex
 	assetURLs map[int64]cachedAssetURL
@@ -135,20 +161,25 @@ func NewClient(token string, cfg storcfg.Config) *Client {
 	if maxDelay <= 0 {
 		maxDelay = defaultMaxRetryDelay
 	}
+	uploadThroughput := cfg.TransferThroughput
+	if uploadThroughput <= 0 {
+		uploadThroughput = defaultTransferThroughput
+	}
 	return &Client{
-		token:          token,
-		apiBaseURL:     strings.TrimRight(cfg.APIBaseURL, "/"),
-		apiVersion:     cfg.APIVersion,
-		client:         client,
-		maxRetries:     cfg.MaxRetries,
-		baseRetryDelay: baseDelay,
-		maxRetryDelay:  maxDelay,
-		sleep:          sleep,
-		logger:         logging.WithComponent(cfg.Logger, "github"),
-		governor:       newRateGovernor(cfg, cfg.Logger, sleep),
-		assetURLs:      make(map[int64]cachedAssetURL),
-		noFollow:       noRedirectClient(client),
-		cdn:            bareCDNClient(client),
+		token:              token,
+		apiBaseURL:         strings.TrimRight(cfg.APIBaseURL, "/"),
+		apiVersion:         cfg.APIVersion,
+		client:             client,
+		maxRetries:         cfg.MaxRetries,
+		baseRetryDelay:     baseDelay,
+		maxRetryDelay:      maxDelay,
+		transferThroughput: uploadThroughput,
+		sleep:              sleep,
+		logger:             logging.WithComponent(cfg.Logger, "github"),
+		governor:           newRateGovernor(cfg, cfg.Logger, sleep),
+		assetURLs:          make(map[int64]cachedAssetURL),
+		noFollow:           noRedirectClient(client),
+		cdn:                bareCDNClient(client),
 	}
 }
 
@@ -329,7 +360,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 	for attempt := 0; attempt < 2; attempt++ {
 		cdnURL, cached := c.cachedAssetURL(assetID)
 		if cached {
-			body, size, status, err := c.fetchCDNRange(ctx, cdnURL.url, rangeHeader)
+			body, size, status, err := c.fetchCDNRange(ctx, cdnURL.url, rangeHeader, end-start+1)
 			if err == nil {
 				return body, size, nil
 			}
@@ -355,7 +386,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 				location = resolved.String()
 			}
 			c.storeAssetURL(assetID, location)
-			body, size, status, fetchErr := c.fetchCDNRange(ctx, location, rangeHeader)
+			body, size, status, fetchErr := c.fetchCDNRange(ctx, location, rangeHeader, end-start+1)
 			if fetchErr == nil {
 				return body, size, nil
 			}
@@ -378,9 +409,14 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 }
 
 // fetchCDNRange performs one unauthenticated range GET against a signed
-// CDN URL. The status code is returned alongside so callers can tell
-// expired-signature rejections apart from other failures.
-func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string) (io.ReadCloser, int64, int, error) {
+// CDN URL. The request is bounded by a deadline scaled to the expected
+// byte count, so a stalled connection surfaces as a retryable timeout
+// instead of hanging the reader forever. The status code is returned
+// alongside so callers can tell expired-signature rejections apart from
+// other failures.
+func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, length int64) (io.ReadCloser, int64, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.transferDeadline(length))
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("create cdn request: %w", err)
@@ -591,12 +627,17 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		switch {
 		case opts.noFollow:
 			client = c.noFollow
-		case opts.stream && client.Timeout > 0:
-			// Streams must not be killed by the client-wide timeout; the
-			// request context governs cancellation instead.
+		case opts.stream || opts.assetUpload:
+			// Sized transfers are bounded by transferDeadline below, not
+			// by the client-wide timeout that amputates large payloads.
 			noTimeout := *client
 			noTimeout.Timeout = 0
 			client = &noTimeout
+		}
+		if opts.assetUpload && opts.contentSize > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, c.transferDeadline(opts.contentSize))
+			defer cancel()
 		}
 		resp, err := client.Do(req)
 		release()
@@ -827,12 +868,18 @@ func parseUnixTime(value string) (time.Time, bool) {
 	return time.Unix(seconds, 0), true
 }
 
+// isRetryableNetworkError reports whether a transport failure is worth
+// another attempt. User cancellation is never retried; timeouts are,
+// because a release-asset PUT is atomic (no partial asset on a dropped
+// connection) and range GETs are read-only - the only cost of a spurious
+// retry is bandwidth, while refusing to retry turns every capped-link
+// stall into a failed commit.
 func isRetryableNetworkError(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var netErr net.Error
-	if errorAs(err, &netErr) {
+	if errorAs(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 	return errors.Is(err, io.ErrUnexpectedEOF)

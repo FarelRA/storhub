@@ -186,6 +186,10 @@ minutes) so long-running sessions survive an exhausted hour. Tune with:
 - `STORHUB_RATE_CONTENT_PER_MIN` - content-creation budget per minute
   (default `60`)
 - `STORHUB_MAX_CONCURRENT` - in-flight API request cap (default `16`)
+- `STORHUB_TRANSFER_THROUGHPUT` - bytes/sec assumed when sizing upload
+  and download deadlines; large transfers get `size / throughput`
+  seconds instead of a fixed timeout, so capped links can finish
+  (default `1048576`, i.e. 1 MiB/s - a 1.7 GiB chunk gets ~28 minutes)
 
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 

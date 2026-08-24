@@ -80,6 +80,12 @@ type Config struct {
 	// documented ceiling is 100).
 	MaxConcurrentRequests int64
 
+	// TransferThroughput is the conservative bytes-per-second assumption
+	// used to size upload/download deadlines; large transfers get
+	// size/throughput seconds instead of a fixed timeout. Zero takes the
+	// library default (1 MiB/s).
+	TransferThroughput int64
+
 	AtimePolicy            AtimePolicy
 	MetadataCommitInterval time.Duration
 	GitCacheDir            string
@@ -105,6 +111,7 @@ func Default() Config {
 		RatePointsPerMin:       720,
 		RateContentPerMin:      60,
 		MaxConcurrentRequests:  16,
+		TransferThroughput:     1 << 20,
 		LogOutput:              os.Stderr,
 		LogLevel:               logging.LevelDebug,
 		LogFormat:              logging.FormatPretty,
