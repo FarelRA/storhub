@@ -50,10 +50,6 @@ type FileMeta struct {
 	// XAttrs is nil-means-empty: normalizeXAttrs collapses empty maps to
 	// nil so serialized metadata omits the field.
 	XAttrs XAttrMap `json:"x,omitempty"`
-	// TimesExplicit marks timestamps as authoritative: zero means the
-	// epoch (e.g. an explicit patch), not "unset", so Normalize must not
-	// backfill. Additive v3 field; omitted for legacy entries.
-	TimesExplicit bool `json:"tsx,omitempty"`
 }
 
 func (f FileMeta) Clone() FileMeta {
@@ -75,8 +71,6 @@ type DirMeta struct {
 	GID        uint32   `json:"g,omitempty"`
 	Inode      uint64   `json:"i,omitempty"`
 	XAttrs     XAttrMap `json:"x,omitempty"`
-	// See FileMeta.TimesExplicit.
-	TimesExplicit bool `json:"tsx,omitempty"`
 }
 
 func (d DirMeta) Clone() DirMeta {
@@ -351,21 +345,10 @@ func (d *DirMeta) Normalize(now int64) {
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
 	}
-	// Explicit-timestamp entries (metadata patch) keep their zeros.
-	if !d.TimesExplicit {
-		if d.CreatedAt == 0 {
-			d.CreatedAt = now
-		}
-		if d.ModifiedAt == 0 {
-			d.ModifiedAt = d.CreatedAt
-		}
-		if d.AccessedAt == 0 {
-			d.AccessedAt = d.ModifiedAt
-		}
-		if d.ChangedAt == 0 {
-			d.ChangedAt = d.ModifiedAt
-		}
-	}
+	// Timestamps are NOT repaired here: the v4 contract is complete,
+	// authoritative values (the stacked migrator completes legacy docs;
+	// creation paths stamp real times). Zeros are real epoch values.
+	_ = now
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
@@ -373,22 +356,8 @@ func (f *FileMeta) Normalize(now int64) {
 	if f.Mode == 0 {
 		f.Mode = defaultFileMode(NodeKindFile)
 	}
-	// Explicit-timestamp entries (metadata patch) keep their zeros: the
-	// epoch is a real value there, not a legacy gap to repair.
-	if !f.TimesExplicit {
-		if f.UploadedAt == 0 {
-			f.UploadedAt = now
-		}
-		if f.ModifiedAt == 0 {
-			f.ModifiedAt = f.UploadedAt
-		}
-		if f.AccessedAt == 0 {
-			f.AccessedAt = f.ModifiedAt
-		}
-		if f.ChangedAt == 0 {
-			f.ChangedAt = f.ModifiedAt
-		}
-	}
+	// See DirMeta.Normalize: zeros are authoritative epoch values, never
+	// gaps to repair here.
 	if f.Chunks == nil {
 		f.Chunks = make([]int64, 0)
 	}
@@ -515,6 +484,15 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 	out := make([]string, len(names))
 	copy(out, names)
 	return out
+}
+
+// WriteFileDirect stores an entry verbatim — no creation defaults, no
+// identity repair. It exists for family updates that must preserve every
+// field exactly (including authoritative epoch zeros) while bypassing the
+// new-node path of UpsertFile.
+func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
+	m.Files[normalizeStoredPath(name)] = file
+	m.invalidateIndexes()
 }
 
 func (m *RepoMetadata) RemoveFile(name string) bool {
@@ -704,19 +682,17 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	if file.GID == 0 {
 		file.GID = gid
 	}
-	// TimesExplicit entries carry authoritative zeros (epoch); backfilling
-	// them here would rewrite an explicit utimensat value on the
-	// remove-and-reinsert path UpdateFileFamily uses for family updates.
-	if !file.TimesExplicit {
-		if file.UploadedAt == 0 {
-			file.UploadedAt = now
-		}
-		if file.ModifiedAt == 0 {
-			file.ModifiedAt = file.UploadedAt
-		}
-		if file.AccessedAt == 0 {
-			file.AccessedAt = file.ModifiedAt
-		}
+	// Fresh nodes get complete timestamps at creation. This runs ONLY on
+	// the new-node path (UpdateFileFamily writes the map directly), so an
+	// explicit epoch on an existing entry can never be rewritten here.
+	if file.UploadedAt == 0 {
+		file.UploadedAt = now
+	}
+	if file.ModifiedAt == 0 {
+		file.ModifiedAt = file.UploadedAt
+	}
+	if file.AccessedAt == 0 {
+		file.AccessedAt = file.ModifiedAt
 	}
 	if file.ChangedAt == 0 {
 		file.ChangedAt = file.ModifiedAt
@@ -730,18 +706,7 @@ func (m *RepoMetadata) normalizeRoot(now int64) {
 	if m.Root.Mode == 0 {
 		m.Root.Mode = defaultDirMode()
 	}
-	if m.Root.CreatedAt == 0 {
-		m.Root.CreatedAt = now
-	}
-	if m.Root.ModifiedAt == 0 {
-		m.Root.ModifiedAt = m.Root.CreatedAt
-	}
-	if m.Root.AccessedAt == 0 {
-		m.Root.AccessedAt = m.Root.ModifiedAt
-	}
-	if m.Root.ChangedAt == 0 {
-		m.Root.ChangedAt = m.Root.ModifiedAt
-	}
+	// Root timestamps are authoritative under v4 (see DirMeta.Normalize).
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
 
 	maxInode := m.Root.Inode

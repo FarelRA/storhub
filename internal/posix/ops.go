@@ -377,7 +377,6 @@ func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPat
 				if mtime != nil {
 					current.ModifiedAt = mtime.Unix()
 				}
-				current.TimesExplicit = true
 				current.ChangedAt = now
 			})
 		}
@@ -387,7 +386,6 @@ func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPat
 		if mtime != nil {
 			dir.ModifiedAt = mtime.Unix()
 		}
-		dir.TimesExplicit = true
 		dir.ChangedAt = now
 		return nil
 	})
@@ -670,9 +668,6 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 					if !patch.MTime.IsZero() {
 						current.ModifiedAt = patch.MTime.Unix()
 					}
-					// Patched timestamps are authoritative, zeros included
-					// (the epoch is a real POSIX value).
-					current.TimesExplicit = true
 				}
 				current.ChangedAt = now
 			})
@@ -692,7 +687,6 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			if !patch.MTime.IsZero() {
 				dir.ModifiedAt = patch.MTime.Unix()
 			}
-			dir.TimesExplicit = true
 		}
 		dir.ChangedAt = now
 		return nil
@@ -766,11 +760,15 @@ func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.F
 		mutate(&clone)
 		updated[name] = clone
 	}
+	// WriteFileDirect: routing through UpsertFile would send family members
+	// down the new-node path (RemoveFile erased the "existing" side),
+	// letting creation defaults overwrite preserved values — including
+	// authoritative epoch zeros.
 	for _, name := range names {
 		repo.RemoveFile(name)
 	}
 	for name, clone := range updated {
-		repo.UpsertFile(name, clone, clone.ChangedAt)
+		repo.WriteFileDirect(name, clone)
 	}
 	return nil
 }
@@ -802,6 +800,5 @@ func equalFileMeta(a, b meta.FileMeta) bool {
 	return a.Size == b.Size && a.Symlink == b.Symlink &&
 		a.UploadedAt == b.UploadedAt && a.ModifiedAt == b.ModifiedAt &&
 		a.AccessedAt == b.AccessedAt && a.ChangedAt == b.ChangedAt &&
-		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID && a.Inode == b.Inode &&
-		a.TimesExplicit == b.TimesExplicit
+		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID && a.Inode == b.Inode
 }
