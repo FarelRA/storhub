@@ -1,0 +1,74 @@
+version: 2
+
+project_name: storhub
+
+# Only platforms that compile today: hanwen/go-fuse limits us to Linux and
+# Darwin, and Go dropped darwin/386 and darwin/arm long ago. Windows/BSD
+# return at the module level only if the FUSE import graph grows guards.
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: storhub
+    main: ./cmd/storhub
+    binary: storhub
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - "386"
+      - amd64
+      - arm
+      - arm64
+    goarm:
+      - "6"
+      - "7"
+    ignore:
+      - goos: darwin
+        goarch: "386"
+      - goos: darwin
+        goarch: arm
+    ldflags:
+      - -s -w -X github.com/FarelRA/storhub/internal/cli.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+      - "^docs:"
+      - typo
+
+release:
+  draft: false
+  prerelease: auto
+dockers_v2:
+  - id: storhub
+    dockerfile: Dockerfile
+    images:
+      - "ghcr.io/farelra/storhub"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - "linux/amd64"
+      - "linux/arm64"
+      - "linux/arm/v7"
+      - "linux/386"
+    build_args:
+      VERSION: "{{ .Version }}"
