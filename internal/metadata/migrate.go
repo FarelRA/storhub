@@ -91,30 +91,30 @@ type docChunk struct {
 }
 
 type docFileV2 struct {
-	Size       int64             `json:"s"`
-	Chunks     []int64           `json:"cs,omitempty"`
-	Symlink    string            `json:"sl,omitempty"`
-	UploadedAt int64             `json:"ua"`
-	ModifiedAt int64             `json:"ma,omitempty"`
-	AccessedAt int64             `json:"aa,omitempty"`
-	ChangedAt  int64             `json:"ca,omitempty"`
-	Mode       uint32            `json:"md,omitempty"`
-	UID        uint32            `json:"u,omitempty"`
-	GID        uint32            `json:"g,omitempty"`
-	Inode      uint64            `json:"i,omitempty"`
-	XAttrs     XAttrMap          `json:"x,omitempty"` // base64 since the compact era began
+	Size       int64    `json:"s"`
+	Chunks     []int64  `json:"cs,omitempty"`
+	Symlink    string   `json:"sl,omitempty"`
+	UploadedAt int64    `json:"ua"`
+	ModifiedAt int64    `json:"ma,omitempty"`
+	AccessedAt int64    `json:"aa,omitempty"`
+	ChangedAt  int64    `json:"ca,omitempty"`
+	Mode       uint32   `json:"md,omitempty"`
+	UID        uint32   `json:"u,omitempty"`
+	GID        uint32   `json:"g,omitempty"`
+	Inode      uint64   `json:"i,omitempty"`
+	XAttrs     XAttrMap `json:"x,omitempty"` // base64 since the compact era began
 }
 
 type docDirV2 struct {
-	CreatedAt  int64             `json:"ca"`
-	ModifiedAt int64             `json:"ma"`
-	AccessedAt int64             `json:"aa,omitempty"`
-	ChangedAt  int64             `json:"cha,omitempty"`
-	Mode       uint32            `json:"m,omitempty"`
-	UID        uint32            `json:"u,omitempty"`
-	GID        uint32            `json:"g,omitempty"`
-	Inode      uint64            `json:"i,omitempty"`
-	XAttrs     XAttrMap          `json:"x,omitempty"`
+	CreatedAt  int64    `json:"ca"`
+	ModifiedAt int64    `json:"ma"`
+	AccessedAt int64    `json:"aa,omitempty"`
+	ChangedAt  int64    `json:"cha,omitempty"`
+	Mode       uint32   `json:"m,omitempty"`
+	UID        uint32   `json:"u,omitempty"`
+	GID        uint32   `json:"g,omitempty"`
+	Inode      uint64   `json:"i,omitempty"`
+	XAttrs     XAttrMap `json:"x,omitempty"`
 }
 
 type docTopV2 struct {
