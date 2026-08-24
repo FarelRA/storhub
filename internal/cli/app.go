@@ -165,6 +165,25 @@ Examples:
 	rootCmd.AddCommand(a.newMountCmd())
 	rootCmd.AddCommand(a.newServeRESTCmd())
 
+	// An unknown command is as much a command-line mistake as a bad flag:
+	// both must classify as usage errors so main exits 2. Making the root
+	// runnable routes every unmatched first word through the Args
+	// validator, where it is wrapped as a usageError.
+	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return cmd.Help()
+	}
+	rootCmd.Args = usageArgs(func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+			return nil
+		}
+		for _, sub := range cmd.Commands() {
+			if sub.Name() == args[0] || sub.HasAlias(args[0]) {
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	})
+
 	a.rootCmd = rootCmd
 }
 
