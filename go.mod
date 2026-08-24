@@ -2,6 +2,8 @@ module github.com/FarelRA/storhub
 
 go 1.26.0
 
+toolchain go1.26.7
+
 require (
 	charm.land/log/v2 v2.0.0
 	github.com/charmbracelet/colorprofile v0.4.3
