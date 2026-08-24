@@ -395,7 +395,7 @@ func TestFromJSONRejectsCorruptAndFutureVersions(t *testing.T) {
 }
 
 func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
-	v2JSON := `{"v":2,"p":"demo","f":{"a.txt":{"s":0,"i":5,"ua":100,"x":{"user.bin":"aGVsbG8=","user.txt":"plain"}}}}`
+	v2JSON := `{"v":2,"p":"demo","f":{"a.txt":{"s":0,"i":5,"ua":100,"x":{"user.bin":"aGVsbG8=","user.txt":"cGxhaW4="}}}}`
 	var m RepoMetadata
 	if err := m.FromJSON([]byte(v2JSON)); err != nil {
 		t.Fatalf("migrate v2: %v", err)
