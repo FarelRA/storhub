@@ -199,8 +199,16 @@ POSIX conformance notes:
   Filenames are byte-honest: surrounding whitespace is significant
   everywhere (`" docs "` is one specific name), enforced by a
   conformance test pinning both normalizers together. Metadata is
-  schema v4 with unambiguous timestamp keys (cr=created, ch=changed);
-  v3 repositories migrate transparently on load
+  schema v4: unambiguous timestamp keys (cr=created, ch=changed),
+  complete authoritative timestamps (zero IS the epoch - no repair
+  passes), no digest fields. The parser accepts ONLY the current
+  schema; older documents are upgraded by a stacked, deterministic,
+  eager migrator (`metadata.Migrate`: pure per-version steps v1->v2->
+  v3->v4, golden-tested, identity on current documents) that runs on
+  every load; upgraded bytes persist on the next commit. There are no
+  data-level or protocol-level fallbacks elsewhere either: share URLs
+  resolve only by short ID (a token in the path is a 404), share TTLs
+  accept seconds only
 - FUSE advisory locks are dropped when a file's last open descriptor closes
   (POSIX last-close guarantee); per-fd close semantics depend on go-fuse
   surfacing `FUSE_RELEASE`'s lock owner, which v2.11 does not
