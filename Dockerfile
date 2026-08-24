@@ -1,3 +1,6 @@
+# Standard source build - works anywhere: docker build .
+# Cross-compiles inside BuildKit via the standard TARGETOS/TARGETARCH
+# arguments, so it also produces correct images on foreign bases.
 FROM golang:1.26.7-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./

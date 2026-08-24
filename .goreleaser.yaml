@@ -59,7 +59,7 @@ release:
   prerelease: auto
 dockers_v2:
   - id: storhub
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.goreleaser
     images:
       - "ghcr.io/farelra/storhub"
     tags:
@@ -70,5 +70,3 @@ dockers_v2:
       - "linux/arm64"
       - "linux/arm/v7"
       - "linux/386"
-    build_args:
-      VERSION: "{{ .Version }}"

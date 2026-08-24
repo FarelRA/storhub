@@ -1,0 +1,6 @@
+# Used exclusively by goreleaser (dockerfile: in .goreleaser.yaml).
+# Its docker context is isolated and contains exactly one thing: the
+# already-built, stripped, ldflags-versioned binary named storhub.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY storhub /usr/bin/storhub
+ENTRYPOINT ["/usr/bin/storhub"]
