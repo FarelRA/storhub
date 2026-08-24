@@ -21,42 +21,7 @@ type ChunkInfo struct {
 }
 
 // XAttrMap holds extended attributes as raw bytes. JSON values are base64
-// encoded. Decoding also accepts legacy plain-string values from v1/v2
-// metadata so old payloads migrate losslessly.
 type XAttrMap map[string][]byte
-
-func (x *XAttrMap) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
-		*x = nil
-		return nil
-	}
-	raw := map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	decoded := make(XAttrMap, len(raw))
-	for k, v := range raw {
-		var b []byte
-		if err := json.Unmarshal(v, &b); err == nil {
-			decoded[k] = b
-			continue
-		}
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			return fmt.Errorf("xattr %s: %w", k, err)
-		}
-		decoded[k] = []byte(s)
-	}
-	*x = decoded
-	return nil
-}
-
-func (x XAttrMap) MarshalJSON() ([]byte, error) {
-	if x == nil {
-		return []byte("null"), nil
-	}
-	return json.Marshal(map[string][]byte(x))
-}
 
 func (x XAttrMap) Clone() XAttrMap {
 	if len(x) == 0 {
@@ -126,62 +91,6 @@ func (d DirMeta) Clone() DirMeta {
 type ReleaseRef struct {
 	AssetCount int   `json:"ac"`
 	CreatedAt  int64 `json:"cr"`
-}
-
-// Schema v4 gave every timestamp an unambiguous key (cr/ch uniformly);
-// the legacy readers below keep v3 payloads ("ca"/"cha", where "ca"
-// meant ChangedAt on files but CreatedAt on dirs) loadable. Writers
-// always emit the new spelling.
-func (f *FileMeta) UnmarshalJSON(data []byte) error {
-	type alias FileMeta
-	var wire struct {
-		alias
-		LegacyChangedAt int64 `json:"ca"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	*f = FileMeta(wire.alias)
-	if f.ChangedAt == 0 && !f.TimesExplicit {
-		f.ChangedAt = wire.LegacyChangedAt
-	}
-	return nil
-}
-
-func (d *DirMeta) UnmarshalJSON(data []byte) error {
-	type alias DirMeta
-	var wire struct {
-		alias
-		LegacyCreatedAt int64 `json:"ca"`
-		LegacyChangedAt int64 `json:"cha"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	*d = DirMeta(wire.alias)
-	if d.CreatedAt == 0 {
-		d.CreatedAt = wire.LegacyCreatedAt
-	}
-	if d.ChangedAt == 0 {
-		d.ChangedAt = wire.LegacyChangedAt
-	}
-	return nil
-}
-
-func (r *ReleaseRef) UnmarshalJSON(data []byte) error {
-	type alias ReleaseRef
-	var wire struct {
-		alias
-		LegacyCreatedAt int64 `json:"ca"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	*r = ReleaseRef(wire.alias)
-	if r.CreatedAt == 0 {
-		r.CreatedAt = wire.LegacyCreatedAt
-	}
-	return nil
 }
 
 func (r ReleaseRef) Clone() ReleaseRef {
@@ -315,59 +224,19 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 	return dst
 }
 
-// FromJSON parses metadata, migrating older schema versions forward. It fails
-// loudly on payloads that are corrupt (no version) or from a newer schema;
-// it never guesses.
+// FromJSON parses a metadata document into current form. Version detection
+// and any upgrades belong entirely to Migrate (stacked, eager); this parser
+// understands ONLY the current schema — legacy spellings never reach it.
 func (m *RepoMetadata) FromJSON(data []byte) error {
-	var raw struct {
-		V       int `json:"v"`
-		Version int `json:"version"`
+	upgraded, _, err := Migrate(data)
+	if err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
-	}
-	version := raw.V
-	if version == 0 {
-		version = raw.Version
-	}
-	switch {
-	case version == 0:
-		return fmt.Errorf("metadata payload has no version field; refusing to guess the schema")
-	case version > maxMetadataVersion:
-		return fmt.Errorf("metadata version %d is newer than supported version %d", version, maxMetadataVersion)
-	case version < 2:
-		if err := m.migrateV1(data); err != nil {
-			return err
-		}
-	default:
-		if err := json.Unmarshal(data, m); err != nil {
-			return fmt.Errorf("unmarshal v%d metadata: %w", version, err)
-		}
+	if err := json.Unmarshal(upgraded, m); err != nil {
+		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
 	m.Version = maxMetadataVersion
-	m.backfillLegacyOwners()
 	return nil
-}
-
-// backfillLegacyOwners stamps process ownership onto entries loaded from
-// older schemas whose owners were omitted. New writes always persist real
-// owner IDs (including 0 for root), so this never runs on v3+ data.
-func (m *RepoMetadata) backfillLegacyOwners() {
-	uid, _ := defaultOwnerIDs()
-	backfill := func(owner *uint32) {
-		if *owner == 0 && uid != 0 {
-			*owner = uid
-		}
-	}
-	backfill(&m.Root.UID)
-	for path, dir := range m.Dirs {
-		backfill(&dir.UID)
-		m.Dirs[path] = dir
-	}
-	for path, file := range m.Files {
-		backfill(&file.UID)
-		m.Files[path] = file
-	}
 }
 
 func (m *RepoMetadata) Normalize(project string, now int64) {
