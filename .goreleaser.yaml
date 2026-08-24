@@ -60,6 +60,8 @@ release:
 dockers_v2:
   - id: storhub
     dockerfile: Dockerfile.goreleaser
+    ids:
+      - storhub
     images:
       - "ghcr.io/farelra/storhub"
     tags:

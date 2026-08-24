@@ -1,6 +1,9 @@
 # Used exclusively by goreleaser (dockerfile: in .goreleaser.yaml).
-# Its docker context is isolated and contains exactly one thing: the
-# already-built, stripped, ldflags-versioned binary named storhub.
+# Its docker context is isolated: binaries live under their platform
+# directory, so linux/amd64/storhub, linux/arm/v7/storhub, etc.
+# $TARGETPLATFORM resolves to that same path prefix inside BuildKit,
+# which is how one line serves every platform in the manifest.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY storhub /usr/bin/storhub
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/storhub /usr/bin/storhub
 ENTRYPOINT ["/usr/bin/storhub"]
