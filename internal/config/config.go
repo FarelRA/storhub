@@ -51,16 +51,35 @@ type Config struct {
 	LogFormat string
 	LogColor  bool
 
-	APIBaseURL             string
-	APIVersion             string
-	HTTPClient             *http.Client
-	ChunkSize              int64
-	BufferSize             int
-	RepoDescription        string
-	CreatePublicRepo       bool
-	MaxRetries             int
-	BaseRetryDelay         time.Duration
-	MaxRetryDelay          time.Duration
+	APIBaseURL       string
+	APIVersion       string
+	HTTPClient       *http.Client
+	ChunkSize        int64
+	BufferSize       int
+	RepoDescription  string
+	CreatePublicRepo bool
+	MaxRetries       int
+	BaseRetryDelay   time.Duration
+	MaxRetryDelay    time.Duration
+
+	// RateReserve keeps this many requests of the hourly GitHub budget
+	// unspent as headroom for recovery operations. Negative restores the
+	// client default.
+	RateReserve int64
+	// RateMaxWait bounds any single rate-limit wait the client may take.
+	// Zero takes the library default (15m, for long-running processes);
+	// a negative value opts into fail-fast behavior.
+	RateMaxWait time.Duration
+	// RatePointsPerMin caps secondary rate-limit points per minute
+	// (GET=1, writes=5; GitHub's documented ceiling is 900).
+	RatePointsPerMin int64
+	// RateContentPerMin caps content-generating requests per minute
+	// such as release-asset uploads (documented ceiling: 80).
+	RateContentPerMin int64
+	// MaxConcurrentRequests bounds in-flight API requests (GitHub's
+	// documented ceiling is 100).
+	MaxConcurrentRequests int64
+
 	AtimePolicy            AtimePolicy
 	MetadataCommitInterval time.Duration
 	GitCacheDir            string
@@ -81,6 +100,11 @@ func Default() Config {
 		MaxRetries:             4,
 		BaseRetryDelay:         500 * time.Millisecond,
 		MaxRetryDelay:          8 * time.Second,
+		RateReserve:            25,
+		RateMaxWait:            15 * time.Minute,
+		RatePointsPerMin:       720,
+		RateContentPerMin:      60,
+		MaxConcurrentRequests:  16,
 		LogOutput:              os.Stderr,
 		LogLevel:               logging.LevelDebug,
 		LogFormat:              logging.FormatPretty,

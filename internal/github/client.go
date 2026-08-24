@@ -18,6 +18,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -37,11 +38,17 @@ type Client struct {
 	apiBaseURL     string
 	apiVersion     string
 	client         *http.Client
+	noFollow       *http.Client
+	cdn            *http.Client
 	maxRetries     int
 	baseRetryDelay time.Duration
 	maxRetryDelay  time.Duration
 	sleep          func(context.Context, time.Duration) error
 	logger         *slog.Logger
+	governor       *rateGovernor
+
+	assetMu   sync.Mutex
+	assetURLs map[int64]cachedAssetURL
 }
 
 type Release struct {
@@ -72,6 +79,17 @@ type requestOptions struct { //nolint:revive // internal request options bundle
 	contentSize int64
 	rangeHeader string
 	retryable   bool
+	// assetUpload marks content-generating release-asset POSTs, which
+	// draw from the governor's stricter content-creation window.
+	assetUpload bool
+	// noFollow returns redirect responses to the caller instead of
+	// following them, used to capture signed asset CDN URLs.
+	noFollow bool
+}
+
+type cachedAssetURL struct {
+	url     string
+	expires time.Time
 }
 
 type putContentResponse struct {
@@ -127,7 +145,30 @@ func NewClient(token string, cfg storcfg.Config) *Client {
 		maxRetryDelay:  maxDelay,
 		sleep:          sleep,
 		logger:         logging.WithComponent(cfg.Logger, "github"),
+		governor:       newRateGovernor(cfg, cfg.Logger, sleep),
+		assetURLs:      make(map[int64]cachedAssetURL),
+		noFollow:       noRedirectClient(client),
+		cdn:            bareCDNClient(client),
 	}
+}
+
+// noRedirectClient returns a copy of client that surfaces redirect
+// responses instead of following them.
+func noRedirectClient(client *http.Client) *http.Client {
+	noFollow := *client
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &noFollow
+}
+
+// bareCDNClient returns a copy of client without the request timeout for
+// streaming range fetches against signed CDN URLs. No auth header is ever
+// attached to these requests; cancellation is context-driven.
+func bareCDNClient(client *http.Client) *http.Client {
+	cdn := *client
+	cdn.Timeout = 0
+	return &cdn
 }
 
 func (c *Client) GetAuthenticatedUser(ctx context.Context) (string, error) {
@@ -270,6 +311,11 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 // size is the server-declared Content-Length and may be -1 when the server
 // does not declare a length; readers must therefore rely on their own byte
 // accounting rather than on the reported size.
+//
+// The octet-stream GET is a redirect to a short-lived signed CDN URL. That
+// resolution is cached per asset, so reading a large file in many range
+// requests costs one core-API call per TTL window instead of one per read;
+// range fetches themselves hit the CDN directly without auth headers.
 func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
 	rangeHeader := ""
 	switch {
@@ -280,13 +326,114 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		// caller bug and must surface as an error.
 		return nil, 0, fmt.Errorf("download asset %d: invalid byte range [%d,%d]", assetID, start, end)
 	}
-	resp, err := c.doRequest(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
-		return nil, nil
-	}, requestOptions{accept: "application/octet-stream", rangeHeader: rangeHeader, retryable: true, stream: true})
-	if err != nil {
-		return nil, 0, fmt.Errorf("download asset: %w", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		cdnURL, cached := c.cachedAssetURL(assetID)
+		if cached {
+			body, size, status, err := c.fetchCDNRange(ctx, cdnURL.url, rangeHeader)
+			if err == nil {
+				return body, size, nil
+			}
+			if !isCDNRejection(status) {
+				return nil, 0, err
+			}
+			// Signed URL expired or revoked: drop it and re-resolve once.
+			c.invalidateAssetURL(assetID)
+		}
+		resp, err := c.doRequest(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
+			return nil, nil
+		}, requestOptions{accept: "application/octet-stream", rangeHeader: rangeHeader, retryable: true, stream: true, noFollow: true})
+		if err != nil {
+			return nil, 0, fmt.Errorf("download asset: %w", err)
+		}
+		if resp.StatusCode == http.StatusFound {
+			location := resp.Header.Get("Location")
+			_ = resp.Body.Close()
+			if location == "" {
+				return nil, 0, fmt.Errorf("download asset %d: redirect missing location", assetID)
+			}
+			if resolved, err := resp.Request.URL.Parse(location); err == nil {
+				location = resolved.String()
+			}
+			c.storeAssetURL(assetID, location)
+			body, size, status, fetchErr := c.fetchCDNRange(ctx, location, rangeHeader)
+			if fetchErr == nil {
+				return body, size, nil
+			}
+			if !isCDNRejection(status) || attempt > 0 {
+				return nil, 0, fetchErr
+			}
+			c.invalidateAssetURL(assetID)
+			continue
+		}
+		// Non-redirect response: treat it as the final answer (also keeps
+		// test servers that stream bytes directly working unchanged).
+		if resp.StatusCode >= 400 {
+			apiErr := decodeAPIError(resp)
+			_ = resp.Body.Close()
+			return nil, 0, apiErr
+		}
+		return resp.Body, resp.ContentLength, nil
 	}
-	return resp.Body, resp.ContentLength, nil
+	return nil, 0, fmt.Errorf("download asset %d: exhausted cdn re-resolution attempts", assetID)
+}
+
+// fetchCDNRange performs one unauthenticated range GET against a signed
+// CDN URL. The status code is returned alongside so callers can tell
+// expired-signature rejections apart from other failures.
+func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string) (io.ReadCloser, int64, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("create cdn request: %w", err)
+	}
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	resp, err := c.cdn.Do(req)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("cdn request: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		defer func() { _ = resp.Body.Close() }()
+		return nil, 0, resp.StatusCode, fmt.Errorf("cdn range fetch: unexpected status %d", resp.StatusCode)
+	}
+	return resp.Body, resp.ContentLength, resp.StatusCode, nil
+}
+
+// isCDNRejection reports whether a CDN status indicates the signed URL is
+// no longer usable and should be re-resolved through the API.
+func isCDNRejection(status int) bool {
+	return status == http.StatusForbidden || status == http.StatusNotFound ||
+		status == http.StatusBadRequest || status == http.StatusGone
+}
+
+func (c *Client) cachedAssetURL(assetID int64) (cachedAssetURL, bool) {
+	c.assetMu.Lock()
+	defer c.assetMu.Unlock()
+	cached, ok := c.assetURLs[assetID]
+	return cached, ok && c.governor.now().Before(cached.expires)
+}
+
+func (c *Client) storeAssetURL(assetID int64, rawURL string) {
+	parsed, err := url.Parse(rawURL)
+	expires := time.Now().Add(60 * time.Second)
+	if err == nil {
+		query := parsed.Query()
+		if stamped, dateErr := time.Parse("20060102T150405Z", query.Get("X-Amz-Date")); dateErr == nil {
+			if lifetime, secErr := strconv.ParseInt(query.Get("X-Amz-Expires"), 10, 64); secErr == nil && lifetime > 0 {
+				// Retire the URL before its real expiry with margin.
+				expires = stamped.Add(time.Duration(lifetime)*time.Second - 30*time.Second)
+			}
+		}
+	}
+	c.assetMu.Lock()
+	defer c.assetMu.Unlock()
+	c.assetURLs[assetID] = cachedAssetURL{url: rawURL, expires: expires}
+}
+
+func (c *Client) invalidateAssetURL(assetID int64) {
+	c.assetMu.Lock()
+	defer c.assetMu.Unlock()
+	delete(c.assetURLs, assetID)
 }
 
 func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, ref string) ([]byte, string, error) {
@@ -419,8 +566,13 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		started := time.Now().UTC()
 		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
+		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload)
+		if err != nil {
+			return nil, err
+		}
 		reader, err := bodyFactory()
 		if err != nil {
+			release()
 			return nil, err
 		}
 		if opts.contentSize == 0 && reader != nil {
@@ -428,6 +580,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		}
 		req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 		if err != nil {
+			release()
 			return nil, fmt.Errorf("create request: %w", err)
 		}
 		c.applyHeaders(req, opts)
@@ -435,7 +588,10 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			req.ContentLength = opts.contentSize
 		}
 		client := c.client
-		if opts.stream && client.Timeout > 0 {
+		switch {
+		case opts.noFollow:
+			client = c.noFollow
+		case opts.stream && client.Timeout > 0:
 			// Streams must not be killed by the client-wide timeout; the
 			// request context governs cancellation instead.
 			noTimeout := *client
@@ -443,7 +599,9 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			client = &noTimeout
 		}
 		resp, err := client.Do(req)
+		release()
 		if err == nil {
+			c.governor.observe(resp.Header)
 			apiErr := decodeAPIError(resp)
 			if apiErr == nil {
 				logging.Debug(c.logger, "http request complete", "method", method, "url", endpoint, "attempt", attempt+1, "status", resp.StatusCode, "elapsed", time.Now().UTC().Sub(started))
@@ -451,11 +609,27 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			}
 			_ = resp.Body.Close()
 			lastErr = apiErr
-			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "err", apiErr)
+			// Endpoints without rate-limit headers (uploads) still get an
+			// accurate reset time from the governor's last snapshot.
+			if apiErr.RateLimited && apiErr.RateLimitReset.IsZero() {
+				if snap := c.governor.snapshot(); snap.seen && c.governor.now().Before(snap.resetAt) {
+					apiErr.RateLimitReset = snap.resetAt
+					if snap.remaining <= c.governor.cfg.reserve {
+						apiErr.Primary = true
+					}
+				}
+			}
+			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "err", apiErr)
 			if attempt == c.maxRetries || !opts.retryable || !apiErr.IsRetryable() {
 				return nil, apiErr
 			}
 			delay := c.retryDelay(attempt, apiErr)
+			// Primary exhaustion is not a backoff situation: the budget
+			// is gone until reset. Waiting longer than maxWait allows is
+			// refused up front instead of pretending an 8s retry helps.
+			if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
+				return nil, apiErr
+			}
 			logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
 			if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 				return nil, sleepErr
@@ -482,9 +656,12 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 			return nil, fmt.Errorf("rewind upload reader: %w", err)
 		}
 		return reader, nil
-		// Upload is a non-idempotent POST; a single attempt per call keeps
-		// ambiguous failures from silently duplicating assets.
-	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: false})
+		// Retries are safe: a release-asset upload is one atomic PUT - no
+		// asset exists unless the full body lands - and the bodyFactory
+		// rewinds the reader for every attempt. A lost response after
+		// finalize can leave an orphan under this attempt's random name;
+		// unreferenced assets are exactly what PurgeUntracked removes.
+	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: true, assetUpload: true})
 	if err != nil {
 		return 0, err
 	}
@@ -517,6 +694,16 @@ func (c *Client) applyHeaders(req *http.Request, opts requestOptions) {
 	}
 }
 
+// rateLimitMarkers are substrings GitHub uses when rejecting requests on
+// rate-limit grounds. The API endpoint advertises this via headers, but
+// the upload endpoint (uploads.github.com) sends none at all - the body
+// is the only signal there.
+var rateLimitMarkers = []string{
+	"api rate limit exceeded",
+	"secondary rate limit",
+	"abuse detection mechanism",
+}
+
 func decodeAPIError(resp *http.Response) *APIError {
 	if resp.StatusCode < http.StatusBadRequest {
 		return nil
@@ -530,26 +717,55 @@ func decodeAPIError(resp *http.Response) *APIError {
 	if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); retryAfter > 0 {
 		err.RetryAfter = retryAfter
 	}
+	marker := containsAny(strings.ToLower(payload.Message+" "+string(body)), rateLimitMarkers)
 	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
 		err.RateLimited = true
 		if reset, ok := parseUnixTime(resp.Header.Get("X-RateLimit-Reset")); ok {
 			err.RateLimitReset = reset
+			err.Primary = true
 		}
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		err.RateLimited = true
 	}
+	// Header-less rejections (uploads.github.com): the body text is the
+	// only evidence of rate limiting. These are not provably primary -
+	// the honest classification is secondary-style pacing.
+	if !err.RateLimited && marker {
+		err.RateLimited = true
+	}
 	return err
 }
 
+func containsAny(haystack string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(haystack, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryDelay computes the wait before the next attempt. Rate-limit
+// rejections follow GitHub's documented guidance instead of the generic
+// exponential backoff: primary exhaustion means waiting for
+// x-ratelimit-reset (the doRequest caller refuses waits beyond maxWait),
+// a present Retry-After is honored exactly, and other secondary limits
+// wait at least one minute with exponential growth.
 func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
-	if apiErr != nil {
+	if apiErr != nil && apiErr.RateLimited {
+		if !apiErr.RateLimitReset.IsZero() {
+			// Wait for the documented reset; the floor only prevents a
+			// hot loop when the clock has already passed it.
+			return maxDuration(time.Until(apiErr.RateLimitReset)+c.baseRetryDelay, c.baseRetryDelay)
+		}
 		if apiErr.RetryAfter > 0 {
-			return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
+			return apiErr.RetryAfter
 		}
-		if apiErr.RateLimited && !apiErr.RateLimitReset.IsZero() {
-			return c.boundedWait(nonNegativeDelay(time.Until(apiErr.RateLimitReset)))
-		}
+		return minDuration(60*time.Second<<attempt, 15*time.Minute)
+	}
+	if apiErr != nil && apiErr.RetryAfter > 0 {
+		return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
 	}
 	base := float64(c.baseRetryDelay)
 	delay := time.Duration(base * math.Pow(2, float64(attempt)))
@@ -561,6 +777,13 @@ func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 	}
 	jitter := time.Duration(rand.Int63n(int64(delay/4 + 1)))
 	return delay + jitter
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (c *Client) apiURL(path string) string {

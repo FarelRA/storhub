@@ -65,6 +65,9 @@ func smallTransferTestConfig() Config {
 		AtimePolicy:            "noatime",
 		MetadataCommitInterval: 100 * time.Millisecond,
 		DisableGitBackend:      true,
+		RateMaxWait:            -1,
+		RatePointsPerMin:       1 << 40,
+		RateContentPerMin:      1 << 40,
 	}
 }
 
@@ -81,6 +84,9 @@ func retryTestConfig() Config {
 		MaxRetryDelay:          5 * time.Millisecond,
 		MetadataCommitInterval: 100 * time.Millisecond,
 		DisableGitBackend:      true,
+		RateMaxWait:            -1,
+		RatePointsPerMin:       1 << 40,
+		RateContentPerMin:      1 << 40,
 	}
 }
 
@@ -101,11 +107,22 @@ func rateLimitTestConfig(sleep func(context.Context, time.Duration) error) Confi
 		MetadataCommitInterval: 100 * time.Millisecond,
 		Now:                    time.Now,
 		DisableGitBackend:      true,
+		RateMaxWait:            15 * time.Minute,
+		RatePointsPerMin:       1 << 40,
+		RateContentPerMin:      1 << 40,
 	}
 }
 
 func liveSmokeConfig() Config {
-	return Config{ChunkSize: testLargeChunkSize, BufferSize: testLargeBufferSize, MaxRetries: 4, MetadataCommitInterval: 100 * time.Millisecond}
+	return Config{
+		ChunkSize:              testLargeChunkSize,
+		BufferSize:             testLargeBufferSize,
+		MaxRetries:             4,
+		MetadataCommitInterval: 100 * time.Millisecond,
+		RateMaxWait:            -1,
+		RatePointsPerMin:       1 << 40,
+		RateContentPerMin:      1 << 40,
+	}
 }
 
 func liveLargeSmokeConfig(client *http.Client) Config {
@@ -1201,25 +1218,59 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 	}
 }
 
-func TestUploadChunkSurfacesTransientFailure(t *testing.T) {
+func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	backend := newMockGitHub(t)
-	var failures atomic.Int32
+	var failures, successes atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") && failures.Load() == 0 {
-			failures.Add(1)
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte(`{"message":"temporary upload issue"}`))
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			switch {
+			case failures.Load() == 0:
+				failures.Add(1)
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"message":"temporary upload issue"}`))
+			default:
+				successes.Add(1)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":777}`))
+			}
 			return true
 		}
 		return false
 	})
 	hub := backend.newClient(t, smallRetryTestConfig())
-	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", []byte("retry upload payload"))
-	if _, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input); err == nil {
-		t.Fatal("expected single-attempt upload failure to surface")
+	payload := bytes.Repeat([]byte("r"), int(testSmallChunkSize)) // exactly one chunk
+	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", payload)
+	meta, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input)
+	if err != nil {
+		t.Fatalf("transient upload failure must be retried: %v", err)
 	}
-	if failures.Load() != 1 {
-		t.Fatalf("expected exactly one upload attempt, got %d", failures.Load())
+	if meta.Size != int64(len(payload)) {
+		t.Fatalf("unexpected uploaded size %d", meta.Size)
+	}
+	if failures.Load() != 1 || successes.Load() != 1 {
+		t.Fatalf("expected one failure then one success, got %d/%d", failures.Load(), successes.Load())
+	}
+
+	persistent := newMockGitHub(t)
+	var attempts atomic.Int32
+	persistent.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"still broken"}`))
+			return true
+		}
+		return false
+	})
+	hub2 := persistent.newClient(t, smallRetryTestConfig())
+	payload2 := bytes.Repeat([]byte("d"), int(testSmallChunkSize))
+	input2 := writeTempFile(t, t.TempDir(), "upload-broken.txt", payload2)
+	if _, err := hub2.UploadFile("project-upload-doomed", "upload-broken.txt", input2); err == nil {
+		t.Fatal("persistent upload failure must surface")
+	}
+	// initial attempt + MaxRetries(2) retries
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("persistent failure must exhaust retries, attempts=%d", got)
 	}
 }
 
@@ -1232,7 +1283,10 @@ func TestRateLimitAwareRetry(t *testing.T) {
 			hits.Add(1)
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Second).Unix(), 10))
+			// A wide reset window keeps the assertion stable under load:
+			// recorded sleeps do not advance the wall clock, so the
+			// measured wait must reflect until-reset, not backoff clamps.
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(30*time.Second).Unix(), 10))
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 			return true
@@ -1256,8 +1310,11 @@ func TestRateLimitAwareRetry(t *testing.T) {
 		t.Fatalf("expected one rate-limited response, got %d", hits.Load())
 	}
 	waited := time.Duration(slept.Load())
-	if waited <= 0 || waited > 2*time.Millisecond {
-		t.Fatalf("rate-limit wait must be positive and clamped to MaxRetryDelay, got %v", waited)
+	// New doctrine: a primary rate-limit wait honors x-ratelimit-reset
+	// (~30s away) instead of being clamped to MaxRetryDelay. The last
+	// recorded sleep is the governor's pre-send wait for the retry.
+	if waited < 5*time.Second || waited > 35*time.Second {
+		t.Fatalf("rate-limit wait must honor the reset window, got %v", waited)
 	}
 }
 

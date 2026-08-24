@@ -1101,6 +1101,7 @@ func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*stor
 	cfg.LogLevel = cliLogLevel
 	cfg.LogFormat = cliLogFormat
 	cfg.LogColor = cliLogColor
+	applyRateEnv(&cfg, false)
 	return storhub.NewStorHubWithConfig(token, cfg)
 }
 
@@ -1114,7 +1115,48 @@ func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
 		cfg.APIBaseURL = apiBase
 	}
 	cfg.AtimePolicy = storcfg.AtimeNo
+	applyRateEnv(&cfg, true)
 	return storhub.NewStorHubWithConfig(token, cfg)
+}
+
+// applyRateEnv layers the rate-governor environment variables onto a hub
+// config. One-shot commands fail fast on rate limits by default (a wait
+// cannot help a script), while long-running commands - mount, serve-rest
+// - may pause up to the documented reset before giving up.
+func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
+	defaultMaxWait := -1 * time.Second
+	if longRunning {
+		defaultMaxWait = 15 * time.Minute
+	}
+	cfg.RateReserve = parseEnvInt64("STORHUB_RATE_RESERVE", cfg.RateReserve)
+	cfg.RateMaxWait = parseEnvDuration("STORHUB_RATE_MAX_WAIT", defaultMaxWait)
+	cfg.RatePointsPerMin = parseEnvInt64("STORHUB_RATE_POINTS_PER_MIN", cfg.RatePointsPerMin)
+	cfg.RateContentPerMin = parseEnvInt64("STORHUB_RATE_CONTENT_PER_MIN", cfg.RateContentPerMin)
+	cfg.MaxConcurrentRequests = parseEnvInt64("STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests)
+}
+
+func parseEnvInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func parseEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 // resolveToken prefers the explicit --token value and falls back to

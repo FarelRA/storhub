@@ -164,6 +164,29 @@ Environment variables: `GITHUB_TOKEN` (authentication),
 (default level is `info`, colors on), `STORHUB_API_BASE_URL`, and
 `STORHUB_REST_AUTH_FILE` (fallback for serve-rest's `--auth-file`).
 
+### Rate limiting
+
+The client tracks GitHub's `x-ratelimit-*` headers on every response and
+paces itself to stay under the documented limits - 5,000 core requests
+per hour, 900 secondary points per minute (`GET` costs 1 point, writes
+cost 5), and 80 content-generating requests per minute. Release-asset
+uploads are retried automatically; a rejected upload whose endpoint sends
+no rate-limit headers is still recognized by its message text.
+
+One-shot commands fail fast when GitHub's budget is exhausted instead of
+waiting; `mount` and `serve-rest` may pause until the reset (at most 15
+minutes) so long-running sessions survive an exhausted hour. Tune with:
+
+- `STORHUB_RATE_MAX_WAIT` - longest single rate-limit wait; `0s` fails
+  fast, negative values also fail fast (default: fail fast for one-shot
+  commands, `15m` for mount/serve-rest)
+- `STORHUB_RATE_RESERVE` - hourly requests kept unspent as headroom
+  (default `25`)
+- `STORHUB_RATE_POINTS_PER_MIN` - secondary point budget (default `720`)
+- `STORHUB_RATE_CONTENT_PER_MIN` - content-creation budget per minute
+  (default `60`)
+- `STORHUB_MAX_CONCURRENT` - in-flight API request cap (default `16`)
+
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 
 REST serving from the CLI:
