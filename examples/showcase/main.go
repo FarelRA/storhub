@@ -13,7 +13,6 @@ import (
 	"time"
 
 	storfuse "github.com/FarelRA/storhub/fuse"
-	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -21,14 +20,14 @@ type showcaseHub interface {
 	Owner() string
 	MkdirContext(ctx context.Context, project, dirPath string) error
 	CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error)
-	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error)
-	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error)
+	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
 	RenameContext(ctx context.Context, project, oldPath, newPath string) error
-	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*storhub.FileMetadata, error)
+	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error)
-	ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...shfs.MutateOption) (*storhub.FileMetadata, error)
-	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error)
+	ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	DownloadFileContext(ctx context.Context, project, remotePath, localPath string) error
 	ListFilesContext(ctx context.Context, project string) ([]storhub.FileMetadata, error)
 	ListReleasesContext(ctx context.Context, project string) ([]storhub.ReleaseMetadata, error)
@@ -47,8 +46,8 @@ type showcaseHub interface {
 	SymlinkContext(ctx context.Context, project, target, linkPath string) (*storhub.FileMetadata, error)
 	ReadlinkContext(ctx context.Context, project, linkPath string) (string, error)
 	LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error)
-	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
-	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
+	DeleteFileContext(ctx context.Context, project, filePath string, opts ...storhub.MutateOption) error
+	RmdirContext(ctx context.Context, project, dirPath string, opts ...storhub.MutateOption) error
 	PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error)
 	CleanupProjectContext(ctx context.Context, project string) error
 	DeleteReleaseContext(ctx context.Context, project, tag string) error
@@ -362,7 +361,7 @@ func previewFUSE(hub *storhub.StorHub, project string) error {
 	}
 	defer fsys.Close()
 	printSection("FUSE Preview")
-	printKV("page size", "%d", fsys.Options().OverlayBufferSize)
+	printKV("overlay buffer size", "%d", fsys.Options().OverlayBufferSize)
 	printKV("cache dir", "%s", fsys.Options().CacheDir)
 	fmt.Println()
 	return nil

@@ -30,5 +30,3 @@ Public APIs highlighted:
 - `(*StorHub).ListFiles`
 - `(*StorHub).ListReleases`
 - `(*StorHub).DownloadFile`
-- `storhub.VerifyFileIntegrity`
-- `storhub.CombineChunkCRC32Cs`

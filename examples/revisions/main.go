@@ -37,11 +37,11 @@ func run() error {
 	}
 	defer os.RemoveAll(workspace)
 	project := fmt.Sprintf("storhub-revisions-%d", os.Getpid())
-	var failed bool
+	// A half-finished demo is pure litter: always delete when the run
+	// failed after creation. On success the env vars below decide retention.
+	var created, failed bool
 	defer func() {
-		// A half-finished demo is pure litter: always delete when the run
-		// failed. On success the env vars below decide retention.
-		if !failed {
+		if !failed || !created {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -57,6 +57,7 @@ func run() error {
 	if _, err := hub.UploadFileContext(ctx, project, "docs/rev.txt", input); err != nil {
 		return failedExit(&failed, err)
 	}
+	created = true
 	if _, err := hub.PatchFileContext(ctx, project, "docs/rev.txt", 0, 0, []byte("v2: ")); err != nil {
 		return failedExit(&failed, err)
 	}
