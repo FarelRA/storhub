@@ -72,20 +72,14 @@ jobs:
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           args: release --snapshot --clean
-      - name: prune nightly assets
-        # allow_updates only adds/overwrites; it never removes. Without
-        # this, every night accumulates another generation of binaries
-        # and checksums stop matching the newest set.
+      - name: delete previous nightly
+        # Recreate from scratch every run: deleting the release together
+        # with its tag guarantees exactly one generation of assets and a
+        # nightly tag that always points at the newest main commit. The
+        # publish step below recreates both at GITHUB_SHA.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly" --jq '.id' 2>/dev/null) || true
-          if [ -n "$RELEASE_ID" ]; then
-            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
-              --jq '.[].id' | while read -r asset_id; do
-                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-              done
-          fi
+        run: gh release delete nightly --cleanup-tag --yes || true
       - name: publish nightly
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -93,7 +87,6 @@ jobs:
           name: nightly
           prerelease: true
           make_latest: false
-          overwrite_files: true
           files: |
             dist/checksums.txt
             dist/*.tar.gz
