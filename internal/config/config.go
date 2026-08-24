@@ -221,7 +221,7 @@ func (c Config) Validate() error {
 			conflicts = append(conflicts, "LogOutput")
 		}
 		if len(conflicts) > 0 {
-			return fmt.Errorf("Logger and log knobs %v are mutually exclusive: configure one mechanism", conflicts)
+			return fmt.Errorf("logger and log knobs %v are mutually exclusive: configure one mechanism", conflicts)
 		}
 	}
 	if !logging.ValidLevel(c.LogLevel) {

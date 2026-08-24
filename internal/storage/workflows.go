@@ -317,7 +317,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 			return preferredTag, release.UploadURL, nil
 		}
 	}
-	for tag, _ := range metadata.Releases {
+	for tag := range metadata.Releases {
 		if release, ok := releaseIndex[tag]; ok && len(release.Assets)+requiredSlots <= 1000 {
 			return tag, release.UploadURL, nil
 		}
@@ -336,7 +336,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 
 func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Release) (string, error) {
 	maxVersion := 0
-	for tag, _ := range metadata.Releases {
+	for tag := range metadata.Releases {
 		if n, ok := meta.ParseNumericReleaseTag(tag); ok && n > maxVersion {
 			maxVersion = n
 		}
@@ -347,13 +347,6 @@ func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Rel
 		}
 	}
 	return fmt.Sprintf("v%d", maxVersion+1), nil
-}
-
-func (h *StorHub) getReleaseByTag(ctx context.Context, project, tag string) (*ghapi.Release, error) {
-	if err := h.ensureOwner(ctx); err != nil {
-		return nil, err
-	}
-	return h.gh.GetReleaseByTag(ctx, h.owner, project, tag)
 }
 
 func (h *StorHub) createRelease(ctx context.Context, project, tag, name string) (*ghapi.Release, error) {
@@ -420,17 +413,6 @@ func (h *StorHub) downloadAssetStream(ctx context.Context, project string, asset
 		return nil, 0, err
 	}
 	return h.gh.DownloadAssetStream(ctx, h.owner, project, assetID, start, end)
-}
-
-func (h *StorHub) readAssetRange(ctx context.Context, project string, chunk ChunkInfo) ([]byte, error) {
-	if chunk.Size == 0 {
-		return []byte{}, nil
-	}
-	data := make([]byte, chunk.Size)
-	if err := h.fillAssetRange(ctx, project, chunk, data); err != nil {
-		return nil, err
-	}
-	return data, nil
 }
 
 func (h *StorHub) fillAssetRange(ctx context.Context, project string, chunk ChunkInfo, dst []byte) error {

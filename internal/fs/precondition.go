@@ -46,16 +46,6 @@ func WithExpectedRevision(revision string) MutateOption {
 	}
 }
 
-func applyMutateOptions(opts []MutateOption) mutateOptions {
-	var o mutateOptions
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&o)
-		}
-	}
-	return o
-}
-
 // RevisionSource is implemented by backends that can report the current
 // committed metadata revision (content SHA) of a project.
 type RevisionSource interface {

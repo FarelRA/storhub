@@ -44,7 +44,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Close()
+	defer func() {
+		if err := fsys.Close(); err != nil {
+			log.Printf("close failed: %v", err)
+		}
+	}()
 	// Arm signals before mounting so an interrupt during setup cannot leave
 	// a half-attached mount behind.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -52,7 +56,11 @@ func main() {
 	if err := fsys.Mount(mountPoint); err != nil {
 		log.Fatal(err)
 	}
-	defer fsys.Unmount()
+	defer func() {
+		if err := fsys.Unmount(); err != nil {
+			log.Printf("unmount failed: %v", err)
+		}
+	}()
 	fmt.Printf("mounted %s at %s\n", project, mountPoint)
 	waitDone := make(chan struct{})
 	go func() {

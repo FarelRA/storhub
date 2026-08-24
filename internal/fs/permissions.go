@@ -383,17 +383,3 @@ func uniqueGIDs(groups []uint32) []uint32 {
 	slices.Sort(sorted)
 	return slices.Compact(sorted)
 }
-
-func currentIdentity() Identity {
-	id := Identity{UID: uint32(os.Geteuid()), GID: uint32(os.Getegid())}
-	if groups, err := os.Getgroups(); err == nil {
-		id.Groups = make([]uint32, 0, len(groups))
-		for _, group := range groups {
-			if group < 0 {
-				continue
-			}
-			id.Groups = append(id.Groups, uint32(group))
-		}
-	}
-	return normalizeIdentity(id)
-}

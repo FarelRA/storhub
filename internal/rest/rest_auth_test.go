@@ -32,7 +32,7 @@ func TestRESTAuthLoginAndPermissions(t *testing.T) {
 	resp = mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=shared/readme.txt&op=append", bytes.NewBufferString("!"), map[string]string{"Authorization": "Bearer " + login.Token}, http.StatusForbidden)
 	assertErrorCode(t, resp, "forbidden")
 
-	resp = mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=public/note.txt&op=append", bytes.NewBufferString("!"), map[string]string{"Authorization": "Bearer " + login.Token}, http.StatusOK)
+	_ = mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=public/note.txt&op=append", bytes.NewBufferString("!"), map[string]string{"Authorization": "Bearer " + login.Token}, http.StatusOK)
 	if body := string(readBody(t, mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=public/note.txt", nil, map[string]string{"Authorization": "Bearer " + login.Token}, http.StatusOK))); body != "hello!" {
 		t.Fatalf("unexpected updated public note: %q", body)
 	}

@@ -100,7 +100,7 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 	}
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 	// Count in 64-bit; a naive int() cast would wrap around on 32-bit
@@ -108,7 +108,7 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 	// zero chunks — no sentinel part is minted.
 	count := (info.Size() + chunkSize - 1) / chunkSize
 	if count > math.MaxInt32 {
-		file.Close()
+		_ = file.Close()
 		return nil, fmt.Errorf("file needs %d chunks; the maximum supported count is %d", count, math.MaxInt32)
 	}
 	return &StreamingChunker{

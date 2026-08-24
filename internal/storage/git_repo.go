@@ -158,7 +158,7 @@ func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer content.Close()
+	defer func() { _ = content.Close() }()
 	data, err := io.ReadAll(content)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)

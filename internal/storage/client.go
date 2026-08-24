@@ -1018,7 +1018,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if err != nil {
 		return nil, err
 	}
-	defer planner.Close()
+	defer func() { _ = planner.Close() }()
 
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
@@ -1136,7 +1136,10 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 		return fmt.Errorf("create output file: %w", err)
 	}
 	defer func() {
-		outFile.Close()
+		cerr := outFile.Close()
+		if err == nil && cerr != nil {
+			err = fmt.Errorf("close output file: %w", cerr)
+		}
 		if err != nil {
 			_ = os.Remove(outputPath)
 		}
@@ -1159,9 +1162,8 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	if err := outFile.Sync(); err != nil {
 		return fmt.Errorf("sync output file: %w", err)
 	}
-	if err := outFile.Close(); err != nil {
-		return fmt.Errorf("close output file: %w", err)
-	}
+	// The deferred closer owns Close so it fires exactly once, whether the
+	// success path completes here or an error unwinds through the defers.
 	return nil
 }
 

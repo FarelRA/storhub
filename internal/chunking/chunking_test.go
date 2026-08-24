@@ -17,7 +17,7 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new chunker: %v", err)
 	}
-	defer chunker.Close()
+	defer func() { _ = chunker.Close() }()
 	if chunker.NumChunks() != 3 {
 		t.Fatalf("expected 3 chunks, got %d", chunker.NumChunks())
 	}
@@ -42,7 +42,7 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new clamped chunker: %v", err)
 	}
-	defer clamped.Close()
+	defer func() { _ = clamped.Close() }()
 	if clamped.NumChunks() != 1 {
 		t.Fatalf("expected clamped single chunk, got %d", clamped.NumChunks())
 	}
@@ -60,7 +60,7 @@ func TestChunkerErrorEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new empty chunker: %v", err)
 	}
-	defer chunker.Close()
+	defer func() { _ = chunker.Close() }()
 	if chunker.NumChunks() != 0 {
 		t.Fatalf("empty file must yield zero chunks, got %d", chunker.NumChunks())
 	}
@@ -83,7 +83,7 @@ func TestChunkNameWidthPast999(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer chunker.Close()
+	defer func() { _ = chunker.Close() }()
 	if got := chunker.NumChunks(); got != 1000 {
 		t.Fatalf("expected 1000 chunks, got %d", got)
 	}

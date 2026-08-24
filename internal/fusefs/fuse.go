@@ -343,14 +343,14 @@ func (s *Filesystem) Mount(mountPoint string) error {
 		RootStableAttr:  &gofusefs.StableAttr{Ino: 1, Gen: 1},
 		Logger:          log.New(os.Stderr, "storhub/go-fuse: ", log.LstdFlags|log.Lmicroseconds),
 	}
-	options.MountOptions.Debug = s.opts.Debug
-	options.MountOptions.AllowOther = s.opts.AllowOther
-	options.MountOptions.MaxBackground = mountMaxBackground
-	options.MountOptions.MaxWrite = mountMaxIOSize
-	options.MountOptions.MaxReadAhead = int(s.hub.ChunkSize())
-	options.MountOptions.Options = append([]string(nil), s.opts.ExtraMountOpts...)
-	options.MountOptions.ExplicitDataCacheControl = true
-	options.MountOptions.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
+	options.Debug = s.opts.Debug
+	options.AllowOther = s.opts.AllowOther
+	options.MaxBackground = mountMaxBackground
+	options.MaxWrite = mountMaxIOSize
+	options.MaxReadAhead = int(s.hub.ChunkSize())
+	options.Options = append([]string(nil), s.opts.ExtraMountOpts...)
+	options.ExplicitDataCacheControl = true
+	options.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
@@ -509,19 +509,6 @@ func (s *Filesystem) writeStateForInode(inode uint64) *inodeWriteState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.writeStates[inode]
-}
-
-func (s *Filesystem) pendingSizeForInode(inode uint64) (int64, bool) {
-	state := s.writeStateForInode(inode)
-	if state == nil {
-		return 0, false
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.deleted {
-		return 0, false
-	}
-	return state.logicalSize, true
 }
 
 func (s *Filesystem) applyPendingSize(entry *shfs.EntryInfo) {
@@ -1325,13 +1312,6 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 	return h, nil
 }
 
-func (h *storhubHandle) materialize(ctx context.Context) error {
-	if h.writeState != nil {
-		return nil
-	}
-	return h.materializePath(ctx, h.path)
-}
-
 func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) error {
 	h.mu.Lock()
 	if h.temp != nil {
@@ -1713,34 +1693,6 @@ func (w *inodeWriteState) ensureTempLocked() error {
 		return err
 	}
 	return nil
-}
-
-func (w *inodeWriteState) releaseTempFile() {
-	if w.temp != nil {
-		if err := w.temp.Close(); err != nil {
-			logging.Error(nil, "failed to close temp file", "path", w.tempPath, "err", err)
-		}
-		w.temp = nil
-	}
-	if w.tempPath != "" {
-		if err := os.Remove(w.tempPath); err != nil {
-			logging.Error(nil, "failed to remove temp file", "path", w.tempPath, "err", err)
-		}
-		w.tempPath = ""
-	}
-	if w.baseTemp != nil {
-		if err := w.baseTemp.Close(); err != nil {
-			logging.Error(nil, "failed to close base temp file", "err", err)
-		}
-		w.baseTemp = nil
-	}
-	if w.baseTempPath != "" {
-		if err := os.Remove(w.baseTempPath); err != nil {
-			logging.Error(nil, "failed to remove base temp file", "path", w.baseTempPath, "err", err)
-		}
-		w.baseTempPath = ""
-	}
-	w.tempAuthoritative = false
 }
 
 // readIntoLocked fills dest with the file content visible at off, serving
@@ -2467,7 +2419,7 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 	}
 	releaseSnapshot := h.fs.protectTemp(snapshotPath)
 	defer func() {
-		os.Remove(snapshotPath)
+		_ = os.Remove(snapshotPath)
 		releaseSnapshot()
 	}()
 	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
@@ -2506,7 +2458,7 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	if cleanupSnapshot {
 		releaseSnapshot = h.fs.protectTemp(snapshotPath)
 		defer func() {
-			os.Remove(snapshotPath)
+			_ = os.Remove(snapshotPath)
 			releaseSnapshot()
 		}()
 	}
@@ -2791,7 +2743,9 @@ func (h *storhubHandle) releaseTrackedLocks() {
 	}
 	h.mu.Unlock()
 	for _, owner := range owners {
-		h.fs.setLock(h.inode, owner, fuse.FileLock{Start: 0, End: 0, Typ: syscall.F_UNLCK})
+		// Best-effort unlock during handle teardown: POSIX locks vanish
+		// with the process anyway, so there is nobody left to report to.
+		_ = h.fs.setLock(h.inode, owner, fuse.FileLock{Start: 0, End: 0, Typ: syscall.F_UNLCK})
 	}
 }
 
@@ -3115,7 +3069,8 @@ func validateProject(project string) error {
 		return fmt.Errorf("invalid project name: %s", project)
 	}
 	for _, ch := range project {
-		if !(ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-') {
+		allowed := ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-'
+		if !allowed {
 			return fmt.Errorf("invalid project name: %s", project)
 		}
 	}
