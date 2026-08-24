@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           shellcheck examples/cli/demo.sh scripts/install.sh
 
-  test:
+  test-amd64:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -52,7 +52,7 @@ jobs:
           go-version-file: go.mod
       - run: go test -count=1 ./...
 
-  race:
+  race-amd64:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -66,7 +66,7 @@ jobs:
 
   test-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -75,9 +75,20 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -count=1 ./...
+
+  race-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - run: go test -race -count=1 ./...
 
-  cross-build:
+  build-cross:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -111,7 +122,7 @@ jobs:
           go build -o "$RUNNER_TEMP/bin/" ./cmd/storhub
           go build -o "$RUNNER_TEMP/examples/" ./examples/...
 
-  examples:
+  test-examples:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

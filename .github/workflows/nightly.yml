@@ -5,6 +5,10 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -19,7 +23,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: gofmt -l . && go vet ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
       - run: go test -count=1 ./...
       - run: go test -race -count=1 ./...
 
@@ -42,7 +53,7 @@ jobs:
           go-version-input: ""
           go-package: ./...
 
-  nightly:
+  publish:
     needs: [gates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -55,13 +66,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: install syft for goreleaser SBOMs
+      - name: install syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-      - name: goreleaser snapshot build
+      - name: goreleaser snapshot
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           args: release --snapshot --clean
-      - name: prune previous nightly assets
+      - name: prune nightly assets
         # allow_updates only adds/overwrites; it never removes. Without
         # this, every night accumulates another generation of binaries
         # and checksums stop matching the newest set.
@@ -75,7 +86,7 @@ jobs:
                 gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
               done
           fi
-      - name: publish rolling nightly prerelease
+      - name: publish nightly
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: nightly
@@ -89,7 +100,8 @@ jobs:
             dist/*.sbom.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: upload dist artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nightly-dist
           path: dist/
