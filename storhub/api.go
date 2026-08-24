@@ -89,6 +89,20 @@ var (
 	ErrNotFound = shfs.ErrNotFound
 )
 
+// MutateOption customizes a single storage mutation.
+type MutateOption = shfs.MutateOption
+
+// WithExpectedRevision upgrades a mutation into true compare-and-swap:
+// storage re-verifies the project's remote metadata revision immediately
+// before applying, failing with ErrPreconditionFailed when it moved.
+func WithExpectedRevision(rev string) MutateOption {
+	return shfs.WithExpectedRevision(rev)
+}
+
+// ErrPreconditionFailed reports a failed compare-and-swap: the remote
+// revision moved between observation and application.
+var ErrPreconditionFailed = shfs.ErrPreconditionFailed
+
 // NewStorHub creates a client for the given GitHub token using defaults.
 func NewStorHub(token string) (*StorHub, error) {
 	return impl.NewStorHub(token)
