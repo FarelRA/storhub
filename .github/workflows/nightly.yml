@@ -82,7 +82,7 @@ jobs:
           name: nightly
           prerelease: true
           make_latest: false
-          allow_updates: true
+          overwrite_files: true
           files: |
             dist/checksums.txt
             dist/*.tar.gz
