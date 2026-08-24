@@ -170,9 +170,9 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		return nil, "", fmt.Errorf("validate metadata: %w", err)
 	}
 	// NOTE: sha here is the metadata BLOB sha from the contents API - it
-	// doubles as the version token for conditional PUTs. Pins must not
-	// consume it as a ref; HeadMetadataSnapshotContext resolves its own
-	// commit sha instead.
+	// doubles as the version token for conditional PUTs. It must never be
+	// consumed as a git ref: pins capture chunk layouts instead, so no
+	// ref resolution is needed anywhere.
 	h.storeRepoMetadata(project, *meta, sha)
 	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
 	return meta, sha, nil
