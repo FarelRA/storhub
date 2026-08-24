@@ -31,7 +31,7 @@ StorHub is not intended to replace a local SSD filesystem or a database storage 
 
 Requirements:
 
-- Go 1.21+
+- Go 1.26+
 - a GitHub token with repository access
 - Linux with FUSE support and `fusermount3` if you want mounted access
 
@@ -79,7 +79,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("uploaded %s (%d bytes) in release %s", meta.Name, meta.Size, meta.Release)
+	log.Printf("uploaded docs/readme.txt (%d bytes) in release %s", meta.Size, meta.Release)
 }
 ```
 
@@ -131,7 +131,8 @@ command fails at runtime, and `2` when the command line itself is wrong
 
 Environment variables: `GITHUB_TOKEN` (authentication),
 `STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
-(default level is `info`), and `STORHUB_API_BASE_URL`.
+(default level is `info`, colors on), `STORHUB_API_BASE_URL`, and
+`STORHUB_REST_AUTH_FILE` (fallback for serve-rest's `--auth-file`).
 
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 
@@ -181,17 +182,18 @@ POSIX-style APIs:
 Precondition (compare-and-swap) APIs:
 
 - `(*StorHub).RevisionContext` - current remote metadata revision
-- `fs.WithExpectedRevision(rev)` as a trailing option on `PatchFileContext`,
+- `storhub.WithExpectedRevision(rev)` as a trailing option on `PatchFileContext`,
   `TruncateFileContext`, `AppendFileContext`, `WriteFileAtContext`,
-  `DeleteFileContext`, `ReplaceFileContext`, and `ReplaceFileFromReaderContext`;
-  the mutation fails with `fs.ErrPreconditionFailed` when remote HEAD moved
+  `DeleteFileContext`, `RmdirContext`, `ReplaceFileContext`, and
+  `ReplaceFileFromReaderContext`; the mutation fails with
+  `storhub.ErrPreconditionFailed` when remote HEAD moved
 
 POSIX conformance notes:
 
 - `Chown`/`ChownContext` accept `(uid_t)-1` (Go `^uint32(0)`) per field as
   POSIX "leave this owner unchanged"
-- metadata-patch timestamps are authoritative: patching mtime to the epoch
-  persists (an additive marker keeps legacy zero-fill repair for old entries);
+- timestamps are authoritative everywhere: patching mtime to the epoch
+  persists, and nothing ever repairs persisted values;
   `Chtimes` keeps its omit-on-zero contract for library callers;
   `ChtimesExplicitContext(atime, mtime *time.Time)` expresses utimensat
   trinary semantics exactly (nil omits, non-nil sets - epoch included),
@@ -268,14 +270,15 @@ The handler also serves a browser UI at `/` and `/ui`.
 
 REST endpoint groups:
 
-- `GET /api/v1/projects/{project}` - project stats
+- `GET|DELETE /api/v1/projects/{project}` - project stats; DELETE removes the project (admin only)
 - `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...` - stat or remove files and empty directories
 - `GET|HEAD /api/v1/projects/{project}/children?path=...` - directory listing
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
 - `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap - storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
-- `POST /api/v1/projects/{project}/ops/...` - mkdir, create-file, rename, link, symlink, chmod, chown, utimes, rollback
-- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry a short opaque identifier (`/shares/{id}`, `/shares/{id}/download`) rather than the signed token, so links leak no credentials; previously issued token-shaped links keep working until expiry or revocation. The creation response alone returns the signed JWT for programmatic bearer use - listings never include it
+- `POST /api/v1/projects/{project}/ops/...` - mkdir, rmdir, create-file, unlink, rename, link, symlink, chmod, chown, utimes, rollback, purge
+- `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}` - share management for the project
+- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry a short opaque identifier (`/shares/{id}`, `/shares/{id}/download`) rather than the signed token, so links leak no credentials; a token placed in the URL path is simply a 404 - tokens authenticate bearers, they are never resource locators. The creation response alone returns the signed JWT for programmatic bearer use; listings never include it
 - `GET /api/v1/projects/{project}/revisions` - metadata revision history
 
 Authenticated REST:
@@ -402,7 +405,8 @@ Public surface:
 
 Internal layout:
 
-- `internal/config` - config defaults and transport tuning
+- `internal/logging` - logger construction and token-redaction helpers
+- `internal/config` - config defaults and validation
 - `internal/github` - real GitHub API client, transport, and request handling
 - `internal/metadata` - metadata model, normalization, indexing, and validation
 - `internal/chunking` - chunk planning helpers
@@ -465,30 +469,3 @@ Environment gates:
 ## License
 
 This project is licensed under the GNU General Public License v3.0. See `LICENSE`.
-
-## Design Notes
-
-- **Sequential transfers**: exactly one HTTP request is in flight at any
-  time. Uploads and downloads are deterministic and retry-safe; the
-  metadata commit loop and cache janitors are the only background work.
-- **Chunk integrity**: uploads record a per-chunk SHA-256 digest; whole-
-  chunk downloads verify it and fail loudly on bit rot. `purge` reclaims
-  orphaned remote assets and prunes the chunk catalog in the same breath,
-  so metadata cannot grow without bound.
-- **Metadata schema v3**: strict version handling (no silent migrations of
-  corrupt payloads), byte-valued extended attributes, offset-ordered chunk
-  lists, persisted inode/chunk counters, and real zero values (UID/GID 0
-  means root).
-- **POSIX semantics**: `mv` replaces targets atomically, symlinks traverse
-  (with ELOOP protection), directory link counts follow POSIX, permission
-  checks are re-verified inside each mutation transaction, errno fidelity
-  is preserved end to end, and an absent caller identity resolves to the
-  local process user — never anonymous root.
-- **Fail loudly**: invalid configurations are rejected at construction;
-  operational failures are logged at error level and never silently
-  swallowed; upstream GitHub errors reach clients as sanitized 502s;
-  handler panics become clean 500s with server-side stack traces.
-- **Bounded resources**: FUSE nodes evicted on kernel FORGET, share
-  registries sweep expired entries, REST mutation bodies are capped
-  (larger payloads belong to full-file PUT), and the UI ships a vendored
-  Alpine.js with session-scoped token storage.
