@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -226,6 +227,33 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 	if err := json.Unmarshal(upgraded, m); err != nil {
 		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
+	m.Version = maxMetadataVersion
+	return nil
+}
+
+// UnmarshalJSON enforces the single-version contract at the type level:
+// only documents written in the CURRENT schema decode. Older payloads must
+// go through FromJSON/Migrate — a direct unmarshal fails loudly instead of
+// silently yielding an empty tree from ignored unknown fields.
+func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		V *int `json:"v"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return fmt.Errorf("metadata probe: %w", err)
+	}
+	if probe.V == nil {
+		return errors.New("metadata document lacks a schema version; use metadata.Migrate for older formats")
+	}
+	if *probe.V != maxMetadataVersion {
+		return fmt.Errorf("metadata version %d is not the parser's version %d; migrate first", *probe.V, maxMetadataVersion)
+	}
+	type alias RepoMetadata
+	var raw alias
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = RepoMetadata(raw)
 	m.Version = maxMetadataVersion
 	return nil
 }
