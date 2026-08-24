@@ -2,8 +2,6 @@ package storage
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,11 +29,11 @@ func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadU
 		if err != nil {
 			return results, err
 		}
-		assetID, digest, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
 		if err != nil {
 			return results, fmt.Errorf("upload chunk %d: %w", i, err)
 		}
-		results[i] = ChunkInfo{Size: chunk.Size(), Offset: chunk.Offset(), AssetOffset: 0, AssetID: assetID, Release: releaseTag, Digest: digest}
+		results[i] = ChunkInfo{Size: chunk.Size(), Offset: chunk.Offset(), AssetOffset: 0, AssetID: assetID, Release: releaseTag}
 	}
 	return results, nil
 }
@@ -406,36 +404,15 @@ func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
 	return nil
 }
 
-func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, string, error) {
+func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
 	if err := h.ensureOwner(ctx); err != nil {
-		return 0, "", err
+		return 0, err
 	}
 	assetID, err := h.gh.UploadAsset(ctx, h.owner, project, releaseTag, uploadURL, assetName, reader, size)
 	if err != nil {
-		return 0, "", err
+		return 0, err
 	}
-	digest, err := digestOfReadSeeker(reader)
-	if err != nil {
-		return assetID, "", fmt.Errorf("digest chunk: %w", err)
-	}
-	return assetID, digest, nil
-}
-
-// digestOfReadSeeker hashes the full content of rs, leaving it rewound.
-// Hashing after the upload (rather than teeing during it) stays correct even
-// if the transport layer retries the request internally.
-func digestOfReadSeeker(rs io.ReadSeeker) (string, error) {
-	if _, err := rs.Seek(0, io.SeekStart); err != nil {
-		return "", err
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, rs); err != nil {
-		return "", err
-	}
-	if _, err := rs.Seek(0, io.SeekStart); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return assetID, nil
 }
 
 func (h *StorHub) downloadAssetStream(ctx context.Context, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
@@ -467,14 +444,6 @@ func (h *StorHub) fillAssetRange(ctx context.Context, project string, chunk Chun
 		}
 		if int64(read) != chunk.Size {
 			return fmt.Errorf("asset range size mismatch: expected %d, got %d", chunk.Size, read)
-		}
-		// Whole-asset reads verify against the digest recorded at upload
-		// time; silently serving bit-rotted bytes is not acceptable.
-		if chunk.Digest != "" && chunk.AssetOffset == 0 {
-			sum := sha256.Sum256(dst)
-			if got := hex.EncodeToString(sum[:]); got != chunk.Digest {
-				return fmt.Errorf("integrity check failed for chunk %d: digest mismatch", chunk.AssetID)
-			}
 		}
 		return nil
 	})

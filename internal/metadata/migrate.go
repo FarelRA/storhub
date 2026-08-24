@@ -217,7 +217,7 @@ func fileToV2(f FileMeta) docFileV2 {
 
 func chunkToDoc(c ChunkInfo) docChunk {
 	return docChunk{Size: c.Size, Offset: c.Offset, Release: c.Release,
-		AssetOffset: c.AssetOffset, AssetID: c.AssetID, Digest: c.Digest}
+		AssetOffset: c.AssetOffset, AssetID: c.AssetID}
 }
 
 // ---------------------------------------------------------------------------

@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -650,7 +648,7 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 		if err != nil {
 			return ChunkInfo{}, err
 		}
-		assetID, digest, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
+		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
 		if err == nil {
 			return ChunkInfo{
 				Size:        int64(len(data)),
@@ -658,7 +656,6 @@ func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTa
 				Release:     releaseTag,
 				AssetID:     assetID,
 				AssetOffset: 0,
-				Digest:      digest,
 			}, nil
 		}
 		var apiErr *ghapi.APIError
@@ -681,9 +678,6 @@ func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
 		if c.Offset < size {
 			if c.Offset+c.Size > size {
 				c.Size = size - c.Offset
-				// Clipped chunk is a partial view; its digest no longer
-				// covers the bytes actually referenced.
-				c.Digest = ""
 			}
 			filtered = append(filtered, c)
 		}
@@ -1285,26 +1279,13 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 			continue
 		}
 
-		// Whole-chunk downloads hash the payload in passing and verify it
-		// against the digest recorded at upload time.
-		hasher := sha256.New()
-		stream := io.Reader(reader)
-		verifyDigest := chunk.Digest != "" && chunk.AssetOffset == 0
-		if verifyDigest {
-			stream = io.TeeReader(stream, hasher)
-		}
-		written, copyErr := h.writeChunk(outFile, stream, *buf, chunk)
+		written, copyErr := h.writeChunk(outFile, reader, *buf, chunk)
 		closeErr := reader.Close()
 		if copyErr == nil && closeErr != nil {
 			copyErr = closeErr
 		}
 		if copyErr == nil && written != chunk.Size {
 			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.AssetID, chunk.Size, written)
-		}
-		if copyErr == nil && verifyDigest {
-			if got := hex.EncodeToString(hasher.Sum(nil)); got != chunk.Digest {
-				copyErr = fmt.Errorf("integrity check failed for chunk %d: digest mismatch", chunk.AssetID)
-			}
 		}
 		if copyErr == nil {
 			return nil
