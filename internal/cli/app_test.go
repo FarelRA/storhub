@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -212,6 +213,84 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 }
 
+// TestRunDrainsHubOncePerCommand is the regression guard for the silent
+// data-loss bug: one-shot CLI commands exited without draining the async
+// metadata writer, so mutations never reached GitHub. Every command that
+// creates a hub must be followed by exactly one Shutdown from Run.
+func TestRunDrainsHubOncePerCommand(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	app, _, _ := newTestApp(t)
+	fake := &fakeHub{t: t}
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		return fake, nil
+	}
+	if err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"}); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if fake.shutdowns != 1 {
+		t.Fatalf("expected exactly 1 hub shutdown after mkdir, got %d", fake.shutdowns)
+	}
+	if err := app.Run([]string{"ls", "--token", "x", "demo", "docs"}); err != nil {
+		t.Fatalf("ls: %v", err)
+	}
+	if fake.shutdowns != 2 {
+		t.Fatalf("expected 2 hub shutdowns after second command, got %d", fake.shutdowns)
+	}
+}
+
+// TestRunWithoutHubSkipsShutdown pins the flip side: paths that never
+// create a hub (help, usage errors) must not invent one to drain.
+func TestRunWithoutHubSkipsShutdown(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	app, stdout, _ := newTestApp(t)
+	fake := &fakeHub{t: t}
+	var created int
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		created++
+		return fake, nil
+	}
+	if err := app.Run(nil); err != nil {
+		t.Fatalf("root help: %v", err)
+	}
+	if err := app.Run([]string{"no-such-command"}); err == nil {
+		t.Fatal("expected unknown command error")
+	}
+	if created != 0 || fake.shutdowns != 0 {
+		t.Fatalf("no hub should exist on help/usage paths (created=%d shutdowns=%d)", created, fake.shutdowns)
+	}
+	if !strings.Contains(stdout(), "StorHub CLI") {
+		t.Fatalf("expected root help output")
+	}
+}
+
+func TestDeleteProjectRequiresYes(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	app, _, stderr := newTestApp(t)
+	fake := &fakeHub{t: t}
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		return fake, nil
+	}
+	err := app.Run([]string{"delete-project", "demo"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("refusal must be a usage error naming --yes, got %v", err)
+	}
+	if fake.shutdowns != 0 {
+		t.Fatalf("refusal must not create or drain a hub, shutdowns=%d", fake.shutdowns)
+	}
+	if err := app.Run([]string{"delete-project", "--yes", "demo"}); err != nil {
+		t.Fatalf("confirmed delete: %v", err)
+	}
+	if !strings.Contains(stderr(), "deleted project demo") {
+		t.Fatalf("expected confirmation chatter on stderr")
+	}
+	if fake.shutdowns != 1 {
+		t.Fatalf("confirmed delete must drain once, shutdowns=%d", fake.shutdowns)
+	}
+}
+
 func TestServeRESTLoadsAuthFile(t *testing.T) {
 	oldHubFactory := newRESTHubFromFlagsFn
 	oldMountFactory := newMountHubFromFlagsFn
@@ -409,7 +488,17 @@ type fakeHub struct {
 	t                 *testing.T
 	assertReadDirPath string
 	assertStatPath    string
+	shutdowns         int
 }
+
+// Shutdown records every drain so tests can prove App.Run closed what a
+// command opened - the regression guard for the silent-data-loss bug.
+func (h *fakeHub) Shutdown(ctx context.Context) error {
+	h.shutdowns++
+	return nil
+}
+
+func (h *fakeHub) DeleteProject(project string) error { return nil }
 
 func (h *fakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
 	return &storhub.FileMetadata{Size: 11, Inode: 1, Mode: 0o644}, nil

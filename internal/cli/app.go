@@ -56,7 +56,13 @@ type hubClient interface {
 	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
 	RollbackMetadata(project, commitSHA string) error
 	PurgeUntracked(project string) (*storhub.PurgeResult, error)
+	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
+
+	// Shutdown drains the asynchronous metadata writer. Part of the
+	// contract on purpose: every implementation - including test fakes -
+	// must be drainable, and App.Run is the single caller.
+	Shutdown(ctx context.Context) error
 }
 
 type storhubClient struct {
@@ -163,6 +169,7 @@ Examples:
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
+	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newMountCmd())
 	rootCmd.AddCommand(a.newServeRESTCmd())
 
@@ -341,6 +348,39 @@ This cleans up orphaned releases and assets (e.g. from interrupted writes or man
 	}
 }
 
+func (a *App) newDeleteProjectCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete-project <project>",
+		Short: "Delete an entire project repository",
+		Long: `Delete-project removes the project's GitHub repository outright: every file,
+directory, release, asset, and metadata revision is gone. This cannot be undone.
+
+The --yes flag is mandatory so a typo can never destroy a project.`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runDeleteProject,
+	}
+	cmd.Flags().Bool("yes", false, "Confirm deletion of the whole project")
+	return cmd
+}
+
+func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	confirmed, _ := cmd.Flags().GetBool("yes")
+	if !confirmed {
+		return &usageError{fmt.Errorf("deleting project %q removes its repository, releases, and every file; pass --yes to confirm", args[0])}
+	}
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	if err != nil {
+		return err
+	}
+	if err := hub.DeleteProject(args[0]); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.stderr, "deleted project %s\n", args[0])
+	return nil
+}
+
 func (a *App) newMountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mount [flags] <project> <mount-point>",
@@ -376,27 +416,24 @@ func (a *App) Run(args []string) error {
 	a.rootCmd.SetOut(a.stdout)
 	a.rootCmd.SetErr(a.stderr)
 	_, err := a.rootCmd.ExecuteC()
-	a.flushHub()
+	a.shutdownHub()
 	return err
 }
 
-// shutdowner is satisfied by real clients; test fakes skip the flush.
-type shutdowner interface{ Shutdown(context.Context) error }
-
-// flushHub blocks until any pending metadata commit lands. The writer is
-// asynchronous, so a CLI mutation that exits without this loses data -
-// exactly what the released-binary smoke test caught.
-func (a *App) flushHub() {
+// shutdownHub is the SINGLE owner of hub.Shutdown: the one and only
+// place that drains the asynchronous metadata writer. Commands must
+// never call Shutdown themselves - not serve-rest, not mount - so there
+// is exactly one drain point to reason about. Shutdown is part of the
+// hubClient contract, so nothing reachable here can lack it. The writer
+// is asynchronous, meaning a CLI mutation that exits without this loses
+// data; that is precisely what the released-binary smoke test caught.
+func (a *App) shutdownHub() {
 	if a.hub == nil {
-		return
-	}
-	s, ok := a.hub.(shutdowner)
-	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := s.Shutdown(ctx); err != nil && a.stderr != nil {
+	if err := a.hub.Shutdown(ctx); err != nil && a.stderr != nil {
 		_, _ = fmt.Fprintf(a.stderr, "warning: metadata flush failed: %v\n", err)
 	}
 }
@@ -982,9 +1019,10 @@ func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) er
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_, _ = fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
 	}
-	if err := hub.Shutdown(shutdownCtx); err != nil {
-		_, _ = fmt.Fprintf(a.stderr, "metadata flush failed: %v\n", err)
-	}
+	// Metadata draining is NOT done here: Run's flushHub is the single
+	// owner of hub.Shutdown for every command. Draining after the HTTP
+	// server stops is exactly the right order - in-flight requests can
+	// still mutate metadata, and flushHub commits all of it.
 	return nil
 }
 
