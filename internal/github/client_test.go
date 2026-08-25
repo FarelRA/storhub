@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -384,13 +385,16 @@ func TestPrimaryRateLimitWaitHonorsResetOnce(t *testing.T) {
 // real ~1h validity required.
 func TestStoreAssetURLParsesAzureSASExpiry(t *testing.T) {
 	c := NewClient("t", storcfg.Default())
-	c.storeAssetURL(9, "https://release-assets.githubusercontent.com/github-production-release-asset/42/abc?sp=r&sv=2018-11-09&sr=b&se=2026-08-25T17%3A28%3A01Z&sig=secret&jwt=token")
+	// Relative to the test run: a hardcoded past date would make
+	// cachedAssetURL rightly refuse the entry and turn this into a
+	// time bomb on any machine whose clock has moved past it.
+	expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	c.storeAssetURL(9, fmt.Sprintf("https://release-assets.githubusercontent.com/github-production-release-asset/42/abc?sp=r&sv=2018-11-09&sr=b&se=%s&sig=secret&jwt=token", url.QueryEscape(expiry.Format(time.RFC3339))))
 	got, ok := c.cachedAssetURL(9)
 	if !ok {
 		t.Fatal("stored URL must still be cached")
 	}
-	want := time.Date(2026, 8, 25, 17, 28, 1, 0, time.UTC).Add(-30 * time.Second)
-	if !got.expires.Equal(want) {
+	if want := expiry.Add(-30 * time.Second); !got.expires.Equal(want) {
 		t.Fatalf("expiry %v, want %v (real SAS lifetime minus margin)", got.expires, want)
 	}
 }
