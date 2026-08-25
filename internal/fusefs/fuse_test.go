@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,7 +71,7 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 
 func TestWriteStateAndRangeHelpers(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -127,7 +129,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 
 func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -172,7 +174,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 
 func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -210,7 +212,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 
 func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -249,7 +251,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 
 func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -287,7 +289,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 
 func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -336,7 +338,7 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 			}
 			return append([]byte(nil), data[off:end]...), nil
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -371,7 +373,7 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 			replacedBytes = data
 			return &meta.FileMeta{Size: int64(len(data))}, nil
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -392,11 +394,14 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 	if string(replacedBytes) != "abcdefghij" {
 		t.Fatalf("expected final payload %q, got %q", "abcdefghij", replacedBytes)
 	}
+	// Owner contract: the handle owned its inode-* overlay and removed it
+	// itself on Release; nothing reaps leftovers anymore.
+	assertCacheDirClean(t, fsys.cacheDir)
 }
 
 func TestLockAndErrorHelpers(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -480,7 +485,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 		removeXAttr: func(context.Context, string, string, string) error { return nil },
 		readlink:    func(context.Context, string, string) (string, error) { return "target", nil },
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -568,7 +573,7 @@ func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 			return nil, syscall.ENOENT
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -639,7 +644,7 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 			return &meta.FileMeta{Inode: 8, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -702,7 +707,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 			return nil
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -742,7 +747,7 @@ func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
 			}
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -775,7 +780,7 @@ func TestAccessChecksCallerPermissions(t *testing.T) {
 			return nil, syscall.ENOENT
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -801,7 +806,7 @@ func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
 			return nil, syscall.ENOENT
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -842,7 +847,7 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 			return nil
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -893,7 +898,7 @@ func TestOpenReturnsKernelCachedFlags(t *testing.T) {
 			return nil, syscall.ENOENT
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -989,7 +994,7 @@ func TestSafeNotifySkipsWhenFilesystemUnmounted(t *testing.T) {
 	notifyEntryFunc = func(*storhubNode, string) { dispatched <- struct{}{} }
 	notifyDeleteFunc = func(*storhubNode, string, *storhubNode) { dispatched <- struct{}{} }
 
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1008,7 +1013,7 @@ func TestSafeNotifySkipsWhenFilesystemUnmounted(t *testing.T) {
 }
 
 func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1069,7 +1074,7 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 			return &meta.FileMeta{Inode: 7, Size: int64(len(data)), Mode: 0o644, UID: 1000, GID: 1000, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 	}
-	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(fake, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1137,6 +1142,7 @@ type stubHub struct {
 	replaceFile     func(context.Context, string, string, string) (*meta.FileMeta, error)
 	patchFile       func(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error)
 	patchRanges     func([]shfs.RangeEdit) (*meta.FileMeta, error)
+	rewriteFn       func(ctx context.Context, project, target, inputPath string) (*meta.FileMeta, error)
 	downloadFile    func(context.Context, string, string, string) error
 	downloads       int
 	patchRangeCalls int
@@ -1287,7 +1293,10 @@ func (s *stubHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	}
 	return clone, nil
 }
-func (*stubHub) RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *meta.RepoMetadata, *meta.FileMeta, int64, []ByteRange) (*meta.FileMeta, error) {
+func (s *stubHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, target, inputPath string, _ *meta.RepoMetadata, _ *meta.FileMeta, _ int64, _ []ByteRange) (*meta.FileMeta, error) {
+	if s.rewriteFn != nil {
+		return s.rewriteFn(ctx, project, target, inputPath)
+	}
 	return nil, nil
 }
 
@@ -1333,7 +1342,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
 			return nil, errors.New("network down")
 		},
-	}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1365,7 +1374,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 		t.Fatalf("read cache dir: %v", err)
 	}
 	for _, entry := range rootEntries {
-		if !entry.IsDir() {
+		if !entry.IsDir() && entry.Name() != mountLockFileName {
 			t.Fatalf("stray temp left in cache root: %s", entry.Name())
 		}
 	}
@@ -1382,7 +1391,7 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 			}
 			return &meta.FileMeta{}, nil
 		},
-	}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1409,6 +1418,355 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 	}
 }
 
+// assertCacheDirClean enforces each temp family's owner contract: once the
+// owning operation finished, the cache root holds only directories
+// (recovery/) and the mount lockfile - no leftover temps, because nothing
+// sweeps them anymore.
+func assertCacheDirClean(t *testing.T, cacheDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == mountLockFileName {
+			continue
+		}
+		t.Errorf("temp left behind by its owner: %s", entry.Name())
+	}
+}
+
+func newMountedStubFS(t *testing.T, cacheDir string, hub Hub) *Filesystem {
+	t.Helper()
+	fsys, err := New(hub, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+	return fsys
+}
+
+// Owner contract for handle-* temps: displacing an open readonly handle
+// (unlink) materializes a private snapshot that the handle itself removes
+// on Release.
+func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
+	now := int64(60)
+	cacheDir := t.TempDir()
+	hub := &stubHub{}
+	hub.loadReadonly = func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+		repo := meta.NewRepoMetadata("demo")
+		repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 6}, now)
+		repo.RebuildIndexes()
+		return repo, "sha-1", nil
+	}
+	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+		if target == "docs/file.txt" {
+			return &shfs.EntryInfo{Path: target, Inode: 7, Size: 6, Mode: 0o644, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		}
+		return nil, syscall.ENOENT
+	}
+	hub.downloadFile = func(_ context.Context, _, _, dest string) error {
+		return os.WriteFile(dest, []byte("abcdef"), 0o644)
+	}
+	fsys := newMountedStubFS(t, cacheDir, hub)
+	docsNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", IsDir: true, Inode: 2, Mode: 0o755})
+	fileNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 6, Mode: 0o644})
+	hAny, _, errno := fileNode.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("open: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if errno := docsNode.Unlink(context.Background(), "file.txt"); errno != 0 {
+		t.Fatalf("unlink: %v", errno)
+	}
+	if h.temp == nil || !strings.HasPrefix(filepath.Base(h.tempPath), "handle-") {
+		t.Fatalf("displaced handle must materialize a handle-* snapshot, got %q", h.tempPath)
+	}
+	buf := make([]byte, 6)
+	res, errno := h.Read(context.Background(), buf, 0)
+	if errno != 0 {
+		t.Fatalf("read from displaced handle: %v", errno)
+	}
+	got, _ := res.Bytes(buf)
+	if string(got) != "abcdef" {
+		t.Fatalf("snapshot read returned %q, want %q", got, "abcdef")
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release: %v", errno)
+	}
+	assertCacheDirClean(t, cacheDir)
+}
+
+// Owner contract for inode-base-* temps: materializing a base snapshot for
+// a displaced write handle is owned by the write state and removed when
+// the last reference releases.
+func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
+	now := int64(61)
+	cacheDir := t.TempDir()
+	hub := &stubHub{}
+	hub.loadReadonly = func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+		repo := meta.NewRepoMetadata("demo")
+		repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 6}, now)
+		repo.RebuildIndexes()
+		return repo, "sha-1", nil
+	}
+	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+		if target == "docs/file.txt" {
+			return &shfs.EntryInfo{Path: target, Inode: 7, Size: 6, Mode: 0o644, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		}
+		return nil, syscall.ENOENT
+	}
+	hub.downloadFile = func(_ context.Context, _, _, dest string) error {
+		return os.WriteFile(dest, []byte("abcdef"), 0o644)
+	}
+	fsys := newMountedStubFS(t, cacheDir, hub)
+	docsNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs", IsDir: true, Inode: 2, Mode: 0o755})
+	fileNode := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/file.txt", Inode: 7, Size: 6, Mode: 0o644})
+	hAny, _, errno := fileNode.Open(context.Background(), syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("open write handle: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if errno := docsNode.Unlink(context.Background(), "file.txt"); errno != 0 {
+		t.Fatalf("unlink: %v", errno)
+	}
+	if h.writeState.baseTemp == nil || !strings.HasPrefix(filepath.Base(h.writeState.baseTempPath), "inode-base-") {
+		t.Fatalf("unlink must materialize an inode-base-* snapshot, got %q", h.writeState.baseTempPath)
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release: %v", errno)
+	}
+	assertCacheDirClean(t, cacheDir)
+}
+
+// Owner contract for inode-commit-* temps: a replace commit whose working
+// temp does not cover the whole file stages a commit snapshot, uploads it,
+// and removes it on every exit path of the commit frame.
+func TestPartialReplaceCommitCleansCommitSnapshot(t *testing.T) {
+	var mu sync.Mutex
+	var replaced []byte
+	base := []byte("ABCDEFGHIJKLMNOP")
+	hub := &stubHub{}
+	hub.readFileAt = func(_ context.Context, _, _ string, off, length int64) ([]byte, error) {
+		end := off + length
+		if end > int64(len(base)) {
+			end = int64(len(base))
+		}
+		return append([]byte(nil), base[off:end]...), nil
+	}
+	hub.replaceFile = func(_ context.Context, _, _ string, inputPath string) (*meta.FileMeta, error) {
+		data, err := os.ReadFile(inputPath)
+		mu.Lock()
+		replaced = data
+		mu.Unlock()
+		return &meta.FileMeta{Size: int64(len(data))}, err
+	}
+	cacheDir := t.TempDir()
+	fsys := newMountedStubFS(t, cacheDir, hub)
+	h, err := fsys.newHandle(context.Background(), 7, "demo.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 16})
+	if err != nil {
+		t.Fatalf("new handle: %v", err)
+	}
+	if n, errno := h.Write(context.Background(), []byte("XXXXXXXX"), 4); errno != 0 || n != 8 {
+		t.Fatalf("write: n=%d errno=%v", n, errno)
+	}
+	if errno := h.Release(context.Background()); errno != 0 {
+		t.Fatalf("release: %v", errno)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if string(replaced) != "ABCDXXXXXXXXMNOP" {
+		t.Fatalf("unexpected replace payload %q", replaced)
+	}
+	assertCacheDirClean(t, cacheDir)
+}
+
+// Owner contract for inode-ranges-* temps: a chunk-rewrite commit stages a
+// range snapshot, hands it to the backend, and removes it even though the
+// commit frame released state.mu in between.
+func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
+	var mu sync.Mutex
+	var rewrittenInput string
+	hub := &stubHub{chunkSize: 4}
+	hub.loadReadonly = func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+		repo := meta.NewRepoMetadata("demo")
+		repo.UpsertFile("ranges.bin", meta.FileMeta{Inode: 31, Size: 32}, 62)
+		repo.RebuildIndexes()
+		return repo, "sha-1", nil
+	}
+	hub.rewriteFn = func(_ context.Context, _, _, inputPath string) (*meta.FileMeta, error) {
+		mu.Lock()
+		rewrittenInput = inputPath
+		mu.Unlock()
+		return &meta.FileMeta{}, nil
+	}
+	cacheDir := t.TempDir()
+	fsys := newMountedStubFS(t, cacheDir, hub)
+
+	const inode = uint64(31)
+	state := &inodeWriteState{fs: fsys, inode: inode, path: "ranges.bin", refs: 1}
+	fsys.mu.Lock()
+	fsys.writeStates[inode] = state
+	fsys.mu.Unlock()
+	if err := state.materializeBootstrap(32); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := state.temp.WriteAt([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"), 0); err != nil {
+		t.Fatalf("seed temp: %v", err)
+	}
+	state.mu.Lock()
+	state.baseSize = 32
+	state.logicalSize = 32
+	state.markDirtyLocked(4, 8)
+	state.markDirtyLocked(12, 16)
+	planned := state.plannedRangesLocked()
+	state.mu.Unlock()
+	if len(planned) != 2 || !state.shouldChunkRewriteLocked(planned) {
+		t.Fatalf("expected two planned ranges on the chunk-rewrite rung, got %+v", planned)
+	}
+	h := newPatchTestHandle(fsys, inode, state)
+	// Caller contract: hold state.mu on entry; commitChunkRewrite releases
+	// it on every return path.
+	state.mu.Lock()
+	errno := h.commitChunkRewrite(context.Background(), "ranges.bin", 32, append([]ByteRange(nil), planned...), shfs.MetadataPatch{})
+	if errno != 0 {
+		t.Fatalf("chunk-rewrite commit: %v", errno)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.HasPrefix(filepath.Base(rewrittenInput), "inode-ranges-") {
+		t.Fatalf("backend must receive an inode-ranges-* snapshot, got %q", rewrittenInput)
+	}
+	state.closeTemp()
+	assertCacheDirClean(t, cacheDir)
+}
+
+// spawnFlockHolder starts a foreign process holding an exclusive flock on
+// lockPath for 30 seconds and returns once the kernel lock is confirmed
+// held. Skipped where the util-linux flock tool is unavailable.
+func spawnFlockHolder(t *testing.T, lockPath string) int {
+	t.Helper()
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock(1) unavailable; cannot simulate a foreign live holder")
+	}
+	cmd := exec.Command("flock", lockPath, "sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn live flock holder: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if probe, err := os.Open(lockPath); err == nil {
+			flockErr := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			_ = probe.Close()
+			if flockErr != nil {
+				return cmd.Process.Pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreign holder never acquired the mount lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// exitedProcessPid returns the pid of a spawned-and-reaped process, so the
+// pid is definitively dead when the caller plants it as a stale claim.
+func exitedProcessPid(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn stale holder process: %v", err)
+	}
+	_ = cmd.Wait()
+	return cmd.Process.Pid
+}
+
+func TestMountLockRejectsSecondLiveMount(t *testing.T) {
+	cacheDir := t.TempDir()
+	lockPath := filepath.Join(cacheDir, mountLockFileName)
+	holder := spawnFlockHolder(t, lockPath)
+	// The flock tool does not write diagnostics; record the holder pid as
+	// a real mount would have.
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(holder)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err == nil || !strings.Contains(err.Error(), "already locked by process") || !strings.Contains(err.Error(), strconv.Itoa(holder)) {
+		t.Fatalf("expected loud error naming holder pid %d, got %v", holder, err)
+	}
+	// A refused New must leave the foreign claim untouched.
+	data, readErr := os.ReadFile(lockPath)
+	if readErr != nil || string(data) != strconv.Itoa(holder) {
+		t.Fatalf("foreign claim was tampered with: %q (err=%v)", data, readErr)
+	}
+}
+
+func TestMountLockReleasedOnCloseAllowsRemount(t *testing.T) {
+	cacheDir := t.TempDir()
+	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("first mount: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(cacheDir, mountLockFileName))
+	if readErr != nil || string(data) != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("expected own pid diagnostics while mounted: %q (err=%v)", data, readErr)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	second, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("remount after close must succeed once the flock is released: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+}
+
+// TestMountLockRejectsSameProcessRemount pins the invariant the kernel
+// lock exists to enforce: one live Filesystem per cacheDir, including two
+// mounts inside a single process - exactly where a pid heuristic would
+// have waved the collision through.
+func TestMountLockRejectsSameProcessRemount(t *testing.T) {
+	cacheDir := t.TempDir()
+	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("first mount: %v", err)
+	}
+	_, err = New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err == nil || !strings.Contains(err.Error(), "already locked") {
+		t.Fatalf("same-process double mount must fail loudly, got %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	third, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("mount after close must succeed: %v", err)
+	}
+	defer func() { _ = third.Close() }()
+}
+
+func TestMountLockTakesOverStaleClaim(t *testing.T) {
+	cacheDir := t.TempDir()
+	dead := exitedProcessPid(t)
+	lockPath := filepath.Join(cacheDir, mountLockFileName)
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(dead)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("claim left by dead pid %d must be reclaimable: %v", dead, err)
+	}
+	defer func() { _ = fsys.Close() }()
+	data, readErr := os.ReadFile(lockPath)
+	if readErr != nil || string(data) != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("expected takeover recorded with own pid: %q (err=%v)", data, readErr)
+	}
+}
+
 func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
 	if s.renameFn != nil {
 		return s.renameFn(ctx, project, oldPath, newPath)
@@ -1419,7 +1777,7 @@ func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 // Shrinking then regrowing must serve zeros for the regrown region, never
 // stale bytes from before the shrink.
 func TestSetSizeRegrowServesZeros(t *testing.T) {
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1455,7 +1813,7 @@ func TestSetSizeRegrowServesZeros(t *testing.T) {
 }
 
 func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1495,7 +1853,7 @@ func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
 }
 
 func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1574,7 +1932,7 @@ func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
 		batches = append(batches, append([]shfs.RangeEdit(nil), edits...))
 		return &meta.FileMeta{}, nil
 	}
-	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1662,7 +2020,7 @@ func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
 	hub.patchRanges = func(_ []shfs.RangeEdit) (*meta.FileMeta, error) {
 		return nil, context.Canceled
 	}
-	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1712,7 +2070,7 @@ func TestConcurrentFDsShareWriteState(t *testing.T) {
 	hub.statPath = func(_ context.Context, _, _ string) (*shfs.EntryInfo, error) {
 		return &shfs.EntryInfo{Path: "shared.bin", Size: 16, Mode: 0o644}, nil
 	}
-	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour, Debug: true})
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), Debug: true})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1791,7 +2149,7 @@ func TestFallocateExtendsAndCommitsZeros(t *testing.T) {
 			replacedBytes = data
 			return &meta.FileMeta{Size: int64(len(data))}, readErr
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1827,7 +2185,7 @@ func TestFallocateKeepSizeLeavesLogicalSize(t *testing.T) {
 			replacedBytes = data
 			return &meta.FileMeta{Size: int64(len(data))}, readErr
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1861,7 +2219,7 @@ func TestFallocateInsideExistingSizeKeepsContent(t *testing.T) {
 			replacedBytes = data
 			return &meta.FileMeta{Size: int64(len(data))}, readErr
 		},
-	}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1888,7 +2246,7 @@ func TestFallocateInsideExistingSizeKeepsContent(t *testing.T) {
 }
 
 func TestFallocateReadOnlyHandleReturnsEBADF(t *testing.T) {
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1917,7 +2275,7 @@ func TestFallocateRejectsUnsupportedModes(t *testing.T) {
 		{"offset overflow", ^uint64(0), 1, 0, syscall.EINVAL},
 		{"length overflow", 0, ^uint64(0), 0, syscall.EINVAL},
 	}
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -1933,12 +2291,21 @@ func TestFallocateRejectsUnsupportedModes(t *testing.T) {
 	}
 }
 
+// TestNewSweepsStaleOverlayTemps pins the mount-start sweep: every flat
+// handle-* / inode-* temp family left by a crashed previous mount is
+// garbage (construction owns all future temps), while recovery/ holds
+// quarantined data and must survive untouched.
 func TestNewSweepsStaleOverlayTemps(t *testing.T) {
 	cacheDir := t.TempDir()
-	staleTemp := filepath.Join(cacheDir, "inode-1234")
-	staleBase := filepath.Join(cacheDir, "inode-base-99")
-	recoveryFile := filepath.Join(cacheDir, "recovery", "inode-5678.saved")
-	for _, p := range []string{staleTemp, staleBase, recoveryFile} {
+	stale := []string{
+		filepath.Join(cacheDir, "handle-1234"),
+		filepath.Join(cacheDir, "inode-1234"),
+		filepath.Join(cacheDir, "inode-base-99"),
+		filepath.Join(cacheDir, "inode-commit-7"),
+		filepath.Join(cacheDir, "inode-ranges-11"),
+	}
+	recoveryFile := filepath.Join(cacheDir, "recovery", "keep-me")
+	for _, p := range append(stale, recoveryFile) {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1947,17 +2314,16 @@ func TestNewSweepsStaleOverlayTemps(t *testing.T) {
 		}
 	}
 
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
 
-	if _, err := os.Stat(staleTemp); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale inode temp must be swept: %v", err)
-	}
-	if _, err := os.Stat(staleBase); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale inode-base temp must be swept: %v", err)
+	for _, p := range stale {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("crash leftover %s must be swept: %v", p, err)
+		}
 	}
 	if _, err := os.Stat(recoveryFile); err != nil {
 		t.Errorf("recovery/ quarantine must survive the sweep: %v", err)
@@ -1993,7 +2359,7 @@ func TestReadonlyOpenServesPinnedRangesWithoutFullDownload(t *testing.T) {
 		}
 		return out, nil
 	}
-	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}

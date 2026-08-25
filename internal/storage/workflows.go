@@ -517,7 +517,18 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 
 func (h *StorHub) invalidateRepoMetadata(project string) {
 	h.metaMu.Lock()
-	delete(h.metaCache, project)
+	pm, ok := h.metaCache[project]
+	if ok {
+		delete(h.metaCache, project)
+		// Teardown mirrors eviction: without stopping the loop, deleting
+		// the cache entry would leak a live commit goroutine per deleted
+		// repo (and a duplicate loop if the project returns). metaMu→pm.mu
+		// ordering matches getOrCreateProjectMeta and eviction.
+		pm.mu.Lock()
+		pm.stopped = true
+		close(pm.stopCh)
+		pm.mu.Unlock()
+	}
 	h.metaMu.Unlock()
 }
 

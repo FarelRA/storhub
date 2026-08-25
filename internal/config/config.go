@@ -86,41 +86,49 @@ type Config struct {
 	// library default (1 MiB/s).
 	TransferThroughput int64
 
-	AtimePolicy            AtimePolicy
-	MetadataCommitInterval time.Duration
-	GitCacheDir            string
-	DisableGitBackend      bool
-	Now                    func() time.Time
-	Sleep                  func(context.Context, time.Duration) error
+	AtimePolicy AtimePolicy
+	// MaxTrackedProjects bounds how many projects' metadata stay resident
+	// in memory. The cap is applied when a new project joins: the least-
+	// recently-used clean entry is evicted (dirty entries always survive).
+	// Each entry pins one RepoMetadata clone - potentially MBs for large
+	// repos - plus one parked goroutine.
+	MaxTrackedProjects int
+	GitCacheDir        string
+	DisableGitBackend  bool
+	Now                func() time.Time
+	Sleep              func(context.Context, time.Duration) error
 }
 
 func Default() Config {
 	return Config{
-		APIBaseURL:             defaultAPIBaseURL,
-		APIVersion:             defaultAPIVersion,
-		HTTPClient:             newDefaultHTTPClient(),
-		ChunkSize:              DefaultChunkSize,
-		BufferSize:             DefaultBufferSize,
-		RepoDescription:        defaultRepoDescription,
-		CreatePublicRepo:       false,
-		MaxRetries:             4,
-		BaseRetryDelay:         500 * time.Millisecond,
-		MaxRetryDelay:          8 * time.Second,
-		RateReserve:            25,
-		RateMaxWait:            15 * time.Minute,
-		RatePointsPerMin:       720,
-		RateContentPerMin:      60,
-		MaxConcurrentRequests:  16,
-		TransferThroughput:     1 << 20,
-		LogOutput:              os.Stderr,
-		LogLevel:               logging.LevelDebug,
-		LogFormat:              logging.FormatPretty,
-		LogColor:               true,
-		AtimePolicy:            AtimeNo,
-		MetadataCommitInterval: 10 * time.Second,
-		GitCacheDir:            defaultGitCacheDir(),
-		Now:                    time.Now,
-		Sleep:                  SleepWithContext,
+		APIBaseURL:            defaultAPIBaseURL,
+		APIVersion:            defaultAPIVersion,
+		HTTPClient:            newDefaultHTTPClient(),
+		ChunkSize:             DefaultChunkSize,
+		BufferSize:            DefaultBufferSize,
+		RepoDescription:       defaultRepoDescription,
+		CreatePublicRepo:      false,
+		MaxRetries:            4,
+		BaseRetryDelay:        500 * time.Millisecond,
+		MaxRetryDelay:         8 * time.Second,
+		RateReserve:           25,
+		RateMaxWait:           15 * time.Minute,
+		RatePointsPerMin:      720,
+		RateContentPerMin:     60,
+		MaxConcurrentRequests: 16,
+		TransferThroughput:    1 << 20,
+		LogOutput:             os.Stderr,
+		LogLevel:              logging.LevelDebug,
+		LogFormat:             logging.FormatPretty,
+		LogColor:              true,
+		AtimePolicy:           AtimeNo,
+		// 64 entries is a generous working set for interactive use while
+		// bounding worst-case residency; embedders touching thousands of
+		// projects should size it deliberately.
+		MaxTrackedProjects: 64,
+		GitCacheDir:        defaultGitCacheDir(),
+		Now:                time.Now,
+		Sleep:              SleepWithContext,
 	}
 }
 
@@ -181,8 +189,8 @@ func (c Config) WithDefaults() Config {
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
 	}
-	if c.MetadataCommitInterval <= 0 {
-		c.MetadataCommitInterval = defaults.MetadataCommitInterval
+	if c.MaxTrackedProjects <= 0 {
+		c.MaxTrackedProjects = defaults.MaxTrackedProjects
 	}
 	if c.GitCacheDir == "" {
 		c.GitCacheDir = defaults.GitCacheDir
@@ -289,6 +297,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("MaxRetries must be >= 0, got %d", c.MaxRetries)
+	}
+	if c.MaxTrackedProjects < 0 {
+		return fmt.Errorf("MaxTrackedProjects must be >= 0, got %d", c.MaxTrackedProjects)
 	}
 	if c.ChunkSize < 0 {
 		return fmt.Errorf("ChunkSize must be >= 0, got %d", c.ChunkSize)

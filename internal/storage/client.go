@@ -74,11 +74,12 @@ type StorHub struct {
 	gitRepos map[string]*gitRepo
 
 	// Shutdown coordination
-	shutdownOnce  sync.Once
-	shutdownCh    chan struct{}
-	shutdownWg    sync.WaitGroup
-	janitorCtx    context.Context
-	janitorCancel context.CancelFunc
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{}
+	shutdownWg   sync.WaitGroup
+	// capWarned records that the MaxTrackedProjects overflow warning has
+	// fired for the current threshold crossing; guarded by metaMu.
+	capWarned bool
 }
 
 // projectMetadata holds metadata for a single project with batched commit support
@@ -102,10 +103,10 @@ type projectMetadata struct {
 	// without it two concurrent mutators can both pass the stopped check
 	// and swap channels under a freshly started commit loop.
 	reviving bool
-	// stopped is set when the janitor evicted this instance. A long
-	// operation that captured the pointer before eviction must not strand
-	// its acknowledged mutations on a dead commit loop; markProjectDirtyLive
-	// revives the instance instead.
+	// stopped is set when this instance was evicted (capacity pressure or
+	// explicit invalidation). A long operation that captured the pointer
+	// before eviction must not strand its acknowledged mutations on a dead
+	// commit loop; markProjectDirtyLive revives the instance instead.
 	stopped bool
 }
 
@@ -141,21 +142,27 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 	pm.version++
 }
 
-// markProjectDirtyLiveLocked marks pm dirty, reviving it first if the
-// janitor evicted it while an operation was still using the pointer.
+// markProjectDirtyLiveLocked marks pm dirty, reviving it first if it was
+// evicted while an operation was still using the pointer.
 // Revival puts the same instance back into the cache with fresh loop
 // channels, so a mutation acknowledged to the caller can never silently
 // strand on a commit loop that already stopped. When a fresher incarnation
 // owns the cache slot, the stale snapshot's changes cannot be applied and
 // this fails loudly instead of losing them silently.
 //
+// It returns the trigger channel to poke after releasing pm.mu. Reading
+// the field directly post-unlock would race a revival's channel swap;
+// the returned value was read under the final pm.mu critical section,
+// giving callers a synchronized handle. A revival failure returns the
+// stale channel: poking it is a harmless no-op.
+//
 // Caller must hold pm.mu; the lock is dropped and re-acquired around cache
 // bookkeeping so metaMu→pm.mu ordering stays consistent with
 // getOrCreateProjectMeta.
-func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) {
+func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) chan struct{} {
 	if !pm.stopped {
 		markProjectDirtyLocked(pm)
-		return
+		return pm.triggerCh
 	}
 	pm.mu.Unlock()
 	// Wait for the evicted commit loop to fully exit before replacing its
@@ -167,7 +174,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	case <-time.After(5 * time.Second):
 		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; skipping metadata revival", "project", project)
 		pm.mu.Lock()
-		return
+		return pm.triggerCh
 	}
 	h.metaMu.Lock()
 	current, exists := h.metaCache[project]
@@ -211,6 +218,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	if revived || live {
 		markProjectDirtyLocked(pm)
 	}
+	return pm.triggerCh
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
@@ -269,8 +277,6 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 			return &buf
 		}},
 	}
-	hub.janitorCtx, hub.janitorCancel = context.WithCancel(ctx)
-	go hub.startJanitor(hub.janitorCtx, 30*time.Minute)
 	return hub, nil
 }
 
@@ -339,6 +345,9 @@ func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
 	}
 
 	now := h.config.Now()
+	// Enforce the residency cap before adding another entry: growth is an
+	// event, so the cap is applied exactly when a new project joins.
+	h.evictForCapacityLocked()
 	// Create new projectMetadata
 	pm = &projectMetadata{
 		meta:       metadata.NewRepoMetadata(project),
@@ -356,13 +365,14 @@ func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
 	return pm
 }
 
-// commitLoop periodically commits dirty metadata to GitHub
+// commitLoop commits dirty metadata when events demand it: a mutation
+// trigger or the final drain at shutdown. It never polls; idle cost is
+// one parked goroutine per tracked project. A failed push retains dirty
+// state and is retried by the next trigger on that project, an explicit
+// FlushMetadata/FlushProjectContext, or Shutdown.
 func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 	defer h.shutdownWg.Done()
 	defer close(pm.stoppedCh)
-
-	ticker := time.NewTicker(h.config.MetadataCommitInterval)
-	defer ticker.Stop()
 
 	logger := h.projectLogger(project)
 
@@ -371,17 +381,10 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 		case <-pm.stopCh:
 			// Project evicted, stop the commit loop
 			return
-		case <-ticker.C:
-			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-				h.recoverMetadataCommitFailure(project, err)
-				continue
-			}
-
 		case <-pm.triggerCh:
 			// Wake up and commit if dirty, then continue loop.
 			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
 				h.recoverMetadataCommitFailure(project, err)
-				continue
 			}
 
 		case <-h.shutdownCh:
@@ -416,7 +419,7 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	var cerr *commitError
 	isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 	if !isConflict {
-		logging.Error(logger, "metadata commit failed; retaining dirty metadata for retry", "err", err)
+		logging.Error(logger, "metadata commit failed; retaining dirty metadata (heals on next mutation, FlushMetadata, or shutdown)", "err", err)
 		return
 	}
 	if errors.As(err, &cerr) {
@@ -506,32 +509,64 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	return nil
 }
 
-// startJanitor periodically evicts idle, non-dirty project metadata to prevent unbounded cache growth
-func (h *StorHub) startJanitor(ctx context.Context, idleTimeout time.Duration) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			h.evictIdleProjects(idleTimeout)
-		case <-ctx.Done():
+// evictForCapacityLocked keeps the tracked-project set at
+// MaxTrackedProjects by evicting the least-recently-used clean entry at
+// insert time. Victims must be clean (nothing unpushed) and not mid-
+// revival; a dirty entry survives arbitrarily long. When no victim
+// qualifies, insertion proceeds unbounded and warns once per threshold
+// crossing - failing an unrelated operation would be worse than honest
+// degradation. Alternating access to more projects than the cap thrashes
+// remote reloads per miss; that costs bandwidth, never data. Revival
+// re-insertions (markProjectDirtyLiveLocked) deliberately bypass this
+// cap - they serve an operation already in flight; overshoot is bounded
+// by concurrently stranded stale pointers.
+// Caller holds metaMu for writing.
+func (h *StorHub) evictForCapacityLocked() {
+	if len(h.metaCache) < h.config.MaxTrackedProjects {
+		h.capWarned = false
+		return
+	}
+	type candidate struct {
+		name       string
+		lastAccess time.Time
+	}
+	var cands []candidate
+	for name, pm := range h.metaCache {
+		pm.mu.RLock()
+		eligible := !pm.dirty && !pm.reviving && !pm.stopped
+		last := pm.lastAccess
+		pm.mu.RUnlock()
+		if eligible {
+			cands = append(cands, candidate{name: name, lastAccess: last})
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].lastAccess.Before(cands[j].lastAccess) })
+	// Walk candidates oldest-first. Re-check under pm.mu so a mutation
+	// racing this eviction either lands before (entry stays dirty, the
+	// next candidate gets its turn) or sees stopped=true and revives via
+	// markProjectDirtyLiveLocked. metaMu is held throughout, so the map
+	// itself is stable while we walk.
+	for _, cand := range cands {
+		pm := h.metaCache[cand.name]
+		pm.mu.Lock()
+		evictable := !pm.dirty && !pm.reviving && !pm.stopped
+		if evictable {
+			pm.stopped = true
+			close(pm.stopCh)
+			delete(h.metaCache, cand.name)
+		}
+		pm.mu.Unlock()
+		if evictable {
+			// Successful enforcement re-arms the overflow warning: at
+			// steady state the cache pins len == cap forever, so without
+			// this the first crossing would silence all later ones.
+			h.capWarned = false
 			return
 		}
 	}
-}
-
-func (h *StorHub) evictIdleProjects(idleTimeout time.Duration) {
-	h.metaMu.Lock()
-	defer h.metaMu.Unlock()
-	now := time.Now()
-	for name, pm := range h.metaCache {
-		pm.mu.Lock()
-		if !pm.dirty && now.Sub(pm.lastAccess) > idleTimeout {
-			pm.stopped = true
-			close(pm.stopCh)
-			delete(h.metaCache, name)
-		}
-		pm.mu.Unlock()
+	if !h.capWarned {
+		logging.Warn(h.logger, "tracked projects exceed cap with no evictable entry; inserting unbounded", "cap", h.config.MaxTrackedProjects, "resident", len(h.metaCache))
+		h.capWarned = true
 	}
 }
 
@@ -542,11 +577,6 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	h.shutdownOnce.Do(func() {
 		logging.Info(h.logger, "shutdown initiated")
-
-		// Stop the janitor (nil when the client never started its loops).
-		if h.janitorCancel != nil {
-			h.janitorCancel()
-		}
 
 		if h.shutdownCh != nil {
 			// Signal all commit loops to stop
@@ -605,6 +635,19 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// FlushProjectContext commits dirty metadata for one project, creating
+// the tracking entry if absent (an unknown project name therefore starts
+// residency with an empty tree and reports success without network
+// traffic). It is the per-project counterpart of FlushMetadata and the
+// remedy after a failed push: healing requires a later operation on that
+// project, this call, or Shutdown.
+func (h *StorHub) FlushProjectContext(ctx context.Context, project string) error {
+	if err := validateProject(project); err != nil {
+		return err
+	}
+	return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
 }
 
 func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, error) {
@@ -764,11 +807,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, latest, fileMeta, now)
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -985,11 +1028,11 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -1040,11 +1083,11 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -1088,11 +1131,11 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, rewritten, now)
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -1219,11 +1262,11 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.meta.UpsertFile(cleanName, fileMeta, h.config.Now().Unix())
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -1535,7 +1578,7 @@ func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 }
 
 // UpdateRepoMetadataContext updates metadata using the new batching system
-// The mutation is applied to in-memory metadata and marked dirty for periodic commit
+// The mutation is applied to in-memory metadata and marked dirty for event-driven commit
 func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*metadata.RepoMetadata) error, message string) (*metadata.RepoMetadata, error) {
 	lockStarted := h.config.Now().UTC()
 	pm := h.getOrCreateProjectMeta(project)
@@ -1581,12 +1624,12 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	// Trigger the commit loop to wake up immediately
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 

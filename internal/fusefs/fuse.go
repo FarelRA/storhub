@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,7 +50,6 @@ type Options struct {
 	EntryTimeout    time.Duration
 	AttrTimeout     time.Duration
 	NegativeTimeout time.Duration
-	CleanupInterval time.Duration
 	// OverlayBufferSize is the size of each buffer allocated by overlay copy loops
 	// (snapshot materialization, range reads). It bounds resident memory per
 	// copying handle and is independent of the storage chunk size, which
@@ -82,15 +82,11 @@ type Filesystem struct {
 	handles     map[uint64]*storhubHandle
 	nextHandle  atomic.Uint64
 	cacheDir    string
-	// protectedTemps holds paths of in-flight commit snapshots
-	// (inode-commit-*, inode-ranges-*) so the janitor cannot unlink a
-	// file that a network step is still consuming by path.
-	protectedMu    sync.Mutex
-	protectedTemps map[string]struct{}
-	stopJanitor    chan struct{}
-	janitorDone    chan struct{}
-	closing        bool
-	unmounted      bool
+	// lockFile holds this mount's flock(2) claim on cacheDir; unlocked
+	// and closed on Close. The lockfile itself stays on disk by design.
+	lockFile  *os.File
+	closing   bool
+	unmounted bool
 }
 
 type lockRecord struct {
@@ -244,7 +240,6 @@ func DefaultOptions() Options {
 		EntryTimeout:      60 * time.Second,
 		AttrTimeout:       60 * time.Second,
 		NegativeTimeout:   10 * time.Second,
-		CleanupInterval:   30 * time.Second,
 		OverlayBufferSize: defaultOverlayBufferSize,
 		ExtraMountOpts:    []string{"noatime"},
 		Debug:             true,
@@ -312,6 +307,54 @@ type Hub interface {
 	ChunkSize() int64
 }
 
+// mountLockFileName arbitrates exclusive ownership of a FUSE cache
+// directory via flock(2); its content is diagnostic only (last holder's
+// pid as decimal text).
+const mountLockFileName = ".storhub-mount.lock"
+
+// readMountLockPid returns the pid recorded by the current or last holder,
+// or zero when unreadable. Purely cosmetic: liveness is decided by the
+// kernel lock, never by this value.
+func readMountLockPid(lockPath string) int {
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	return pid
+}
+
+// claimMountLock takes exclusive ownership of cacheDir for this process
+// with an flock(2) LOCK_EX|LOCK_NB on the lockfile. A held lock refuses
+// the claim - the holder may have commit snapshots in flight that our
+// startup sweep would delete. flock is chosen over a pidfile because it
+// closes every hole a pid heuristic leaves: a crashed holder's lock
+// vanishes with the process (stale takeover is automatic), and two
+// mounts inside one process conflict just like two processes, since each
+// open file description owns its lock independently. The file itself is
+// never unlinked: unlock-then-unlink lets a contender lock an orphaned
+// inode while another recreates the path, producing two simultaneous
+// holders.
+func claimMountLock(lockPath string) (*os.File, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open mount lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		dir := path.Dir(lockPath)
+		if holder := readMountLockPid(lockPath); holder > 0 {
+			return nil, fmt.Errorf("cache dir %s is already locked by process %d", dir, holder)
+		}
+		return nil, fmt.Errorf("cache dir %s is already locked", dir)
+	}
+	// Best-effort diagnostics; the lock, not this text, is authoritative.
+	if truncErr := f.Truncate(0); truncErr == nil {
+		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
+	}
+	return f, nil
+}
+
 func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
@@ -325,9 +368,6 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	}
 	if opts.NegativeTimeout <= 0 {
 		opts.NegativeTimeout = defaults.NegativeTimeout
-	}
-	if opts.CleanupInterval <= 0 {
-		opts.CleanupInterval = defaults.CleanupInterval
 	}
 	if opts.OverlayBufferSize <= 0 {
 		opts.OverlayBufferSize = defaults.OverlayBufferSize
@@ -345,13 +385,25 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create fuse cache dir: %w", err)
 	}
-	// Startup sweep: overlay temps from a crashed previous mount are
-	// pure garbage (nothing can reference them before any file is
-	// opened); the recovery/ quarantine is preserved by design.
+	// Claim the directory before touching its contents. The sweep below
+	// deletes leftover temps unconditionally, so without the lock a second
+	// live mount sharing this cacheDir would silently destroy the first
+	// one's in-flight commit snapshots; the lock turns that into an
+	// explicit error instead.
+	lockFile, err := claimMountLock(path.Join(cacheDir, mountLockFileName))
+	if err != nil {
+		return nil, err
+	}
+	// Startup sweep: handle-* and inode-* flat files from a crashed
+	// previous mount are pure garbage - nothing can reference them because
+	// no file is open yet and the filesystem constructed below owns every
+	// future temp. The recovery/ quarantine is preserved by design.
+	// Construction past this point cannot fail, so no failed New leaves a
+	// claim behind; Close releases it.
 	if entries, err := os.ReadDir(cacheDir); err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			if name == "recovery" || !strings.HasPrefix(name, "inode-") {
+			if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
 				continue
 			}
 			if err := os.RemoveAll(path.Join(cacheDir, name)); err != nil {
@@ -370,13 +422,11 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		writeStates: make(map[uint64]*inodeWriteState),
 		handles:     make(map[uint64]*storhubHandle),
 		cacheDir:    cacheDir,
-		stopJanitor: make(chan struct{}),
-		janitorDone: make(chan struct{}),
+		lockFile:    lockFile,
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
 	fsys.lockCond = sync.NewCond(&fsys.mu)
-	go fsys.runJanitor()
 	return fsys, nil
 }
 
@@ -455,9 +505,7 @@ func (s *Filesystem) Close() error {
 		return nil
 	}
 	s.closing = true
-	close(s.stopJanitor)
 	s.mu.Unlock()
-	<-s.janitorDone
 	_ = s.Unmount()
 	s.mu.Lock()
 	handles := make([]*storhubHandle, 0, len(s.handles))
@@ -478,6 +526,15 @@ func (s *Filesystem) Close() error {
 	}
 	for _, handle := range handles {
 		handle.closeTemp()
+	}
+	// Release the ownership claim last so the directory stays exclusively
+	// ours for the whole teardown, including temp quarantine above. The
+	// lockfile stays on disk: unlocking is what releases ownership, and
+	// unlinking would race a contender into locking an orphaned inode.
+	if s.lockFile != nil {
+		_ = syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+		_ = s.lockFile.Close()
+		s.lockFile = nil
 	}
 	s.debugf("close complete project=%s", s.project)
 	return nil
@@ -504,9 +561,9 @@ func (s *Filesystem) recoveryDir() string {
 	return path.Join(s.cacheDir, "recovery")
 }
 
-// quarantineFile moves tempPath into the recovery directory, where the cache
-// janitor will not touch it. Called when a commit fails and the overlay holds
-// the only copy of data the application has already written.
+// quarantineFile moves tempPath into the recovery directory, which the
+// mount-start sweep preserves. Called when a commit fails and the overlay
+// holds the only copy of data the application has already written.
 func (s *Filesystem) quarantineFile(tempPath string) {
 	dir := s.recoveryDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -2555,11 +2612,9 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 		h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
-	releaseSnapshot := h.fs.protectTemp(snapshotPath)
-	defer func() {
-		_ = os.Remove(snapshotPath)
-		releaseSnapshot()
-	}()
+	// The snapshot is event-scoped: this commit frame owns it and removes
+	// it on every exit path.
+	defer func() { _ = os.Remove(snapshotPath) }()
 	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 	if err != nil {
@@ -2592,13 +2647,9 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 		h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
-	var releaseSnapshot func()
 	if cleanupSnapshot {
-		releaseSnapshot = h.fs.protectTemp(snapshotPath)
-		defer func() {
-			_ = os.Remove(snapshotPath)
-			releaseSnapshot()
-		}()
+		// Event-scoped snapshot: this commit frame owns the removal.
+		defer func() { _ = os.Remove(snapshotPath) }()
 	}
 	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
 	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
@@ -3023,24 +3074,6 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	}()
 }
 
-func (s *Filesystem) runJanitor() {
-	defer close(s.janitorDone)
-	ticker := time.NewTicker(s.opts.CleanupInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.stopJanitor:
-			return
-		case <-ticker.C:
-			s.cleanupExpiredCache()
-		}
-	}
-}
-
-// protectTemp marks a commit snapshot as janitor-immune until the returned
-// release func runs. Every creator of inode-commit-*/inode-ranges-* temps
-// must wrap its consumption window; otherwise a slow metadata load or
-// upload lets cleanupExpiredCache delete the file mid-commit.
 // nlinkForEntry reports the hard-link count for a freshly created entry.
 // A metadata load failure is logged and reported as 1 rather than silently
 // fabricated as 0; getattr refreshes the value on the next lookup anyway.
@@ -3057,83 +3090,6 @@ func (s *Filesystem) nlinkForEntry(entryPath string) int {
 		return n
 	}
 	return 1
-}
-
-func (s *Filesystem) protectTemp(p string) func() {
-	s.protectedMu.Lock()
-	if s.protectedTemps == nil {
-		s.protectedTemps = make(map[string]struct{})
-	}
-	s.protectedTemps[p] = struct{}{}
-	s.protectedMu.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			s.protectedMu.Lock()
-			delete(s.protectedTemps, p)
-			s.protectedMu.Unlock()
-		})
-	}
-}
-
-func (s *Filesystem) cleanupExpiredCache() {
-	s.mu.RLock()
-	handles := make([]*storhubHandle, 0, len(s.handles))
-	for _, handle := range s.handles {
-		handles = append(handles, handle)
-	}
-	writeStates := make([]*inodeWriteState, 0, len(s.writeStates))
-	for _, writeState := range s.writeStates {
-		writeStates = append(writeStates, writeState)
-	}
-	s.mu.RUnlock()
-	openTemps := make(map[string]struct{}, len(handles)+len(writeStates))
-	for _, handle := range handles {
-		handle.mu.Lock()
-		if handle.tempPath != "" {
-			openTemps[handle.tempPath] = struct{}{}
-		}
-		handle.mu.Unlock()
-	}
-	for _, writeState := range writeStates {
-		writeState.mu.Lock()
-		if writeState.tempPath != "" {
-			openTemps[writeState.tempPath] = struct{}{}
-		}
-		// Base snapshots feed in-flight commits; deleting them mid-commit
-		// corrupts the upload.
-		if writeState.baseTempPath != "" {
-			openTemps[writeState.baseTempPath] = struct{}{}
-		}
-		writeState.mu.Unlock()
-	}
-	s.protectedMu.Lock()
-	for p := range s.protectedTemps {
-		openTemps[p] = struct{}{}
-	}
-	s.protectedMu.Unlock()
-	graceThreshold := time.Now().Add(-5 * time.Minute)
-	entries, err := os.ReadDir(s.cacheDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			// Subdirectories (e.g. recovery/) are never cache temp files.
-			continue
-		}
-		fullPath := path.Join(s.cacheDir, entry.Name())
-		if _, ok := openTemps[fullPath]; ok {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(graceThreshold) {
-			_ = os.Remove(fullPath)
-		}
-	}
 }
 
 func fillEntryOut(out *fuse.EntryOut, entry *shfs.EntryInfo, opts Options) {

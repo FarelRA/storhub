@@ -321,6 +321,13 @@ Revision and maintenance APIs:
 - `CleanupProject`
 - `DeleteRelease`
 - `DeleteProject`
+- `FlushMetadata` / `FlushProjectContext` - explicit metadata push; the
+  remedy after a failed push, since commits are event-driven (mutation
+  triggers and shutdown) with no periodic flush
+
+Metadata residency: at most `Config.MaxTrackedProjects` projects stay
+resident; the least-recently-used clean entry is evicted when a new
+project joins (dirty entries always survive).
 
 FUSE APIs:
 

@@ -78,11 +78,11 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 
@@ -114,11 +114,11 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	h.markProjectDirtyLiveLocked(project, pm)
+	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()
 
 	select {
-	case pm.triggerCh <- struct{}{}:
+	case trigger <- struct{}{}:
 	default:
 	}
 

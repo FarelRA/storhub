@@ -43,11 +43,10 @@ const (
 
 func singleChunkTestConfig() Config {
 	return Config{
-		ChunkSize:              testSingleChunkSize,
-		BufferSize:             testSingleBufferSize,
-		MaxRetries:             0,
-		MetadataCommitInterval: 100 * time.Millisecond,
-		DisableGitBackend:      true,
+		ChunkSize:         testSingleChunkSize,
+		BufferSize:        testSingleBufferSize,
+		MaxRetries:        0,
+		DisableGitBackend: true,
 	}
 }
 
@@ -59,15 +58,14 @@ func defaultTestConfig() Config {
 
 func smallTransferTestConfig() Config {
 	return Config{
-		ChunkSize:              testSmallChunkSize,
-		BufferSize:             testSmallBufferSize,
-		MaxRetries:             0,
-		AtimePolicy:            "noatime",
-		MetadataCommitInterval: 100 * time.Millisecond,
-		DisableGitBackend:      true,
-		RateMaxWait:            -1,
-		RatePointsPerMin:       1 << 40,
-		RateContentPerMin:      1 << 40,
+		ChunkSize:         testSmallChunkSize,
+		BufferSize:        testSmallBufferSize,
+		MaxRetries:        0,
+		AtimePolicy:       "noatime",
+		DisableGitBackend: true,
+		RateMaxWait:       -1,
+		RatePointsPerMin:  1 << 40,
+		RateContentPerMin: 1 << 40,
 	}
 }
 
@@ -79,14 +77,13 @@ func smallRetryDisabledTestConfig() Config {
 
 func retryTestConfig() Config {
 	return Config{
-		MaxRetries:             2,
-		BaseRetryDelay:         time.Millisecond,
-		MaxRetryDelay:          5 * time.Millisecond,
-		MetadataCommitInterval: 100 * time.Millisecond,
-		DisableGitBackend:      true,
-		RateMaxWait:            -1,
-		RatePointsPerMin:       1 << 40,
-		RateContentPerMin:      1 << 40,
+		MaxRetries:        2,
+		BaseRetryDelay:    time.Millisecond,
+		MaxRetryDelay:     5 * time.Millisecond,
+		DisableGitBackend: true,
+		RateMaxWait:       -1,
+		RatePointsPerMin:  1 << 40,
+		RateContentPerMin: 1 << 40,
 	}
 }
 
@@ -100,28 +97,26 @@ func smallRetryTestConfig() Config {
 
 func rateLimitTestConfig(sleep func(context.Context, time.Duration) error) Config {
 	return Config{
-		MaxRetries:             1,
-		BaseRetryDelay:         time.Millisecond,
-		MaxRetryDelay:          2 * time.Millisecond,
-		Sleep:                  sleep,
-		MetadataCommitInterval: 100 * time.Millisecond,
-		Now:                    time.Now,
-		DisableGitBackend:      true,
-		RateMaxWait:            15 * time.Minute,
-		RatePointsPerMin:       1 << 40,
-		RateContentPerMin:      1 << 40,
+		MaxRetries:        1,
+		BaseRetryDelay:    time.Millisecond,
+		MaxRetryDelay:     2 * time.Millisecond,
+		Sleep:             sleep,
+		Now:               time.Now,
+		DisableGitBackend: true,
+		RateMaxWait:       15 * time.Minute,
+		RatePointsPerMin:  1 << 40,
+		RateContentPerMin: 1 << 40,
 	}
 }
 
 func liveSmokeConfig() Config {
 	return Config{
-		ChunkSize:              testLargeChunkSize,
-		BufferSize:             testLargeBufferSize,
-		MaxRetries:             4,
-		MetadataCommitInterval: 100 * time.Millisecond,
-		RateMaxWait:            -1,
-		RatePointsPerMin:       1 << 40,
-		RateContentPerMin:      1 << 40,
+		ChunkSize:         testLargeChunkSize,
+		BufferSize:        testLargeBufferSize,
+		MaxRetries:        4,
+		RateMaxWait:       -1,
+		RatePointsPerMin:  1 << 40,
+		RateContentPerMin: 1 << 40,
 	}
 }
 
@@ -234,7 +229,7 @@ func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 		}
 		return false
 	})
-	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
 	input := writeTempFile(t, t.TempDir(), "video.bin", data)
@@ -283,7 +278,7 @@ func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 
 func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	if err := hub.Mkdir("project-fs-ops", "notes"); err != nil {
 		t.Fatalf("mkdir notes: %v", err)
 	}
@@ -591,7 +586,7 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 
 func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, MetadataCommitInterval: 100 * time.Millisecond, DisableGitBackend: true})
+	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
 	meta, err := hub.UploadFile("project-exact-ranges", "exact-ranges.bin", input)
@@ -2834,11 +2829,10 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 		return false
 	})
 	hub := backend.newClient(t, Config{
-		ChunkSize:              8,
-		BufferSize:             testSingleBufferSize,
-		MaxRetries:             0,
-		MetadataCommitInterval: 100 * time.Millisecond,
-		DisableGitBackend:      true,
+		ChunkSize:         8,
+		BufferSize:        testSingleBufferSize,
+		MaxRetries:        0,
+		DisableGitBackend: true,
 	})
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "fragmented.txt", []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"))
@@ -3816,18 +3810,17 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 	assertFileContent(t, output, []byte("completely different version two"))
 }
 
-// TestMarkProjectDirtyRevivesEvictedMetadata pins the janitor-race guard:
+// TestMarkProjectDirtyRevivesEvictedMetadata pins the eviction-race guard:
 // an operation that captured pm before eviction can still land its
 // acknowledged mutation — the instance is revived with a live commit loop
 // instead of silently stranding dirty state on a dead loop.
 func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{
-		ChunkSize:              32 << 20,
-		BufferSize:             testSingleBufferSize,
-		MaxRetries:             0,
-		MetadataCommitInterval: 30 * time.Millisecond,
-		DisableGitBackend:      true,
+		ChunkSize:         32 << 20,
+		BufferSize:        testSingleBufferSize,
+		MaxRetries:        0,
+		DisableGitBackend: true,
 	})
 	ctx := context.Background()
 	project := "project-revive"
@@ -3861,7 +3854,7 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Simulate the janitor racing an in-flight operation.
+	// Simulate eviction racing an in-flight operation.
 	hub.metaMu.Lock()
 	pm.mu.Lock()
 	if pm.dirty {
@@ -3909,11 +3902,10 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 func TestExpectedRevisionCAS(t *testing.T) {
 	backend := newMockGitHub(t)
 	cfg := Config{
-		ChunkSize:              32 << 20,
-		BufferSize:             testSingleBufferSize,
-		MaxRetries:             0,
-		MetadataCommitInterval: time.Hour, // keep commits manual
-		DisableGitBackend:      true,
+		ChunkSize:         32 << 20,
+		BufferSize:        testSingleBufferSize,
+		MaxRetries:        0,
+		DisableGitBackend: true,
 	}
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
@@ -3992,11 +3984,10 @@ func TestExpectedRevisionCAS(t *testing.T) {
 func TestColdCacheMutationDoesNotClobberRemote(t *testing.T) {
 	backend := newMockGitHub(t)
 	cfg := Config{
-		ChunkSize:              32 << 20,
-		BufferSize:             testSingleBufferSize,
-		MaxRetries:             0,
-		MetadataCommitInterval: time.Hour,
-		DisableGitBackend:      true,
+		ChunkSize:         32 << 20,
+		BufferSize:        testSingleBufferSize,
+		MaxRetries:        0,
+		DisableGitBackend: true,
 	}
 	writer := backend.newClient(t, cfg)
 	ctx := context.Background()
