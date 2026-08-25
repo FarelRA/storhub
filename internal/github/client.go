@@ -369,6 +369,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			}
 			// Signed URL expired or revoked: drop it and re-resolve once.
 			c.invalidateAssetURL(assetID)
+			logging.Warn(c.logger, "cached asset URL rejected; re-resolving via API", "asset", assetID, "status", status)
 		}
 		resp, err := c.doRequest(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
 			return nil, nil
@@ -394,6 +395,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 				return nil, 0, fetchErr
 			}
 			c.invalidateAssetURL(assetID)
+			logging.Warn(c.logger, "fresh asset URL rejected; retrying resolution", "asset", assetID, "status", status)
 			continue
 		}
 		// Non-redirect response: treat it as the final answer (also keeps
@@ -414,11 +416,18 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 // instead of hanging the reader forever. The status code is returned
 // alongside so callers can tell expired-signature rejections apart from
 // other failures.
+//
+// The deadline's cancel is bound to the RETURNED BODY's lifetime, not to
+// this function: callers stream the body long after we return, and a
+// defer cancel() here amputated every transfer mid-read ("context
+// canceled" after whatever bytes had already buffered - the intermittent
+// EIO plague on mounted reads). Closing the body releases the resources;
+// the deadline itself still aborts genuinely stalled streams.
 func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, length int64) (io.ReadCloser, int64, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.transferDeadline(length))
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		cancel()
 		return nil, 0, 0, fmt.Errorf("create cdn request: %w", err)
 	}
 	if rangeHeader != "" {
@@ -426,13 +435,34 @@ func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, len
 	}
 	resp, err := c.cdn.Do(req)
 	if err != nil {
+		cancel()
+		logging.Debug(c.logger, "cdn range fetch failed", "url", c.redactSignedURL(url), "range", rangeHeader, "err", err)
 		return nil, 0, 0, fmt.Errorf("cdn request: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		defer func() { _ = resp.Body.Close() }()
-		return nil, 0, resp.StatusCode, fmt.Errorf("cdn range fetch: unexpected status %d", resp.StatusCode)
+		logging.Debug(c.logger, "cdn range fetch rejected", "url", c.redactSignedURL(url), "range", rangeHeader, "status", resp.StatusCode)
+		cancel()
+		return nil, 0, resp.StatusCode, &CDNError{StatusCode: resp.StatusCode}
 	}
-	return resp.Body, resp.ContentLength, resp.StatusCode, nil
+	// Ownership of cancel transfers to the returned body.
+	_ = cancel
+	return &deadlineBoundBody{ReadCloser: resp.Body, cancel: cancel}, resp.ContentLength, resp.StatusCode, nil
+}
+
+// deadlineBoundBody keeps a response context alive until the streamed
+// body is closed, so readers may consume it after the request function
+// has returned.
+type deadlineBoundBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *deadlineBoundBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
+	return err
 }
 
 // isCDNRejection reports whether a CDN status indicates the signed URL is
@@ -453,11 +483,15 @@ func (c *Client) storeAssetURL(assetID int64, rawURL string) {
 	parsed, err := url.Parse(rawURL)
 	expires := time.Now().Add(60 * time.Second)
 	if err == nil {
-		query := parsed.Query()
-		if stamped, dateErr := time.Parse("20060102T150405Z", query.Get("X-Amz-Date")); dateErr == nil {
-			if lifetime, secErr := strconv.ParseInt(query.Get("X-Amz-Expires"), 10, 64); secErr == nil && lifetime > 0 {
-				// Retire the URL before its real expiry with margin.
-				expires = stamped.Add(time.Duration(lifetime)*time.Second - 30*time.Second)
+		// GitHub release assets redirect to Azure blob storage whose SAS
+		// token carries the expiry in 'se' (RFC3339). Honoring it avoids
+		// re-resolving an hour-valid URL every minute under the fixed-60s
+		// fallback, which remains the safety net for any future scheme:
+		// a too-long guess dies against a rejection status and triggers
+		// exactly one API re-resolution.
+		if se := parsed.Query().Get("se"); se != "" {
+			if exp, seErr := time.Parse(time.RFC3339, se); seErr == nil {
+				expires = exp.Add(-30 * time.Second)
 			}
 		}
 	}
@@ -470,6 +504,17 @@ func (c *Client) invalidateAssetURL(assetID int64) {
 	c.assetMu.Lock()
 	defer c.assetMu.Unlock()
 	delete(c.assetURLs, assetID)
+}
+
+// redactSignedURL strips the query from a signed CDN URL for logging:
+// the signature is a bearer credential and must never reach logs.
+func (c *Client) redactSignedURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "(asset url)"
+	}
+	parsed.RawQuery = ""
+	return parsed.String()
 }
 
 func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, ref string) ([]byte, string, error) {

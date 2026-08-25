@@ -35,6 +35,26 @@ func (e *APIError) Error() string {
 
 func (e *APIError) NotFound() bool { return e != nil && e.StatusCode == http.StatusNotFound }
 
+// CDNError reports a failed range fetch against a signed asset URL. The
+// status is carried structurally so callers can distinguish transient
+// server trouble (retryable) from permanent conditions without parsing
+// error strings.
+type CDNError struct {
+	StatusCode int
+}
+
+func (e *CDNError) Error() string {
+	return fmt.Sprintf("cdn range fetch: unexpected status %d", e.StatusCode)
+}
+
+// Transient reports whether the CDN rejection is worth retrying: server
+// trouble and throttling clear on their own, while 4xx client errors
+// (expired signature aside, which triggers re-resolution instead) will
+// repeat identically.
+func (e *CDNError) Transient() bool {
+	return e != nil && (e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
+}
+
 // IsPrimaryRateLimit reports whether err is a confirmed primary rate-limit
 // rejection: the hourly budget is gone and the request must wait for the
 // documented reset time instead of being retried on backoff.

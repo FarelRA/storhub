@@ -2313,6 +2313,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		n, err := writeState.readIntoLocked(ctx, buf, off)
 		writeState.mu.Unlock()
 		if err != nil {
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(buf[:n]), 0
@@ -2324,12 +2325,17 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		buf := make([]byte, len(dest))
 		n, err := temp.ReadAt(buf, off)
 		if err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, io.EOF) {
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(buf[:n]), 0
 	}
 	data, err := h.readFromPinned(ctx, off, int64(len(dest)))
 	if err != nil {
+		// A failed read is an operational event users experience as EIO
+		// with no other trace; without this line the backend cause was
+		// invisible unless the mount ran at debug level.
+		h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 		return nil, errnoFromError(err)
 	}
 	return fuse.ReadResultData(data), 0

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"syscall"
 	"time"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
@@ -44,5 +45,12 @@ func isRetryableNetworkError(err error) bool {
 	if errors.As(err, &netErr) {
 		return true
 	}
-	return errors.Is(err, io.ErrUnexpectedEOF)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Bare syscall unwrapping: a connection reset can surface without a
+	// *net.OpError wrapper depending on where the transport fails, and
+	// killing the read on one dropped connection is exactly the failure
+	// mode retries exist to absorb.
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
 }

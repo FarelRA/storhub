@@ -1538,6 +1538,12 @@ func isRetryableDownloadError(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.IsRetryable()
 	}
+	// Transient CDN trouble (throttle, 5xx) must retry like any other
+	// network hiccup; permanent statuses stay terminal.
+	var cdnErr *ghapi.CDNError
+	if errors.As(err, &cdnErr) {
+		return cdnErr.Transient()
+	}
 	return isRetryableNetworkError(err)
 }
 

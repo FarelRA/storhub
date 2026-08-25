@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -232,8 +233,7 @@ func TestDownloadAssetStreamCachesSignedURL(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
 		apiHits.Add(1)
-		stamp := time.Now().UTC().Format("20060102T150405Z")
-		http.Redirect(w, r, fmt.Sprintf("/cdn/7?X-Amz-Date=%s&X-Amz-Expires=300", stamp), http.StatusFound)
+		http.Redirect(w, r, fmt.Sprintf("/cdn/7?sp=r&se=%s&sig=testsig", time.Now().Add(5*time.Minute).UTC().Format(time.RFC3339)), http.StatusFound)
 	})
 	mux.HandleFunc("/cdn/7", func(w http.ResponseWriter, r *http.Request) {
 		cdnHits.Add(1)
@@ -373,5 +373,93 @@ func TestPrimaryRateLimitWaitHonorsResetOnce(t *testing.T) {
 	}
 	if user.Login != "ok" {
 		t.Fatalf("unexpected login %q", user.Login)
+	}
+}
+
+// TestStoreAssetURLParsesAzureSASExpiry pins expiry extraction for
+// GitHub's current release-asset redirect format: an Azure blob SAS URL
+// carrying the lifetime in the RFC3339 'se' parameter. Before this was
+// parsed, every URL fell back to a fixed 60s residency and got
+// re-resolved through the API roughly sixty times more often than its
+// real ~1h validity required.
+func TestStoreAssetURLParsesAzureSASExpiry(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	c.storeAssetURL(9, "https://release-assets.githubusercontent.com/github-production-release-asset/42/abc?sp=r&sv=2018-11-09&sr=b&se=2026-08-25T17%3A28%3A01Z&sig=secret&jwt=token")
+	got, ok := c.cachedAssetURL(9)
+	if !ok {
+		t.Fatal("stored URL must still be cached")
+	}
+	want := time.Date(2026, 8, 25, 17, 28, 1, 0, time.UTC).Add(-30 * time.Second)
+	if !got.expires.Equal(want) {
+		t.Fatalf("expiry %v, want %v (real SAS lifetime minus margin)", got.expires, want)
+	}
+}
+
+// TestStoreAssetURLFallbackKeepsUnknownSchemesCovered pins the safe
+// default: a signed URL whose scheme we cannot read gets a conservative
+// short residency; rejection-triggered re-resolution covers any guess
+// that runs long.
+func TestStoreAssetURLFallbackKeepsUnknownSchemesCovered(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	c.storeAssetURL(11, "https://cdn.example.com/x?sig=opaque&nonsense=1")
+	_, ok := c.cachedAssetURL(11)
+	if !ok {
+		t.Fatal("unknown-scheme URL must stay cached under the fallback")
+	}
+}
+
+// TestDownloadAssetStreamBodySurvivesReturn pins the streaming contract:
+// the returned body stays fully readable long after DownloadAssetStream
+// has returned. The CDN fetch bounds its request with a context deadline,
+// and that deadline's cancel must live as long as the body - a deferred
+// cancel amputated every large transfer mid-read ("context canceled"
+// after whatever bytes had already buffered), while tiny buffered test
+// bodies kept CI green. Large + slow is what makes this deterministic.
+func TestDownloadAssetStreamBodySurvivesReturn(t *testing.T) {
+	payload := make([]byte, 512<<10)
+	for i := range payload {
+		payload[i] = byte(i * 7)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, fmt.Sprintf("/cdn/7?sp=r&se=%s&sig=testsig", time.Now().Add(5*time.Minute).UTC().Format(time.RFC3339)), http.StatusFound)
+	})
+	mux.HandleFunc("/cdn/7", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		flusher := w.(http.Flusher)
+		for written := 0; written < len(payload); {
+			n, err := w.Write(payload[written : written+8<<10])
+			if err != nil {
+				return
+			}
+			written += n
+			flusher.Flush()
+			time.Sleep(2 * time.Millisecond)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := retryTaxonomyConfig(server, nil)
+	cfg.TransferThroughput = 1 << 20
+	c := NewClient("t", cfg)
+
+	body, size, err := c.DownloadAssetStream(context.Background(), "o", "p", 7, 0, int64(len(payload)-1))
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, readErr := io.ReadAll(body)
+	closeErr := body.Close()
+	if readErr != nil {
+		t.Fatalf("reading the returned body failed; the fetch deadline must outlive the call: %v (got %d/%d bytes)", readErr, len(got), len(payload))
+	}
+	if closeErr != nil {
+		t.Fatalf("close body: %v", closeErr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch: got %d bytes intact, want %d", len(got), len(payload))
+	}
+	if size != int64(len(payload)) {
+		t.Fatalf("content length %d, want %d", size, len(payload))
 	}
 }
