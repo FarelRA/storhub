@@ -3,12 +3,14 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
 func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
@@ -29,7 +31,6 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		return nil, "", err
 	}
 
-	// Resolve chunk names to ChunkInfo
 	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
 	for _, name := range fileMeta.Chunks {
 		if chunk, ok := repoMeta.Chunks[name]; ok {
@@ -37,10 +38,22 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		}
 	}
 
-	assembled := make([]ChunkInfo, 0, len(resolved)+len(patchedChunks)+2)
+	assembled := spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks)
+	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
+	return assembled, releaseTag, nil
+}
+
+// spliceEdit rewrites a playlist for one edit: chunks entirely before the
+// edit span pass through, chunks after it shift by delta, chunks spanning
+// it are cut into prefix/suffix views of their original assets, and the
+// inserted chunks - whose offsets must already be final - slot into place.
+// Pure metadata math; no I/O. Both the single-edit and batched patch
+// builders funnel through here so the layout rules have one definition.
+func spliceEdit(chunks []ChunkInfo, patchOffset, deleteSize, insertedLen int64, inserted []ChunkInfo) []ChunkInfo {
+	assembled := make([]ChunkInfo, 0, len(chunks)+len(inserted)+2)
 	patchEnd := patchOffset + deleteSize
-	delta := int64(len(edit)) - deleteSize
-	for _, chunk := range resolved {
+	delta := insertedLen - deleteSize
+	for _, chunk := range chunks {
 		chunkEnd := chunk.Offset + chunk.Size
 		if chunkEnd <= patchOffset || chunk.Offset >= patchEnd {
 			if chunk.Offset >= patchEnd {
@@ -50,24 +63,21 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 			continue
 		}
 		if chunk.Offset < patchOffset {
-			prefix, err := h.sliceChunk(ctx, project, chunk, chunk.Offset, patchOffset-chunk.Offset)
-			if err != nil {
-				return nil, "", err
-			}
+			prefix := chunk
+			prefix.Size = patchOffset - chunk.Offset
 			assembled = append(assembled, prefix)
 		}
 		if chunkEnd > patchEnd {
-			suffix, err := h.sliceChunk(ctx, project, chunk, patchEnd, chunkEnd-patchEnd)
-			if err != nil {
-				return nil, "", err
-			}
+			suffix := chunk
+			suffix.Offset = patchEnd
+			suffix.Size = chunkEnd - patchEnd
+			suffix.AssetOffset = chunk.AssetOffset + (patchEnd - chunk.Offset)
 			suffix.Offset += delta
 			assembled = append(assembled, suffix)
 		}
 	}
-	assembled = append(assembled, patchedChunks...)
-	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, releaseTag, nil
+	assembled = append(assembled, inserted...)
+	return assembled
 }
 
 func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte) ([]ChunkInfo, error) {
@@ -241,4 +251,48 @@ func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, 
 		assembled = append(assembled, segment)
 	}
 	return assembled, nil
+}
+
+// buildPatchedRangeChunks applies a batch of ascending, disjoint edits in
+// one pass: ONE release resolution for the whole batch, sequential
+// uploads of exactly the edited bytes, and one playlist rebuild. Edits
+// are folded through spliceEdit left to right with a running shift, so
+// the layout math stays identical to the single-edit path by
+// construction.
+func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, edits []shfs.RangeEdit) ([]ChunkInfo, string, error) {
+	if len(edits) == 0 {
+		return nil, "", errors.New("patch batch is empty")
+	}
+	workingMeta := repoMeta.Clone()
+	workingMeta.RemoveFile(filePath)
+	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+
+	requiredSlots := 0
+	for _, edit := range edits {
+		requiredSlots += inlineChunkCount(edit.Len(), chunkSize)
+	}
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
+	if err != nil {
+		return nil, "", err
+	}
+
+	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
+	for _, name := range fileMeta.Chunks {
+		if chunk, ok := repoMeta.Chunks[name]; ok {
+			resolved = append(resolved, chunk)
+		}
+	}
+
+	assembled := resolved
+	shift := int64(0)
+	for _, edit := range edits {
+		inserted, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, edit.Start+shift, edit.Data)
+		if err != nil {
+			return nil, "", err
+		}
+		assembled = spliceEdit(assembled, edit.Start+shift, edit.DeleteSize, edit.Len(), inserted)
+		shift += edit.Len() - edit.DeleteSize
+	}
+	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
+	return assembled, releaseTag, nil
 }

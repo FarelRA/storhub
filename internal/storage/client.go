@@ -882,6 +882,120 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	return result, err
 }
 
+// PatchFileRangesWithMetadataContext applies a batch of ascending,
+// disjoint edits as ONE operation: one release resolution, one asset per
+// chunk of edited bytes, one playlist rebuild, one metadata mutation.
+// Compared to looping PatchFileContext per range it removes the per-range
+// release listing round-trip and the N-1 intermediate playlist states -
+// on a slow link that turns N+2 latency chains into one. The caller owns
+// the pre-network validation (range bounds, sort order); this layer
+// re-validates defensively and re-checks concurrent size changes once
+// before committing.
+// PatchFileRangesContext applies a batch of ascending, disjoint edits as
+// ONE operation: one release resolution, one asset per chunk of edited
+// bytes, one playlist rebuild, one metadata mutation. Compared to looping
+// PatchFileContext per range it removes the per-range release listing
+// round-trip and the N-1 intermediate playlist states - on a slow link
+// that turns N+2 latency chains into one. Either the whole batch commits
+// or none of it does.
+func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName string, edits []shfs.RangeEdit) (result *FileMeta, err error) {
+	started := h.logOpStart(project, "patch-file-ranges", "path", fileName, "edits", len(edits))
+	defer func() {
+		h.logOpFinish(project, "patch-file-ranges", started, err, "path", fileName, "edits", len(edits))
+	}()
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	cleanName, err := shfs.NormalizePath(fileName)
+	if err != nil {
+		return nil, err
+	}
+	if cleanName == "" {
+		return nil, errors.New("file name is required")
+	}
+	if len(edits) == 0 {
+		return nil, errors.New("patch batch is empty")
+	}
+	for i, edit := range edits {
+		if edit.Start < 0 || edit.DeleteSize < 0 {
+			return nil, fmt.Errorf("patch edit %d has negative range", i)
+		}
+		if edit.DeleteSize == 0 && edit.Len() == 0 {
+			return nil, fmt.Errorf("patch edit %d is empty", i)
+		}
+		if i > 0 && edit.Start < edits[i-1].End() {
+			return nil, fmt.Errorf("patch edit %d overlaps its predecessor", i)
+		}
+	}
+
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	fileMeta := repoMeta.FindFile(cleanName)
+	if fileMeta == nil {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
+	}
+	if fileMeta.Symlink != "" {
+		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
+	}
+	for i, edit := range edits {
+		if edit.End() > fileMeta.Size {
+			return nil, fmt.Errorf("patch edit %d range [%d,%d) exceeds file size %d", i, edit.Start, edit.End(), fileMeta.Size)
+		}
+	}
+
+	newChunks, releaseTag, err := h.buildPatchedRangeChunks(ctx, project, repoMeta, *fileMeta, cleanName, edits)
+	if err != nil {
+		return nil, err
+	}
+	now := h.config.Now().Unix()
+	patched := fileMeta.Clone()
+
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	pm.meta.EnsureRelease(releaseTag, now)
+	chunkIDs := make([]int64, len(newChunks))
+	for i := range newChunks {
+		id := pm.meta.AllocateChunkID()
+		pm.meta.Chunks[id] = newChunks[i]
+		chunkIDs[i] = id
+	}
+	patched.Chunks = chunkIDs
+	totalDelete, totalInsert := int64(0), int64(0)
+	for _, edit := range edits {
+		totalDelete += edit.DeleteSize
+		totalInsert += edit.Len()
+	}
+	patched.Size = fileMeta.Size - totalDelete + totalInsert
+	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
+	patched.ModifiedAt = now
+	patched.ChangedAt = now
+	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
+	current := pm.meta.FindFile(cleanName)
+	if current == nil {
+		pm.mu.Unlock()
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
+	}
+	// Same concurrency guard as the single-edit path: the snapshot may be
+	// stale by the time uploads finish; one size check covers the batch.
+	if current.Size != fileMeta.Size || edits[len(edits)-1].End() > current.Size {
+		pm.mu.Unlock()
+		return nil, fmt.Errorf("file %s changed concurrently (size %d, expected %d); patch batch rejected", cleanName, current.Size, fileMeta.Size)
+	}
+	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
+	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
+	h.markProjectDirtyLiveLocked(project, pm)
+	pm.mu.Unlock()
+
+	select {
+	case pm.triggerCh <- struct{}{}:
+	default:
+	}
+
+	return &patched, nil
+}
+
 func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMeta, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
 	newChunks, releaseTag, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
 	if err != nil {

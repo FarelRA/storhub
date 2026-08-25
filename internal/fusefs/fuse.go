@@ -301,6 +301,7 @@ type Hub interface {
 	DownloadFileContext(context.Context, string, string, string) error
 	ReadFileAtContext(context.Context, string, string, int64, int64) ([]byte, error)
 	PatchFileContext(context.Context, string, string, int64, int64, []byte, ...shfs.MutateOption) (*metadata.FileMeta, error)
+	PatchFileRangesContext(context.Context, string, string, []shfs.RangeEdit) (*metadata.FileMeta, error)
 	ReplaceFileContext(context.Context, string, string, string, ...shfs.MutateOption) (*metadata.FileMeta, error)
 	LoadRepoMetadataReadonlyContext(context.Context, string) (*metadata.RepoMetadata, string, error)
 	ReadPinnedFileContext(context.Context, string, *metadata.FileMeta, map[int64]metadata.ChunkInfo, int64, int64) ([]byte, error)
@@ -2633,40 +2634,53 @@ func (w *inodeWriteState) removeDirtyRangeLocked(start, end int64) {
 // commitPatch handles the partial patch path.
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
 func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
-	edits := make([][]byte, len(planned))
-	for i, dirty := range planned {
+	edits := make([]shfs.RangeEdit, 0, len(planned))
+	for _, dirty := range planned {
 		buf := make([]byte, dirty.End-dirty.Start)
 		n, err := h.writeState.readIntoLocked(ctx, buf, dirty.Start)
 		if err != nil {
 			h.writeState.mu.Unlock()
 			return errnoFromError(err)
 		}
+		// A short read is legal only when the missing tail lies past
+		// end-of-file, where POSIX holes read as zeros. Anything else is
+		// internal inconsistency: refuse to upload fabricated bytes.
+		if n < len(buf) && dirty.Start+int64(n) < logicalSize {
+			h.writeState.mu.Unlock()
+			h.fs.errorf("commit aborted path=%s inode=%d step=patch-read short read at [%d,%d): got %d of %d bytes before EOF", targetPath, h.inode, dirty.Start, dirty.End, n, len(buf))
+			return syscall.EIO
+		}
 		for j := n; j < len(buf); j++ {
 			buf[j] = 0
 		}
-		edits[i] = buf
-	}
-	h.writeState.mu.Unlock()
-	h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
-	for i := len(planned) - 1; i >= 0; i-- {
-		dirty := planned[i]
 		deleteSize := dirty.End - dirty.Start
 		if dirty.Start >= baseSize {
 			deleteSize = 0
 		} else if maxDelete := baseSize - dirty.Start; deleteSize > maxDelete {
 			deleteSize = maxDelete
 		}
-		if _, err := h.fs.hub.PatchFileContext(ctx, h.fs.project, targetPath, dirty.Start, deleteSize, edits[i]); err != nil {
-			h.fs.debugf("commit failed path=%s inode=%d step=patch offset=%d err=%v", targetPath, h.inode, dirty.Start, err)
-			return errnoFromError(err)
-		}
-		// Mark this range applied so a retry resumes instead of
-		// re-applying already-committed edits (which would duplicate
-		// bytes).
-		h.writeState.mu.Lock()
-		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
-		h.writeState.mu.Unlock()
+		edits = append(edits, shfs.RangeEdit{Start: dirty.Start, DeleteSize: deleteSize, Data: buf})
 	}
+	h.writeState.mu.Unlock()
+
+	// One batched operation for the whole commit: a single release
+	// resolution and playlist rebuild instead of one round-trip chain per
+	// range. Ascending order replaces the old right-to-left dance - no
+	// intermediate offsets to keep valid. Either the whole batch commits
+	// or none of it does, so failures leave every range dirty and the
+	// retry replays the identical batch.
+	h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
+	if _, err := h.fs.hub.PatchFileRangesContext(ctx, h.fs.project, targetPath, edits); err != nil {
+		h.fs.debugf("commit failed path=%s inode=%d step=patch-batch err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	// Mark all applied ranges consumed so a retry resumes instead of
+	// re-applying committed edits (which would duplicate bytes).
+	h.writeState.mu.Lock()
+	for _, dirty := range planned {
+		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
+	}
+	h.writeState.mu.Unlock()
 	if logicalSize != baseSize {
 		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
 		if !appendOnly {

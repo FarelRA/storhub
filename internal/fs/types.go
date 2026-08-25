@@ -35,6 +35,24 @@ type MetadataPatch struct {
 	MTime    time.Time
 }
 
+// RangeEdit replaces the byte span [Start, Start+DeleteSize) with Data in
+// one step. A batch of RangeEdits is applied to a file as a single
+// operation: one release resolution, one asset per chunk of edited bytes,
+// one playlist rebuild, one metadata mutation. Edits must be sorted by
+// Start and never overlap; DeleteSize may be zero (pure insert) and Data
+// may be empty (pure delete).
+type RangeEdit struct {
+	Start      int64
+	DeleteSize int64
+	Data       []byte
+}
+
+// End returns the exclusive end offset this edit replaces.
+func (e RangeEdit) End() int64 { return e.Start + e.DeleteSize }
+
+// Len reports how many bytes the edit inserts.
+func (e RangeEdit) Len() int64 { return int64(len(e.Data)) }
+
 type DirEntry struct {
 	Name      string            `json:"name"`
 	Path      string            `json:"path"`

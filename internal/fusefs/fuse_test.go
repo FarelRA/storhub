@@ -1118,26 +1118,31 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 }
 
 type stubHub struct {
-	createFile   func(context.Context, string, string) (*meta.FileMeta, error)
-	statPath     func(context.Context, string, string) (*shfs.EntryInfo, error)
-	readDir      func(context.Context, string, string) ([]shfs.DirEntry, error)
-	statFS       func(context.Context, string) (*shfs.FSStats, error)
-	readFileAt   func(context.Context, string, string, int64, int64) ([]byte, error)
-	getXAttr     func(context.Context, string, string, string) ([]byte, error)
-	setXAttr     func(context.Context, string, string, string, []byte) error
-	listXAttr    func(context.Context, string, string) ([]string, error)
-	removeXAttr  func(context.Context, string, string, string) error
-	readlink     func(context.Context, string, string) (string, error)
-	chmod        func(context.Context, string, string, uint32) error
-	applyPatch   func(context.Context, string, string, shfs.MetadataPatch) error
-	truncateFile func(context.Context, string, string, int64) (*meta.FileMeta, error)
-	loadReadonly func(context.Context, string) (*meta.RepoMetadata, string, error)
-	updateMeta   func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
-	renameFn     func(context.Context, string, string, string) error
-	replaceFile  func(context.Context, string, string, string) (*meta.FileMeta, error)
-	patchFile    func(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error)
-	now          int64
-	chunkSize    int64
+	createFile      func(context.Context, string, string) (*meta.FileMeta, error)
+	statPath        func(context.Context, string, string) (*shfs.EntryInfo, error)
+	readDir         func(context.Context, string, string) ([]shfs.DirEntry, error)
+	statFS          func(context.Context, string) (*shfs.FSStats, error)
+	readFileAt      func(context.Context, string, string, int64, int64) ([]byte, error)
+	getXAttr        func(context.Context, string, string, string) ([]byte, error)
+	setXAttr        func(context.Context, string, string, string, []byte) error
+	listXAttr       func(context.Context, string, string) ([]string, error)
+	removeXAttr     func(context.Context, string, string, string) error
+	readlink        func(context.Context, string, string) (string, error)
+	chmod           func(context.Context, string, string, uint32) error
+	applyPatch      func(context.Context, string, string, shfs.MetadataPatch) error
+	truncateFile    func(context.Context, string, string, int64) (*meta.FileMeta, error)
+	loadReadonly    func(context.Context, string) (*meta.RepoMetadata, string, error)
+	updateMeta      func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
+	renameFn        func(context.Context, string, string, string) error
+	replaceFile     func(context.Context, string, string, string) (*meta.FileMeta, error)
+	patchFile       func(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error)
+	patchRanges     func([]shfs.RangeEdit) (*meta.FileMeta, error)
+	downloadFile    func(context.Context, string, string, string) error
+	downloads       int
+	patchRangeCalls int
+	patchRangeEdits [][]shfs.RangeEdit
+	now             int64
+	chunkSize       int64
 }
 
 func (s *stubHub) StatPathContext(ctx context.Context, project, target string) (*shfs.EntryInfo, error) {
@@ -1231,7 +1236,13 @@ func (s *stubHub) RemoveXAttrContext(ctx context.Context, project, target, attr 
 	}
 	return nil
 }
-func (*stubHub) DownloadFileContext(context.Context, string, string, string) error { return nil }
+func (s *stubHub) DownloadFileContext(ctx context.Context, project, path, dest string) error {
+	if s.downloadFile != nil {
+		s.downloads++
+		return s.downloadFile(ctx, project, path, dest)
+	}
+	return nil
+}
 func (s *stubHub) ReadFileAtContext(ctx context.Context, project, target string, off, length int64) ([]byte, error) {
 	if s.readFileAt != nil {
 		return s.readFileAt(ctx, project, target, off, length)
@@ -1278,6 +1289,30 @@ func (s *stubHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 }
 func (*stubHub) RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *meta.RepoMetadata, *meta.FileMeta, int64, []ByteRange) (*meta.FileMeta, error) {
 	return nil, nil
+}
+
+func (s *stubHub) PatchFileRangesContext(_ context.Context, _, _ string, edits []shfs.RangeEdit) (*meta.FileMeta, error) {
+	if s.patchRanges == nil {
+		return nil, nil
+	}
+	out, err := s.patchRanges(edits)
+	if err != nil {
+		return nil, err
+	}
+	s.patchRangeCalls++
+	s.patchRangeEdits = append(s.patchRangeEdits, edits)
+	// Mirror the storage contract: the returned entry carries the batched size.
+	totalDelete, totalInsert := int64(0), int64(0)
+	for _, edit := range edits {
+		totalDelete += edit.DeleteSize
+		totalInsert += edit.Len()
+	}
+	base := &meta.FileMeta{Size: 0}
+	if out != nil {
+		base = out
+	}
+	base.Size += totalInsert - totalDelete
+	return base, nil
 }
 func (s *stubHub) Now() int64 {
 	if s.now == 0 {
@@ -1520,23 +1555,24 @@ func newPatchTestHandle(fsys *Filesystem, inode uint64, state *inodeWriteState) 
 	return h
 }
 
-// TestCommitPatchRetriesResumeAfterFailure pins the idempotency contract of
-// the patch ladder: ranges are applied in REVERSE order, each successful
-// range leaves the dirty set immediately, so a mid-loop failure makes the
-// retry apply only the remainder instead of duplicating bytes.
-func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
+// TestCommitPatchBatchRetryAfterFailure pins the idempotency contract of
+// the batched patch ladder: a commit is ONE operation, so failure leaves
+// EVERY range dirty and the retry replays the identical batch - no range
+// can be half-applied, and nothing duplicates.
+func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
 	var mu sync.Mutex
-	var applied []int64
-	failOnSecondCall := true
+	var batches [][]shfs.RangeEdit
+	failFirst := true
 	hub := &stubHub{chunkSize: 4}
-	hub.patchFile = func(_ context.Context, _, _ string, off, _ int64, _ []byte) (*meta.FileMeta, error) {
+	hub.patchRanges = func(edits []shfs.RangeEdit) (*meta.FileMeta, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if len(applied) == 1 && failOnSecondCall {
+		if failFirst {
+			failFirst = false
 			return nil, syscall.EIO
 		}
-		applied = append(applied, off)
-		return nil, nil
+		batches = append(batches, append([]shfs.RangeEdit(nil), edits...))
+		return &meta.FileMeta{}, nil
 	}
 	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -1545,9 +1581,25 @@ func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
 	defer func() { _ = fsys.Close() }()
 
 	const inode = uint64(21)
-	// Base 4 bytes, working content 12 bytes: chunks [4,8) and [8,12) dirty.
-	state := newPatchTestState(t, fsys, inode, 4, "ABCDEFGHIJKL")
-	planned := []ByteRange{{Start: 4, End: 8}, {Start: 8, End: 12}}
+	// Base 4 bytes, working content 12 bytes, two DISJOINT dirty ranges
+	// ([4,8) and [9,11)) so the batch carries two separate edits.
+	state := &inodeWriteState{fs: fsys, inode: inode, path: "patch.bin", refs: 1}
+	fsys.mu.Lock()
+	fsys.writeStates[inode] = state
+	fsys.mu.Unlock()
+	if err := state.materializeBootstrap(4); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := state.temp.WriteAt([]byte("ABCDEFGHIJKL"), 0); err != nil {
+		t.Fatalf("seed temp: %v", err)
+	}
+	state.mu.Lock()
+	state.baseSize = 4
+	state.logicalSize = 12
+	state.markDirtyLocked(4, 8)
+	state.markDirtyLocked(9, 11)
+	state.mu.Unlock()
+	planned := []ByteRange{{Start: 4, End: 8}, {Start: 9, End: 11}}
 	h := newPatchTestHandle(fsys, inode, state)
 
 	// Caller contract: hold state.mu on entry; commitPatch releases it on
@@ -1555,37 +1607,49 @@ func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
 	state.mu.Lock()
 	errno := h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), planned...), shfs.MetadataPatch{})
 	if errno == 0 {
-		t.Fatal("expected the injected second-range failure to surface")
+		t.Fatal("expected the injected batch failure to surface")
 	}
-	mu.Lock()
-	firstPass := append([]int64(nil), applied...)
-	mu.Unlock()
 	state.mu.Lock()
 	remaining := append([]ByteRange(nil), state.dirtyRanges...)
 	logical := state.logicalSize
 	state.mu.Unlock()
-	if len(firstPass) != 1 || firstPass[0] != 8 {
-		t.Fatalf("reverse order must apply [8,12) first, got %v", firstPass)
-	}
-	if len(remaining) != 1 || remaining[0] != (ByteRange{Start: 4, End: 8}) {
-		t.Fatalf("after failure only the unapplied range must remain dirty, got %+v", remaining)
+	if len(remaining) != 2 || remaining[0] != (ByteRange{Start: 4, End: 8}) || remaining[1] != (ByteRange{Start: 9, End: 11}) {
+		t.Fatalf("failed batch must leave every range dirty, got %+v", remaining)
 	}
 	if logical != 12 {
 		t.Fatalf("failure must not lose the logical size: %d", logical)
 	}
 
-	// Retry: only the failed range is applied; the committed one is NOT
-	// repeated.
-	failOnSecondCall = false
+	// Retry: the identical batch is replayed and succeeds.
 	state.mu.Lock()
-	errno = h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), remaining...), shfs.MetadataPatch{})
+	errno = h.commitPatch(context.Background(), "patch.bin", 4, 12, remaining, shfs.MetadataPatch{})
 	if errno != 0 {
 		t.Fatalf("retry failed: %v", errno)
 	}
+	state.mu.Lock()
+	dirtyLeft := len(state.dirtyRanges)
+	base := state.baseSize
+	state.mu.Unlock()
+	if dirtyLeft != 0 {
+		t.Fatalf("successful retry must clear every dirty range, got %d left", dirtyLeft)
+	}
+	if base != 12 {
+		t.Fatalf("retry must promote logical size to base, got %d", base)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(applied) != 2 || applied[1] != 4 {
-		t.Fatalf("retry must apply only the remaining range, got %v", applied)
+	if hub.patchRangeCalls != 1 || len(batches) != 1 {
+		t.Fatalf("retry must issue exactly one successful batch, got calls=%d batches=%d", hub.patchRangeCalls, len(batches))
+	}
+	replay := batches[0]
+	if len(replay) != 2 || replay[0].Start != 4 || replay[1].Start != 9 {
+		t.Fatalf("batch must carry both edits ascending, got %+v", replay)
+	}
+	if replay[0].DeleteSize != 0 || string(replay[0].Data) != "EFGH" {
+		t.Fatalf("edit [4,8) is a pure insert of EFGH, got %+v", replay[0])
+	}
+	if replay[1].DeleteSize != 0 || string(replay[1].Data) != "JK" {
+		t.Fatalf("edit [9,11) is a pure insert of JK, got %+v", replay[1])
 	}
 }
 
@@ -1595,8 +1659,8 @@ func TestCommitPatchRetriesResumeAfterFailure(t *testing.T) {
 func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	hub := &stubHub{chunkSize: 4}
-	hub.patchFile = func(callCtx context.Context, _, _ string, _, _ int64, _ []byte) (*meta.FileMeta, error) {
-		return nil, callCtx.Err()
+	hub.patchRanges = func(_ []shfs.RangeEdit) (*meta.FileMeta, error) {
+		return nil, context.Canceled
 	}
 	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
 	if err != nil {
@@ -1633,13 +1697,15 @@ func TestConcurrentFDsShareWriteState(t *testing.T) {
 		edit   string
 	}
 	hub := &stubHub{chunkSize: 64}
-	hub.patchFile = func(_ context.Context, _, _ string, off, del int64, edit []byte) (*meta.FileMeta, error) {
+	hub.patchRanges = func(edits []shfs.RangeEdit) (*meta.FileMeta, error) {
 		mu.Lock()
-		patched = append(patched, struct {
-			off    int64
-			delete int64
-			edit   string
-		}{off, del, string(edit)})
+		for _, e := range edits {
+			patched = append(patched, struct {
+				off    int64
+				delete int64
+				edit   string
+			}{e.Start, e.DeleteSize, string(e.Data)})
+		}
 		mu.Unlock()
 		return &meta.FileMeta{}, nil
 	}
@@ -1895,5 +1961,72 @@ func TestNewSweepsStaleOverlayTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(recoveryFile); err != nil {
 		t.Errorf("recovery/ quarantine must survive the sweep: %v", err)
+	}
+}
+
+// TestReadonlyOpenServesPinnedRangesWithoutFullDownload pins the read-path
+// contract: a plain readonly open transfers ZERO file bytes - only
+// metadata - and every Read is served on demand against the pinned chunk
+// layout. Full-file materialization is reserved for destructive-path
+// snapshots (unlink/rename-over), never for reading.
+func TestReadonlyOpenServesPinnedRangesWithoutFullDownload(t *testing.T) {
+	now := int64(50)
+	hub := &stubHub{chunkSize: 64}
+	hub.loadReadonly = func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
+		repo := meta.NewRepoMetadata("demo")
+		repo.UpsertFile("docs/big.txt", meta.FileMeta{Inode: 9, Size: 4096}, now)
+		repo.RebuildIndexes()
+		return repo, "sha-1", nil
+	}
+	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
+		if target == "docs/big.txt" {
+			return &shfs.EntryInfo{Path: target, Inode: 9, Size: 4096, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+		}
+		return nil, syscall.ENOENT
+	}
+	served := make(map[int64]string)
+	hub.readFileAt = func(_ context.Context, _, _ string, off, length int64) ([]byte, error) {
+		served[off] = string(rune('a' + off))
+		out := make([]byte, length)
+		for i := range out {
+			out[i] = byte('a' + int(off) + i)
+		}
+		return out, nil
+	}
+	fsys, err := New(hub, "demo", Options{CacheDir: t.TempDir(), CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer func() { _ = fsys.Close() }()
+
+	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "docs/big.txt", Inode: 9, Size: 4096, Mode: 0o600, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now})
+	hAny, _, errno := node.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("open: %v", errno)
+	}
+	h := hAny.(*storhubHandle)
+	if h.temp != nil {
+		t.Fatal("readonly open must not materialize the file body")
+	}
+
+	buf := make([]byte, 4)
+	res, errno := h.Read(context.Background(), buf, 3)
+	if errno != 0 {
+		t.Fatalf("read at 3: %v", errno)
+	}
+	got, _ := res.Bytes(buf)
+	if len(got) != 4 || string(got) != "defg" {
+		t.Fatalf("pinned range read returned %q, want \"defg\"", got)
+	}
+	res, errno = h.Read(context.Background(), buf, 100)
+	if errno != 0 {
+		t.Fatalf("read at 100: %v", errno)
+	}
+	got, _ = res.Bytes(buf)
+	if len(got) != 4 {
+		t.Fatalf("short tail read: %q", got)
+	}
+	if hub.downloads != 0 {
+		t.Fatalf("readonly reads must never trigger full-file downloads, got %d", hub.downloads)
 	}
 }
