@@ -43,14 +43,14 @@ type AuthOptions struct {
 }
 
 type User struct {
-	Username     string
-	PasswordHash string
-	Password     string
-	UID          uint32
-	PrimaryGID   uint32
-	Groups       []uint32
-	Admin        bool
-	Disabled     bool
+	Username     string   `json:"username"`
+	PasswordHash string   `json:"password_hash"`
+	Password     string   `json:"password,omitempty"`
+	UID          uint32   `json:"uid"`
+	PrimaryGID   uint32   `json:"primary_gid"`
+	Groups       []uint32 `json:"groups,omitempty"`
+	Admin        bool     `json:"admin,omitempty"`
+	Disabled     bool     `json:"disabled,omitempty"`
 }
 
 type restAuthenticator struct {
