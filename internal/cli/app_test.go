@@ -117,7 +117,8 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 		{name: "patch", args: []string{"patch", "project", "path", "0", "0", "text"}, want: "missing GitHub token"},
 		{name: "revisions", args: []string{"revisions", "project"}, want: "missing GitHub token"},
 		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "missing GitHub token"},
-		{name: "serve-rest", args: []string{"serve-rest"}, want: "missing GitHub token"},
+		{name: "rest", args: []string{"rest"}, want: "missing GitHub token"},
+		{name: "serve", args: []string{"serve", "project", t.TempDir()}, want: "missing GitHub token"},
 		{name: "mount", args: []string{"mount", "project", t.TempDir()}, want: "missing GitHub token"},
 	}
 	for _, check := range checks {
@@ -189,8 +190,9 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"patch", "--token", "x", "demo", "docs/readme.txt", "1", "2", "x"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
-		{"serve-rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
+		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
+		{"serve", "--token", "x", "demo", mountDir, "--allow-anonymous"},
 	}
 	for _, args := range checks {
 		if err := app.Run(args); err != nil {
@@ -199,7 +201,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	// Status chatter belongs on stderr; stdout carries only data.
 	chatter := stderr()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at "} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
 		if !strings.Contains(chatter, want) {
 			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
@@ -325,7 +327,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 		}
 		return errors.New("stop")
 	}
-	err := app.Run([]string{"serve-rest", "--token", "x", "--listen", "127.0.0.1:9090", "--auth-file", authFile})
+	err := app.Run([]string{"rest", "--token", "x", "--listen", "127.0.0.1:9090", "--auth-file", authFile})
 	if err == nil || err.Error() != "stop" {
 		t.Fatalf("expected stop error, got %v", err)
 	}
@@ -470,7 +472,7 @@ func TestArgValidationErrors(t *testing.T) {
 	})
 
 	t.Run("no args", func(t *testing.T) {
-		err := app.Run([]string{"serve-rest", "extra"})
+		err := app.Run([]string{"rest", "extra"})
 		if err == nil || !strings.Contains(err.Error(), "unknown command") {
 			t.Fatalf("expected unknown command error, got %v", err)
 		}

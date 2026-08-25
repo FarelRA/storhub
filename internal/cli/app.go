@@ -96,6 +96,9 @@ var newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
 	}
 	return storhubClient{StorHub: hub}, nil
 }
+var newFUSEFn = func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
+	return hub.NewFUSE(project, opts)
+}
 var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
 	return shrest.New(hub, opts)
 }
@@ -136,8 +139,9 @@ Examples:
   storhub upload docs-project docs/readme.txt ./README.md
   storhub ls docs-project docs
   storhub stat docs-project docs/readme.txt
-  storhub serve-rest --listen :8080
-  storhub mount docs-project ./mnt`,
+  storhub rest --listen :8080
+  storhub mount docs-project ./mnt
+  storhub serve docs-project ./mnt --listen :8080`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
@@ -173,7 +177,8 @@ Examples:
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newMountCmd())
-	rootCmd.AddCommand(a.newServeRESTCmd())
+	rootCmd.AddCommand(a.newRestCmd())
+	rootCmd.AddCommand(a.newServeCmd())
 
 	// An unknown command is as much a command-line mistake as a bad flag:
 	// both must classify as usage errors so main exits 2. Making the root
@@ -430,9 +435,9 @@ func (a *App) newMountCmd() *cobra.Command {
 	return cmd
 }
 
-func (a *App) newServeRESTCmd() *cobra.Command {
+func (a *App) newRestCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "serve-rest [flags]",
+		Use:   "rest [flags]",
 		Short: "Start the REST API server",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE:  a.runServeREST,
@@ -458,11 +463,11 @@ func (a *App) Run(args []string) error {
 
 // shutdownHub is the SINGLE owner of hub.Shutdown: the one and only
 // place that drains the asynchronous metadata writer. Commands must
-// never call Shutdown themselves - not serve-rest, not mount - so there
-// is exactly one drain point to reason about. Shutdown is part of the
-// hubClient contract, so nothing reachable here can lack it. The writer
-// is asynchronous, meaning a CLI mutation that exits without this loses
-// data; that is precisely what the released-binary smoke test caught.
+// never call Shutdown themselves - not rest, not mount, not serve - so
+// there is exactly one drain point to reason about. Shutdown is part of
+// the hubClient contract, so nothing reachable here can lack it. The
+// writer is asynchronous, meaning a CLI mutation that exits without this
+// loses data; that is precisely what the released-binary smoke test caught.
 func (a *App) shutdownHub() {
 	if a.hub == nil {
 		return
@@ -495,7 +500,7 @@ func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
 func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 	hub, err := newRESTHubFromFlagsFn(token, apiBase, chunkSize, public)
 	if err == nil {
-		// serve-rest needs the raw *StorHub for shrest.New; track the
+		// rest/serve need the raw *StorHub for shrest.New; track the
 		// wrapped form so Run can still flush pending metadata.
 		a.hub = storhubClient{StorHub: hub}
 	}
@@ -986,43 +991,68 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	apiBase, _ := cmd.Flags().GetString("api-base")
 	listen, _ := cmd.Flags().GetString("listen")
-	basePath, _ := cmd.Flags().GetString("base-path")
-	authFile, _ := cmd.Flags().GetString("auth-file")
-	if authFile == "" {
-		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
-	}
 	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
-	opts := shrest.DefaultOptions()
-	opts.BasePath = basePath
-	if strings.TrimSpace(authFile) != "" {
-		auth, err := loadRESTAuthOptions(authFile)
-		if err != nil {
-			return err
-		}
-		opts.Auth = auth
-	} else {
-		// Running without an auth file is a deliberate choice: require the
-		// explicit opt-in flag so an open server never happens by accident.
-		noAuth, _ := cmd.Flags().GetBool("allow-anonymous")
-		if !noAuth {
-			return fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")
-		}
-		opts.AllowAnonymous = true
-	}
-	handler, err := newRESTHandlerFn(hub, opts)
+	opts, err := serveAuthOptions(cmd)
 	if err != nil {
 		return err
 	}
-	handler = a.loggingMiddleware(handler)
-	mode := "without auth"
-	if opts.Auth != nil {
-		mode = "with auth"
+	handler, err := a.buildRESTHandler(hub, opts)
+	if err != nil {
+		return err
 	}
-	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, mode)
-	server := &http.Server{
+	server := newRESTServer(listen, handler)
+	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
+	return a.serveRESTUntilSignal(server, hub)
+}
+
+// serveAuthOptions resolves the shared REST serving policy: base path and
+// authentication. Running without an auth file is a deliberate choice -
+// require the explicit opt-in flag so an open server never happens by
+// accident.
+func serveAuthOptions(cmd *cobra.Command) (shrest.Options, error) {
+	basePath, _ := cmd.Flags().GetString("base-path")
+	authFile, _ := cmd.Flags().GetString("auth-file")
+	opts := shrest.DefaultOptions()
+	opts.BasePath = basePath
+	if authFile == "" {
+		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
+	}
+	if strings.TrimSpace(authFile) != "" {
+		auth, err := loadRESTAuthOptions(authFile)
+		if err != nil {
+			return opts, err
+		}
+		opts.Auth = auth
+	} else {
+		noAuth, _ := cmd.Flags().GetBool("allow-anonymous")
+		if !noAuth {
+			return opts, fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")
+		}
+		opts.AllowAnonymous = true
+	}
+	return opts, nil
+}
+
+func (a *App) buildRESTHandler(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+	handler, err := newRESTHandlerFn(hub, opts)
+	if err != nil {
+		return nil, err
+	}
+	return a.loggingMiddleware(handler), nil
+}
+
+func describeRESTAuth(opts shrest.Options) string {
+	if opts.Auth != nil {
+		return "with auth"
+	}
+	return "without auth"
+}
+
+func newRESTServer(listen string, handler http.Handler) *http.Server {
+	return &http.Server{
 		Addr:              listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -1030,8 +1060,167 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	return a.serveRESTUntilSignal(server, hub)
 }
+
+// newServeCmd registers `storhub serve`: FUSE mount and REST API from one
+// process over ONE shared hub. Sharing the hub is the point - both surfaces
+// see each other's writes immediately, share one metadata writer and one
+// cache claim; two hubs would fight over the git cache lock and double-flush
+// metadata.
+func (a *App) newServeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve <project> <mount-point>",
+		Short: "Mount FUSE and serve the REST API together",
+		Long: `Serve mounts the project over FUSE and exposes the same data through
+the REST API, from one process over one shared hub: writes through the
+mount are visible to REST clients immediately and vice versa.
+
+On Ctrl+C the mount is unmounted and in-flight HTTP requests drained
+before pending metadata is flushed.`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runServe,
+	}
+	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
+	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
+	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+	cmd.Flags().String("listen", ":8080", "Listen address for the REST API")
+	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
+	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
+	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
+	return cmd
+}
+
+func (a *App) runServe(cmd *cobra.Command, args []string) error {
+	token, _ := cmd.Flags().GetString("token")
+	apiBase, _ := cmd.Flags().GetString("api-base")
+	allowOther, _ := cmd.Flags().GetBool("allow-other")
+	debug, _ := cmd.Flags().GetBool("debug")
+	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	listen, _ := cmd.Flags().GetString("listen")
+
+	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
+	if err != nil {
+		return err
+	}
+	fuseOpts := storhub.DefaultFUSEOptions()
+	fuseOpts.AllowOther = allowOther
+	fuseOpts.Debug = debug
+	fuseOpts.CacheDir = cacheDir
+
+	// Arm signal handling before touching FUSE: an interrupt arriving during
+	// setup must not kill the process with a half-attached mount left behind.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fsys, err := newFUSEFn(hub, args[0], fuseOpts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = fsys.Close() }()
+	if err := os.MkdirAll(args[1], 0o755); err != nil {
+		return err
+	}
+	if err := fsys.Mount(args[1]); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		if uerr := fsys.Unmount(); uerr != nil {
+			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", uerr, args[1])
+		}
+		return errors.New("interrupted while mounting " + args[0])
+	}
+	// Single owner of fsys.Wait: everything below joins through fsDone.
+	fsDone := fsWait(fsys)
+	opts, err := serveAuthOptions(cmd)
+	if err != nil {
+		stop()
+		unmountWithRetry(fsys, args[1], a.stderr)
+		<-fsDone
+		return err
+	}
+	handler, err := a.buildRESTHandler(hub, opts)
+	if err != nil {
+		stop()
+		unmountWithRetry(fsys, args[1], a.stderr)
+		<-fsDone
+		return err
+	}
+	server := newRESTServer(listen, handler)
+	errCh := make(chan error, 1)
+	errDone := make(chan struct{})
+	go func() {
+		defer close(errDone)
+		errCh <- restListenAndServeFn(server)
+	}()
+
+	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
+	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
+	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to stop")
+
+	var serveErr error
+	fsDown := false
+	select {
+	case <-fsDone:
+		// The mount went away on its own (unmounted externally).
+		fsDown = true
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// The listener died; tear the mount down too so neither
+			// surface outlives the other half-configured.
+			serveErr = err
+		}
+	case <-ctx.Done():
+	}
+	// Both surfaces can end at once; fold whatever else is already
+	// decided so a simultaneous failure is never swallowed.
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && serveErr == nil {
+			serveErr = err
+		}
+	default:
+	}
+	if !fsDown {
+		select {
+		case <-fsDone:
+			fsDown = true
+		default:
+		}
+	}
+	// Restore the default signal disposition first: pressing Ctrl+C again
+	// force-quits instead of queueing more polite stops.
+	stop()
+	// Drain in-flight requests before pulling the mount out from under
+	// any client that might still be reading through it.
+	shutdownRESTServer(server, a.stderr)
+	if !fsDown {
+		unmountWithRetry(fsys, args[1], a.stderr)
+	}
+	<-fsDone
+	// Join the listener goroutine so nothing outlives this function.
+	<-errDone
+	// Metadata draining is NOT done here: Run's shutdownHub is the single
+	// owner of hub.Shutdown for every command.
+	return serveErr
+}
+
+func shutdownRESTServer(server *http.Server, report io.Writer) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil && report != nil {
+		_, _ = fmt.Fprintf(report, "graceful shutdown failed: %v\n", err)
+	}
+}
+
+// fsWait runs fsys.Wait once and yields a channel that closes when it
+// returns, so teardown paths can join the mount goroutine without racing
+// a second Wait call.
+func fsWait(fsys fuseMount) <-chan struct{} {
+	done := make(chan struct{})
+	go func() { defer close(done); fsys.Wait() }()
+	return done
+}
+
+// unmountWithRetry retries the unmount until it succeeds or its retry budget
 
 // serveRESTUntilSignal runs the REST server and drains it cleanly on
 // SIGINT/SIGTERM: in-flight requests finish within a bounded shutdown
@@ -1157,7 +1346,7 @@ func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
 
 // applyRateEnv layers the rate-governor environment variables onto a hub
 // config. One-shot commands fail fast on rate limits by default (a wait
-// cannot help a script), while long-running commands - mount, serve-rest
+// cannot help a script), while long-running commands - rest, mount, serve
 // - may pause up to the documented reset before giving up.
 func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 	defaultMaxWait := -1 * time.Second

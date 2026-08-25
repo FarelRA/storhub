@@ -135,8 +135,9 @@ Common commands:
 - inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
 - recovery and cleanup: `rollback`
-- web: `serve-rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
+- web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
 - mount: `mount`
+- both at once: `serve` (FUSE mount + REST API from one process over one shared hub, so writes through either surface are immediately visible to the other)
 - `cat` streams through a fixed 1 MiB window, so piping multi-GB files never buffers them whole; `revisions` prints nothing for empty history, like `ls(1)`
 
 Typical workflow:
@@ -162,7 +163,7 @@ command fails at runtime, and `2` when the command line itself is wrong
 Environment variables: `GITHUB_TOKEN` (authentication),
 `STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
 (default level is `info`, colors on), `STORHUB_API_BASE_URL`, and
-`STORHUB_REST_AUTH_FILE` (fallback for serve-rest's `--auth-file`).
+`STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--auth-file`).
 
 ### Rate limiting
 
@@ -174,12 +175,12 @@ uploads are retried automatically; a rejected upload whose endpoint sends
 no rate-limit headers is still recognized by its message text.
 
 One-shot commands fail fast when GitHub's budget is exhausted instead of
-waiting; `mount` and `serve-rest` may pause until the reset (at most 15
+waiting; `mount`, `rest`, and `serve` may pause until the reset (at most 15
 minutes) so long-running sessions survive an exhausted hour. Tune with:
 
 - `STORHUB_RATE_MAX_WAIT` - longest single rate-limit wait; `0s` fails
   fast, negative values also fail fast (default: fail fast for one-shot
-  commands, `15m` for mount/serve-rest)
+  commands, `15m` for rest/mount/serve)
 - `STORHUB_RATE_RESERVE` - hourly requests kept unspent as headroom
   (default `25`)
 - `STORHUB_RATE_POINTS_PER_MIN` - secondary point budget (default `720`)
@@ -219,10 +220,13 @@ REST serving from the CLI:
 
 ```bash
 # With authentication (recommended):
-GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --auth-file ./rest-auth.json
+GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --auth-file ./rest-auth.json
 
 # Deliberately unauthenticated (insecure; requires the explicit flag):
-GITHUB_TOKEN=your_token go run ./cmd/storhub serve-rest --listen :8080 --allow-anonymous
+GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --allow-anonymous
+
+# REST API and FUSE mount together, one shared hub:
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --auth-file ./rest-auth.json
 ```
 
 Open `http://localhost:8080/ui` for the built-in Alpine.js file browser and console.

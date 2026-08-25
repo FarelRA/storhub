@@ -409,8 +409,13 @@ func (s *Filesystem) Mount(mountPoint string) error {
 }
 
 func (s *Filesystem) Wait() {
-	if s.server != nil {
-		s.server.Wait()
+	// Snapshot under the lock, then block outside it: server.Wait only
+	// returns after Unmount completes, and Unmount needs this mutex.
+	s.mu.RLock()
+	server := s.server
+	s.mu.RUnlock()
+	if server != nil {
+		server.Wait()
 	}
 }
 
