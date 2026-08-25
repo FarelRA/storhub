@@ -422,6 +422,23 @@ func pluralize(n int, one, many string) string {
 	return many
 }
 
+// addFUSEFlags registers the flags every FUSE-mounting command shares.
+// One definition: mount and serve must not drift apart on wording or
+// defaults, because serve is mount plus REST over the same hub.
+func addFUSEFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
+	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
+	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+}
+
+// addRESTFlags registers the flags every REST-serving command shares.
+func addRESTFlags(cmd *cobra.Command) {
+	cmd.Flags().String("listen", ":8080", "Listen address")
+	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
+	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
+	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
+}
+
 func (a *App) newMountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mount [flags] <project> <mount-point>",
@@ -429,9 +446,7 @@ func (a *App) newMountCmd() *cobra.Command {
 		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE:  a.runMount,
 	}
-	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
-	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
-	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+	addFUSEFlags(cmd)
 	return cmd
 }
 
@@ -442,10 +457,7 @@ func (a *App) newRestCmd() *cobra.Command {
 		Args:  usageArgs(cobra.NoArgs),
 		RunE:  a.runServeREST,
 	}
-	cmd.Flags().String("listen", ":8080", "Listen address")
-	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
-	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
-	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
+	addRESTFlags(cmd)
 	return cmd
 }
 
@@ -1080,13 +1092,8 @@ before pending metadata is flushed.`,
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: a.runServe,
 	}
-	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
-	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
-	cmd.Flags().String("cache-dir", "", "Optional cache directory")
-	cmd.Flags().String("listen", ":8080", "Listen address for the REST API")
-	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
-	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
-	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
+	addFUSEFlags(cmd)
+	addRESTFlags(cmd)
 	return cmd
 }
 
@@ -1130,19 +1137,21 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	}
 	// Single owner of fsys.Wait: everything below joins through fsDone.
 	fsDone := fsWait(fsys)
-	opts, err := serveAuthOptions(cmd)
-	if err != nil {
+	// abort stops a half-started serve: the mount comes down before the
+	// error surfaces, so neither surface is left running unpaired.
+	abort := func(err error) error {
 		stop()
 		unmountWithRetry(fsys, args[1], a.stderr)
 		<-fsDone
 		return err
 	}
+	opts, err := serveAuthOptions(cmd)
+	if err != nil {
+		return abort(err)
+	}
 	handler, err := a.buildRESTHandler(hub, opts)
 	if err != nil {
-		stop()
-		unmountWithRetry(fsys, args[1], a.stderr)
-		<-fsDone
-		return err
+		return abort(err)
 	}
 	server := newRESTServer(listen, handler)
 	errCh := make(chan error, 1)
@@ -1156,6 +1165,10 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
 	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to stop")
 
+	// Not errgroup: teardown must be ORDERED - drain HTTP before pulling
+	// the mount out from under in-flight readers, join both goroutines,
+	// and only then let Run flush metadata. A plain select with explicit
+	// joins keeps that contract visible.
 	var serveErr error
 	fsDown := false
 	select {
