@@ -16,6 +16,7 @@ import (
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shlog "github.com/FarelRA/storhub/internal/logging"
+	storage "github.com/FarelRA/storhub/internal/storage"
 	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
@@ -170,6 +171,7 @@ Examples:
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
+	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newMountCmd())
 	rootCmd.AddCommand(a.newServeRESTCmd())
 
@@ -379,6 +381,40 @@ func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.stderr, "deleted project %s\n", args[0])
 	return nil
+}
+
+func (a *App) newCacheCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Manage local cache directories",
+		Args:  usageArgs(cobra.NoArgs),
+	}
+	cmd.AddCommand(a.newCachePruneCmd())
+	return cmd
+}
+
+func (a *App) newCachePruneCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "prune",
+		Short: "Reclaim cache directories left by crashed processes",
+		Long: `Cache prune removes storhub's local cache leftovers: per-project git worktrees
+whose owning process is gone, and legacy pre-XDG temp roots. Directories held by
+live processes are never touched. No network access, no token required.`,
+		Args: usageArgs(cobra.NoArgs),
+		RunE: func(*cobra.Command, []string) error {
+			logger := shlog.NewLogger(shlog.Options{Level: shlog.LevelWarn, Format: shlog.FormatText, Output: a.stderr})
+			reaped := storage.ReapOrphanedCaches(logger)
+			_, _ = fmt.Fprintf(a.stderr, "reclaimed %d orphaned cache %s\n", reaped, pluralize(reaped, "entry", "entries"))
+			return nil
+		},
+	}
+}
+
+func pluralize(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func (a *App) newMountCmd() *cobra.Command {

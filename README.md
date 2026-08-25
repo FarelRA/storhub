@@ -191,6 +191,28 @@ minutes) so long-running sessions survive an exhausted hour. Tune with:
   seconds instead of a fixed timeout, so capped links can finish
   (default `1048576`, i.e. 1 MiB/s - a 1.7 GiB chunk gets ~28 minutes)
 
+### Local cache layout
+
+Caches live under `${XDG_CACHE_HOME:-~/.cache}/storhub` (override the
+whole root with `STORHUB_CACHE_DIR`) - deliberately **not** `/tmp`,
+whose tmpfs sizing turns cache growth into memory exhaustion:
+
+```
+storhub/
+├── git/
+│   ├── .locks/<project>.lock   ← per-project ownership (pid)
+│   └── <project>/              ← metadata worktree, re-cloned on demand
+└── fuse/
+    └── <project>/              ← overlay temps; recovery/ quarantine kept
+```
+
+Lifecycle: project dirs are removed on clean `Shutdown`; directories
+left by crashed processes are reclaimed at next startup, by `mount`,
+and by `storhub cache prune` (offline, no token needed). A directory
+held by a live process is never touched - concurrent mounts fail fast
+with the holder's pid instead. Out-of-space failures name the exact
+cache directory and point at `STORHUB_CACHE_DIR`.
+
 For a shell-first walkthrough, see `examples/cli/demo.sh` and `examples/cli/README.md`.
 
 REST serving from the CLI:

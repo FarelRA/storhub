@@ -249,6 +249,12 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
+	// Unset git cache dir takes the shared XDG default
+	// (~/.cache/storhub/git); project directories beneath it are claimed
+	// by lockfile and removed on Shutdown.
+	if strings.TrimSpace(cfg.GitCacheDir) == "" {
+		cfg.GitCacheDir = storcfg.DefaultGitCacheBase()
+	}
 	hub := &StorHub{
 		token:      token,
 		gh:         ghapi.NewClient(token, cfg),
@@ -482,6 +488,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, metaBytes, previousSHA, message)
 	}
 	if err != nil {
+		err = wrapNoSpace(h.config.GitCacheDir, err)
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return &commitError{err: fmt.Errorf("commit metadata: %w", err), version: version}
 	}
@@ -555,6 +562,16 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 
 		select {
 		case <-done:
+			// Contract: the per-project git cache is a pure mirror of
+			// remote state, so Shutdown removes the directories this
+			// hub claimed. Re-clone on next use.
+			h.gitMu.Lock()
+			for name, r := range h.gitRepos {
+				if err := r.release(true); err != nil {
+					logging.Warn(h.logger, "shutdown git cache cleanup failed", "project", name, "err", err)
+				}
+			}
+			h.gitMu.Unlock()
 			logging.Info(h.logger, "shutdown complete")
 		case <-ctx.Done():
 			shutdownErr = fmt.Errorf("shutdown timeout: %w", ctx.Err())

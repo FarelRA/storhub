@@ -1866,3 +1866,34 @@ func TestFallocateRejectsUnsupportedModes(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSweepsStaleOverlayTemps(t *testing.T) {
+	cacheDir := t.TempDir()
+	staleTemp := filepath.Join(cacheDir, "inode-1234")
+	staleBase := filepath.Join(cacheDir, "inode-base-99")
+	recoveryFile := filepath.Join(cacheDir, "recovery", "inode-5678.saved")
+	for _, p := range []string{staleTemp, staleBase, recoveryFile} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir, CleanupInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("new filesystem: %v", err)
+	}
+	defer func() { _ = fsys.Close() }()
+
+	if _, err := os.Stat(staleTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale inode temp must be swept: %v", err)
+	}
+	if _, err := os.Stat(staleBase); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale inode-base temp must be swept: %v", err)
+	}
+	if _, err := os.Stat(recoveryFile); err != nil {
+		t.Errorf("recovery/ quarantine must survive the sweep: %v", err)
+	}
+}

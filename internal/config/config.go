@@ -199,8 +199,29 @@ func (c Config) WithDefaults() Config {
 // defaultGitCacheDir returns a per-process cache directory. A shared
 // /tmp/storhub would let concurrent processes (or other users on multi-user
 // machines) collide on the same git workspaces.
+// CacheBase returns the root directory for storhub's local caches:
+// $STORHUB_CACHE_DIR when set, otherwise the platform user cache dir
+// (~/.cache/storhub on Linux per XDG), falling back to a temp
+// directory when no home is available. Component caches live beneath
+// it: git/ for backend working repos, fuse/<project>/ for overlays.
+func CacheBase() string {
+	if custom := strings.TrimSpace(os.Getenv("STORHUB_CACHE_DIR")); custom != "" {
+		return custom
+	}
+	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
+		return filepath.Join(userCache, "storhub")
+	}
+	return filepath.Join(os.TempDir(), "storhub")
+}
+
 func defaultGitCacheDir() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("storhub-git-%d", os.Getpid()))
+	return filepath.Join(CacheBase(), "git")
+}
+
+// DefaultGitCacheBase exposes the git cache base for callers that create
+// per-process roots beneath it.
+func DefaultGitCacheBase() string {
+	return filepath.Join(CacheBase(), "git")
 }
 
 func newDefaultHTTPClient() *http.Client {

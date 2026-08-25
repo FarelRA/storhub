@@ -18,6 +18,7 @@ import (
 	"time"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
@@ -338,10 +339,24 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	}
 	cacheDir := opts.CacheDir
 	if strings.TrimSpace(cacheDir) == "" {
-		cacheDir = path.Join(os.TempDir(), "storhub-fuse", project)
+		cacheDir = path.Join(storcfg.CacheBase(), "fuse", project)
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create fuse cache dir: %w", err)
+	}
+	// Startup sweep: overlay temps from a crashed previous mount are
+	// pure garbage (nothing can reference them before any file is
+	// opened); the recovery/ quarantine is preserved by design.
+	if entries, err := os.ReadDir(cacheDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "recovery" || !strings.HasPrefix(name, "inode-") {
+				continue
+			}
+			if err := os.RemoveAll(path.Join(cacheDir, name)); err != nil {
+				logging.Warn(opts.Logger, "fuse startup sweep failed", "path", name, "err", err)
+			}
+		}
 	}
 	fsys := &Filesystem{
 		hub:         hub,

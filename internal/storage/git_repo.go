@@ -23,6 +23,7 @@ const defaultBranch = "main"
 
 type gitRepo struct {
 	dir     string
+	base    string
 	owner   string
 	project string
 	token   string
@@ -36,11 +37,59 @@ type gitRepo struct {
 
 func newGitRepo(cacheDir, owner, project, token string) *gitRepo {
 	return &gitRepo{
-		dir:     filepath.Join(cacheDir, "repos", project),
+		// cacheDir is the shared base (~/.cache/storhub/git); each
+		// project gets one lock-protected directory beneath it.
+		dir:     filepath.Join(cacheDir, project),
+		base:    cacheDir,
 		owner:   owner,
 		project: project,
 		token:   token,
 	}
+}
+
+// ensure opens or creates the local worktree. Caller must hold r.mu.
+// A directory left behind by a dead process is reclaimed first
+// ("cleanup on startup"); a directory held by a live process fails
+// honestly instead of corrupting it.
+func (r *gitRepo) ensure(ctx context.Context) error {
+	if r.repo != nil {
+		return nil
+	}
+	if _, err := os.Stat(r.dir); err == nil {
+		if pid := projectLockPid(r.base, r.project); pid != 0 && pid != os.Getpid() && pidAlive(pid) {
+			return fmt.Errorf("cache dir %s is held by live process %d", r.dir, pid)
+		}
+		if projectLockPid(r.base, r.project) != os.Getpid() {
+			if err := os.RemoveAll(r.dir); err != nil {
+				return fmt.Errorf("reclaim stale cache dir %s: %w", r.dir, err)
+			}
+		}
+	}
+	if err := os.MkdirAll(r.dir, 0o755); err != nil {
+		return wrapNoSpace(filepath.Dir(r.dir), fmt.Errorf("mkdir %s: %w", r.dir, err))
+	}
+	if err := claimProjectLock(r.base, r.project); err != nil {
+		return err
+	}
+	repo, err := git.PlainOpen(r.dir)
+	if err == nil {
+		r.repo = repo
+		return nil
+	}
+	if !errors.Is(err, git.ErrRepositoryNotExists) {
+		return fmt.Errorf("open repo %s: %w", r.project, err)
+	}
+	// Full history is required: rollback and revision listing resolve
+	// arbitrary past commits. The metadata repo is tiny, so depth is cheap.
+	repo, err = git.PlainCloneContext(ctx, r.dir, &git.CloneOptions{
+		URL:           r.remoteURL(),
+		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
+	})
+	if err != nil {
+		return wrapNoSpace(r.base, fmt.Errorf("clone %s: %w", r.project, err))
+	}
+	r.repo = repo
+	return nil
 }
 
 func (r *gitRepo) remoteURL() string {
@@ -54,31 +103,22 @@ func (r *gitRepo) auth() *http.BasicAuth {
 	return &http.BasicAuth{Username: r.owner, Password: r.token}
 }
 
-func (r *gitRepo) ensure(ctx context.Context) error {
-	if r.repo != nil {
+// release drops this process's claim on the cache dir. remove also
+// deletes the directory, per the Shutdown contract: the worktree is a
+// pure cache of remote state and is re-cloned on demand.
+func (r *gitRepo) release(remove bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.repo = nil
+	if remove {
+		if err := os.RemoveAll(r.dir); err != nil {
+			releaseProjectLock(r.base, r.project)
+			return fmt.Errorf("remove git cache dir %s: %w", r.dir, err)
+		}
+		releaseProjectLock(r.base, r.project)
 		return nil
 	}
-	repo, err := git.PlainOpen(r.dir)
-	if err == nil {
-		r.repo = repo
-		return nil
-	}
-	if !errors.Is(err, git.ErrRepositoryNotExists) {
-		return fmt.Errorf("open repo %s: %w", r.project, err)
-	}
-	if err := os.MkdirAll(r.dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", r.dir, err)
-	}
-	// Full history is required: rollback and revision listing resolve
-	// arbitrary past commits. The metadata repo is tiny, so depth is cheap.
-	repo, err = git.PlainCloneContext(ctx, r.dir, &git.CloneOptions{
-		URL:           r.remoteURL(),
-		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
-	})
-	if err != nil {
-		return fmt.Errorf("clone %s: %w", r.project, err)
-	}
-	r.repo = repo
+	releaseProjectLock(r.base, r.project)
 	return nil
 }
 
