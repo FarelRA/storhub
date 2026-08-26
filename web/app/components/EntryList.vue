@@ -61,9 +61,13 @@ function toggleMenu(entry: EntryInfo) {
   if (left - estWidth < margin) left = estWidth + margin
   const spaceBelow = vh - rect.bottom - margin
   const spaceAbove = rect.top - margin
+  // Flip only if the menu wouldn't fit below and there's more room above
   const flipUp = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow
   const available = flipUp ? spaceAbove : spaceBelow
-  const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(160, available - 4))
+  // Only limit height to what the viewport actually offers — the menu
+  // will scroll internally (overflowY) only when its natural height
+  // exceeds this available space.
+  const maxHeight = Math.max(160, available - 4)
   const y = flipUp ? rect.top : rect.bottom + 4
   openMenu.value = {
     entry,
@@ -96,12 +100,10 @@ watch(openMenu, (open) => {
       window.addEventListener('click', onGlobalPointer, true)
       window.addEventListener('keydown', onKey)
       window.addEventListener('resize', closeMenu)
-      window.addEventListener('scroll', closeMenu, true)
     } else {
       window.removeEventListener('click', onGlobalPointer, true)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('resize', closeMenu)
-      window.removeEventListener('scroll', closeMenu, true)
     }
   }
 })
