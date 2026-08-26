@@ -1,4 +1,13 @@
 import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry } from '~/utils/api-types'
+import {
+  PREVIEW_MAX_BYTES,
+  SNIFF_BYTES,
+  classify,
+  kindFromExtension,
+  mimeForKind,
+  toHexDump,
+} from '~/utils/preview'
+import type { PreviewKind } from '~/utils/preview'
 
 export type ModalKind =
   | 'mkdir'
@@ -60,6 +69,13 @@ const revisions = ref<Revision[]>([])
 const xattrs = ref<XattrEntry[]>([])
 const editorContent = ref('')
 const editorDirty = ref(false)
+// Preview pipeline: what the editor pane is currently showing and whether
+// its content may be PUT back (only genuine text reads are saveable).
+const previewKind = ref<PreviewKind>('text')
+const previewUrl = ref('')
+const previewHex = ref('')
+const previewMeta = ref({ shown: 0, total: 0 })
+const editorIsText = ref(true)
 const busy = ref(false)
 
 const token = useState<string>('auth-token', () => '')
@@ -195,6 +211,9 @@ export function useConsole() {
       const result = await request<unknown>(url(projectURL('/content'), { path }), { headers })
       editorContent.value =
         typeof result.payload === 'string' ? result.payload : JSON.stringify(result.payload, null, 2)
+      editorIsText.value = true
+      previewKind.value = 'text'
+      clearPreview()
     })
   }
 
@@ -281,6 +300,8 @@ export function useConsole() {
     editorContent.value = ''
     editorDirty.value = false
     xattrs.value = []
+    editorIsText.value = true
+    clearPreview()
     const failed = (await run('Load project', refreshAll)) === null
     if (failed) {
       reset()
@@ -341,6 +362,68 @@ export function useConsole() {
     void loadDirectory(parentPath(currentPath.value))
   }
 
+  function clearPreview(): void {
+    if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+    previewUrl.value = ''
+    previewHex.value = ''
+    previewMeta.value = { shown: 0, total: 0 }
+  }
+
+  /**
+   * Decide how to preview the selected file and fetch only what that kind
+   * needs: media types get a full blob (they cannot render partially), text
+   * and binary get one ranged sniff window. Files above PREVIEW_MAX_BYTES
+   * are never fetched - the range bar covers targeted reads.
+   */
+  async function loadPreview(entry: EntryInfo): Promise<void> {
+    clearPreview()
+    editorContent.value = ''
+    editorDirty.value = false
+    editorIsText.value = false
+    const ext = (entry.path.split('/').pop() ?? '').split('.').pop() ?? ''
+    if (entry.size > PREVIEW_MAX_BYTES) {
+      previewKind.value = 'too-large'
+      previewMeta.value = { shown: 0, total: entry.size }
+      return
+    }
+    const mediaKind = kindFromExtension(entry.path)
+    if (mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio' || mediaKind === 'pdf') {
+      try {
+        const result = await request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
+          binary: true,
+        })
+        const blob = new Blob([result.payload], { type: mimeForKind(mediaKind, ext) })
+        previewUrl.value = URL.createObjectURL(blob)
+        previewKind.value = mediaKind
+        previewMeta.value = { shown: entry.size, total: entry.size }
+      } catch (error) {
+        previewKind.value = 'too-large'
+        toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return
+    }
+    // Sniff window: one ranged request, then classify by magic / UTF-8.
+    const windowLen = Math.min(entry.size, SNIFF_BYTES)
+    const end = windowLen > 0 ? windowLen - 1 : 0
+    const result = await run('Preview', () =>
+      request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
+        binary: true,
+        headers: { Range: `bytes=0-${end}` },
+      }),
+    )
+    if (result === null) return
+    const bytes = new Uint8Array(result.payload)
+    previewMeta.value = { shown: bytes.byteLength, total: entry.size }
+    const kind = classify(bytes)
+    previewKind.value = kind
+    if (kind === 'text') {
+      editorContent.value = new TextDecoder().decode(bytes)
+      editorIsText.value = true
+    } else if (kind === 'binary') {
+      previewHex.value = toHexDump(bytes, { maxRows: 4096 })
+    }
+  }
+
   async function selectEntry(entry: EntryInfo): Promise<void> {
     await inspectPath(entry.path)
     const current = selectedEntry.value
@@ -349,13 +432,16 @@ export function useConsole() {
       await loadDirectory(entry.path)
       return
     }
-    if (!current.is_symlink) await readFile(entry.path)
+    if (current.is_symlink) return
+    await loadPreview(entry)
   }
 
   // ---- Mutations -----------------------------------------------------------
 
   async function saveFile(): Promise<void> {
-    if (!canEditFile.value || !selectedPath.value) return
+    // Only genuine text loads may be PUT back: saving over a file we merely
+    // hex-dumped or never fetched would destroy data.
+    if (!canEditFile.value || !editorIsText.value || !selectedPath.value) return
     const ok = await run('Save', () =>
       request(url(projectURL('/content'), { path: selectedPath.value! }), {
         method: 'PUT',
@@ -400,6 +486,8 @@ export function useConsole() {
     editorContent.value = ''
     editorDirty.value = false
     xattrs.value = []
+    editorIsText.value = true
+    clearPreview()
   }
 
   async function deleteProject(): Promise<boolean> {
@@ -461,6 +549,8 @@ export function useConsole() {
     xattrs.value = []
     editorContent.value = ''
     editorDirty.value = false
+    editorIsText.value = true
+    clearPreview()
   }
 
   // ---- Modal ---------------------------------------------------------------
@@ -598,6 +688,14 @@ export function useConsole() {
     openModal,
     closeModal,
     submitModal,
+    // preview
+    previewKind,
+    previewUrl,
+    previewHex,
+    previewMeta,
+    editorIsText,
+    loadPreview,
+    clearPreview,
     // actions
     loadProject,
     loadDirectory,

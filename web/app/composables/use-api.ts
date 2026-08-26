@@ -22,19 +22,24 @@ export function useApi() {
 
   async function request<T = unknown>(
     path: string,
-    options: RequestInit & { rawBody?: boolean } = {},
+    options: RequestInit & { rawBody?: boolean; binary?: boolean } = {},
   ): Promise<ApiResult<T>> {
-    const { rawBody, headers: extraHeaders, ...rest } = options
+    const { rawBody, headers: extraHeaders, binary, ...rest } = options
     // Single choke point for base-path resolution: callers pass either bare
     // routes or url()-prefixed paths and both land on the right URL.
     const response = await fetch(joinApiPath(config.basePath, path), {
       ...rest,
       headers: authHeaders((extraHeaders as Record<string, string>) ?? {}),
     })
-    const contentType = response.headers.get('content-type') ?? ''
-    const payload: unknown = contentType.includes('application/json')
-      ? await response.json().catch(() => null)
-      : await response.text()
+    let payload: unknown
+    if (binary) {
+      payload = await response.arrayBuffer()
+    } else {
+      const contentType = response.headers.get('content-type') ?? ''
+      payload = contentType.includes('application/json')
+        ? await response.json().catch(() => null)
+        : await response.text()
+    }
     if (!response.ok) {
       const message =
         payload && typeof payload === 'object' && 'error' in payload
