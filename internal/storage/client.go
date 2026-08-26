@@ -928,8 +928,28 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 			}
 			var apiErr *ghapi.APIError
 			if errors.As(uploadErr, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity {
-				h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
-				continue
+				bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
+				if strings.Contains(bodyLower, "already_exists") {
+					h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
+					continue
+				}
+				if strings.Contains(bodyLower, "file_count") || strings.Contains(bodyLower, "1000") || strings.Contains(bodyLower, "too many") {
+					h.debugf("upload release full (422 file_count), creating new release, retry=%d asset=%s release=%s", renameAttempt+1, assetName, releaseTag)
+					h.invalidateReleaseCache(project)
+					remainingSlots := 1
+					if size > uploaded {
+						remainingSlots = int((size - uploaded + chunkSize - 1) / chunkSize)
+					}
+					newTag, newURL, err := h.PrepareReplaceContext(ctx, project, filePath, remainingSlots)
+					if err != nil {
+						cleanup()
+						h.compensateDeleteAssets(ctx, project, chunks)
+						return nil, err
+					}
+					releaseTag = newTag
+					uploadURL = newURL
+					continue
+				}
 			}
 			cleanup()
 			h.compensateDeleteAssets(ctx, project, chunks)

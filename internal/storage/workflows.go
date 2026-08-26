@@ -315,15 +315,28 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	for _, release := range releases {
 		releaseIndex[release.TagName] = release
 	}
+	need := requiredSlots
+	if need < 1 {
+		need = 1
+	}
 	if strings.TrimSpace(preferredTag) != "" {
-		if release, ok := releaseIndex[preferredTag]; ok && len(release.Assets)+requiredSlots <= 1000 {
+		if release, ok := releaseIndex[preferredTag]; ok && len(release.Assets)+need <= 1000 {
 			metadata.EnsureRelease(preferredTag, h.config.Now().Unix())
 			return preferredTag, release.UploadURL, nil
 		}
 	}
 	for tag := range metadata.Releases {
-		if release, ok := releaseIndex[tag]; ok && len(release.Assets)+requiredSlots <= 1000 {
+		if release, ok := releaseIndex[tag]; ok && len(release.Assets)+need <= 1000 {
 			return tag, release.UploadURL, nil
+		}
+	}
+	// Fallback: any GitHub release (including orphaned) with space.
+	// This reclaims space from releases left behind by deleted files/folders
+	// without waiting for explicit `purge`. Prefer the one with most free slots.
+	for _, release := range releases {
+		if len(release.Assets)+need <= 1000 {
+			metadata.EnsureRelease(release.TagName, h.config.Now().Unix())
+			return release.TagName, release.UploadURL, nil
 		}
 	}
 	tag, err := h.getNextReleaseTag(metadata, releases)
