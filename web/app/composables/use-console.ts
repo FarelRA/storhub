@@ -556,12 +556,16 @@ export function useConsole() {
   }
 
   async function removeMany(paths: string[]): Promise<boolean> {
-    let ok = true
-    for (const p of paths) {
-      const entry = entries.value.find((e) => e.path === p) ?? { path: p, is_dir: false, is_symlink: false } as EntryInfo
-      const done = await op(`Remove ${p}`, (entry as EntryInfo).is_dir ? 'rmdir' : 'unlink', { path: p })
-      if (!done) ok = false
-    }
+    // Parallel deletes, single refresh (op() does refreshAll per item → 15× slow)
+    const results = await Promise.all(
+      paths.map(async (p) => {
+        const entry = entries.value.find((e) => e.path === p) ?? { path: p, is_dir: false, is_symlink: false } as EntryInfo
+        const res = await run(`Remove ${p}`, () => postJSON(projectURL(`/ops/${(entry as EntryInfo).is_dir ? 'rmdir' : 'unlink'}`), { path: p }), true)
+        return res !== null
+      }),
+    )
+    const ok = results.every(Boolean)
+    if (!ok) toasts.error(`Failed to remove ${results.filter((v) => !v).length}/${paths.length} items`)
     // Clear those that were removed from selection
     for (const p of paths) selectedPaths.value.delete(p)
     selectedPaths.value = new Set(selectedPaths.value)
@@ -572,6 +576,7 @@ export function useConsole() {
       selectedPath.value = last
       await inspectPath(last)
     }
+    await refreshAll()
     return ok
   }
 

@@ -187,8 +187,6 @@ function handleSelect(entry: EntryInfo, event: MouseEvent) {
   } else {
     console_.selectSingle(entry.path)
   }
-  // Keep single-preview in sync for detail panes
-  void console_.focusEntry(entry)
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -204,7 +202,6 @@ function handleKeydown(event: KeyboardEvent) {
     } else {
       console_.selectSingle(next.path)
     }
-    void console_.focusEntry(next)
   } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
     event.preventDefault()
     console_.selectAll()
@@ -220,7 +217,6 @@ function onTouchStart(entry: EntryInfo) {
   if (!isMobile.value) return
   pressTimer = setTimeout(() => {
     console_.toggleSelect(entry.path)
-    void console_.focusEntry(entry)
     if (navigator.vibrate) navigator.vibrate(20)
     pressTimer = null
   }, 500)
@@ -268,6 +264,7 @@ async function copyBulk() {
 
 async function removeBulk() {
   const targets = menuTargets.value
+  closeMenu()
   const ok = await ask({
     title: targets.length === 1 ? 'Remove entry' : `Remove ${targets.length} items`,
     body: targets.length === 1
@@ -277,7 +274,6 @@ async function removeBulk() {
     danger: true,
   })
   if (!ok) return
-  closeMenu()
   await console_.removeMany(targets.map((e) => e.path))
 }
 </script>
