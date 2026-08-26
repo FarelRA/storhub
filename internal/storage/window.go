@@ -48,6 +48,14 @@ func newWindowReader(live io.Reader, size int64) (*windowReader, func(), error) 
 		cleanup()
 		return nil, nil, fmt.Errorf("create spool file: %w", err)
 	}
+	cleanup = func() {
+		_ = file.Close()
+		_ = os.RemoveAll(dir)
+	}
+	// NOTE: deliberately NOT implementing io.Close on windowReader -
+	// http.Client closes request bodies after every response, which would
+	// kill the spool file between rename attempts. Lifecycle is owned
+	// exclusively by the returned cleanup func.
 	return &windowReader{spool: file, live: live, size: size}, cleanup, nil
 }
 
@@ -124,10 +132,6 @@ func (w *windowReader) Seek(offset int64, whence int) (int64, error) {
 	return w.pos, nil
 }
 
-// Close releases the spool file handle; callers additionally remove the
-// spool directory via the cleanup func handed out by newWindowReader.
-func (w *windowReader) Close() error { return w.spool.Close() }
-
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -135,4 +139,8 @@ func minInt(a, b int) int {
 	return b
 }
 
+// NOTE: windowReader deliberately does NOT implement io.Closer -
+// http.Client closes request bodies after every response, which would kill
+// the spool file between rename attempts. Lifecycle is owned exclusively by
+// the cleanup func returned by newWindowReader.
 func mkdirAll(dir string) error { return os.MkdirAll(dir, 0o755) }

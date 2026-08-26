@@ -43,7 +43,7 @@ func TestWindowReaderReplayAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newWindowReader: %v", err)
 	}
-	defer func() { _ = win.Close() }()
+	defer cleanup()
 
 	// Simulate attempt 1 dying after 5 bytes: read them, discard.
 	head := make([]byte, 5)
@@ -84,12 +84,11 @@ func TestSpoolDirUnderCacheBaseRest(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cache")
 	t.Setenv("STORHUB_CACHE_DIR", dir)
 
-	win, cleanup, err := newWindowReader(strings.NewReader("x"), 1)
+	_, cleanup, err := newWindowReader(strings.NewReader("x"), 1)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("newWindowReader: %v", err)
 	}
-	defer func() { _ = win.Close() }()
 
 	base := filepath.Join(dir, "rest")
 	entries, err := os.ReadDir(base)
