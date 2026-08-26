@@ -508,6 +508,15 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 		}
 	}
 	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}}, logger: logger}
+	if len(opts.ShareSigningKey) == 0 && opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
+		// No explicit share key: derive one from the auth token signing key
+		// so an auth-file deployment gets working shares with zero extra
+		// configuration. Domain-separated hash => deterministic across
+		// restarts (existing share links keep verifying), unrelated to the
+		// JWT key material, and always >= 32 bytes.
+		hash := sha256.Sum256([]byte("storhub/share-signing/v1\x00" + string(opts.Auth.TokenSigningKey)))
+		opts.ShareSigningKey = hash[:]
+	}
 	if len(opts.ShareSigningKey) > 0 {
 		seed := opts.ShareSigningKey
 		if len(seed) > 32 {
@@ -1624,7 +1633,7 @@ func canonicalSharePath(raw string) (string, error) {
 
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	if h.shareSignKey == nil {
-		return nil, errForbidden("share signing key not configured")
+		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
 	}
 	claims := &shareClaims{}
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), claims, func(token *jwt.Token) (any, error) {
@@ -1641,7 +1650,9 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 
 func (h *restHandler) newShareRecord(project, sharePath string, download, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
 	if h.shareSignKey == nil {
-		return nil, errors.New("share signing key not configured")
+		// Configuration error surfaced through the API error mapper as a
+		// clean 403 (not a 500): the deployment is missing its share key.
+		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
 	}
 	id, err := newShareID()
 	if err != nil {

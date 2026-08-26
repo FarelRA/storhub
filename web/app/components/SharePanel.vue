@@ -42,7 +42,7 @@ async function remove(share: { id: string; path: string }) {
     <div class="flex flex-wrap gap-2">
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath || !console_.project"
+        :disabled="!console_.selectedPath.value || !console_.project.value"
         title="Create a browser-only share for the selected entry"
         @click="createShare(false)"
       >
@@ -50,7 +50,7 @@ async function remove(share: { id: string; path: string }) {
       </button>
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath || !console_.project || !!selectedEntry?.is_dir"
+        :disabled="!console_.selectedPath.value || !console_.project.value || !!selectedEntry?.is_dir"
         title="Create a direct-download share for the selected file"
         @click="createShare(true)"
       >

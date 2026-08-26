@@ -436,6 +436,7 @@ func addRESTFlags(cmd *cobra.Command) {
 	cmd.Flags().String("listen", ":8080", "Listen address")
 	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
 	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
+	cmd.Flags().String("share-key", "", "Share signing key; defaults to one derived from the auth file's token_signing_key (falls back to $STORHUB_SHARE_SIGNING_KEY)")
 	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
 }
 
@@ -1045,7 +1046,20 @@ func serveAuthOptions(cmd *cobra.Command) (shrest.Options, error) {
 		}
 		opts.AllowAnonymous = true
 	}
+	shareKey := strings.TrimSpace(shareSigningKey(cmd))
+	if shareKey != "" {
+		opts.ShareSigningKey = []byte(shareKey)
+	}
 	return opts, nil
+}
+
+// shareSigningKey resolves the explicit share key: flag first, then env. An
+// empty result lets the server derive one from the auth signing key.
+func shareSigningKey(cmd *cobra.Command) string {
+	if key, _ := cmd.Flags().GetString("share-key"); strings.TrimSpace(key) != "" {
+		return key
+	}
+	return os.Getenv("STORHUB_SHARE_SIGNING_KEY")
 }
 
 func (a *App) buildRESTHandler(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {

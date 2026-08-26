@@ -51,7 +51,7 @@ const submitLabel = computed(() => {
     <div v-else-if="isNewPathKind" class="flex flex-col gap-3">
       <label class="block">
         <span class="field-label">Existing path</span>
-        <input :value="console_.selectedPath" type="text" class="input font-mono opacity-60" disabled >
+        <input :value="console_.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
       </label>
       <label class="block">
         <span class="field-label">{{ modalKind === 'symlink' ? 'Link path' : 'New path' }}</span>
@@ -101,7 +101,7 @@ const submitLabel = computed(() => {
     </div>
 
     <div v-else-if="isTextOpKind" class="flex flex-col gap-3">
-      <p class="font-mono text-xs text-mist">{{ console_.selectedPath }}</p>
+      <p class="font-mono text-xs text-mist">{{ console_.selectedPath.value }}</p>
       <div v-if="modalKind === 'patch'" class="grid grid-cols-2 gap-3">
         <label class="block">
           <span class="field-label">Offset (bytes)</span>

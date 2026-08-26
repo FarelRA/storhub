@@ -32,7 +32,7 @@ const rows = computed(() => {
     <div class="flex flex-wrap gap-2">
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath || !console_.canWrite"
+        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
         @click="console_.openModal('chmod')"
       >
         Chmod
@@ -40,14 +40,14 @@ const rows = computed(() => {
       <button
         v-if="console_.isAdmin.value"
         class="btn btn-sm"
-        :disabled="!console_.selectedPath || !console_.canWrite"
+        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
         @click="console_.openModal('chown')"
       >
         Chown
       </button>
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath || !console_.canWrite"
+        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
         @click="console_.openModal('utimes')"
       >
         Timestamps
