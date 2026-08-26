@@ -849,7 +849,10 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	}
 
 	for {
-		n, readErr := reader.Read(*buf)
+		// Fill the buffer completely before sealing a chunk. A bare Read()
+		// may return any small fragment (HTTP bodies arrive piecemeal),
+		// which would shatter one file into dozens of tiny assets.
+		n, readErr := fillChunk(reader, *buf)
 		if n > 0 {
 			chunk, uploadErr := h.UploadChunkDataContext(ctx, project, releaseTag, uploadURL, uploaded, (*buf)[:n])
 			if uploadErr != nil {
@@ -859,10 +862,10 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 			uploaded += int64(n)
 		}
 		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
+			if !errors.Is(readErr, io.EOF) {
+				return nil, readErr
 			}
-			return nil, readErr
+			break
 		}
 	}
 
@@ -2030,4 +2033,30 @@ func (h *StorHub) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 
 func (h *StorHub) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) error {
 	return h.posixService().ApplyMetadataPatchContext(ctx, project, targetPath, patch)
+}
+
+// fillChunk reads from r until buf is full, clean EOF, or error. It returns
+// the number of bytes read (0 only at clean EOF) so callers seal whole
+// chunks regardless of how fragmentedly the underlying body delivers data.
+// Per the io.Reader contract, a read returning both data and io.EOF is
+// followed by more reads until they report 0, EOF.
+func fillChunk(r io.Reader, buf []byte) (int, error) {
+	total := 0
+	for total < len(buf) {
+		n, err := r.Read(buf[total:])
+		total += n
+		if n > 0 && err == io.EOF {
+			err = nil // data + EOF in one read: keep filling; next read reports 0
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrNoProgress
+		}
+	}
+	return total, nil
 }

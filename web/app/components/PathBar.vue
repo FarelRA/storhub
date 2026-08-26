@@ -54,8 +54,9 @@ const segments = computed(() => {
       >
         {{ project || 'no project' }}
       </button>
+      <span aria-hidden="true" class="text-hair">/</span>
       <template v-for="(segment, index) in segments" :key="segment.target">
-        <span aria-hidden="true" class="text-hair">/</span>
+        <span v-if="index > 0" aria-hidden="true" class="text-hair">/</span>
         <button
           v-if="index < segments.length - 1"
           type="button"
@@ -68,7 +69,6 @@ const segments = computed(() => {
           {{ segment.name }}
         </span>
       </template>
-      <li v-if="!segments.length" aria-hidden="true"><span class="text-hair">/</span></li>
 
       <button
         type="button"
