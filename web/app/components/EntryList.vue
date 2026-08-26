@@ -308,13 +308,6 @@ async function removeBulk() {
           @touchend="onTouchEnd"
           @touchmove="onTouchMove"
         >
-          <span
-            class="grid h-4 w-4 shrink-0 place-items-center rounded border text-[10px] transition-colors"
-            :class="isSelected(entry) ? 'border-ember bg-ember text-[#1f1408]' : 'border-hair bg-transparent text-transparent'"
-            aria-hidden="true"
-          >
-            ✓
-          </span>
           <span aria-hidden="true" class="w-4 shrink-0 text-center" :class="glyphClass(entry)">
             {{ glyph(entry) }}
           </span>

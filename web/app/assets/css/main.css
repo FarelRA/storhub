@@ -87,7 +87,7 @@
   }
   .menu-item {
     @apply flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-parchment transition-colors
-      hover:bg-raise hover:text-parchment focus-visible:bg-raise focus-visible:outline-none active:bg-overlay max-lg:min-h-11;
+      hover:bg-surface focus-visible:bg-surface focus-visible:outline-none max-lg:min-h-11;
   }
   .menu-sep {
     @apply my-1 border-t border-hair;
