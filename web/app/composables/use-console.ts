@@ -91,6 +91,20 @@ const shareDownloadAllowed = ref(true)
 
 const modalOpen = ref(false)
 const modalKind = ref<ModalKind>('mkdir')
+
+// ---- Uploads ---------------------------------------------------------------
+// Sequential (slow-network doctrine): one PUT at a time, parent directories
+// ensured once per session, progress exposed for the pane UI.
+interface UploadProgress {
+  active: boolean
+  done: number
+  failed: number
+  total: number
+  current: string
+}
+
+const uploadProgress = ref<UploadProgress>({ active: false, done: 0, failed: 0, total: 0, current: '' })
+const uploadedDirs = new Set<string>()
 const modalForm = ref<ModalForm>(blankForm())
 const modalError = ref('')
 
@@ -591,6 +605,7 @@ export function useConsole() {
     editorContent.value = ''
     editorDirty.value = false
     editorIsText.value = true
+    uploadedDirs.clear()
     clearPreview()
   }
 
@@ -629,6 +644,61 @@ export function useConsole() {
   /** Select an entry non-navigatively: stat it so detail panes follow along. */
   async function focusEntry(entry: EntryInfo): Promise<void> {
     await inspectPath(entry.path)
+  }
+
+  // ---- Uploads ---------------------------------------------------------------
+
+  /** mkdir -p against the REST API, memoized per project session. */
+  async function ensureDir(dir: string): Promise<boolean> {
+    const parts = normalizePath(dir).split('/').filter(Boolean)
+    let cur = ''
+    for (const part of parts) {
+      cur = cur ? `${cur}/${part}` : part
+      const key = `${project.value}/${cur}`
+      if (uploadedDirs.has(key)) continue
+      const ok = await run('Create folder', () => postJSON(projectURL('/ops/mkdir'), { path: cur }), true)
+      if (ok === null) return false
+      uploadedDirs.add(key)
+    }
+    return true
+  }
+
+  /**
+   * Upload a batch of files into baseDir. Each item carries its relative
+   * path (from drag-and-drop traversal or webkitRelativePath), so dropped
+   * folders land with their structure intact.
+   */
+  async function uploadFiles(items: Array<{ file: File; relPath: string }>, baseDir: string): Promise<void> {
+    if (!items.length || !canWrite.value) return
+    uploadProgress.value = { active: true, done: 0, failed: 0, total: items.length, current: '' }
+    let firstError = ''
+    for (const { file, relPath } of items) {
+      const cleanRel = normalizePath(relPath)
+      if (!cleanRel) continue
+      uploadProgress.value = { ...uploadProgress.value, current: cleanRel }
+      const dir = parentPath(cleanRel)
+      const target = normalizePath(dir ? `${baseDir}/${dir}` : baseDir)
+      if (dir && !(await ensureDir(`${normalizePath(baseDir)}/${dir}`))) {
+        uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1, done: uploadProgress.value.done + 1 }
+        firstError ||= `could not create ${target}`
+        continue
+      }
+      void target
+      const fullPath = normalizePath(`${normalizePath(baseDir)}/${cleanRel}`)
+      const ok = await run(`Upload ${fullPath}`, () =>
+        request(url(projectURL('/content'), { path: fullPath }), { method: 'PUT', body: file }),
+      )
+      if (ok === null) {
+        firstError ||= `failed: ${cleanRel}`
+        uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1 }
+      }
+      uploadProgress.value = { ...uploadProgress.value, done: uploadProgress.value.done + 1 }
+    }
+    uploadProgress.value = { ...uploadProgress.value, active: false, current: '' }
+    await refreshAll()
+    const { done, failed, total } = uploadProgress.value
+    if (failed === 0) toasts.success(`Uploaded ${done}/${total}`)
+    else toasts.error(`Uploaded ${done - failed}/${total} — ${firstError}`)
   }
 
   // ---- Modal ---------------------------------------------------------------
@@ -799,6 +869,7 @@ export function useConsole() {
     previewHex,
     previewMeta,
     editorIsText,
+    uploadProgress,
     previewLoading,
     loadPreview,
     clearPreview,
@@ -825,6 +896,7 @@ export function useConsole() {
     createShare,
     deleteShare,
     loadXattrs,
+    uploadFiles,
     setXattr,
     removeXattr,
   }
