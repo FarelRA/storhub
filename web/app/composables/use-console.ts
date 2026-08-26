@@ -77,6 +77,7 @@ const previewUrl = ref('')
 const previewHex = ref('')
 const previewMeta = ref({ shown: 0, total: 0 })
 const editorIsText = ref(true)
+const previewLoading = ref(false)
 const busy = ref(false)
 
 const token = useState<string>('auth-token', () => '')
@@ -126,10 +127,6 @@ export function useConsole() {
   const canEditFile = computed(
     () => canWrite.value && !!selectedEntry.value && !selectedEntry.value.is_dir && !selectedEntry.value.is_symlink,
   )
-  const canReadRanges = computed(() => {
-    const entry = selectedEntry.value
-    return !!entry && !entry.is_dir && !entry.is_symlink
-  })
 
   function projectURL(suffix: string): string {
     return `/projects/${enc(project.value)}${suffix}`
@@ -208,23 +205,28 @@ export function useConsole() {
       headers.Range = `bytes=${range.offset}-${range.offset + range.length - 1}`
       label = 'Read range'
     }
-    await run(label, async () => {
-      const result = await request<unknown>(url(projectURL('/content'), { path }), { headers })
-      editorContent.value =
-        typeof result.payload === 'string' ? result.payload : JSON.stringify(result.payload, null, 2)
-      editorIsText.value = true
-      previewKind.value = 'text'
-      clearPreview()
-    })
+    previewLoading.value = true
+    try {
+      await run(label, async () => {
+        const result = await request<unknown>(url(projectURL('/content'), { path }), { headers })
+        editorContent.value =
+          typeof result.payload === 'string' ? result.payload : JSON.stringify(result.payload, null, 2)
+        editorIsText.value = true
+        previewKind.value = 'text'
+        clearPreview()
+      })
+    } finally {
+      previewLoading.value = false
+    }
   }
-
   async function loadStats(): Promise<void> {
     if (sharedMode.value) {
       stats.value = {}
       return
     }
     await run('Stats', async () => {
-      stats.value = await getJSON<ProjectStats>(projectURL(''))
+      const payload = await getJSON<{ stats?: ProjectStats }>(projectURL(''))
+      stats.value = payload.stats ?? {}
     })
   }
 
@@ -266,6 +268,7 @@ export function useConsole() {
       token.value = payload.token
       principal.value = payload.principal
       sessionStorage.setItem('storhub.token', payload.token)
+      sessionStorage.setItem('storhub.principal', JSON.stringify(payload.principal))
       toasts.success(`Signed in as ${payload.principal.username}`)
       if (project.value) await refreshAll()
       return true
@@ -280,12 +283,23 @@ export function useConsole() {
     token.value = ''
     principal.value = null
     sessionStorage.removeItem('storhub.token')
+    sessionStorage.removeItem('storhub.principal')
     toasts.info('Signed out')
   }
 
   function restoreSession(): void {
     const saved = sessionStorage.getItem('storhub.token')
     if (saved) token.value = saved
+    // Restore identity too - otherwise a reload leaves the session valid but
+    // the UI blind to who it belongs to (empty "Signed in as", lost admin).
+    const savedPrincipal = sessionStorage.getItem('storhub.principal')
+    if (savedPrincipal) {
+      try {
+        principal.value = JSON.parse(savedPrincipal) as Principal
+      } catch {
+        sessionStorage.removeItem('storhub.principal')
+      }
+    }
   }
 
   async function loadProject(name: string): Promise<boolean> {
@@ -381,47 +395,52 @@ export function useConsole() {
     editorContent.value = ''
     editorDirty.value = false
     editorIsText.value = false
-    const ext = (entry.path.split('/').pop() ?? '').split('.').pop() ?? ''
-    if (entry.size > PREVIEW_MAX_BYTES) {
-      previewKind.value = 'too-large'
-      previewMeta.value = { shown: 0, total: entry.size }
-      return
-    }
-    const mediaKind = kindFromExtension(entry.path)
-    if (mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio' || mediaKind === 'pdf') {
-      try {
-        const result = await request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
-          binary: true,
-        })
-        const blob = new Blob([result.payload], { type: mimeForKind(mediaKind, ext) })
-        previewUrl.value = URL.createObjectURL(blob)
-        previewKind.value = mediaKind
-        previewMeta.value = { shown: entry.size, total: entry.size }
-      } catch (error) {
+    previewLoading.value = true
+    try {
+      const ext = (entry.path.split('/').pop() ?? '').split('.').pop() ?? ''
+      if (entry.size > PREVIEW_MAX_BYTES) {
         previewKind.value = 'too-large'
-        toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
+        previewMeta.value = { shown: 0, total: entry.size }
+        return
       }
-      return
-    }
-    // Sniff window: one ranged request, then classify by magic / UTF-8.
-    const windowLen = Math.min(entry.size, SNIFF_BYTES)
-    const end = windowLen > 0 ? windowLen - 1 : 0
-    const result = await run('Preview', () =>
-      request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
-        binary: true,
-        headers: { Range: `bytes=0-${end}` },
-      }),
-    )
-    if (result === null) return
-    const bytes = new Uint8Array(result.payload)
-    previewMeta.value = { shown: bytes.byteLength, total: entry.size }
-    const kind = classify(bytes)
-    previewKind.value = kind
-    if (kind === 'text') {
-      editorContent.value = new TextDecoder().decode(bytes)
-      editorIsText.value = true
-    } else if (kind === 'binary') {
-      previewHex.value = toHexDump(bytes, { maxRows: 4096 })
+      const mediaKind = kindFromExtension(entry.path)
+      if (mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio' || mediaKind === 'pdf') {
+        try {
+          const result = await request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
+            binary: true,
+          })
+          const blob = new Blob([result.payload], { type: mimeForKind(mediaKind, ext) })
+          previewUrl.value = URL.createObjectURL(blob)
+          previewKind.value = mediaKind
+          previewMeta.value = { shown: entry.size, total: entry.size }
+        } catch (error) {
+          previewKind.value = 'too-large'
+          toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        return
+      }
+      // Sniff window: one ranged request, then classify by magic / UTF-8.
+      const windowLen = Math.min(entry.size, SNIFF_BYTES)
+      const end = windowLen > 0 ? windowLen - 1 : 0
+      const result = await run('Preview', () =>
+        request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
+          binary: true,
+          headers: { Range: `bytes=0-${end}` },
+        }),
+      )
+      if (result === null) return
+      const bytes = new Uint8Array(result.payload)
+      previewMeta.value = { shown: bytes.byteLength, total: entry.size }
+      const kind = classify(bytes)
+      previewKind.value = kind
+      if (kind === 'text') {
+        editorContent.value = new TextDecoder().decode(bytes)
+        editorIsText.value = true
+      } else if (kind === 'binary') {
+        previewHex.value = toHexDump(bytes, { maxRows: 4096 })
+      }
+    } finally {
+      previewLoading.value = false
     }
   }
 
@@ -693,7 +712,29 @@ export function useConsole() {
     }
   }
 
+  // Pinned project (`storhub serve <project>`): auto-loaded, selector hidden.
+  const lockedProject = config.project ?? ''
+
+  async function init(): Promise<void> {
+    restoreSession()
+    const params = new URLSearchParams(window.location.search)
+    const shareParam = params.get('share')
+    if (shareParam) {
+      await bootstrapShare(shareParam)
+      return
+    }
+    if (lockedProject) {
+      await loadProject(lockedProject)
+      return
+    }
+    // Deep-link convenience: /?project=name preloads without touching the UI.
+    const urlProject = params.get('project')
+    if (urlProject) await loadProject(urlProject)
+  }
+
   return {
+    lockedProject,
+    init,
     // state
     project,
     currentPath,
@@ -718,7 +759,7 @@ export function useConsole() {
     shareDownloadAllowed,
     canWrite,
     canEditFile,
-    canReadRanges,
+
     // modal
     modalOpen,
     modalKind,
@@ -734,6 +775,7 @@ export function useConsole() {
     previewHex,
     previewMeta,
     editorIsText,
+    previewLoading,
     loadPreview,
     clearPreview,
     // actions

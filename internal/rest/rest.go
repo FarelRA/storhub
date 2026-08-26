@@ -44,7 +44,10 @@ const (
 )
 
 type Options struct {
-	BasePath         string
+	BasePath string
+	// DefaultProject pins the console to a single project when the server
+	// was started as `storhub serve <project> ...`.
+	DefaultProject   string
 	StreamChunkSize  int64
 	MaxPatchBodySize int64
 	ShareTTL         time.Duration
@@ -726,6 +729,7 @@ func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
 	payload, err := json.Marshal(map[string]any{
 		"basePath":    h.opts.BasePath,
 		"authEnabled": h.opts.Auth != nil,
+		"project":     h.opts.DefaultProject,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -740,6 +744,9 @@ func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 		"service":   "storhub-rest",
 		"version":   "v1",
 		"base_path": h.opts.BasePath,
+		// Set by `storhub serve <project>`: the console auto-loads this and
+		// hides the free-form project selector - one server, one project.
+		"project": h.opts.DefaultProject,
 	})
 }
 

@@ -31,9 +31,6 @@ function glyphClass(entry: EntryInfo): string {
 
 interface MenuState {
   entry: EntryInfo
-  x: number
-  y: number
-  flipUp: boolean
   style: Record<string, string>
 }
 
@@ -58,9 +55,6 @@ function toggleMenu(entry: EntryInfo) {
   const y = flipUp ? rect.top : rect.bottom + 4
   openMenu.value = {
     entry,
-    x: rect.right,
-    y,
-    flipUp,
     style: {
       left: `${rect.right}px`,
       ...(flipUp ? { bottom: `${window.innerHeight - y + 4}px` } : { top: `${y}px` }),
@@ -100,10 +94,9 @@ watch(openMenu, (open) => {
 
 onUnmounted(closeMenu)
 
-async function runFor(entry: EntryInfo, fn: () => Promise<void> | void) {
+async function runFor(_entry: EntryInfo, fn: () => Promise<void> | void) {
   closeMenu()
   await fn()
-  void entry
 }
 
 /** Stat the row first so modals + detail panes operate on the same entry. */
@@ -153,7 +146,9 @@ function isFile(entry: EntryInfo): boolean {
             {{ glyph(entry) }}
           </span>
           <span class="min-w-0 flex-1">
-            <span class="block truncate font-medium">{{ entry.path.split('/').pop() }}</span>
+            <div class="font-medium">
+              <MidTruncate :text="entry.path.split('/').pop() ?? entry.path" />
+            </div>
             <span class="block truncate text-xs text-mist">
               {{ entry.is_dir ? 'directory' : entry.is_symlink ? `symlink → ${entry.symlink_target ?? '?'}` : 'file' }}
             </span>

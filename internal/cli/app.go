@@ -1163,6 +1163,9 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return abort(err)
 	}
+	// `serve <project> <mount>`: the REST surface (and thus the web console)
+	// is pinned to that project - no free-form selector needed.
+	opts.DefaultProject = args[0]
 	handler, err := a.buildRESTHandler(hub, opts)
 	if err != nil {
 		return abort(err)

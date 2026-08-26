@@ -4,7 +4,6 @@ const {
   project,
   currentPath,
   selectedPath,
-  selectedEntry,
   entries,
   busy,
   authEnabled,
@@ -12,19 +11,15 @@ const {
   isSharedView,
   sharedMode,
   canWrite,
+  lockedProject,
 } = console_
 
 const drawerOpen = ref(false)
 const projectInput = ref('')
 const { ask } = useConfirm()
 
-onMounted(async () => {
-  console_.restoreSession()
-  const shareParam = new URLSearchParams(window.location.search).get('share')
-  if (shareParam) {
-    await console_.bootstrapShare(shareParam)
-    return
-  }
+onMounted(() => {
+  void console_.init()
 })
 
 async function loadProject() {
@@ -39,16 +34,6 @@ async function navigate(path: string) {
 async function selectEntry(entry: Parameters<typeof console_.selectEntry>[0]) {
   await console_.selectEntry(entry)
   drawerOpen.value = false
-}
-
-async function purge() {
-  const ok = await ask({
-    title: 'Purge untracked chunks',
-    body: 'Delete release assets that are no longer referenced by any metadata revision? This frees storage but old revisions may lose their blobs.',
-    confirmLabel: 'Purge',
-    danger: true,
-  })
-  if (ok) await console_.purgeUntracked()
 }
 
 function onGlobalKey(event: KeyboardEvent) {
@@ -67,6 +52,29 @@ onUnmounted(() => window.removeEventListener('keydown', onGlobalKey))
 function closeDrawer() {
   drawerOpen.value = false
 }
+
+async function purge() {
+  const ok = await ask({
+    title: 'Purge untracked chunks',
+    body: 'Delete release assets that are no longer referenced by any metadata revision? This frees storage but old revisions may lose their blobs.',
+    confirmLabel: 'Purge',
+    danger: true,
+  })
+  if (ok) await console_.purgeUntracked()
+}
+
+const { panels } = usePanelWidths()
+
+// Main-page directory actions.
+function newFolderHere() {
+  console_.openModal('mkdir', currentPath.value || '')
+}
+function newFileHere() {
+  console_.openModal('create-file', currentPath.value || '')
+}
+function symlinkHere() {
+  console_.openModal('symlink', currentPath.value || '')
+}
 </script>
 
 <template>
@@ -84,7 +92,7 @@ function closeDrawer() {
       </button>
       <span class="hidden font-mono text-base font-semibold sm:block">StorHub</span>
 
-      <AppBreadcrumbs :project="project" :path="currentPath" @navigate="navigate" />
+      <Breadcrumbs :project="project" :path="currentPath" @navigate="navigate" />
 
       <div class="ml-auto flex shrink-0 items-center gap-2">
         <span v-if="busy" class="chip animate-pulse motion-reduce:animate-none" role="status">working…</span>
@@ -100,8 +108,8 @@ function closeDrawer() {
     </header>
 
     <div class="flex min-h-0 flex-1">
-      <!-- Sidebar: drawer below lg, pinned at lg+ -->
-      <SideDrawer :open="drawerOpen" @close="closeDrawer">
+      <!-- First column: controls sidebar (resizable at lg+) -->
+      <SideDrawer :open="drawerOpen" :width="panels.sidebar" @close="closeDrawer">
         <nav class="mb-5 flex items-center justify-between lg:hidden">
           <span class="font-mono text-base font-semibold">StorHub</span>
           <button type="button" class="btn btn-sm" aria-label="Close menu" @click="closeDrawer">✕</button>
@@ -109,7 +117,7 @@ function closeDrawer() {
 
         <!-- Project -->
         <section class="space-y-3 border-b border-hair pb-5">
-          <label class="block">
+          <label v-if="!lockedProject" class="block">
             <span class="field-label">Project</span>
             <input
               v-model.trim="projectInput"
@@ -123,11 +131,17 @@ function closeDrawer() {
               @keydown.enter.prevent="loadProject"
             >
           </label>
+          <p v-else class="text-sm text-mist">
+            Project <code class="font-mono text-parchment">{{ lockedProject }}</code>
+            <span class="chip ml-1">pinned by server</span>
+          </p>
           <div class="grid grid-cols-2 gap-2">
-            <button class="btn btn-solid" :disabled="isSharedView || !projectInput" @click="loadProject">
+            <button v-if="!lockedProject" class="btn btn-solid" :disabled="isSharedView || !projectInput" @click="loadProject">
               Load
             </button>
-            <button class="btn" :disabled="!project || busy" @click="console_.refreshAll()">Refresh</button>
+            <button class="btn" :class="lockedProject ? 'col-span-2' : ''" :disabled="!project || busy" @click="console_.refreshAll()">
+              Refresh
+            </button>
           </div>
         </section>
 
@@ -140,11 +154,11 @@ function closeDrawer() {
           <button class="btn btn-sm w-full" @click="console_.logout()">Sign out</button>
         </section>
 
-        <!-- Stats -->
-        <section v-if="project && !isSharedView" class="space-y-2.5 border-b border-hair py-5">
+        <!-- Stats: always visible; dashes until a project reports numbers -->
+        <section class="space-y-2.5 border-b border-hair py-5">
           <StatsGrid :stats="console_.stats.value" />
           <button
-            v-if="isAdmin"
+            v-if="project && !isSharedView && isAdmin"
             class="btn btn-sm w-full"
             :disabled="busy || !project"
             title="Admin only: delete release assets no longer referenced by metadata"
@@ -152,73 +166,68 @@ function closeDrawer() {
           >
             Purge untracked assets…
           </button>
-          <ConfirmDeleteProject @deleted="projectInput = ''" />
+          <ConfirmDeleteProject v-if="project && !isSharedView" @deleted="projectInput = ''" />
         </section>
 
-        <!-- Directory actions -->
-        <section v-if="project" class="space-y-2 border-b border-hair py-5">
-          <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Directory actions</h2>
-          <div class="grid gap-2">
-            <button class="btn btn-sm" :disabled="!canWrite || busy" @click="console_.openModal('mkdir')">
-              New directory…
-            </button>
-            <button class="btn btn-sm" :disabled="!currentPath || (!canWrite && !!selectedEntry)" @click="console_.goUp()">
-              Up one level
-            </button>
-            <button class="btn btn-sm" :disabled="!canWrite || busy" @click="console_.openModal('create-file')">
-              New file…
-            </button>
-          </div>
-        </section>
-
-        <section class="py-5">
+        <!-- Shares -->
+        <section class="border-b border-hair py-5">
           <SharePanel />
         </section>
 
-        <p v-if="!isSharedView" class="pb-4 text-xs leading-relaxed text-mist/70">
-          Everything here goes through the same REST API the CLI uses — nothing is special-cased.
-        </p>
+        <!-- Revisions -->
+        <section v-if="!isSharedView" class="border-b border-hair py-5">
+          <RevisionPanel />
+        </section>
+
         <ServerInfoCard />
       </SideDrawer>
 
-      <!-- Main workspace -->
+      <!-- Gutter: sidebar | workspace -->
+      <PanelGutter panel="sidebar" />
+
+      <!-- Workspace: directory center, preview right (desktop); stacked on mobile -->
       <main class="min-w-0 flex-1 lg:h-full lg:overflow-hidden">
         <div
-          class="grid grid-cols-1 md:grid-cols-2 lg:h-full lg:grid-cols-[minmax(260px,340px)_minmax(360px,1fr)_minmax(300px,380px)]"
+          class="grid h-full grid-cols-1 md:grid-cols-2 lg:[grid-template-columns:var(--dir-w,35rem)_auto_1fr]"
+          :style="{ '--dir-w': `${panels.directory}px` }"
         >
-          <!-- Directory pane -->
-          <section class="flex min-h-0 flex-col gap-3 border-b border-hair p-4 max-md:border-r-0 md:border-b lg:border-b-0 lg:border-r">
-            <header class="flex items-baseline justify-between gap-3">
+          <!-- Directory pane with inline actions -->
+          <section class="flex min-h-0 min-w-0 flex-col gap-3 p-4 md:border-r max-md:border-t max-md:border-hair lg:border-hair">
+            <header class="flex items-center justify-between gap-2">
               <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Directory</h2>
-              <span class="text-xs text-mist">{{ entries.length }} entries</span>
+              <div class="flex items-center gap-1.5">
+                <button class="btn btn-sm px-2.5" :disabled="!currentPath || busy" title="Up one level" aria-label="Up one level" @click="console_.goUp()">
+                  ↑
+                </button>
+                <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFolderHere">+ Folder</button>
+                <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFileHere">+ File</button>
+                <button class="btn btn-sm" :disabled="!canWrite || busy" title="Create a symbolic link in this directory" @click="symlinkHere">Symlink…</button>
+                <span class="ml-1 hidden text-xs text-mist sm:inline">{{ entries.length }}</span>
+              </div>
             </header>
             <EmptyState
               v-if="!entries.length"
               icon="🗂"
               title="Nothing here"
-              :hint="project ? 'This directory is empty.' : 'Load a project from the menu to start browsing.'"
+              :hint="project ? 'This directory is empty.' : 'Load a project to start browsing.'"
             />
-            <div v-else class="min-h-0 overflow-y-auto pr-1 lg:min-h-0">
+            <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
               <EntryList :entries="entries" :selected-path="selectedPath" @select="selectEntry" />
             </div>
           </section>
 
-          <!-- Editor pane -->
-          <section class="min-h-0 border-b border-hair p-4 lg:border-b-0 lg:border-r">
+          <!-- Gutter: directory | preview -->
+          <PanelGutter panel="directory" />
+
+          <!-- Preview pane -->
+          <section class="flex min-h-0 min-w-0 flex-col p-4 max-md:border-t max-md:border-hair">
             <EditorPane />
           </section>
-
-          <!-- Details column -->
-          <aside class="flex min-h-0 flex-col gap-5 overflow-y-auto p-4 md:col-span-2 lg:col-span-1 lg:overflow-y-auto">
-            <EntryDetails />
-            <XattrPanel />
-            <RevisionPanel v-if="!isSharedView" />
-          </aside>
         </div>
       </main>
     </div>
 
-    <!-- Modals -->
+    <!-- Modals & overlays -->
     <ActionModals />
     <ConfirmDialog />
     <ToastStack />

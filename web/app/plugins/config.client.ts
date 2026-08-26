@@ -1,6 +1,8 @@
 export interface UiConfig {
   basePath: string
   authEnabled: boolean
+  /** Pinned by `storhub serve <project>`; empty for plain `storhub rest`. */
+  project?: string
 }
 
 declare global {
@@ -15,10 +17,11 @@ declare global {
  * script, so fall back to the default REST prefix.
  */
 export default defineNuxtPlugin(() => {
-  const config = window.STORHUB_UI_CONFIG ?? { basePath: '/api/v1', authEnabled: true }
-  // "/" or "" means the API is mounted at the root; anything else loses its
-  // trailing slash. joinApiPath() consumes the result verbatim.
-  const raw = config.basePath ?? '/api/v1'
-  const basePath = !raw || raw === '/' ? '' : raw.replace(/\/+$/, '')
-  return { provide: { uiConfig: { basePath, authEnabled: config.authEnabled } } }
+  const raw0 = window.STORHUB_UI_CONFIG ?? { basePath: '/api/v1', authEnabled: true }
+  const base = !raw0.basePath || raw0.basePath === '/' ? '' : raw0.basePath.replace(/\/+$/, '')
+  return {
+    provide: {
+      uiConfig: { basePath: base, authEnabled: raw0.authEnabled !== false, project: raw0.project ?? '' },
+    },
+  }
 })

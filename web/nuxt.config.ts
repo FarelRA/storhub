@@ -9,9 +9,13 @@ export default defineNuxtConfig({
   vite: {
     plugins: [tailwindcss()],
     server: {
+      // Allow browsing the dev server via the machine's hostname
+      // (e.g. http://nodus:3311) - Vite blocks unlisted hosts otherwise.
+      allowedHosts: ['nodus'],
       proxy: {
-        // `bun run dev` against a local `storhub rest --listen :8080`.
-        '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+        // Dev backend target; override with DEV_API_TARGET (e.g. a storhub
+        // instance running on another machine).
+        '/api': { target: process.env.DEV_API_TARGET ?? 'http://127.0.0.1:8080', changeOrigin: true },
       },
     },
   },
