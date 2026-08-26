@@ -64,6 +64,8 @@ const project = ref('')
 const currentPath = ref('')
 const selectedPath = ref('')
 const selectedEntry = ref<EntryInfo | null>(null)
+const selectedPaths = ref<Set<string>>(new Set())
+const lastSelected = ref<string | null>(null)
 const entries = ref<EntryInfo[]>([])
 const stats = ref<ProjectStats>({})
 const shares = ref<Share[]>([])
@@ -194,6 +196,7 @@ export function useConsole() {
     let nextPath = normalizePath(path)
     if (sharedMode.value && shareRootPath.value && !withinShareRoot(nextPath)) nextPath = shareRootPath.value
     currentPath.value = nextPath
+    clearSelection()
     await run('Directory', async () => {
       const payload = await getJSON<{ entries?: EntryInfo[] }>(url(projectURL('/children'), { path: nextPath }))
       entries.value = payload.entries ?? []
@@ -354,6 +357,8 @@ export function useConsole() {
     project.value = trimmed
     currentPath.value = ''
     selectedPath.value = ''
+    selectedPaths.value = new Set()
+    lastSelected.value = null
     selectedEntry.value = null
     editorContent.value = ''
     editorDirty.value = false
@@ -541,18 +546,93 @@ export function useConsole() {
 
   async function removeSelected(entry: EntryInfo): Promise<boolean> {
     const done = await op(`Remove ${entry.path}`, entry.is_dir ? 'rmdir' : 'unlink', { path: entry.path })
-    if (done && selectedPath.value === entry.path) clearSelection()
+    if (done) {
+      selectedPaths.value.delete(entry.path)
+      selectedPaths.value = new Set(selectedPaths.value)
+      if (selectedPath.value === entry.path) clearSelection()
+      if (selectedPaths.value.size === 0) clearSelection()
+    }
     return done
+  }
+
+  async function removeMany(paths: string[]): Promise<boolean> {
+    let ok = true
+    for (const p of paths) {
+      const entry = entries.value.find((e) => e.path === p) ?? { path: p, is_dir: false, is_symlink: false } as EntryInfo
+      const done = await op(`Remove ${p}`, (entry as EntryInfo).is_dir ? 'rmdir' : 'unlink', { path: p })
+      if (!done) ok = false
+    }
+    // Clear those that were removed from selection
+    for (const p of paths) selectedPaths.value.delete(p)
+    selectedPaths.value = new Set(selectedPaths.value)
+    if (selectedPaths.value.size === 0) clearSelection()
+    else {
+      // Keep primary selected as last remaining
+      const last = [...selectedPaths.value].pop()!
+      selectedPath.value = last
+      await inspectPath(last)
+    }
+    return ok
   }
 
   function clearSelection(): void {
     selectedPath.value = ''
     selectedEntry.value = null
+    selectedPaths.value = new Set()
+    lastSelected.value = null
     editorContent.value = ''
     editorDirty.value = false
     xattrs.value = []
     editorIsText.value = true
     clearPreview()
+  }
+
+  function isSelected(path: string): boolean {
+    return selectedPaths.value.has(path)
+  }
+
+  function selectSingle(path: string): void {
+    selectedPaths.value = new Set([path])
+    lastSelected.value = path
+    selectedPath.value = path
+  }
+
+  function toggleSelect(path: string): void {
+    const next = new Set(selectedPaths.value)
+    if (next.has(path)) next.delete(path)
+    else next.add(path)
+    selectedPaths.value = next
+    lastSelected.value = path
+    if (next.size === 1) {
+      selectedPath.value = [...next][0]!
+    } else if (next.size === 0) {
+      clearSelection()
+      return
+    } else {
+      selectedPath.value = path
+    }
+  }
+
+  function selectRange(from: string, to: string): void {
+    const idxFrom = entries.value.findIndex((e) => e.path === from)
+    const idxTo = entries.value.findIndex((e) => e.path === to)
+    if (idxFrom === -1 || idxTo === -1) {
+      selectSingle(to)
+      return
+    }
+    const [a, b] = idxFrom < idxTo ? [idxFrom, idxTo] : [idxTo, idxFrom]
+    const range = entries.value.slice(a, b + 1).map((e) => e.path)
+    selectedPaths.value = new Set(range)
+    lastSelected.value = to
+    selectedPath.value = to
+  }
+
+  function selectAll(): void {
+    selectedPaths.value = new Set(entries.value.map((e) => e.path))
+    if (entries.value.length) {
+      lastSelected.value = entries.value[entries.value.length - 1]!.path
+      selectedPath.value = lastSelected.value!
+    }
   }
 
   async function deleteProject(): Promise<boolean> {
@@ -606,6 +686,8 @@ export function useConsole() {
     project.value = ''
     currentPath.value = ''
     selectedPath.value = ''
+    selectedPaths.value = new Set()
+    lastSelected.value = null
     selectedEntry.value = null
     entries.value = []
     stats.value = {}
@@ -896,6 +978,8 @@ export function useConsole() {
     project,
     currentPath,
     selectedPath,
+    selectedPaths,
+    lastSelected,
     selectedEntry,
     entries,
     stats,
@@ -950,6 +1034,13 @@ export function useConsole() {
     bootstrapShare,
     goUp,
     removeSelected,
+    removeMany,
+    clearSelection,
+    isSelected,
+    selectSingle,
+    toggleSelect,
+    selectRange,
+    selectAll,
     deleteProject,
     rollbackRevision,
     purgeUntracked,

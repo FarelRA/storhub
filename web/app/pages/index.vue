@@ -32,8 +32,21 @@ async function navigate(path: string) {
 }
 
 async function selectEntry(entry: Parameters<typeof console_.selectEntry>[0]) {
+  // Selection only; keep drawer open on desktop for multi-select
+  await console_.focusEntry(entry)
+}
+
+async function openEntry(entry: Parameters<typeof console_.selectEntry>[0]) {
   await console_.selectEntry(entry)
   drawerOpen.value = false
+}
+
+function onSelect(entry: Parameters<typeof console_.selectEntry>[0]) {
+  void selectEntry(entry)
+}
+
+function onOpen(entry: Parameters<typeof console_.selectEntry>[0]) {
+  void openEntry(entry)
 }
 
 function onGlobalKey(event: KeyboardEvent) {
@@ -340,7 +353,7 @@ async function onDrop(event: DragEvent) {
               :hint="project ? 'This directory is empty — drop files to upload.' : 'Load a project to start browsing.'"
             />
             <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
-              <EntryList :entries="entries" :selected-path="selectedPath" @select="selectEntry" />
+              <EntryList :entries="entries" :selected-path="selectedPath" @select="onSelect" @open="onOpen" />
             </div>
           </section>
 
