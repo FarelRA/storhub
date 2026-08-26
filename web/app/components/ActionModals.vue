@@ -49,9 +49,9 @@ const submitLabel = computed(() => {
     </div>
 
     <div v-else-if="isNewPathKind" class="flex flex-col gap-3">
-      <label class="block">
+      <label v-if="modalKind !== 'symlink'" class="block">
         <span class="field-label">Existing path</span>
-        <input :value="console_.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
+        <input :value="console_.selectedPath" type="text" class="input font-mono opacity-60" disabled >
       </label>
       <label class="block">
         <span class="field-label">{{ modalKind === 'symlink' ? 'Link path' : 'New path' }}</span>

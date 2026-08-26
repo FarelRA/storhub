@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path"
 	"reflect"
 	"sort"
@@ -227,13 +228,13 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
-	if share.ID == "" || share.URL != "/shares/"+share.ID || share.DownloadURL != "/shares/"+share.ID+"/download" {
+	if share.ID == "" || !strings.Contains(share.URL, "share=") || share.DownloadURL == "" {
 		t.Fatalf("unexpected share response: %+v", share)
 	}
-	info := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusOK)
+	info := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.Token, nil, nil, http.StatusOK)
 	var public shareResponse
 	decodeJSONBody(t, info, &public)
-	if public.Path != "hello.txt" || public.ID != share.ID {
+	if public.Path != "hello.txt" || public.ID != share.ID || public.Token != share.Token {
 		t.Fatalf("unexpected public share response: %+v", public)
 	}
 	shared := mustRequest(t, handler, http.MethodGet, share.DownloadURL, nil, nil, http.StatusOK)
@@ -256,7 +257,8 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 	if share.Download {
 		t.Fatalf("expected disabled download in response: %+v", share)
 	}
-	resp := mustRequest(t, handler, http.MethodGet, share.URL+"/download", nil, nil, http.StatusForbidden)
+	resp := mustRequest(t, handler, http.MethodGet,
+		"/shares/"+share.ID+"/download?token="+url.QueryEscape(share.Token), nil, nil, http.StatusForbidden)
 	assertErrorCode(t, resp, "forbidden")
 }
 
@@ -296,7 +298,8 @@ func TestRESTProjectShareListAndDelete(t *testing.T) {
 		t.Fatalf("unexpected share listing: %+v", listing)
 	}
 	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+share.ID, nil, nil, http.StatusNoContent)
-	missing := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.ID, nil, nil, http.StatusNotFound)
+	// Revocation is by ID in the management plane; redemption dies too.
+	missing := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.Token, nil, nil, http.StatusNotFound)
 	assertErrorCode(t, missing, "not_found")
 }
 

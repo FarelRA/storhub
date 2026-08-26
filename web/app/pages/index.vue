@@ -72,9 +72,6 @@ function newFolderHere() {
 function newFileHere() {
   console_.openModal('create-file', currentPath.value || '')
 }
-function symlinkHere() {
-  console_.openModal('symlink', currentPath.value || '')
-}
 </script>
 
 <template>
@@ -149,8 +146,28 @@ function symlinkHere() {
         <section v-if="authEnabled && !console_.token.value && !isSharedView" class="border-b border-hair py-5">
           <LoginCard />
         </section>
-        <section v-else-if="authEnabled && console_.token.value && !isSharedView" class="space-y-2 border-b border-hair py-5 max-lg:hidden">
-          <p class="text-sm text-sage">✓ Signed in as {{ console_.principal.value?.username }}</p>
+        <section v-else-if="authEnabled && console_.token.value && !isSharedView" class="space-y-3 border-b border-hair py-5 max-lg:hidden">
+          <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Account</h2>
+          <dl class="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 text-sm">
+            <dt class="text-xs leading-6 text-mist">user</dt>
+            <dd class="font-mono text-xs leading-6">{{ console_.principal.value?.username }}</dd>
+            <dt class="text-xs leading-6 text-mist">uid</dt>
+            <dd class="font-mono text-xs leading-6">{{ console_.principal.value?.uid }}</dd>
+            <dt class="text-xs leading-6 text-mist">gid</dt>
+            <dd class="font-mono text-xs leading-6">{{ console_.principal.value?.primary_gid }}</dd>
+            <dt v-if="console_.principal.value?.groups?.length" class="text-xs leading-6 text-mist">groups</dt>
+            <dd
+              v-if="console_.principal.value?.groups?.length"
+              class="truncate font-mono text-xs leading-6"
+              :title="(console_.principal.value.groups ?? []).join(', ')"
+            >
+              {{ (console_.principal.value.groups ?? []).join(',') }}
+            </dd>
+            <dt class="text-xs leading-6 text-mist">role</dt>
+            <dd class="font-mono text-xs leading-6">
+              {{ console_.principal.value?.admin ? 'admin' : 'user' }}
+            </dd>
+          </dl>
           <button class="btn btn-sm w-full" @click="console_.logout()">Sign out</button>
         </section>
 
@@ -175,7 +192,7 @@ function symlinkHere() {
         </section>
 
         <!-- Revisions -->
-        <section v-if="!isSharedView" class="border-b border-hair py-5">
+        <section v-if="!isSharedView" class="py-5">
           <RevisionPanel />
         </section>
 
@@ -201,7 +218,6 @@ function symlinkHere() {
                 </button>
                 <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFolderHere">+ Folder</button>
                 <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFileHere">+ File</button>
-                <button class="btn btn-sm" :disabled="!canWrite || busy" title="Create a symbolic link in this directory" @click="symlinkHere">Symlink…</button>
                 <span class="ml-1 hidden text-xs text-mist sm:inline">{{ entries.length }}</span>
               </div>
             </header>

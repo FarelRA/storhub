@@ -1,6 +1,19 @@
 <script setup lang="ts">
+import { formatBytes } from '~/composables/use-format'
+
 const console_ = useConsole()
-const { selectedPath, selectedEntry, canEditFile, busy, editorIsText, previewKind, previewLoading } = console_
+const { selectedPath, selectedEntry, canEditFile, busy, editorIsText, previewKind, previewLoading, previewMeta, editorDirty } = console_
+
+// Right-aligned status on the PREVIEW header line.
+const meta = computed(() => {
+  const { shown, total } = previewMeta.value
+  if (!selectedPath.value || !selectedEntry.value) return ''
+  if (selectedEntry.value.is_dir || selectedEntry.value.is_symlink) return ''
+  if (previewKind.value === 'too-large') return `file is ${formatBytes(total)} — too large to auto-preview`
+  if (previewKind.value === 'binary') return `first ${formatBytes(shown)} of ${formatBytes(total)}`
+  if (previewKind.value === 'text' && shown < total) return `first ${formatBytes(shown)} of ${formatBytes(total)}`
+  return ''
+})
 
 async function reload() {
   const entry = selectedEntry.value
@@ -17,6 +30,14 @@ async function reload() {
   <section class="flex h-full min-h-0 min-w-0 flex-col gap-3">
     <header class="flex items-baseline justify-between gap-3">
       <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Preview</h2>
+      <p
+        v-if="meta || editorDirty"
+        class="min-w-0 truncate text-right font-mono text-xs text-mist"
+        :title="meta"
+      >
+        <span v-if="editorDirty && previewKind === 'text'" class="mr-1 text-ember" title="Unsaved changes">●</span>
+        {{ meta }}
+      </p>
     </header>
 
     <PreviewPane />

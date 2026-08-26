@@ -2,24 +2,46 @@
 import { formatBytes } from '~/composables/use-format'
 
 const console_ = useConsole()
-const { previewKind, previewUrl, previewHex, previewMeta, editorContent, editorDirty, selectedPath, selectedEntry, busy, previewLoading, editorIsText } = console_
+const { previewKind, previewUrl, previewHex, previewMeta, editorContent, editorDirty, selectedPath, selectedEntry, busy, previewLoading } = console_
 
 async function downloadSelected() {
   const entry = selectedEntry.value
   if (entry) await console_.downloadEntry(entry)
 }
 
-const meta = computed(() => {
-  const { shown, total } = previewMeta.value
-  if (previewKind.value === 'too-large') return `file is ${formatBytes(total)} — too large to auto-preview`
-  if (previewKind.value === 'binary') return `first ${formatBytes(shown)} of ${formatBytes(total)}`
-  if (previewKind.value === 'text' && shown < total) return `first ${formatBytes(shown)} of ${formatBytes(total)}`
-  return ''
-})
-
 // Transparency-friendly checkerboard behind images.
 const checker =
   'bg-[conic-gradient(#241f1b_0_25%,#1b1714_0_50%,#241f1b_0_75%,#1b1714_0)] bg-[length:16px_16px]'
+
+/**
+ * Non-previewable selections get the centered state card instead of an
+ * empty text box: nothing selected, a directory, or a symlink.
+ */
+const stateCard = computed<{ icon: string; title: string; hint: string } | null>(() => {
+  const entry = selectedEntry.value
+  if (!selectedPath.value || !entry) {
+    return {
+      icon: '📄',
+      title: 'No file selected',
+      hint: 'Pick an entry from the directory pane — its preview will appear here.',
+    }
+  }
+  if (entry.is_dir) {
+    return {
+      icon: '🗂',
+      title: 'Directory selected',
+      hint: 'Directories have no content to preview — browse or open the files inside via the ⋮ menu.',
+    }
+  }
+  if (entry.is_symlink) {
+    return {
+      icon: '↪',
+      title: 'Symlink selected',
+      hint: `Points to ${entry.symlink_target ?? 'an unknown target'} — preview the target file itself.`,
+    }
+  }
+  return null
+})
 </script>
 
 <template>
@@ -35,13 +57,23 @@ const checker =
       <span class="font-mono text-xs text-mist">Loading preview…</span>
     </div>
 
-    <!-- Text: hug height via field-sizing; soft-wrap kills any width leak -->
+    <!-- Non-previewable selection: centered state card -->
+    <div
+      v-if="!previewLoading && stateCard"
+      class="flex w-full flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center"
+    >
+      <span aria-hidden="true" class="text-3xl opacity-60">{{ stateCard.icon }}</span>
+      <p class="text-sm font-medium">{{ stateCard.title }}</p>
+      <p class="max-w-xs text-xs leading-relaxed text-mist">{{ stateCard.hint }}</p>
+    </div>
+
+    <!-- Text: fills the pane's height, wraps, scrolls when longer -->
     <textarea
-      v-if="!previewLoading && previewKind === 'text'"
+      v-else-if="!previewLoading && previewKind === 'text'"
       v-model="editorContent"
       wrap="soft"
       spellcheck="false"
-      class="max-h-full min-h-24 min-w-0 w-full max-w-full resize-none overflow-y-auto rounded-lg border border-hair bg-[#191512] p-3 font-mono text-sm leading-relaxed text-parchment placeholder:text-mist/40 focus:border-ember focus:outline-none [field-sizing:content]"
+      class="min-h-24 min-w-0 w-full flex-1 resize-none overflow-y-auto rounded-lg border border-hair bg-[#191512] p-3 font-mono text-sm leading-relaxed text-parchment placeholder:text-mist/40 focus:border-ember focus:outline-none"
       placeholder="Select a file to preview it here"
       @input="editorDirty = true"
     />
@@ -99,9 +131,4 @@ const checker =
       </button>
     </div>
   </div>
-
-  <p v-if="meta" class="font-mono text-xs text-mist/80">
-    <span v-if="editorDirty && previewKind === 'text' && editorIsText" class="mr-1 text-ember" title="Unsaved changes">●</span>
-    {{ meta }}
-  </p>
 </template>

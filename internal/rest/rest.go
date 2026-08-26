@@ -472,6 +472,16 @@ type shareClaims struct {
 	IsDir    bool   `json:"dir"`
 }
 
+// revokedShares marks deleted share IDs so stateless redemption stops
+// honoring them immediately (per-process; see serveShareInfo).
+var revokedShares sync.Map // map[string]struct{}
+
+func revokeShare(id string) { revokedShares.Store(id, struct{}{}) }
+func (h *restHandler) isRevoked(id string) bool {
+	_, bad := revokedShares.Load(id)
+	return bad
+}
+
 type sharesResponse struct {
 	Project string          `json:"project"`
 	Shares  []shareResponse `json:"shares"`
@@ -707,6 +717,11 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 
 			claims, err := h.parseShareToken(token)
 			if err == nil {
+				if h.isRevoked(claims.ID) {
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
+					h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
+					return
+				}
 				project := chi.URLParam(r, "project")
 				if project == claims.Project && strings.HasPrefix(r.URL.Path, basePath+"/projects/"+project+"/shares") {
 					h.writeError(w, http.StatusForbidden, "forbidden", "share links cannot manage shares")
@@ -750,14 +765,33 @@ func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Share redemption follows ONE pathway: the signed JWT is the credential
+// and the source of truth. GET /shares/{token} verifies it statelessly and
+// answers from claims - no registry lookup, so links survive restarts.
+// Revocation: DELETE marks the share ID revoked (checked by the auth
+// middleware), killing the link immediately for this process; revocation is
+// per-process by design - permanent revocation is key rotation.
 func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
-	shareID := chi.URLParam(r, "id")
-	record, ok := h.lookupShare(shareID)
-	if !ok {
+	segment := chi.URLParam(r, "id")
+	claims, err := h.parseShareToken(segment)
+	if err != nil || strings.TrimSpace(claims.Path) == "" || strings.TrimSpace(claims.Project) == "" {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
+	if h.isRevoked(claims.ID) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, shareResponse{
+		ID:        claims.ID,
+		Project:   claims.Project,
+		Path:      claims.Path,
+		URL:       "/?share=" + url.QueryEscape(segment),
+		Token:     segment,
+		ExpiresAt: claims.ExpiresAt.Time.UTC().Format(time.RFC3339),
+		Download:  claims.Download,
+		IsDir:     claims.IsDir,
+	})
 }
 
 // ---- Signed single-file download links -------------------------------------
@@ -1612,32 +1646,15 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	h.removeShare(record.ID)
+	revokeShare(record.ID) // stateless redemption stops immediately
 	// 204 like every other successful delete in this API (nodes, projects).
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resolveShareAccess maps a /shares/{id} URL segment onto its live record.
-// Links carry ONLY the short opaque identifier; a signed token in the URL
-// is not recognized — tokens authenticate bearers (Authorization header),
-// they never act as resource locators.
-func (h *restHandler) resolveShareAccess(segment string) (*shareRecord, *shareClaims, bool) {
-	record, ok := h.lookupShare(segment)
-	if !ok {
-		return nil, nil, false
-	}
-	claims, err := h.parseShareToken(record.Token)
-	if err != nil {
-		return nil, nil, false
-	}
-	return record, claims, true
-}
-
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
-	segment := chi.URLParam(r, "id")
-	_, claims, ok := h.resolveShareAccess(segment)
-	// A valid signature alone is not enough: a deleted share must stop
-	// working immediately, not at token expiry.
-	if !ok {
+	// Same single pathway as info: the token (query here) is the credential.
+	claims, err := h.parseShareToken(r.URL.Query().Get("token"))
+	if err != nil || h.isRevoked(claims.ID) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -1877,16 +1894,23 @@ func (h *restHandler) projectShareResponses(project string) []shareResponse {
 			continue
 		}
 		copy := *record
+		copy.Token = "" // listings never carry the credential (or its URLs)
 		shares = append(shares, h.shareResponse(&copy))
 	}
 	return shares
 }
 
+// shareResponse builds the public shape. Redemption URLs are minted ONLY
+// from the signed token (creation responses carry it; listings cannot, so
+// their URL fields stay empty - the token is the credential).
 func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
-	url := "/shares/" + record.ID
-	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, URL: url, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
+	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
+	if record.Token == "" {
+		return resp
+	}
+	resp.URL = "/?share=" + url.QueryEscape(record.Token)
 	if record.Download && !record.IsDir {
-		resp.DownloadURL = url + "/download"
+		resp.DownloadURL = "/shares/" + url.PathEscape(record.ID) + "/download?token=" + url.QueryEscape(record.Token)
 	}
 	return resp
 }

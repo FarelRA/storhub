@@ -105,10 +105,16 @@ async function withFocus(entry: EntryInfo, kind: Parameters<typeof console_.open
   console_.openModal(kind, contextDir)
 }
 
-async function shareAndCopy(entry: EntryInfo, download: boolean) {
-  const share = await console_.createShare(entry.path, download)
+async function copyDirectLink(entry: EntryInfo) {
+  closeMenu()
+  await console_.copyDirectLink(entry)
+}
+
+async function shareEntry(entry: EntryInfo) {
+  closeMenu()
+  const share = await console_.createShare(entry.path, false)
   if (!share) return
-  const link = `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.id)}`
+  const link = `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
   await copyText(link)
   toasts.success('Share link copied')
 }
@@ -186,38 +192,38 @@ function isFile(entry: EntryInfo): boolean {
 
           <template v-if="console_.canWrite.value">
             <div v-if="entry.is_dir" class="menu-sep" />
-            <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('create-file', entry.path))">New file here…</button>
-            <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('mkdir', entry.path))">New folder here…</button>
+            <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('create-file', entry.path))">New file here</button>
+            <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('mkdir', entry.path))">New folder here</button>
 
             <div class="menu-sep" />
-            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'rename'))">Rename…</button>
-            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'link'))">Hard link…</button>
-            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chmod'))">Chmod…</button>
-            <button v-if="console_.isAdmin.value" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chown'))">Chown…</button>
-            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'utimes'))">Timestamps…</button>
+            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'rename'))">Rename</button>
+            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'link'))">Hard link</button>
+            <button role="menuitem" class="menu-item" title="Create a symlink pointing to this entry, inside the current directory" @click="runFor(entry, () => withFocus(entry, 'symlink', console_.currentPath.value))">Symlink</button>
+            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chmod'))">Chmod</button>
+            <button v-if="console_.isAdmin.value" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chown'))">Chown</button>
+            <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'utimes'))">Timestamps</button>
 
             <template v-if="isFile(entry)">
               <div class="menu-sep" />
-              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'append'))">Append…</button>
-              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'patch'))">Patch bytes…</button>
-              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'truncate'))">Truncate…</button>
+              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'append'))">Append</button>
+              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'patch'))">Patch</button>
+              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'truncate'))">Truncate</button>
             </template>
 
             <div class="menu-sep" />
-            <button role="menuitem" class="menu-item" @click="runFor(entry, () => shareAndCopy(entry, false))">Share (browser)…</button>
-            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => shareAndCopy(entry, true))">Share + download…</button>
+            <button role="menuitem" class="menu-item" @click="runFor(entry, () => shareEntry(entry))">Share</button>
             <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
-            <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed link, valid 5 minutes - works with curl/wget" @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link…</button>
+            <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed URL, valid 5 minutes - works with curl/wget too" @click="copyDirectLink(entry)">Copy direct link</button>
           </template>
           <template v-else>
             <div class="menu-sep" />
             <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
-            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link…</button>
+            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="copyDirectLink(entry)">Copy direct link</button>
           </template>
 
           <template v-if="console_.canWrite.value">
             <div class="menu-sep" />
-            <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="removeEntry(entry)">Remove…</button>
+            <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="removeEntry(entry)">Remove</button>
           </template>
         </div>
       </Teleport>

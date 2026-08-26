@@ -1,3 +1,4 @@
+import { ApiError } from '~/utils/api-types'
 import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry } from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
 import {
@@ -137,7 +138,21 @@ export function useConsole() {
     try {
       return await fn()
     } catch (error) {
-      if (!quiet) toasts.error(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      // An expired session must not produce endless 401 toasts: sign out
+      // once and tell the user exactly what happened.
+      if (error instanceof ApiError && error.status === 401) {
+        if (isSharedView.value) {
+          toasts.error('This share link has expired or was revoked')
+          return null
+        }
+        if (token.value) {
+          logout()
+          toasts.error('Session expired — please sign in again')
+          return null
+        }
+      }
+      if (!quiet) toasts.error(`${label}: ${message}`)
       return null
     } finally {
       busy.value = false
@@ -612,13 +627,18 @@ export function useConsole() {
 
   // ---- Modal ---------------------------------------------------------------
 
-  function openModal(kind: ModalKind, contextDir?: string): void {
+  function openModal(kind: ModalKind, contextDir?: string, targetPath?: string): void {
     const form = blankForm()
     form.path = contextDir !== undefined
       ? `${normalizePath(contextDir)}/`
       : currentPath.value ? `${currentPath.value}/` : ''
-    form.newPath = selectedPath.value ?? ''
-    form.target = selectedPath.value ?? ''
+    // Symlinks: the clicked entry is the TARGET; the link is born in contextDir.
+    if (kind === 'symlink') {
+      form.target = targetPath ?? selectedPath.value ?? ''
+      form.newPath = `${normalizePath(contextDir || currentPath.value)}/`
+    } else {
+      form.newPath = selectedPath.value ?? ''
+    }
     if (selectedEntry.value?.mode !== undefined) form.mode = formatMode(selectedEntry.value.mode)
     form.uid = selectedEntry.value?.uid ?? 0
     form.gid = selectedEntry.value?.gid ?? 0
@@ -717,19 +737,12 @@ export function useConsole() {
 
   async function init(): Promise<void> {
     restoreSession()
-    const params = new URLSearchParams(window.location.search)
-    const shareParam = params.get('share')
+    const shareParam = new URLSearchParams(window.location.search).get('share')
     if (shareParam) {
       await bootstrapShare(shareParam)
       return
     }
-    if (lockedProject) {
-      await loadProject(lockedProject)
-      return
-    }
-    // Deep-link convenience: /?project=name preloads without touching the UI.
-    const urlProject = params.get('project')
-    if (urlProject) await loadProject(urlProject)
+    if (lockedProject) await loadProject(lockedProject)
   }
 
   return {

@@ -11,8 +11,8 @@ async function copy(label: string, value: string) {
   toasts.success(`${label} copied`)
 }
 
-function shareLink(share: { id: string }): string {
-  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.id)}`
+function shareLink(share: { id: string; token?: string }): string {
+  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
 }
 
 async function createShare(download: boolean) {

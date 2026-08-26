@@ -3,12 +3,13 @@ package rest
 import (
 	"bytes"
 	"errors"
-
-	ghapi "github.com/FarelRA/storhub/internal/github"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+
+	ghapi "github.com/FarelRA/storhub/internal/github"
 )
 
 // TestPanickingHandlerReturns500 pins the recovery middleware: a panic in
@@ -110,7 +111,7 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 	var share shareResponse
 	decodeJSONBody(t, createResp, &share)
 
-	downloadURL := "/shares/" + share.ID + "/download"
+	downloadURL := share.DownloadURL + "&path=docs%2Ff.txt"
 	headResp := mustRequest(t, handler, http.MethodHead, downloadURL, nil, nil, http.StatusOK)
 	if got := headResp.Header.Get("Content-Length"); got == "" || got == "0" {
 		t.Fatalf("HEAD must advertise length, got %q", got)
@@ -120,12 +121,11 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 	}
 }
 
-// TestShareLinksCarryShortIDs pins the round-4 registry change: URLs and
-// listing IDs are short opaque identifiers (no JWT in links), the creation
-// response alone carries the signed token for bearer use, deleted shares
-// stay dead by ID, and legacy JWT-shaped segments still resolve to their
-// live record.
-func TestShareLinksCarryShortIDs(t *testing.T) {
+// TestShareRedemptionIsStateless pins the single-pathway contract: the
+// signed token IS the share. URLs embed the token (restart-proof - the
+// in-memory registry is only bookkeeping for listings/revocation), listings
+// never leak it, and deletion revokes immediately for this process.
+func TestShareRedemptionIsStateless(t *testing.T) {
 	dl := true
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
@@ -144,23 +144,32 @@ func TestShareLinksCarryShortIDs(t *testing.T) {
 		t.Fatalf("share URL id must be a short opaque identifier, got %q", created.ID)
 	}
 	if created.Token == "" || !strings.Contains(created.Token, ".") {
-		t.Fatalf("creation response must carry the signed token for bearer use")
+		t.Fatalf("creation response must carry the signed token")
 	}
-	if !strings.Contains(created.URL, created.ID) || strings.Contains(created.URL, created.Token) {
-		t.Fatalf("share url must embed the short id only: %q", created.URL)
+	if !strings.Contains(created.URL, created.Token) || strings.Contains(created.URL, "/shares/"+created.ID) {
+		t.Fatalf("share url must embed the signed token: %q", created.URL)
 	}
 
-	// Download by short ID works; a token in the URL is NOT a locator.
-	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusOK)
-	mustRequest(t, handler, http.MethodGet, "/shares/"+created.Token+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
+	// Stateless info redemption by token.
+	info := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+created.Token, nil, nil, http.StatusOK)
+	var public shareResponse
+	decodeJSONBody(t, info, &public)
+	if public.Project != "demo" || public.Path != "shared" || public.Token != created.Token {
+		t.Fatalf("unexpected stateless share info: %+v", public)
+	}
 
-	// Listings never leak tokens.
+	// Download via token-bearing URL.
+	mustRequest(t, handler, http.MethodGet,
+		"/shares/"+created.ID+"/download?token="+url.QueryEscape(created.Token)+"&path=shared/readme.txt",
+		nil, nil, http.StatusOK)
+
+	// Listings never leak tokens or mintable URLs.
 	listResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/shares", nil, auth, http.StatusOK)
 	if strings.Contains(string(readBody(t, listResp)), created.Token) {
 		t.Fatal("share listing leaked the signed token")
 	}
 
-	// Revocation kills the link immediately.
+	// Revocation kills the link immediately (same process).
 	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/shares/"+created.ID, nil, auth, http.StatusNoContent)
-	mustRequest(t, handler, http.MethodGet, "/shares/"+created.ID+"/download?path=shared/readme.txt", nil, nil, http.StatusNotFound)
+	mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+created.Token, nil, nil, http.StatusNotFound)
 }
