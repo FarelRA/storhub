@@ -239,7 +239,7 @@ function isFile(entry: EntryInfo): boolean {
 
           <template v-if="console_.canWrite.value">
             <div class="menu-sep" />
-            <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="removeEntry(entry)">Remove</button>
+            <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="runFor(entry, () => removeEntry(entry))">Remove</button>
           </template>
         </div>
       </Teleport>
