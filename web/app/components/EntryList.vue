@@ -51,14 +51,28 @@ function toggleMenu(entry: EntryInfo) {
   const button = kebabButtons.get(entry.path)
   if (!button) return
   const rect = button.getBoundingClientRect()
-  const flipUp = rect.bottom + MENU_MAX_HEIGHT > window.innerHeight && rect.top > MENU_MAX_HEIGHT
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const margin = 8
+  const estWidth = 256 // min-w-56 + padding, covers longest labels like "Copy direct link"
+  let left = rect.right
+  // Clamp horizontally so the menu (right-aligned to the button) never leaves the viewport
+  if (left > vw - margin) left = vw - margin
+  if (left - estWidth < margin) left = estWidth + margin
+  const spaceBelow = vh - rect.bottom - margin
+  const spaceAbove = rect.top - margin
+  const flipUp = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow
+  const available = flipUp ? spaceAbove : spaceBelow
+  const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(160, available - 4))
   const y = flipUp ? rect.top : rect.bottom + 4
   openMenu.value = {
     entry,
     style: {
-      left: `${rect.right}px`,
-      ...(flipUp ? { bottom: `${window.innerHeight - y + 4}px` } : { top: `${y}px` }),
+      left: `${left}px`,
+      ...(flipUp ? { bottom: `${vh - y + 4}px` } : { top: `${y}px` }),
       transform: 'translateX(-100%)',
+      maxHeight: `${maxHeight}px`,
+      overflowY: 'auto',
     },
   }
 }
@@ -183,7 +197,7 @@ function isFile(entry: EntryInfo): boolean {
           data-entry-menu
           role="menu"
           :aria-label="`Actions for ${entry.path}`"
-          class="card fixed z-50 min-w-56 py-1 shadow-2xl"
+          class="card fixed z-50 min-w-56 max-w-[calc(100vw-16px)] py-1 shadow-2xl overscroll-contain"
           :style="openMenu.style"
         >
           <button role="menuitem" class="menu-item" @click="runFor(entry, () => emit('select', entry))">

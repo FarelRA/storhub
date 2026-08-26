@@ -321,8 +321,7 @@ async function onDrop(event: DragEvent) {
                 />
               </div>
               <p class="truncate font-mono text-xs text-mist">
-                Uploading {{ uploadProgress.done }}/{{ uploadProgress.total }} · {{ uploadProgress.current }}
-                · {{ formatBytes(uploadProgress.bytesDone) }} / {{ formatBytes(uploadProgress.bytesTotal) }}
+                Uploading {{ uploadProgress.done }}/{{ uploadProgress.total }} · {{ formatBytes(uploadProgress.bytesDone) }} / {{ formatBytes(uploadProgress.bytesTotal) }} · {{ uploadProgress.current }}
               </p>
             </div>
 
