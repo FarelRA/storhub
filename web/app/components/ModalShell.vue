@@ -46,7 +46,7 @@ watch(
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        class="card mx-auto my-[7vh] w-full max-w-lg p-5 shadow-2xl"
+        class="card mx-auto my-[7vh] w-full max-w-lg p-4 shadow-2xl"
       >
         <div class="mb-4 flex items-start justify-between gap-4">
           <h2 id="modal-title" class="font-mono text-base font-semibold">{{ title }}</h2>

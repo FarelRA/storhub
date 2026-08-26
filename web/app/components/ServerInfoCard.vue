@@ -31,7 +31,7 @@ watch(() => console_.project.value, load, { immediate: true })
 </script>
 
 <template>
-  <section v-if="info" class="space-y-1.5 pt-4 text-xs text-mist">
+  <section v-if="info" class="space-y-1.5 pb-5 text-xs text-mist">
     <h2 class="font-mono text-xs font-semibold tracking-wide uppercase">Server</h2>
     <p><span class="text-mist/70">service</span> <code class="font-mono">{{ info.service ?? '?' }}</code></p>
     <p><span class="text-mist/70">api</span> <code class="font-mono">{{ info.base_path }}</code> <span v-if="info.version" class="chip ml-1">{{ info.version }}</span></p>

@@ -113,7 +113,7 @@ function newFileHere() {
         </nav>
 
         <!-- Project: hidden entirely when pinned by the server -->
-        <section v-if="!lockedProject" class="space-y-3 border-b border-hair pb-5">
+        <section v-if="!lockedProject" class="space-y-3 border-b border-hair pb-4">
           <label class="block">
             <span class="field-label">Project</span>
             <input
@@ -139,10 +139,10 @@ function newFileHere() {
         </section>
 
         <!-- Auth -->
-        <section v-if="authEnabled && !console_.token.value && !isSharedView" class="border-b border-hair py-5">
+        <section v-if="authEnabled && !console_.token.value && !isSharedView" class="border-b border-hair py-4">
           <LoginCard />
         </section>
-        <section v-else-if="authEnabled && console_.token.value && !isSharedView" class="space-y-3 border-b border-hair py-5 max-lg:hidden">
+        <section v-else-if="authEnabled && console_.token.value && !isSharedView" class="space-y-3 border-b border-hair py-4 max-lg:hidden">
           <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Account</h2>
           <dl class="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 text-sm">
             <dt class="text-xs leading-6 text-mist">user</dt>
@@ -168,7 +168,7 @@ function newFileHere() {
         </section>
 
         <!-- Stats: always visible; dashes until a project reports numbers -->
-        <section class="space-y-2.5 border-b border-hair py-5">
+        <section class="space-y-2.5 border-b border-hair py-4">
           <StatsGrid :stats="console_.stats.value" />
           <button
             v-if="project && !isSharedView && isAdmin"
@@ -183,12 +183,12 @@ function newFileHere() {
         </section>
 
         <!-- Shares -->
-        <section class="border-b border-hair py-5">
+        <section class="border-b border-hair py-4">
           <SharePanel />
         </section>
 
         <!-- Revisions -->
-        <section v-if="!isSharedView" class="py-5">
+        <section v-if="!isSharedView" class="py-4">
           <RevisionPanel />
         </section>
 
