@@ -322,11 +322,6 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 				return tag, r.UploadURL, nil
 			}
 		}
-		for tag := range metadata.Releases {
-			if r, ok := releaseIndex[tag]; ok {
-				return tag, r.UploadURL, nil
-			}
-		}
 		for _, r := range releases {
 			metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
 			return r.TagName, r.UploadURL, nil
@@ -335,11 +330,6 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 		if tag := strings.TrimSpace(preferredTag); tag != "" {
 			if r, ok := releaseIndex[tag]; ok && len(r.Assets)+requiredSlots <= 1000 {
 				metadata.EnsureRelease(tag, h.config.Now().Unix())
-				return tag, r.UploadURL, nil
-			}
-		}
-		for tag := range metadata.Releases {
-			if r, ok := releaseIndex[tag]; ok && len(r.Assets)+requiredSlots <= 1000 {
 				return tag, r.UploadURL, nil
 			}
 		}
