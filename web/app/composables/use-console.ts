@@ -354,7 +354,9 @@ export function useConsole() {
         path: string
         download?: boolean
       }>(`/shares/${enc(shareParam)}`)
-      shareToken.value = payload.id ?? payload.token ?? shareParam
+      // The signed token is the credential - never the short registry id
+      // (which the server may echo alongside it).
+      shareToken.value = payload.token ?? payload.id ?? shareParam
       token.value = shareToken.value
       project.value = payload.project
       shareRootPath.value = normalizePath(payload.path)

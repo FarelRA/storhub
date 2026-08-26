@@ -15,6 +15,9 @@ describe('joinApiPath', () => {
     ['/api/v1///', '/nodes', '/api/v1/nodes'],
     // Non-root-relative garbage passes through untouched.
     ['/api/v1', 'https://other.example/x', 'https://other.example/x'],
+    // Bare root resolves to the API root, never a double slash.
+    ['/api/v1', '/', '/api/v1'],
+    ['', '/', '/'],
   ])('joinApiPath(%j, %j) -> %j', (base, path, expected) => {
     expect(joinApiPath(base, path)).toBe(expected)
   })

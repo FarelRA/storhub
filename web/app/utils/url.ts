@@ -8,6 +8,8 @@
 export function joinApiPath(base: string, path: string): string {
   const cleanBase = !base || base === '/' ? '' : base.replace(/\/+$/, '')
   if (!path.startsWith('/')) return path
+  // A bare "/" means the API root itself.
+  if (path === '/') return cleanBase || '/'
   if (cleanBase && (path === cleanBase || path.startsWith(`${cleanBase}/`))) return path
   return `${cleanBase}${path}`
 }
