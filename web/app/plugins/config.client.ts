@@ -16,6 +16,9 @@ declare global {
  */
 export default defineNuxtPlugin(() => {
   const config = window.STORHUB_UI_CONFIG ?? { basePath: '/api/v1', authEnabled: true }
-  const normalized = { ...config, basePath: config.basePath.replace(/\/+$/, '') || '/api/v1' }
-  return { provide: { uiConfig: normalized } }
+  // "/" or "" means the API is mounted at the root; anything else loses its
+  // trailing slash. joinApiPath() consumes the result verbatim.
+  const raw = config.basePath ?? '/api/v1'
+  const basePath = !raw || raw === '/' ? '' : raw.replace(/\/+$/, '')
+  return { provide: { uiConfig: { basePath, authEnabled: config.authEnabled } } }
 })

@@ -1,5 +1,6 @@
 import type { UiConfig } from '~/plugins/config.client'
 import { ApiError } from '~/utils/api-types'
+import { joinApiPath } from '~/utils/url'
 
 export interface ApiResult<T = unknown> {
   status: number
@@ -24,7 +25,9 @@ export function useApi() {
     options: RequestInit & { rawBody?: boolean } = {},
   ): Promise<ApiResult<T>> {
     const { rawBody, headers: extraHeaders, ...rest } = options
-    const response = await fetch(path, {
+    // Single choke point for base-path resolution: callers pass either bare
+    // routes or url()-prefixed paths and both land on the right URL.
+    const response = await fetch(joinApiPath(config.basePath, path), {
       ...rest,
       headers: authHeaders((extraHeaders as Record<string, string>) ?? {}),
     })

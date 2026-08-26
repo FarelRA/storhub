@@ -5,7 +5,7 @@ const toasts = useToasts()
 const { ask } = useConfirm()
 
 function shareLink(share: { id: string }): string {
-  return `${window.location.origin}/?share=${encodeURIComponent(share.id)}`
+  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.id)}`
 }
 
 async function copy(label: string, value: string) {
