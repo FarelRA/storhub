@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -320,10 +321,10 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	}
 	restListenAndServeFn = func(server *http.Server) error {
 		if server.Addr != "127.0.0.1:9090" || server.Handler == nil {
-			t.Fatalf("unexpected serve args: addr=%q handler=%v", server.Addr, server.Handler)
+			return fmt.Errorf("unexpected serve args: addr=%q handler=%v", server.Addr, server.Handler)
 		}
-		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
-			t.Fatalf("expected REST server timeouts, got %+v", server)
+		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout != 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
+			return fmt.Errorf("expected REST server timeouts (ReadHeader>0 Read=0 Write>0 Idle>0), got ReadHeader=%v Read=%v Write=%v Idle=%v", server.ReadHeaderTimeout, server.ReadTimeout, server.WriteTimeout, server.IdleTimeout)
 		}
 		return errors.New("stop")
 	}
