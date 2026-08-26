@@ -229,7 +229,26 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --allow-anonymo
 GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --auth-file ./rest-auth.json
 ```
 
-Open `http://localhost:8080/ui` for the built-in Alpine.js file browser and console.
+Open `http://localhost:8080/` for the built-in web console (the REST API stays under `/api/v1`).
+
+The console is a Nuxt 4 + Tailwind CSS v4 SPA in `web/`, compiled ahead of time
+and embedded into the binary — no runtime CDN or external asset fetches. The
+built `internal/rest/static/dist` is committed, so plain `go build` always
+ships a working console. To change the console:
+
+```bash
+cd web
+bun install          # bun >= 1.2; node 22 also works via npx equivalents
+bun run dev          # dev server on :3000 proxying /api to :8080
+bun run test         # vitest
+bun run lint         # eslint
+bun run typecheck    # vue-tsc
+bun run build:embed  # generate + copy bundle into internal/rest/static/dist
+```
+
+Committing regenerated `dist` output alongside `web/` source changes keeps
+Go-only CI green and binaries reproducible; the nightly/release workflows
+rebuild it from source before goreleaser runs.
 
 ## API Guide
 

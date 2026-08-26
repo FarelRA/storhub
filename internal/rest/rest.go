@@ -524,10 +524,9 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	r.Use(h.requestLogging)
 
 	r.Get("/", h.serveUIRoot)
-	r.Get("/styles.css", h.serveStyles)
-	r.Get("/alpine.min.js", h.serveAlpineJS)
-	r.Get("/app.js", h.serveAppJS)
 	r.Get("/config.js", h.serveConfigJS)
+	r.Get("/_nuxt/*", h.serveUIAssets)
+	r.Get("/favicon.svg", h.serveUIPublic)
 
 	r.Get("/shares/{id}/download", h.serveShareDownload)
 	r.Head("/shares/{id}/download", h.serveShareDownload)
@@ -704,20 +703,6 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 			h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 		})
 	}
-}
-
-func (h *restHandler) serveUIRoot(w http.ResponseWriter, r *http.Request) {
-	h.writeHTML(w, http.StatusOK, uiDocument)
-}
-
-func (h *restHandler) serveStyles(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	_, _ = io.WriteString(w, uiStyles)
-}
-
-func (h *restHandler) serveAppJS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	_, _ = io.WriteString(w, uiScript)
 }
 
 func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {

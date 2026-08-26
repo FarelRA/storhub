@@ -199,9 +199,10 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	root := mustRequest(t, handler, http.MethodGet, "/", nil, nil, http.StatusOK)
-	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub Console") || !strings.Contains(body, "Shared Access") || !strings.Contains(body, "storhubConsole") || !strings.Contains(body, "/app.js") {
+	if body := string(readBody(t, root)); !strings.Contains(body, "StorHub Console") {
 		t.Fatalf("unexpected ui body: %q", body)
 	}
+	mustRequest(t, handler, http.MethodGet, "/_nuxt/nope.js", nil, nil, http.StatusNotFound)
 	config := mustRequest(t, handler, http.MethodGet, "/config.js", nil, nil, http.StatusOK)
 	if body := string(readBody(t, config)); !strings.Contains(body, "authEnabled") || !strings.Contains(body, "/api/v1") {
 		t.Fatalf("unexpected config body: %q", body)

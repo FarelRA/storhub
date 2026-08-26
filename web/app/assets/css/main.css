@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+@theme {
+  /* StorHub warm-dark palette (mirrors the historical console). */
+  --color-shell: #161311;
+  --color-surface: #201c19;
+  --color-raise: #2a2521;
+  --color-overlay: #332d29;
+  --color-hair: #453d38;
+  --color-parchment: #f3eadc;
+  --color-mist: #b9ad9c;
+  --color-ember: #c67a24;
+  --color-ember-hi: #d99243;
+  --color-ember-deep: #b06a1e;
+  --color-sage: #889d6c;
+  --color-clay: #9c4c36;
+  --color-clay-soft: #f0bbb0;
+
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --breakpoint-3xl: 1600px;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-shell font-sans text-parchment antialiased;
+    background-image:
+      linear-gradient(180deg, rgb(255 255 255 / 0.02), transparent 24%),
+      repeating-linear-gradient(0deg, transparent, transparent 31px, rgb(255 255 255 / 0.028) 32px);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-ember);
+    outline-offset: 2px;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-overlay);
+    border-radius: 5px;
+    border: 2px solid var(--color-shell);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-overlay) transparent;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-hair
+      bg-surface px-3 text-sm font-medium text-parchment transition-colors select-none
+      hover:border-ember hover:bg-raise focus-visible:border-ember
+      disabled:pointer-events-none disabled:opacity-45 max-lg:min-h-11 motion-reduce:transition-none;
+  }
+  .btn-solid {
+    @apply border-ember-hi bg-ember font-semibold text-[#1f1408] hover:bg-ember-deep hover:border-ember-deep;
+  }
+  .btn-danger {
+    @apply border-[#7b4638] bg-transparent text-clay-soft hover:bg-clay/20 hover:border-clay;
+  }
+  .btn-sm {
+    @apply min-h-8 rounded-md px-2.5 text-xs max-lg:min-h-9;
+  }
+  .input {
+    @apply w-full rounded-lg border border-hair bg-surface px-3 py-2.5 text-parchment
+      placeholder:text-mist/50 focus:border-ember focus:outline-none
+      max-md:text-base;
+  }
+  .field-label {
+    @apply mb-1.5 block text-xs font-medium tracking-wide text-mist uppercase;
+  }
+  .card {
+    @apply rounded-xl border border-hair bg-surface;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-hair bg-raise px-2 py-0.5 text-xs text-mist;
+  }
+}
