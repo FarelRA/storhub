@@ -143,6 +143,15 @@ function closeDrawer() {
         <!-- Stats -->
         <section v-if="project && !isSharedView" class="space-y-2.5 border-b border-hair py-5">
           <StatsGrid :stats="console_.stats.value" />
+          <button
+            v-if="isAdmin"
+            class="btn btn-sm w-full"
+            :disabled="busy || !project"
+            title="Admin only: delete release assets no longer referenced by metadata"
+            @click="purge"
+          >
+            Purge untracked assets…
+          </button>
           <ConfirmDeleteProject @deleted="projectInput = ''" />
         </section>
 
@@ -173,45 +182,8 @@ function closeDrawer() {
 
       <!-- Main workspace -->
       <main class="min-w-0 flex-1 lg:h-full lg:overflow-hidden">
-        <!-- Contextual toolbar -->
-        <div class="sticky top-14 z-20 flex items-center gap-2 overflow-x-auto border-b border-hair bg-shell/95 px-3 py-2 backdrop-blur sm:px-4">
-          <button
-            class="btn btn-sm shrink-0"
-            :disabled="!selectedPath || !canWrite || busy"
-            title="Rename selected entry"
-            @click="console_.openModal('rename')"
-          >
-            Rename
-          </button>
-          <button
-            class="btn btn-sm shrink-0"
-            :disabled="!selectedPath || !!selectedEntry?.is_dir || !canWrite || busy"
-            title="Create a hard link to the selected file"
-            @click="console_.openModal('link')"
-          >
-            Hard link
-          </button>
-          <button
-            class="btn btn-sm shrink-0"
-            :disabled="!canWrite || busy"
-            title="Create a symbolic link"
-            @click="console_.openModal('symlink')"
-          >
-            Symlink
-          </button>
-          <span aria-hidden="true" class="h-6 w-px shrink-0 bg-hair" />
-          <button
-            class="btn btn-sm shrink-0"
-            :disabled="!project || !isAdmin || busy"
-            title="Admin only: delete release assets no longer referenced by metadata"
-            @click="purge"
-          >
-            Purge untracked
-          </button>
-        </div>
-
         <div
-          class="grid grid-cols-1 md:grid-cols-2 lg:h-[calc(100%-3.25rem)] lg:grid-cols-[minmax(260px,340px)_minmax(360px,1fr)_minmax(300px,380px)]"
+          class="grid grid-cols-1 md:grid-cols-2 lg:h-full lg:grid-cols-[minmax(260px,340px)_minmax(360px,1fr)_minmax(300px,380px)]"
         >
           <!-- Directory pane -->
           <section class="flex min-h-0 flex-col gap-3 border-b border-hair p-4 max-md:border-r-0 md:border-b lg:border-b-0 lg:border-r">

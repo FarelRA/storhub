@@ -1,20 +1,18 @@
 <script setup lang="ts">
+import { copyText } from '~/utils/clipboard'
+
 const console_ = useConsole()
 const { shares, selectedEntry } = console_
 const toasts = useToasts()
 const { ask } = useConfirm()
 
-function shareLink(share: { id: string }): string {
-  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.id)}`
+async function copy(label: string, value: string) {
+  await copyText(value)
+  toasts.success(`${label} copied`)
 }
 
-async function copy(label: string, value: string) {
-  try {
-    await navigator.clipboard.writeText(value)
-    toasts.success(`${label} copied`)
-  } catch {
-    window.prompt('Copy to clipboard:', value)
-  }
+function shareLink(share: { id: string }): string {
+  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.id)}`
 }
 
 async function createShare(download: boolean) {

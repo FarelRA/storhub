@@ -29,29 +29,5 @@ const rows = computed(() => {
         <dd class="min-w-0 break-words font-mono text-xs leading-6" :title="row.value">{{ row.value }}</dd>
       </template>
     </dl>
-    <div class="flex flex-wrap gap-2">
-      <button
-        class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
-        @click="console_.openModal('chmod')"
-      >
-        Chmod
-      </button>
-      <button
-        v-if="console_.isAdmin.value"
-        class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
-        @click="console_.openModal('chown')"
-      >
-        Chown
-      </button>
-      <button
-        class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.canWrite.value"
-        @click="console_.openModal('utimes')"
-      >
-        Timestamps
-      </button>
-    </div>
   </section>
 </template>

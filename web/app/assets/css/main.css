@@ -85,4 +85,11 @@
   .chip {
     @apply inline-flex items-center gap-1 rounded-full border border-hair bg-raise px-2 py-0.5 text-xs text-mist;
   }
+  .menu-item {
+    @apply flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-parchment transition-colors
+      hover:bg-surface focus-visible:bg-surface focus-visible:outline-none max-lg:min-h-11;
+  }
+  .menu-sep {
+    @apply my-1 border-t border-hair;
+  }
 }

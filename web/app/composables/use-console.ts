@@ -553,11 +553,41 @@ export function useConsole() {
     clearPreview()
   }
 
+  /**
+   * Authenticated client-side download: bytes arrive with the bearer token,
+   * then hand off to the browser via an object URL. Very large files exceed
+   * what is reasonable to buffer in a tab - point those at mount/CLI.
+   */
+  async function downloadEntry(entry: EntryInfo): Promise<void> {
+    const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+    if (entry.size > MAX_DOWNLOAD_BYTES) {
+      toasts.error(`Too large for browser download (${formatBytes(entry.size)}) - use the FUSE mount or CLI`)
+      return
+    }
+    const done = await run(`Download ${entry.path}`, () =>
+      request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), { binary: true }),
+    )
+    if (done === null) return
+    const blobUrl = URL.createObjectURL(new Blob([done.payload]))
+    const anchor = document.createElement('a')
+    anchor.href = blobUrl
+    anchor.download = entry.path.split('/').pop() ?? 'download'
+    anchor.click()
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000)
+  }
+
+  /** Select an entry non-navigatively: stat it so detail panes follow along. */
+  async function focusEntry(entry: EntryInfo): Promise<void> {
+    await inspectPath(entry.path)
+  }
+
   // ---- Modal ---------------------------------------------------------------
 
-  function openModal(kind: ModalKind): void {
+  function openModal(kind: ModalKind, contextDir?: string): void {
     const form = blankForm()
-    form.path = currentPath.value ? `${currentPath.value}/` : ''
+    form.path = contextDir !== undefined
+      ? `${normalizePath(contextDir)}/`
+      : currentPath.value ? `${currentPath.value}/` : ''
     form.newPath = selectedPath.value ?? ''
     form.target = selectedPath.value ?? ''
     if (selectedEntry.value?.mode !== undefined) form.mode = formatMode(selectedEntry.value.mode)
@@ -713,6 +743,8 @@ export function useConsole() {
     deleteProject,
     rollbackRevision,
     purgeUntracked,
+    downloadEntry,
+    focusEntry,
     createShare,
     deleteShare,
     loadXattrs,
