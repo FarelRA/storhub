@@ -23,7 +23,7 @@ import (
 // Invariant: `mirrored` is the high-water mark of live bytes durably written
 // to the spool, and reads below it always come from disk.
 type windowReader struct {
-	spool    *os.File  // full-window mirror (sparse until written)
+	spool    *os.File  // flat spool file: full-window mirror (sparse until written)
 	live     io.Reader // upstream cursor, shared across sequential windows
 	size     int64     // window length
 	mirrored int64     // high-water mark of spooled bytes
@@ -33,24 +33,18 @@ type windowReader struct {
 var errWindowOverrun = errors.New("window reader: live stream overran window")
 
 func newWindowReader(live io.Reader, size int64) (*windowReader, func(), error) {
-	base := filepath.Join(storcfg.CacheBase(), "rest")
+	base := filepath.Join(storcfg.CacheBase(), "storhub", "rest")
 	if err := mkdirAll(base); err != nil {
 		return nil, nil, fmt.Errorf("create spool base dir: %w", err)
 	}
-	dir, err := os.MkdirTemp(base, "upload-*")
+	// Flat layout: the spool IS a file named upload-<id>. No per-upload dirs.
+	file, err := os.CreateTemp(base, "upload-*")
 	if err != nil {
-		return nil, nil, fmt.Errorf("create spool dir: %w", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-
-	file, err := os.Create(filepath.Join(dir, "window"))
-	if err != nil {
-		cleanup()
 		return nil, nil, fmt.Errorf("create spool file: %w", err)
 	}
-	cleanup = func() {
+	cleanup := func() {
 		_ = file.Close()
-		_ = os.RemoveAll(dir)
+		_ = os.Remove(file.Name())
 	}
 	// NOTE: deliberately NOT implementing io.Close on windowReader -
 	// http.Client closes request bodies after every response, which would

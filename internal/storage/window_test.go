@@ -78,9 +78,9 @@ func TestWindowReaderReplayAfterFailure(t *testing.T) {
 	}
 }
 
-// TestSpoolDirUnderCacheBaseRest pins the location convention:
-// <CacheBase>/rest/upload-*.
-func TestSpoolDirUnderCacheBaseRest(t *testing.T) {
+// TestSpoolLayout pins the location + flat-file convention:
+// <CacheBase>/storhub/rest/upload-<id> is a regular file, nothing else.
+func TestSpoolLayout(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cache")
 	t.Setenv("STORHUB_CACHE_DIR", dir)
 
@@ -90,14 +90,13 @@ func TestSpoolDirUnderCacheBaseRest(t *testing.T) {
 		t.Fatalf("newWindowReader: %v", err)
 	}
 
-	base := filepath.Join(dir, "rest")
+	base := filepath.Join(dir, "storhub", "rest")
 	entries, err := os.ReadDir(base)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("expected spool dir under %s: err=%v entries=%d", base, err, len(entries))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected exactly one spool entry under %s: err=%v entries=%d", base, err, len(entries))
 	}
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), "upload-") {
-			t.Fatalf("spool dir %q does not follow upload-* convention", e.Name())
-		}
+	e := entries[0]
+	if !strings.HasPrefix(e.Name(), "upload-") || e.IsDir() {
+		t.Fatalf("spool must be a flat file upload-*, got %q (dir=%v)", e.Name(), e.IsDir())
 	}
 }
