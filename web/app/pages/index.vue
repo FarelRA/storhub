@@ -191,8 +191,6 @@ function newFileHere() {
         <section v-if="!isSharedView" class="py-4">
           <RevisionPanel />
         </section>
-
-        <ServerInfoCard />
       </SideDrawer>
 
       <!-- Gutter: sidebar | workspace -->
