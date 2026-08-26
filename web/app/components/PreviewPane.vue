@@ -2,7 +2,12 @@
 import { formatBytes } from '~/composables/use-format'
 
 const console_ = useConsole()
-const { previewKind, previewUrl, previewHex, previewMeta, editorContent, editorDirty, selectedPath } = console_
+const { previewKind, previewUrl, previewHex, previewMeta, editorContent, editorDirty, selectedPath, selectedEntry, busy } = console_
+
+async function downloadSelected() {
+  const entry = selectedEntry.value
+  if (entry) await console_.downloadEntry(entry)
+}
 
 const meta = computed(() => {
   const { shown, total } = previewMeta.value
@@ -56,17 +61,24 @@ const meta = computed(() => {
     <pre class="min-h-64 w-full flex-1 overflow-auto rounded-lg border border-hair bg-[#191512] p-3 font-mono text-xs leading-5 text-mist lg:min-h-0">{{ previewHex }}</pre>
   </div>
 
-  <!-- Too large: explicit, with guidance -->
+  <!-- Too large: explicit, with guidance and a way out -->
   <div
     v-else
-    class="flex min-h-40 flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-hair px-6 py-10 text-center"
+    class="flex min-h-40 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-hair px-6 py-10 text-center"
   >
     <span aria-hidden="true" class="text-3xl opacity-60">📦</span>
     <p class="text-sm font-medium">Too large to preview</p>
     <p class="max-w-xs text-xs leading-relaxed text-mist">
-      This file is {{ formatBytes(previewMeta.total) }}. Use the range bar below to read specific
-      offsets, or Append / Patch / Truncate which work server-side without downloading.
+      This file is {{ formatBytes(previewMeta.total) }}. Read specific offsets with the range bar,
+      use the server-side Append / Patch / Truncate actions — or download it natively.
     </p>
+    <button
+      class="btn btn-sm"
+      :disabled="!selectedPath || busy"
+      @click="downloadSelected"
+    >
+      ⬇ Download {{ formatBytes(previewMeta.total) }}
+    </button>
   </div>
 
   <p v-if="meta" class="font-mono text-xs text-mist/80">

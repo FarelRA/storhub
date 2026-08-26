@@ -1,4 +1,5 @@
 import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry } from '~/utils/api-types'
+import { copyText } from '~/utils/clipboard'
 import {
   PREVIEW_MAX_BYTES,
   SNIFF_BYTES,
@@ -554,26 +555,35 @@ export function useConsole() {
   }
 
   /**
-   * Authenticated client-side download: bytes arrive with the bearer token,
-   * then hand off to the browser via an object URL. Very large files exceed
-   * what is reasonable to buffer in a tab - point those at mount/CLI.
+   * Native browser download: mint a short-lived signed URL server-side, then
+   * hand the plain link to the browser - its download manager owns streaming,
+   * resume, and disk I/O. No JS buffering, no size cap. The same URL works
+   * with curl/wget.
    */
-  async function downloadEntry(entry: EntryInfo): Promise<void> {
-    const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
-    if (entry.size > MAX_DOWNLOAD_BYTES) {
-      toasts.error(`Too large for browser download (${formatBytes(entry.size)}) - use the FUSE mount or CLI`)
-      return
-    }
-    const done = await run(`Download ${entry.path}`, () =>
-      request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), { binary: true }),
+  async function mintDownloadURL(entry: EntryInfo): Promise<string | null> {
+    const done = await run('Download', () =>
+      postJSON<{ url: string }>(projectURL('/downloads'), { path: entry.path }),
     )
-    if (done === null) return
-    const blobUrl = URL.createObjectURL(new Blob([done.payload]))
+    return done ? done.url : null
+  }
+
+  async function downloadEntry(entry: EntryInfo): Promise<void> {
+    const target = await mintDownloadURL(entry)
+    if (!target) return
     const anchor = document.createElement('a')
-    anchor.href = blobUrl
-    anchor.download = entry.path.split('/').pop() ?? 'download'
+    anchor.href = target
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
     anchor.click()
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000)
+    anchor.remove()
+  }
+
+  async function copyDirectLink(entry: EntryInfo): Promise<void> {
+    const path = await mintDownloadURL(entry)
+    if (!path) return
+    const absolute = new URL(path, window.location.origin).toString()
+    const ok = await copyText(absolute)
+    if (ok) toasts.success('Direct link copied (valid 5 min) - works with curl/wget too')
   }
 
   /** Select an entry non-navigatively: stat it so detail panes follow along. */
@@ -744,6 +754,7 @@ export function useConsole() {
     rollbackRevision,
     purgeUntracked,
     downloadEntry,
+    copyDirectLink,
     focusEntry,
     createShare,
     deleteShare,

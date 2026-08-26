@@ -178,6 +178,7 @@ function closeDrawer() {
         <p v-if="!isSharedView" class="pb-4 text-xs leading-relaxed text-mist/70">
           Everything here goes through the same REST API the CLI uses — nothing is special-cased.
         </p>
+        <ServerInfoCard />
       </SideDrawer>
 
       <!-- Main workspace -->

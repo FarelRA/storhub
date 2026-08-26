@@ -212,11 +212,12 @@ function isFile(entry: EntryInfo): boolean {
             <button role="menuitem" class="menu-item" @click="runFor(entry, () => shareAndCopy(entry, false))">Share (browser)…</button>
             <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => shareAndCopy(entry, true))">Share + download…</button>
             <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
+            <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed link, valid 5 minutes - works with curl/wget" @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link…</button>
           </template>
           <template v-else>
             <div class="menu-sep" />
             <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
-            <button role="menuitem" class="menu-item" @click="runFor(entry, () => shareAndCopy(entry, false))">Share (browser)…</button>
+            <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link…</button>
           </template>
 
           <template v-if="console_.canWrite.value">
