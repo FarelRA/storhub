@@ -119,3 +119,34 @@ func requireEnvValue(t *testing.T, name string) string {
 	}
 	return value
 }
+
+func TestAssetNamingDictionaryRegression(t *testing.T) {
+	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
+	seenExts := make(map[string]int)
+	namer := newAssetNamer()
+	for i := 0; i < 200; i++ {
+		name, err := namer.Next()
+		if err != nil {
+			t.Fatalf("generate asset name: %v", err)
+		}
+		if !nameRe.MatchString(name) {
+			t.Fatalf("unexpected asset name format %q: want 1-5 words, 1-5 extensions", name)
+		}
+		parts := strings.Split(name, ".")
+		if len(parts) < 2 || len(parts) > 6 {
+			t.Fatalf("unexpected dot parts %q: want 1-5 words + 1-5 exts", name)
+		}
+		for _, ext := range parts[1:] {
+			if ext == "" {
+				t.Fatalf("empty extension in %q", name)
+			}
+			seenExts[ext]++
+		}
+		if parts[0] == "" {
+			t.Fatalf("empty words part %q", name)
+		}
+	}
+	if len(seenExts) < 50 {
+		t.Fatalf("expected dictionary-based diversity, got %d unique exts <50 (likely old wordlist)", len(seenExts))
+	}
+}

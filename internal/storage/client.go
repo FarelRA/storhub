@@ -779,7 +779,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	}
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
-	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
 	return releaseTag, uploadURL, err
 }
 
@@ -1288,7 +1288,6 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, err
 	}
 	existing := repoMeta.FindFile(cleanName)
-	var preferredRelease string
 	if !replace && existing != nil {
 		return nil, shfs.AlreadyExists(cleanName)
 	}
@@ -1305,7 +1304,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if fileInfo.Size() == 0 {
 		requiredSlots = 0
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, preferredRelease)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
 	if err != nil {
 		return nil, err
 	}
@@ -1770,8 +1769,8 @@ func (h *StorHub) LoadRepoMetadataContext(ctx context.Context, project string) (
 	return h.loadRepoMetadata(ctx, project)
 }
 
-func (h *StorHub) GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *metadata.RepoMetadata, requiredSize int, preferredTag string) (string, string, error) {
-	return h.getOrCreateUploadRelease(ctx, project, repoMeta, requiredSize, preferredTag)
+func (h *StorHub) GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *metadata.RepoMetadata, requiredSize int) (string, string, error) {
+	return h.getOrCreateUploadRelease(ctx, project, repoMeta, requiredSize)
 }
 
 func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {

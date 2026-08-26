@@ -306,33 +306,17 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 	return nil
 }
 
-func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, metadata *RepoMetadata, requiredSlots int, preferredTag string) (string, string, error) {
+func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, metadata *RepoMetadata, requiredSlots int) (string, string, error) {
 	releases, err := h.listReleasesCached(ctx, project)
 	if err != nil {
 		return "", "", err
 	}
-	releaseIndex := make(map[string]ghapi.Release, len(releases))
-	for _, release := range releases {
-		releaseIndex[release.TagName] = release
-	}
 	if requiredSlots <= 0 {
-		if tag := strings.TrimSpace(preferredTag); tag != "" {
-			if r, ok := releaseIndex[tag]; ok {
-				metadata.EnsureRelease(tag, h.config.Now().Unix())
-				return tag, r.UploadURL, nil
-			}
-		}
 		for _, r := range releases {
 			metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
 			return r.TagName, r.UploadURL, nil
 		}
 	} else {
-		if tag := strings.TrimSpace(preferredTag); tag != "" {
-			if r, ok := releaseIndex[tag]; ok && len(r.Assets)+requiredSlots <= 1000 {
-				metadata.EnsureRelease(tag, h.config.Now().Unix())
-				return tag, r.UploadURL, nil
-			}
-		}
 		for _, r := range releases {
 			if len(r.Assets)+requiredSlots <= 1000 {
 				metadata.EnsureRelease(r.TagName, h.config.Now().Unix())

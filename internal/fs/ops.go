@@ -23,7 +23,7 @@ type Backend interface {
 	LoadRepoMetadataContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
 	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
-	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int, preferredTag string) (string, string, error)
+	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int) (string, string, error)
 	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
 	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64)

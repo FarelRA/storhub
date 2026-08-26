@@ -77,7 +77,7 @@ func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targ
 
 func (b *testBackend) Logger() *slog.Logger { return nil }
 
-func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ string, repoMeta *meta.RepoMetadata, _ int, _ string) (string, string, error) {
+func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ string, repoMeta *meta.RepoMetadata, _ int) (string, string, error) {
 	repoMeta.EnsureRelease("v1", b.now)
 	return "v1", "upload", nil
 }

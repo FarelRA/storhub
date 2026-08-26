@@ -21,7 +21,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 	if finalSize == 0 && requiredSlots == 0 {
 		return []ChunkInfo{}, "", nil
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -147,7 +147,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	for _, dirty := range dirtySegments {
 		requiredSlots += inlineChunkCount(dirty.end-dirty.start, chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -271,7 +271,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	for _, edit := range edits {
 		requiredSlots += inlineChunkCount(edit.Len(), chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots, "")
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
