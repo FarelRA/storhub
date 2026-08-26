@@ -101,9 +101,19 @@ interface UploadProgress {
   failed: number
   total: number
   current: string
+  bytesDone: number
+  bytesTotal: number
 }
 
-const uploadProgress = ref<UploadProgress>({ active: false, done: 0, failed: 0, total: 0, current: '' })
+const uploadProgress = ref<UploadProgress>({
+  active: false,
+  done: 0,
+  failed: 0,
+  total: 0,
+  current: '',
+  bytesDone: 0,
+  bytesTotal: 0,
+})
 const uploadedDirs = new Set<string>()
 const modalForm = ref<ModalForm>(blankForm())
 const modalError = ref('')
@@ -664,40 +674,93 @@ export function useConsole() {
   }
 
   /**
+   * Upload one file with byte-level progress via XHR (its upload.onprogress
+   * is the only browser API reporting real bytes while keeping an explicit
+   * Content-Length, which the server's size enforcement requires).
+   */
+  function putFileWithProgress(fullPath: string, file: File, onBytes: (loaded: number) => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url(projectURL('/content'), { path: fullPath }))
+      if (token.value) xhr.setRequestHeader('Authorization', `Bearer ${token.value}`)
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onBytes(event.loaded)
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve()
+          return
+        }
+        let message = `HTTP ${xhr.status}`
+        try {
+          const parsed = JSON.parse(xhr.responseText) as { error?: { message?: string } }
+          message = parsed.error?.message ?? message
+        } catch {
+          /* non-JSON error body */
+        }
+        reject(new ApiError(xhr.status, message, null))
+      }
+      xhr.onerror = () => reject(new ApiError(0, 'network error during upload', null))
+      xhr.send(file)
+    })
+  }
+
+  /**
    * Upload a batch of files into baseDir. Each item carries its relative
    * path (from drag-and-drop traversal or webkitRelativePath), so dropped
-   * folders land with their structure intact.
+   * folders land with their structure intact. Byte progress is cumulative
+   * across the whole batch.
    */
   async function uploadFiles(items: Array<{ file: File; relPath: string }>, baseDir: string): Promise<void> {
     if (!items.length || !canWrite.value) return
-    uploadProgress.value = { active: true, done: 0, failed: 0, total: items.length, current: '' }
+    const bytesTotal = items.reduce((sum, item) => sum + item.file.size, 0)
+    uploadProgress.value = {
+      active: true,
+      done: 0,
+      failed: 0,
+      total: items.length,
+      current: '',
+      bytesDone: 0,
+      bytesTotal,
+    }
     let firstError = ''
+    let baseBytes = 0
     for (const { file, relPath } of items) {
       const cleanRel = normalizePath(relPath)
       if (!cleanRel) continue
+      const fullPath = normalizePath(`${normalizePath(baseDir)}/${cleanRel}`)
       uploadProgress.value = { ...uploadProgress.value, current: cleanRel }
       const dir = parentPath(cleanRel)
-      const target = normalizePath(dir ? `${baseDir}/${dir}` : baseDir)
       if (dir && !(await ensureDir(`${normalizePath(baseDir)}/${dir}`))) {
-        uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1, done: uploadProgress.value.done + 1 }
-        firstError ||= `could not create ${target}`
+        firstError ||= `could not create ${dir}`
+        baseBytes += file.size
+        uploadProgress.value = {
+          ...uploadProgress.value,
+          bytesDone: baseBytes,
+          failed: uploadProgress.value.failed + 1,
+          done: uploadProgress.value.done + 1,
+        }
         continue
       }
-      void target
-      const fullPath = normalizePath(`${normalizePath(baseDir)}/${cleanRel}`)
-      const ok = await run(`Upload ${fullPath}`, () =>
-        request(url(projectURL('/content'), { path: fullPath }), { method: 'PUT', body: file }),
-      )
-      if (ok === null) {
-        firstError ||= `failed: ${cleanRel}`
+      try {
+        await putFileWithProgress(fullPath, file, (loaded) => {
+          uploadProgress.value = { ...uploadProgress.value, bytesDone: baseBytes + loaded }
+        })
+        baseBytes += file.size
+      } catch (error) {
+        firstError ||= error instanceof Error ? error.message : String(error)
         uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1 }
       }
-      uploadProgress.value = { ...uploadProgress.value, done: uploadProgress.value.done + 1 }
+      uploadProgress.value = {
+        ...uploadProgress.value,
+        bytesDone: baseBytes,
+        done: uploadProgress.value.done + 1,
+      }
     }
     uploadProgress.value = { ...uploadProgress.value, active: false, current: '' }
     await refreshAll()
     const { done, failed, total } = uploadProgress.value
-    if (failed === 0) toasts.success(`Uploaded ${done}/${total}`)
+    if (failed === 0) toasts.success(`Uploaded ${done}/${total} · ${formatBytes(bytesTotal)}`)
     else toasts.error(`Uploaded ${done - failed}/${total} — ${firstError}`)
   }
 

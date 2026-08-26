@@ -312,16 +312,17 @@ async function onDrop(event: DragEvent) {
               </div>
             </header>
 
-            <!-- Upload progress -->
+            <!-- Upload progress (byte-level across the whole batch) -->
             <div v-if="uploadProgress.active" class="space-y-1">
               <div class="h-1 overflow-hidden rounded bg-hair">
                 <div
                   class="h-full bg-ember transition-[width] motion-reduce:transition-none"
-                  :style="{ width: `${Math.round((uploadProgress.done / Math.max(1, uploadProgress.total)) * 100)}%` }"
+                  :style="{ width: `${Math.round((uploadProgress.bytesDone / Math.max(1, uploadProgress.bytesTotal)) * 100)}%` }"
                 />
               </div>
               <p class="truncate font-mono text-xs text-mist">
                 Uploading {{ uploadProgress.done }}/{{ uploadProgress.total }} · {{ uploadProgress.current }}
+                · {{ formatBytes(uploadProgress.bytesDone) }} / {{ formatBytes(uploadProgress.bytesTotal) }}
               </p>
             </div>
 
