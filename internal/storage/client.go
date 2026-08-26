@@ -117,8 +117,6 @@ type releaseCacheEntry struct {
 	fetchedAt time.Time
 }
 
-const releaseCacheTTL = 45 * time.Second
-
 func (h *StorHub) getCachedReleases(project string) ([]ghapi.Release, bool) {
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()
