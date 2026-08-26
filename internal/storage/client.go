@@ -68,7 +68,7 @@ type StorHub struct {
 	metaCache map[string]*projectMetadata
 
 	// Release list cache to avoid per-upload ListReleases (secondary rate limit)
-	releaseMu    sync.Mutex
+	releaseMu    sync.RWMutex
 	releaseCache map[string]releaseCacheEntry
 
 	// Git repository cache for metadata operations
@@ -113,20 +113,16 @@ type projectMetadata struct {
 }
 
 type releaseCacheEntry struct {
-	releases  []ghapi.Release
-	fetchedAt time.Time
+	releases []ghapi.Release
 }
 
 func (h *StorHub) getCachedReleases(project string) ([]ghapi.Release, bool) {
-	h.releaseMu.Lock()
-	defer h.releaseMu.Unlock()
+	h.releaseMu.RLock()
+	defer h.releaseMu.RUnlock()
 	entry, ok := h.releaseCache[project]
 	if !ok {
 		return nil, false
 	}
-	// Lifetime cache: once fetched, keep for the process lifetime.
-	// Mutations (create/delete/upload) update the cache in place;
-	// explicit invalidation is only for deleteRepo.
 	out := make([]ghapi.Release, len(entry.releases))
 	copy(out, entry.releases)
 	return out, true
@@ -137,7 +133,7 @@ func (h *StorHub) setCachedReleases(project string, releases []ghapi.Release) {
 	defer h.releaseMu.Unlock()
 	cp := make([]ghapi.Release, len(releases))
 	copy(cp, releases)
-	h.releaseCache[project] = releaseCacheEntry{releases: cp, fetchedAt: h.config.Now()}
+	h.releaseCache[project] = releaseCacheEntry{releases: cp}
 }
 
 func (h *StorHub) invalidateReleaseCache(project string) {
@@ -154,13 +150,10 @@ func (h *StorHub) addReleaseToCache(project string, release *ghapi.Release) {
 	defer h.releaseMu.Unlock()
 	entry, ok := h.releaseCache[project]
 	if !ok {
-		// No cache yet; next listReleases will populate.
+		h.releaseCache[project] = releaseCacheEntry{releases: []ghapi.Release{*release}}
 		return
 	}
-	cp := make([]ghapi.Release, len(entry.releases)+1)
-	copy(cp, entry.releases)
-	cp[len(entry.releases)] = *release
-	entry.releases = cp
+	entry.releases = append(append([]ghapi.Release(nil), entry.releases...), *release)
 	h.releaseCache[project] = entry
 }
 
@@ -178,6 +171,24 @@ func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string) {
 			return
 		}
 	}
+}
+
+func isAlreadyExists(err error) bool {
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
+	return strings.Contains(bodyLower, "already_exists")
+}
+
+func isReleaseFull(err error) bool {
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
+	return strings.Contains(bodyLower, "file_count") || strings.Contains(bodyLower, "1000") || strings.Contains(bodyLower, "too many")
 }
 
 // ensureHydratedLocked applies the cold-cache guard to direct metadata
@@ -926,30 +937,26 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 				applied = true
 				break
 			}
-			var apiErr *ghapi.APIError
-			if errors.As(uploadErr, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity {
-				bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
-				if strings.Contains(bodyLower, "already_exists") {
-					h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
-					continue
+			if isAlreadyExists(uploadErr) {
+				h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
+				continue
+			}
+			if isReleaseFull(uploadErr) {
+				h.debugf("upload release full (422 file_count), creating new release, retry=%d asset=%s release=%s", renameAttempt+1, assetName, releaseTag)
+				h.invalidateReleaseCache(project)
+				remainingSlots := 1
+				if size > uploaded {
+					remainingSlots = int((size - uploaded + chunkSize - 1) / chunkSize)
 				}
-				if strings.Contains(bodyLower, "file_count") || strings.Contains(bodyLower, "1000") || strings.Contains(bodyLower, "too many") {
-					h.debugf("upload release full (422 file_count), creating new release, retry=%d asset=%s release=%s", renameAttempt+1, assetName, releaseTag)
-					h.invalidateReleaseCache(project)
-					remainingSlots := 1
-					if size > uploaded {
-						remainingSlots = int((size - uploaded + chunkSize - 1) / chunkSize)
-					}
-					newTag, newURL, err := h.PrepareReplaceContext(ctx, project, filePath, remainingSlots)
-					if err != nil {
-						cleanup()
-						h.compensateDeleteAssets(ctx, project, chunks)
-						return nil, err
-					}
-					releaseTag = newTag
-					uploadURL = newURL
-					continue
+				newTag, newURL, err := h.PrepareReplaceContext(ctx, project, filePath, remainingSlots)
+				if err != nil {
+					cleanup()
+					h.compensateDeleteAssets(ctx, project, chunks)
+					return nil, err
 				}
+				releaseTag = newTag
+				uploadURL = newURL
+				continue
 			}
 			cleanup()
 			h.compensateDeleteAssets(ctx, project, chunks)
