@@ -1082,9 +1082,14 @@ func newRESTServer(listen string, handler http.Handler) *http.Server {
 		Addr:              listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      5 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
+		// No whole-request ReadTimeout: it bounds body reads too, killing
+		// large uploads mid-flight (a 400 MB file over a 15 MB/s link dies
+		// at 30 s with "context canceled" cascading into GitHub). Slow-loris
+		// protection lives in ReadHeaderTimeout; body abuse is bounded by
+		// explicit size enforcement in the content handlers instead.
+		ReadTimeout:  0,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  2 * time.Minute,
 	}
 }
 

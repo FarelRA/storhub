@@ -1146,7 +1146,15 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	if r.ContentLength >= 0 {
 		replaceOpts = append(replaceOpts, shfs.WithSize(r.ContentLength))
 	}
-	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body, replaceOpts...); err != nil {
+	// Accepted uploads outlive their HTTP request: a client disconnect at
+	// minute 25 of a 400 MB transfer must not orphan half-uploaded chunks
+	// (and previously skipped compensating deletes, since those were bound
+	// to the same dying context). WithoutCancel keeps identity/logging
+	// values while dropping cancellation; the scaled transferDeadline inside
+	// the GitHub client remains the real bound. If the client is gone, the
+	// final response write simply fails silently.
+	uploadCtx := context.WithoutCancel(r.Context())
+	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
 			if cleanupErr := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); cleanupErr != nil {
 				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
