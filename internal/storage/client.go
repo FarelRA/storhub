@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -701,33 +699,6 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	return releaseTag, uploadURL, err
 }
 
-func (h *StorHub) UploadChunkDataContext(ctx context.Context, project, releaseTag, uploadURL string, offset int64, data []byte) (ChunkInfo, error) {
-	const maxNameRetries = 5
-	for attempt := 0; attempt < maxNameRetries; attempt++ {
-		assetName, err := randomAssetName()
-		if err != nil {
-			return ChunkInfo{}, err
-		}
-		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, bytes.NewReader(data), int64(len(data)))
-		if err == nil {
-			return ChunkInfo{
-				Size:        int64(len(data)),
-				Offset:      offset,
-				Release:     releaseTag,
-				AssetID:     assetID,
-				AssetOffset: 0,
-			}, nil
-		}
-		var apiErr *ghapi.APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == 422 {
-			h.debugf("upload chunk asset name collision, retry=%d asset=%s", attempt+1, assetName)
-			continue
-		}
-		return ChunkInfo{}, err
-	}
-	return ChunkInfo{}, fmt.Errorf("upload chunk data failed after %d name retries", maxNameRetries)
-}
-
 // trimChunks drops chunks at or beyond size and re-sorts/re-indexes them.
 func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
 	if len(chunks) == 0 {
@@ -830,43 +801,70 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
-	chunkSize := h.ChunkSize()
+
+	size, hasSize := shfs.ApplyMutateOptions(opts).ExpectedSize()
+	if !hasSize {
+		return nil, fmt.Errorf("upload size unknown: pass fs.WithSize(n) (REST callers: Content-Length)")
+	}
 
 	releaseTag, uploadURL, err := h.PrepareReplaceContext(ctx, project, filePath, 0)
 	if err != nil {
 		return nil, err
 	}
 
+	// Stream the body straight into per-chunk GitHub uploads. Each window is
+	// tee-mirrored to a spool file so transport retries rewind from disk
+	// instead of re-reading the network; a failed window compensates by
+	// deleting earlier windows of this call, keeping metadata-atomicity.
 	var chunks []ChunkInfo
 	var uploaded int64
-	buf := h.getBuffer()
-	defer h.putBuffer(buf)
+	namer := newAssetNamer()
+	for uploaded < size {
+		windowSize := min64(h.ChunkSize(), size-uploaded)
 
-	// Wrap in bufio for efficiency on small-read bodies (e.g. HTTP).
-	reader := body
-	if _, ok := body.(*bufio.Reader); !ok {
-		reader = bufio.NewReaderSize(body, int(chunkSize))
-	}
+		win, cleanup, werr := newWindowReader(body, windowSize)
+		if werr != nil {
+			h.compensateDeleteAssets(ctx, project, chunks)
+			return nil, werr
+		}
 
-	for {
-		// Fill the buffer completely before sealing a chunk. A bare Read()
-		// may return any small fragment (HTTP bodies arrive piecemeal),
-		// which would shatter one file into dozens of tiny assets.
-		n, readErr := fillChunk(reader, *buf)
-		if n > 0 {
-			chunk, uploadErr := h.UploadChunkDataContext(ctx, project, releaseTag, uploadURL, uploaded, (*buf)[:n])
-			if uploadErr != nil {
-				return nil, uploadErr
+		const maxNameRetries = 5
+		var chunk ChunkInfo
+		applied := false
+		for renameAttempt := 0; renameAttempt < maxNameRetries; renameAttempt++ {
+			assetName, nameErr := namer.Next()
+			if nameErr != nil {
+				cleanup()
+				h.compensateDeleteAssets(ctx, project, chunks)
+				return nil, nameErr
 			}
-			chunks = append(chunks, chunk)
-			uploaded += int64(n)
-		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				return nil, readErr
+			if _, seekErr := win.Seek(0, io.SeekStart); seekErr != nil {
+				cleanup()
+				h.compensateDeleteAssets(ctx, project, chunks)
+				return nil, seekErr
 			}
-			break
+			assetID, uploadErr := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, win, windowSize)
+			if uploadErr == nil {
+				chunk = ChunkInfo{Size: windowSize, Offset: uploaded, Release: releaseTag, AssetID: assetID, AssetOffset: 0}
+				applied = true
+				break
+			}
+			var apiErr *ghapi.APIError
+			if errors.As(uploadErr, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity {
+				h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
+				continue
+			}
+			cleanup()
+			h.compensateDeleteAssets(ctx, project, chunks)
+			return nil, uploadErr
 		}
+		cleanup()
+		if !applied {
+			h.compensateDeleteAssets(ctx, project, chunks)
+			return nil, fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
+		}
+		chunks = append(chunks, chunk)
+		uploaded += windowSize
 	}
 
 	return h.FinalizeReplaceChunksContext(ctx, project, filePath, releaseTag, uploaded, chunks)
@@ -2035,28 +2033,21 @@ func (h *StorHub) ApplyMetadataPatchContext(ctx context.Context, project, target
 	return h.posixService().ApplyMetadataPatchContext(ctx, project, targetPath, patch)
 }
 
-// fillChunk reads from r until buf is full, clean EOF, or error. It returns
-// the number of bytes read (0 only at clean EOF) so callers seal whole
-// chunks regardless of how fragmentedly the underlying body delivers data.
-// Per the io.Reader contract, a read returning both data and io.EOF is
-// followed by more reads until they report 0, EOF.
-func fillChunk(r io.Reader, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := r.Read(buf[total:])
-		total += n
-		if n > 0 && err == io.EOF {
-			err = nil // data + EOF in one read: keep filling; next read reports 0
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return total, nil
-			}
-			return total, err
-		}
-		if n == 0 {
-			return total, io.ErrNoProgress
+func min64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// compensateDeleteAssets best-effort removes windows uploaded by this call
+// after a later failure; metadata was never committed, so these are pure
+// orphans. Individual failures are logged, not fatal - the original error
+// is what matters.
+func (h *StorHub) compensateDeleteAssets(ctx context.Context, project string, chunks []ChunkInfo) {
+	for _, c := range chunks {
+		if err := h.deleteAssetByID(ctx, project, c.AssetID); err != nil {
+			h.debugf("compensating delete failed project=%s asset=%d err=%v", project, c.AssetID, err)
 		}
 	}
-	return total, nil
 }

@@ -16,6 +16,8 @@ type MutateOption func(*mutateOptions)
 
 type mutateOptions struct {
 	expectedRevision string
+	expectedSize     int64
+	hasSize          bool
 }
 
 // ExpectedRevision returns the revision declared via WithExpectedRevision
@@ -45,6 +47,23 @@ func WithExpectedRevision(revision string) MutateOption {
 		o.expectedRevision = revision
 	}
 }
+
+// WithSize declares the exact byte length of the body about to be uploaded.
+// Streaming chunk uploads require it up front: GitHub asset uploads carry an
+// explicit Content-Length per chunk, and window planning needs the total to
+// compute ceil(size/ChunkSize). Callers without a natural size must not
+// guess - storage rejects missing sizes with a descriptive error instead of
+// fragmenting uploads.
+func WithSize(n int64) MutateOption {
+	return func(o *mutateOptions) {
+		if n >= 0 {
+			o.expectedSize, o.hasSize = n, true
+		}
+	}
+}
+
+// ExpectedSize returns the declared body size and whether one was declared.
+func (o mutateOptions) ExpectedSize() (int64, bool) { return o.expectedSize, o.hasSize }
 
 // RevisionSource is implemented by backends that can report the current
 // committed metadata revision (content SHA) of a project.

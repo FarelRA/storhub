@@ -1142,7 +1142,11 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	// did not exist (or clobbers a symlink). If the body transfer then
 	// fails, remove the placeholder instead of stranding an orphan the
 	// client believes was never created.
-	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body, replaceRevOpts...); err != nil {
+	replaceOpts := replaceRevOpts
+	if r.ContentLength >= 0 {
+		replaceOpts = append(replaceOpts, shfs.WithSize(r.ContentLength))
+	}
+	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(r.Context(), project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
 			if cleanupErr := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); cleanupErr != nil {
 				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
