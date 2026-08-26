@@ -307,7 +307,7 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 }
 
 func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, metadata *RepoMetadata, requiredSlots int, preferredTag string) (string, string, error) {
-	releases, err := h.listReleases(ctx, project)
+	releases, err := h.listReleasesCached(ctx, project)
 	if err != nil {
 		return "", "", err
 	}
@@ -357,7 +357,12 @@ func (h *StorHub) createRelease(ctx context.Context, project, tag, name string) 
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
-	return h.gh.CreateRelease(ctx, h.owner, project, tag, name)
+	release, err := h.gh.CreateRelease(ctx, h.owner, project, tag, name)
+	if err != nil {
+		return nil, err
+	}
+	h.addReleaseToCache(project, release)
+	return release, nil
 }
 
 func (h *StorHub) listReleases(ctx context.Context, project string) ([]ghapi.Release, error) {
@@ -372,21 +377,37 @@ func (h *StorHub) listReleases(ctx context.Context, project string) ([]ghapi.Rel
 		}
 		return nil, err
 	}
+	h.setCachedReleases(project, releases)
 	return releases, nil
+}
+
+func (h *StorHub) listReleasesCached(ctx context.Context, project string) ([]ghapi.Release, error) {
+	if cached, ok := h.getCachedReleases(project); ok {
+		return cached, nil
+	}
+	return h.listReleases(ctx, project)
 }
 
 func (h *StorHub) deleteReleaseByID(ctx context.Context, project string, releaseID int64) error {
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
 	}
-	return h.gh.DeleteReleaseByID(ctx, h.owner, project, releaseID)
+	err := h.gh.DeleteReleaseByID(ctx, h.owner, project, releaseID)
+	if err == nil {
+		h.invalidateReleaseCache(project)
+	}
+	return err
 }
 
 func (h *StorHub) deleteAssetByID(ctx context.Context, project string, assetID int64) error {
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
 	}
-	return h.gh.DeleteAssetByID(ctx, h.owner, project, assetID)
+	err := h.gh.DeleteAssetByID(ctx, h.owner, project, assetID)
+	if err == nil {
+		h.invalidateReleaseCache(project)
+	}
+	return err
 }
 
 func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
@@ -398,6 +419,7 @@ func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
 	}
 	h.setRepoState(project, false)
 	h.invalidateRepoMetadata(project)
+	h.invalidateReleaseCache(project)
 	return nil
 }
 
@@ -409,6 +431,7 @@ func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag,
 	if err != nil {
 		return 0, err
 	}
+	h.bumpCachedReleaseAssetCount(project, releaseTag)
 	return assetID, nil
 }
 

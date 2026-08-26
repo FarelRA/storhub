@@ -649,6 +649,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-multi-release-patch")
 	firstRelease := metaState.Chunks[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-multi-release-patch", firstRelease, 999)
+	hub.invalidateReleaseCache("project-multi-release-patch")
 	patched, err := hub.PatchFile("project-multi-release-patch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
@@ -995,6 +996,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-capacity")
 	firstRelease := repoMeta.Chunks[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-capacity", firstRelease, 999)
+	hub.invalidateReleaseCache("project-capacity")
 	inputB := writeTempFile(t, t.TempDir(), "second.txt", []byte("beta"))
 	replaced, err := hub.ReplaceFile("project-capacity", "capacity.txt", inputB)
 	if err != nil {
@@ -3692,6 +3694,7 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge-spill")
 	firstRelease := metaState.Chunks[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-purge-spill", firstRelease, 999)
+	hub.invalidateReleaseCache("project-purge-spill")
 
 	patched, err := hub.PatchFile("project-purge-spill", "spill.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {

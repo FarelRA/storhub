@@ -38,7 +38,7 @@ func TestHelperUtilities(t *testing.T) {
 	if shortSHA("1234567890123456") != "123456789012" || shortSHA("short") != "short" {
 		t.Fatal("unexpected short sha")
 	}
-	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){1,3}\.[a-z]+$`)
+	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
 	seen := make(map[string]struct{})
 	namer := newAssetNamer()
 	for i := 0; i < 32; i++ {

@@ -67,6 +67,10 @@ type StorHub struct {
 	metaMu    sync.RWMutex
 	metaCache map[string]*projectMetadata
 
+	// Release list cache to avoid per-upload ListReleases (secondary rate limit)
+	releaseMu    sync.Mutex
+	releaseCache map[string]releaseCacheEntry
+
 	// Git repository cache for metadata operations
 	gitMu    sync.Mutex
 	gitRepos map[string]*gitRepo
@@ -106,6 +110,76 @@ type projectMetadata struct {
 	// before eviction must not strand its acknowledged mutations on a dead
 	// commit loop; markProjectDirtyLive revives the instance instead.
 	stopped bool
+}
+
+type releaseCacheEntry struct {
+	releases  []ghapi.Release
+	fetchedAt time.Time
+}
+
+const releaseCacheTTL = 45 * time.Second
+
+func (h *StorHub) getCachedReleases(project string) ([]ghapi.Release, bool) {
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	entry, ok := h.releaseCache[project]
+	if !ok {
+		return nil, false
+	}
+	// Lifetime cache: once fetched, keep for the process lifetime.
+	// Mutations (create/delete/upload) update the cache in place;
+	// explicit invalidation is only for deleteRepo.
+	out := make([]ghapi.Release, len(entry.releases))
+	copy(out, entry.releases)
+	return out, true
+}
+
+func (h *StorHub) setCachedReleases(project string, releases []ghapi.Release) {
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	cp := make([]ghapi.Release, len(releases))
+	copy(cp, releases)
+	h.releaseCache[project] = releaseCacheEntry{releases: cp, fetchedAt: h.config.Now()}
+}
+
+func (h *StorHub) invalidateReleaseCache(project string) {
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	delete(h.releaseCache, project)
+}
+
+func (h *StorHub) addReleaseToCache(project string, release *ghapi.Release) {
+	if release == nil {
+		return
+	}
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	entry, ok := h.releaseCache[project]
+	if !ok {
+		// No cache yet; next listReleases will populate.
+		return
+	}
+	cp := make([]ghapi.Release, len(entry.releases)+1)
+	copy(cp, entry.releases)
+	cp[len(entry.releases)] = *release
+	entry.releases = cp
+	h.releaseCache[project] = entry
+}
+
+func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string) {
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	entry, ok := h.releaseCache[project]
+	if !ok {
+		return
+	}
+	for i := range entry.releases {
+		if entry.releases[i].TagName == tag {
+			entry.releases[i].Assets = append(entry.releases[i].Assets, ghapi.Asset{ID: -1})
+			h.releaseCache[project] = entry
+			return
+		}
+	}
 }
 
 // ensureHydratedLocked applies the cold-cache guard to direct metadata
@@ -262,14 +336,15 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 		cfg.GitCacheDir = storcfg.DefaultGitCacheBase()
 	}
 	hub := &StorHub{
-		token:      token,
-		gh:         ghapi.NewClient(token, cfg),
-		config:     cfg,
-		repoState:  make(map[string]bool),
-		metaCache:  make(map[string]*projectMetadata),
-		gitRepos:   make(map[string]*gitRepo),
-		logger:     logging.WithComponent(cfg.Logger, "storage"),
-		shutdownCh: make(chan struct{}),
+		token:        token,
+		gh:           ghapi.NewClient(token, cfg),
+		config:       cfg,
+		repoState:    make(map[string]bool),
+		metaCache:    make(map[string]*projectMetadata),
+		releaseCache: make(map[string]releaseCacheEntry),
+		gitRepos:     make(map[string]*gitRepo),
+		logger:       logging.WithComponent(cfg.Logger, "storage"),
+		shutdownCh:   make(chan struct{}),
 		bufferPool: sync.Pool{New: func() any {
 			buf := make([]byte, cfg.BufferSize)
 			return &buf
@@ -806,8 +881,12 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	if !hasSize {
 		return nil, fmt.Errorf("upload size unknown: pass fs.WithSize(n) (REST callers: Content-Length)")
 	}
-
-	releaseTag, uploadURL, err := h.PrepareReplaceContext(ctx, project, filePath, 0)
+	chunkSize := chunking.NormalizedSize(h.ChunkSize())
+	requiredSlots := 0
+	if size > 0 {
+		requiredSlots = int((size + chunkSize - 1) / chunkSize)
+	}
+	releaseTag, uploadURL, err := h.PrepareReplaceContext(ctx, project, filePath, requiredSlots)
 	if err != nil {
 		return nil, err
 	}
