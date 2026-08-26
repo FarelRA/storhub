@@ -112,9 +112,9 @@ function newFileHere() {
           <button type="button" class="btn btn-sm" aria-label="Close menu" @click="closeDrawer">✕</button>
         </nav>
 
-        <!-- Project -->
-        <section class="space-y-3 border-b border-hair pb-5">
-          <label v-if="!lockedProject" class="block">
+        <!-- Project: hidden entirely when pinned by the server -->
+        <section v-if="!lockedProject" class="space-y-3 border-b border-hair pb-5">
+          <label class="block">
             <span class="field-label">Project</span>
             <input
               v-model.trim="projectInput"
@@ -128,15 +128,11 @@ function newFileHere() {
               @keydown.enter.prevent="loadProject"
             >
           </label>
-          <p v-else class="text-sm text-mist">
-            Project <code class="font-mono text-parchment">{{ lockedProject }}</code>
-            <span class="chip ml-1">pinned by server</span>
-          </p>
           <div class="grid grid-cols-2 gap-2">
-            <button v-if="!lockedProject" class="btn btn-solid" :disabled="isSharedView || !projectInput" @click="loadProject">
+            <button class="btn btn-solid" :disabled="isSharedView || !projectInput" @click="loadProject">
               Load
             </button>
-            <button class="btn" :class="lockedProject ? 'col-span-2' : ''" :disabled="!project || busy" @click="console_.refreshAll()">
+            <button class="btn" :disabled="!project || busy" @click="console_.refreshAll()">
               Refresh
             </button>
           </div>
@@ -215,6 +211,15 @@ function newFileHere() {
               <div class="flex items-center gap-1.5">
                 <button class="btn btn-sm px-2.5" :disabled="!currentPath || busy" title="Up one level" aria-label="Up one level" @click="console_.goUp()">
                   ↑
+                </button>
+                <button
+                  class="btn btn-sm px-2.5"
+                  :disabled="!project || busy"
+                  title="Refresh everything"
+                  aria-label="Refresh"
+                  @click="console_.refreshAll()"
+                >
+                  ⟳
                 </button>
                 <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFolderHere">+ Folder</button>
                 <button class="btn btn-sm" :disabled="!canWrite || busy" @click="newFileHere">+ File</button>

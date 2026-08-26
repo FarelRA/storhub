@@ -285,6 +285,10 @@ export function useConsole() {
       sessionStorage.setItem('storhub.token', payload.token)
       sessionStorage.setItem('storhub.principal', JSON.stringify(payload.principal))
       toasts.success(`Signed in as ${payload.principal.username}`)
+      if (lockedProject && project.value !== lockedProject) {
+        await loadProject(lockedProject)
+        return true
+      }
       if (project.value) await refreshAll()
       return true
     } catch (error) {
@@ -742,7 +746,12 @@ export function useConsole() {
       await bootstrapShare(shareParam)
       return
     }
-    if (lockedProject) await loadProject(lockedProject)
+    // A pinned project must never fire unauthenticated requests: defer the
+    // auto-load until login succeeds (login() picks it up).
+    if (lockedProject) {
+      if (!authEnabled.value || token.value) await loadProject(lockedProject)
+      return
+    }
   }
 
   return {
