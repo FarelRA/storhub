@@ -557,11 +557,6 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 
 	r.Get(basePath, h.serveAPIInfo)
 	r.Get(basePath+"/shares/{id}", h.serveShareInfo)
-	// Signed download links minted under /projects/{p}/downloads are redeemed
-	// here WITHOUT auth headers: that is the entire point - the browser's own
-	// download manager (or curl/wget) fetches a plain URL.
-	r.Get(basePath+"/download/{project}", h.serveProjectDownload)
-	r.Head(basePath+"/download/{project}", h.serveProjectDownload)
 
 	if opts.Auth != nil {
 		auth, err := newAuthenticator(*opts.Auth)
@@ -651,9 +646,6 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/shares", h.handleProjectShares)
 	r.Get("/shares/{shareID}", h.handleProjectShare)
 	r.Delete("/shares/{shareID}", h.handleProjectShare)
-	// Mints a short-lived signed download URL (redeemable without auth
-	// headers, so the browser's own downloader or curl can use it).
-	r.Post("/downloads", h.handleCreateDownloadLink)
 }
 
 func (h *restHandler) recoverPanics(next http.Handler) http.Handler {
@@ -801,121 +793,6 @@ func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
 // Stateless by construction - no registry, self-expiring, valid across
 // restarts within their window - and they delegate streaming to
 // handleContentRead so Range/206 resume, ETag and HEAD come for free.
-
-const (
-	downloadLinkTTL = 5 * time.Minute
-)
-
-type downloadLinkRequest struct {
-	Path string `json:"path"`
-}
-
-type downloadLinkResponse struct {
-	URL       string `json:"url"`
-	ExpiresIn int64  `json:"expires_in"`
-}
-
-func (h *restHandler) handleCreateDownloadLink(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req downloadLinkRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if strings.TrimSpace(req.Path) == "" {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "path is required")
-		return
-	}
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, req.Path)
-	if err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if entry.IsDir {
-		h.writeError(w, http.StatusConflict, "is_directory", "download links target files; use shares for directories")
-		return
-	}
-	signed, err := h.signDownloadToken(project, req.Path)
-	if err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	basePath := strings.TrimRight(h.opts.BasePath, "/")
-	h.writeJSON(w, http.StatusCreated, downloadLinkResponse{
-		URL:       fmt.Sprintf("%s/download/%s?token=%s", basePath, url.PathEscape(project), url.QueryEscape(signed)),
-		ExpiresIn: int64(downloadLinkTTL.Seconds()),
-	})
-}
-
-func (h *restHandler) signDownloadToken(project, filePath string) (string, error) {
-	if h.shareSignKey == nil {
-		return "", errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
-	}
-	now := time.Now()
-	shareID, err := newShareID()
-	if err != nil {
-		return "", err
-	}
-	claims := &shareClaims{
-		ID:       shareID,
-		Project:  project,
-		Path:     filePath,
-		Download: true,
-		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(downloadLinkTTL)),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
-	return token.SignedString(h.shareSignKey)
-}
-
-// serveProjectDownload redeems a signed link. The claims must match the URL
-// exactly (project from path, file from ?path=): tokens are scoped to one
-// file and grant nothing else.
-func (h *restHandler) serveProjectDownload(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	claims, err := h.parseShareToken(r.URL.Query().Get("token"))
-	if err != nil || !claims.Download {
-		h.writeError(w, http.StatusForbidden, "forbidden", "invalid or expired download token")
-		return
-	}
-	if claims.Project != project || strings.TrimSpace(claims.Path) == "" {
-		h.writeError(w, http.StatusForbidden, "forbidden", "download token does not cover this project")
-		return
-	}
-
-	// The signed token is the single source of truth for the file path -
-	// nothing about the target is client-controllable. Delegate to the
-	// canonical byte-streaming reader; inject only the attachment
-	// disposition. Range/206/ETag/HEAD behavior is inherited.
-	r2 := r.Clone(r.Context())
-	q := r2.URL.Query()
-	q.Set("path", claims.Path)
-	r2.URL.RawQuery = q.Encode()
-	w.Header().Set("Content-Disposition", contentDisposition(claims.Path))
-	h.handleContentRead(w, r2)
-}
-
-func contentDisposition(name string) string {
-	base := name
-	if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
-		base = base[idx+1:]
-	}
-	if base == "" || base == "." || base == ".." {
-		base = "download"
-	}
-	var ascii strings.Builder
-	for _, rn := range base {
-		if rn < 0x20 || rn > 0x7e || rn == '"' || rn == '\\' {
-			ascii.WriteRune('_')
-		} else {
-			ascii.WriteRune(rn)
-		}
-	}
-	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`,
-		ascii.String(), url.PathEscape(base))
-}
 
 func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")

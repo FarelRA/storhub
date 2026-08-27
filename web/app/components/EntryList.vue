@@ -127,16 +127,22 @@ async function withFocus(entry: EntryInfo, kind: Parameters<typeof console_.open
 async function copyDirectLink(entry: EntryInfo) {
   closeMenu()
   const share = await console_.createShare(entry.path, true, 300)
-  if (!share) return
-  await copyText(`${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`)
+  if (!share?.download_url) {
+    toasts.error('Failed to create direct link')
+    return
+  }
+  await copyText(share.download_url)
   toasts.success('Direct link copied (valid 5 min)')
 }
 
 async function shareEntry(entry: EntryInfo) {
   closeMenu()
   const share = await console_.createShare(entry.path, false, 300)
-  if (!share) return
-  await copyText(`${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`)
+  if (!share?.token) {
+    toasts.error('Failed to create share link')
+    return
+  }
+  await copyText(`${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token)}`)
   toasts.success('Share link copied (valid 5 min)')
 }
 

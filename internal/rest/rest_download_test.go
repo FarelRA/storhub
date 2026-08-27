@@ -30,25 +30,27 @@ func seedDownloadFile(t *testing.T, client *fakeRESTClient, path, content string
 	}
 }
 
-// TestDownloadLinkLifecycle pins the whole native-download contract:
-// authed mint -> anonymous browser-style redeem (attachment + exact bytes),
-// HTTP Range resume through the same URL, and strict claim scoping.
+// TestDownloadLinkLifecycle pins the whole share-based download contract:
+// authed mint via POST /shares (download=true, 5m) -> anonymous redeem
+// via GET /shares/{id}/download (attachment + exact bytes), Range resume,
+// and strict claim scoping. Replaces the old POST /downloads + GET /download/{project}.
 func TestDownloadLinkLifecycle(t *testing.T) {
 	const content = "hello native download\n"
 	fake := newFakeRESTClient()
 	seedDownloadFile(t, fake, "docs/report.txt", content)
 
 	handler, bearer := newAuthedShareHandler(t, fake)
-	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/downloads",
-		strings.NewReader(`{"path":"docs/report.txt"}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
-	var link downloadLinkResponse
-	decodeJSONBody(t, resp, &link)
-	if link.URL == "" || link.ExpiresIn <= 0 {
-		t.Fatalf("mint response incomplete: %+v", link)
+	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
+		strings.NewReader(`{"path":"docs/report.txt","download":true,"expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
+	var share shareResponse
+	decodeJSONBody(t, resp, &share)
+	if share.DownloadURL == "" || share.Token == "" {
+		t.Fatalf("mint response incomplete: %+v", share)
 	}
+	linkURL := share.DownloadURL
 
 	// Anonymous redeem - no Authorization header, like a real browser.
-	got := mustRequest(t, handler, http.MethodGet, link.URL, nil, nil, http.StatusOK)
+	got := mustRequest(t, handler, http.MethodGet, linkURL, nil, nil, http.StatusOK)
 	if disp := got.Header.Get("Content-Disposition"); !strings.HasPrefix(disp, `attachment; filename="report.txt"`) {
 		t.Fatalf("unexpected disposition: %q", disp)
 	}
@@ -57,28 +59,31 @@ func TestDownloadLinkLifecycle(t *testing.T) {
 	}
 
 	// Range request: resumability is inherited from the streaming reader.
-	partial := mustRequest(t, handler, http.MethodGet, link.URL,
+	partial := mustRequest(t, handler, http.MethodGet, linkURL,
 		nil, map[string]string{"Range": "bytes=6-9"}, http.StatusPartialContent)
 	if body := string(readBody(t, partial)); body != "nati" {
 		t.Fatalf("range body mismatch: %q", body)
 	}
 
-	// Project mismatch between URL and signed claims is rejected.
-	wrongProject := strings.Replace(link.URL, "/download/demo", "/download/other", 1)
-	mustRequest(t, handler, http.MethodGet, wrongProject, nil, nil, http.StatusForbidden)
-
-	// Garbage token.
+	// Garbage token is rejected (404 for unknown share ID or bad JWT)
 	mustRequest(t, handler, http.MethodGet,
-		"/api/v1/download/demo?token=garbage&path=docs/report.txt", nil, nil, http.StatusForbidden)
+		"/api/v1/shares/invalid-id/download?token=garbage", nil, nil, http.StatusNotFound)
+	tampered := linkURL
+	if idx := strings.Index(tampered, "token="); idx != -1 {
+		tampered = tampered[:idx+6] + "garbage" + tampered[idx+6:]
+	}
+	mustRequest(t, handler, http.MethodGet, tampered, nil, nil, http.StatusNotFound)
 
-	// Directories are refused at mint time with guidance toward shares.
+	// Directories via shares with download=true succeed but have no download_url (files only)
 	if err := fake.MkdirContext(context.Background(), "demo", "docs/archive"); err != nil {
 		t.Fatalf("mkdir archive: %v", err)
 	}
-	errResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/downloads",
-		strings.NewReader(`{"path":"docs/archive"}`), map[string]string{"Authorization": bearer}, http.StatusConflict)
-	if body := readBody(t, errResp); !strings.Contains(string(body), "is_directory") {
-		t.Fatalf("expected is_directory error, got: %s", body)
+	resp2 := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
+		strings.NewReader(`{"path":"docs/archive","download":true,"expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
+	var share2 shareResponse
+	decodeJSONBody(t, resp2, &share2)
+	if share2.DownloadURL != "" {
+		t.Fatalf("expected no download_url for folder share, got %+v", share2)
 	}
 }
 
@@ -91,8 +96,8 @@ func TestDownloadLinkRequiresSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
-	errResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/downloads",
-		strings.NewReader(`{"path":"f.txt"}`), nil, http.StatusForbidden)
+	errResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
+		strings.NewReader(`{"path":"f.txt","download":true}`), nil, http.StatusForbidden)
 	if body := readBody(t, errResp); !strings.Contains(string(body), "--share-key") {
 		t.Fatalf("expected actionable message, got: %s", body)
 	}

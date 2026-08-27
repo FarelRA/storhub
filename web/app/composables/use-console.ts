@@ -738,18 +738,14 @@ export function useConsole() {
    * resume, and disk I/O. No JS buffering, no size cap. The same URL works
    * with curl/wget.
    */
-  async function mintDownloadURL(entry: EntryInfo): Promise<string | null> {
-    const done = await run('Download', () =>
-      postJSON<{ url: string }>(projectURL('/downloads'), { path: entry.path }),
-    )
-    return done ? done.url : null
-  }
-
   async function downloadEntry(entry: EntryInfo): Promise<void> {
-    const target = await mintDownloadURL(entry)
-    if (!target) return
+    const share = await createShare(entry.path, true, 300)
+    if (!share?.download_url) {
+      toasts.error('Failed to create download link')
+      return
+    }
     const anchor = document.createElement('a')
-    anchor.href = target
+    anchor.href = share.download_url
     anchor.rel = 'noopener'
     document.body.appendChild(anchor)
     anchor.click()
@@ -757,11 +753,13 @@ export function useConsole() {
   }
 
   async function copyDirectLink(entry: EntryInfo): Promise<void> {
-    const path = await mintDownloadURL(entry)
-    if (!path) return
-    const absolute = new URL(path, window.location.origin).toString()
-    const ok = await copyText(absolute)
-    if (ok) toasts.success('Direct link copied (valid 5 min) - works with curl/wget too')
+    const share = await createShare(entry.path, true, 300)
+    if (!share?.download_url) {
+      toasts.error('Failed to create direct link')
+      return
+    }
+    const ok = await copyText(share.download_url)
+    if (ok) toasts.success('Direct link copied (valid 5 min)')
   }
 
   /** Select an entry non-navigatively: stat it so detail panes follow along. */

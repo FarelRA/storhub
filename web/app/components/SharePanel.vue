@@ -77,13 +77,13 @@ async function remove(share: { id: string; path: string }) {
         <p class="truncate font-mono text-xs font-medium">{{ share.path || '/' }}</p>
         <div class="flex flex-wrap gap-1">
           <span class="chip">{{ share.is_dir ? 'folder' : 'file' }}</span>
-          <span class="chip">{{ share.download ? 'download' : 'browser-only' }}</span>
+          <span class="chip">{{ share.download ? 'download' : 'browser' }}</span>
           <span class="chip" :title="share.expires_at">expires {{ relativeTime(share.expires_at) }}</span>
         </div>
         <div class="flex flex-wrap gap-1.5">
-          <button class="btn btn-sm" @click="copy('Share link', shareLink(share))">Link</button>
+          <button v-if="share.token" class="btn btn-sm" @click="copy('Share link', shareLink(share))">Link</button>
           <button
-            v-if="share.download && !share.is_dir && share.download_url"
+            v-if="share.download && share.download_url"
             class="btn btn-sm"
             @click="copy('Direct link', share.download_url)"
           >
