@@ -48,7 +48,14 @@ async function remove(share: { id: string; path: string }) {
 </script>
 
 <template>
-  <section v-if="!console_.isSharedView.value" class="space-y-3">
+  <section v-if="console_.isSharedView.value" class="space-y-3">
+    <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Share</h2>
+    <p class="text-sm text-mist">
+      Viewing <span class="font-mono text-xs">{{ console_.shareRootPath.value || '/' }}</span> — read-only.
+    </p>
+    <p class="text-xs text-mist">Links expire with the share.</p>
+  </section>
+  <section v-else class="space-y-3">
     <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Shares</h2>
 
     <div class="flex flex-wrap gap-2">

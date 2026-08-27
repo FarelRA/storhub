@@ -9,7 +9,6 @@ const {
   authEnabled,
   isAdmin,
   isSharedView,
-  sharedMode,
   canWrite,
   lockedProject,
 } = console_
@@ -175,7 +174,6 @@ async function onDrop(event: DragEvent) {
 
       <div class="ml-auto flex shrink-0 items-center gap-2">
         <span v-if="busy" class="chip animate-pulse motion-reduce:animate-none" role="status">working…</span>
-        <span v-if="isSharedView && sharedMode" class="chip text-sage">shared · read-only</span>
       </div>
     </header>
 
