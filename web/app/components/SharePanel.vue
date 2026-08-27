@@ -85,7 +85,7 @@ async function remove(share: { id: string; path: string }) {
           <button
             v-if="share.download && share.download_url"
             class="btn btn-sm"
-            @click="copy('Direct link', share.download_url)"
+            @click="copy('Direct link', new URL(share.download_url, window.location.origin).toString())"
           >
             Direct
           </button>

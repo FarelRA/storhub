@@ -744,8 +744,9 @@ export function useConsole() {
       toasts.error('Failed to create download link')
       return
     }
+    const absolute = new URL(share.download_url, window.location.origin).toString()
     const anchor = document.createElement('a')
-    anchor.href = share.download_url
+    anchor.href = absolute
     anchor.rel = 'noopener'
     document.body.appendChild(anchor)
     anchor.click()
@@ -758,7 +759,8 @@ export function useConsole() {
       toasts.error('Failed to create direct link')
       return
     }
-    const ok = await copyText(share.download_url)
+    const absolute = new URL(share.download_url, window.location.origin).toString()
+    const ok = await copyText(absolute)
     if (ok) toasts.success('Direct link copied (valid 5 min)')
   }
 

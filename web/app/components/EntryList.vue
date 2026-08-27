@@ -131,7 +131,8 @@ async function copyDirectLink(entry: EntryInfo) {
     toasts.error('Failed to create direct link')
     return
   }
-  await copyText(share.download_url)
+  const absolute = new URL(share.download_url, window.location.origin).toString()
+  await copyText(absolute)
   toasts.success('Direct link copied (valid 5 min)')
 }
 
