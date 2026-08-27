@@ -681,9 +681,11 @@ export function useConsole() {
     return op('Purge untracked', 'purge', {})
   }
 
-  async function createShare(path: string, download: boolean): Promise<Share | null> {
+  async function createShare(path: string, download: boolean, expiresInSeconds?: number): Promise<Share | null> {
     return run('Create share', async () => {
-      const payload = await postJSON<Share>(projectURL('/shares'), { path, download })
+      const body: Record<string, unknown> = { path, download }
+      if (expiresInSeconds) body.expires_in_seconds = expiresInSeconds
+      const payload = await postJSON<Share>(projectURL('/shares'), body)
       await loadShares()
       return payload
     })

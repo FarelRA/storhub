@@ -6,6 +6,19 @@ const { shares } = console_
 const toasts = useToasts()
 const { ask } = useConfirm()
 
+const singlePath = computed(() => {
+  if (console_.selectedPaths.value.size === 1) return [...console_.selectedPaths.value][0]!
+  if (console_.selectedPaths.value.size === 0 && console_.selectedPath.value) return console_.selectedPath.value
+  return null
+})
+const singleEntry = computed(() => {
+  if (console_.selectedPaths.value.size === 1) {
+    const p = [...console_.selectedPaths.value][0]!
+    return console_.entries.value.find((e) => e.path === p) ?? console_.selectedEntry.value
+  }
+  return console_.selectedEntry.value
+})
+
 async function copy(label: string, value: string) {
   await copyText(value)
   toasts.success(`${label} copied`)
@@ -16,13 +29,11 @@ function shareLink(share: { id: string; token?: string }): string {
 }
 
 async function createShare(download: boolean) {
-  const paths = console_.selectedPaths.value.size > 0 ? [...console_.selectedPaths.value] : [console_.selectedPath.value].filter(Boolean) as string[]
-  if (!paths.length) return
-  for (const p of paths) {
-    const share = await console_.createShare(p, download)
-    if (share) await copy('Share link', shareLink(share))
-  }
-  if (paths.length > 1) toasts.success(`Created ${paths.length} shares`)
+  const p = singlePath.value
+  if (!p) return
+  // 7 days = 604800 seconds
+  const share = await console_.createShare(p, download, 604800)
+  if (share) await copy('Share link', shareLink(share))
 }
 
 async function remove(share: { id: string; path: string }) {
@@ -43,16 +54,16 @@ async function remove(share: { id: string; path: string }) {
     <div class="flex flex-wrap gap-2">
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.project.value"
-        title="Create a browser-only share for the selected entry (works for files and folders)"
+        :disabled="!singlePath || !console_.project.value"
+        title="Share the selected file or folder in browser (7 days, single only)"
         @click="createShare(false)"
       >
         Share selected…
       </button>
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.project.value"
-        title="Create a share that allows direct download (works for files and folders)"
+        :disabled="!singlePath || !console_.project.value || !!singleEntry?.is_dir"
+        title="Direct download share for the selected file (7 days, single file only)"
         @click="createShare(true)"
       >
         Direct download…

@@ -126,16 +126,18 @@ async function withFocus(entry: EntryInfo, kind: Parameters<typeof console_.open
 
 async function copyDirectLink(entry: EntryInfo) {
   closeMenu()
-  await console_.copyDirectLink(entry)
+  const share = await console_.createShare(entry.path, true, 300)
+  if (!share) return
+  await copyText(`${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`)
+  toasts.success('Direct link copied (valid 5 min)')
 }
 
 async function shareEntry(entry: EntryInfo) {
   closeMenu()
-  const share = await console_.createShare(entry.path, false)
+  const share = await console_.createShare(entry.path, false, 300)
   if (!share) return
-  const link = `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
-  await copyText(link)
-  toasts.success('Share link copied')
+  await copyText(`${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`)
+  toasts.success('Share link copied (valid 5 min)')
 }
 
 async function removeEntry(entry: EntryInfo) {
@@ -243,23 +245,12 @@ const menuTargets = computed(() => {
   return [cur]
 })
 
-const canBulkShare = computed(() => menuTargets.value.length > 0)
 const canBulkDownload = computed(() => menuTargets.value.length > 0 && menuTargets.value.every(isFile))
 const canBulkRemove = computed(() => menuTargets.value.length > 0)
-
-async function shareBulk() {
-  closeMenu()
-  for (const e of menuTargets.value) await shareEntry(e)
-}
 
 async function downloadBulk() {
   closeMenu()
   for (const e of menuTargets.value) await console_.downloadEntry(e)
-}
-
-async function copyBulk() {
-  closeMenu()
-  for (const e of menuTargets.value) await copyDirectLink(e)
 }
 
 async function removeBulk() {
@@ -348,9 +339,7 @@ async function removeBulk() {
           <div v-if="menuTargets.length > 1" class="menu-sep" />
 
           <template v-if="menuTargets.length > 1">
-            <button v-if="canBulkShare" role="menuitem" class="menu-item" @click="shareBulk">Share ({{ menuTargets.length }})</button>
             <button v-if="canBulkDownload" role="menuitem" class="menu-item" @click="downloadBulk">Download ({{ menuTargets.length }})</button>
-            <button v-if="canBulkDownload" role="menuitem" class="menu-item" @click="copyBulk">Copy direct link ({{ menuTargets.length }})</button>
             <template v-if="console_.canWrite.value && canBulkRemove">
               <div class="menu-sep" />
               <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="removeBulk">Remove ({{ menuTargets.length }})</button>
