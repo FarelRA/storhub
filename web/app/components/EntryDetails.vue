@@ -9,17 +9,17 @@ const rows = computed(() => {
     // Always render the full key set so the panel never jumps around.
     return ['path', 'kind', 'mode', 'uid / gid', 'size', 'inode', 'links', 'modified'].map((key) => ({
       key,
-      value: '—',
+      value: '-',
     }))
   }
   return [
     { key: 'path', value: entry.path || '/' },
     { key: 'kind', value: entry.is_dir ? 'directory' : entry.is_symlink ? 'symlink' : 'file' },
     { key: 'mode', value: formatMode(entry.mode) },
-    { key: 'uid / gid', value: `${entry.uid ?? '—'} / ${entry.gid ?? '—'}` },
-    { key: 'size', value: entry.is_dir ? '—' : formatBytes(entry.size) },
-    { key: 'inode', value: String(entry.inode ?? '—') },
-    { key: 'links', value: String(entry.nlink ?? '—') },
+    { key: 'uid / gid', value: `${entry.uid ?? '-'} / ${entry.gid ?? '-'}` },
+    { key: 'size', value: entry.is_dir ? '-' : formatBytes(entry.size) },
+    { key: 'inode', value: String(entry.inode ?? '-') },
+    { key: 'links', value: String(entry.nlink ?? '-') },
     ...(entry.symlink_target ? [{ key: 'target', value: entry.symlink_target }] : []),
     { key: 'modified', value: relativeTime(entry.modified_at) },
   ]

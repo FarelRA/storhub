@@ -200,7 +200,7 @@ func TestFullChainV1ToCurrent(t *testing.T) {
 }
 
 // Parser cleanliness: fed a RAW legacy payload with no migrator in the
-// loop, the type itself refuses — no silent empty trees from ignored
+// loop, the type itself refuses - no silent empty trees from ignored
 // unknown fields. Through FromJSON the same payload migrates correctly.
 func TestParserIsCurrentOnly(t *testing.T) {
 	rawV3 := `{"v":3,"rt":{"ca":1},"f":{"a":{"s":1,"ua":1,"ca":2}},"r":{"t":{"ac":1,"ca":3}}}`

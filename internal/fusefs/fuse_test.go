@@ -1865,7 +1865,7 @@ func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
 	fsys.lockTable[7] = []lockRecord{{owner: 42, lock: fuse.FileLock{Start: 0, End: 0, Typ: syscall.F_WRLCK}}}
 	fsys.mu.Unlock()
 
-	// POSIX: once a file has no open descriptor, no locks remain — even
+	// POSIX: once a file has no open descriptor, no locks remain - even
 	// locks recorded by owners this handle never tracked.
 	if errno := h.Release(context.Background()); errno != 0 {
 		t.Fatalf("release: %v", errno)

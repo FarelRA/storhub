@@ -4,7 +4,7 @@ import { ApiError } from '../app/utils/api-types'
 
 describe('formatBytes', () => {
   it.each([
-    [undefined, '—'],
+    [undefined, '-'],
     [0, '0 B'],
     [512, '512 B'],
     [1024, '1.0 KB'],
@@ -30,7 +30,7 @@ describe('relativeTime', () => {
     const now = Date.parse('2026-08-26T12:00:00Z')
     expect(relativeTime(new Date(now - 90_000).toISOString(), now)).toContain('minute')
     expect(relativeTime(new Date(now + 3.6e6).toISOString(), now)).toContain('hour')
-    expect(relativeTime(undefined)).toBe('—')
+    expect(relativeTime(undefined)).toBe('-')
   })
 })
 
@@ -38,7 +38,7 @@ describe('formatMode', () => {
   it('renders octal with leading zero', () => {
     expect(formatMode(0o644)).toBe('0644')
     expect(formatMode(0o755)).toBe('0755')
-    expect(formatMode(undefined)).toBe('—')
+    expect(formatMode(undefined)).toBe('-')
   })
 })
 

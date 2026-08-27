@@ -585,7 +585,7 @@ func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
 }
 
 // TestNormalizePreservesAuthoritativeZeros pins the v4 contract: Normalize
-// never repairs timestamps — persisted values are complete and exact, and
+// never repairs timestamps - persisted values are complete and exact, and
 // zero is a real epoch value, not a gap. Legacy completion belongs to the
 // stacked migrator (migrate.go), not to the parser or normalizer.
 func TestNormalizePreservesAuthoritativeZeros(t *testing.T) {

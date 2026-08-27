@@ -239,11 +239,11 @@ async function onDrop(event: DragEvent) {
           <button class="btn btn-sm w-full" @click="console_.logout()">Sign out</button>
         </section>
 
-        <!-- Stats: always visible; dashes until a project reports numbers -->
-        <section class="space-y-2.5 border-b border-hair py-4">
+        <!-- Stats: hidden in shared view (no dashes) -->
+        <section v-if="!isSharedView" class="space-y-2.5 border-b border-hair py-4">
           <StatsGrid :stats="console_.stats.value" />
           <button
-            v-if="project && !isSharedView && isAdmin"
+            v-if="project && isAdmin"
             class="btn btn-sm w-full"
             :disabled="busy || !project"
             title="Admin only: delete release assets no longer referenced by metadata"
@@ -251,7 +251,7 @@ async function onDrop(event: DragEvent) {
           >
             Purge untracked assets…
           </button>
-          <ConfirmDeleteProject v-if="project && !isSharedView" @deleted="projectInput = ''" />
+          <ConfirmDeleteProject v-if="project" @deleted="projectInput = ''" />
         </section>
 
         <!-- Shares -->
@@ -340,7 +340,7 @@ async function onDrop(event: DragEvent) {
               v-if="!entries.length"
               icon="🗂"
               title="Nothing here"
-              :hint="project ? 'This directory is empty — drop files to upload.' : 'Load a project to start browsing.'"
+              :hint="project ? 'This directory is empty - drop files to upload.' : 'Load a project to start browsing.'"
             />
             <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
               <EntryList :entries="entries" :selected-path="selectedPath" @select="onSelect" @open="onOpen" />

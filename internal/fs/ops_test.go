@@ -473,7 +473,7 @@ func TestWhitespaceNamesEndToEnd(t *testing.T) {
 	}
 
 	// Rename into a padded target lands on exactly that key and stays
-	// addressable and removable — regression for raw-key divergence.
+	// addressable and removable - regression for raw-key divergence.
 	if err := svc.MkdirContext(ctx, proj, "plain"); err != nil {
 		t.Fatalf("mkdir plain: %v", err)
 	}

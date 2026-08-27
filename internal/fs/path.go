@@ -8,7 +8,7 @@ import (
 
 // NormalizePath canonicalizes a user-supplied path: relative to the project
 // root, slash-clean, and free of traversal. Surrounding whitespace is
-// significant — leading/trailing spaces are legal filename characters on
+// significant - leading/trailing spaces are legal filename characters on
 // Unix and are preserved verbatim.
 func NormalizePath(value string) (string, error) {
 	if strings.TrimSpace(value) == "" {

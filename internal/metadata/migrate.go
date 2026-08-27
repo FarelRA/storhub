@@ -12,7 +12,7 @@ const CurrentVersion = maxMetadataVersion
 
 // detectVersion reports a document's schema version. Historical spellings:
 // v1 documents wrote "version"; v2 onward write "v". That history belongs
-// to the migrator alone — the main parser never sees version detection.
+// to the migrator alone - the main parser never sees version detection.
 func detectVersion(data []byte) (int, error) {
 	var probe struct {
 		V       *int `json:"v"`
@@ -331,7 +331,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 
 // completeTimes fills zero-valued timestamps deterministically from the
 // entry's own UploadedAt (then ModifiedAt), finally from the document's
-// LastMod — the same chains the old load-time repair used, minus the wall
+// LastMod - the same chains the old load-time repair used, minus the wall
 // clock. Entries flagged TimesExplicit are already authoritative and pass
 // through untouched.
 func completeTimes(uploaded, modified, accessed, changed, fallback int64, explicit bool) (int64, int64, int64, int64) {

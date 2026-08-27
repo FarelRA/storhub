@@ -11,7 +11,7 @@ const source = join(root, '.output', 'public')
 const target = resolve(root, '..', 'internal', 'rest', 'static', 'dist')
 
 if (!existsSync(source) || readdirSync(source).length === 0) {
-  console.error(`build:embed: ${source} is empty — run \`nuxt generate\` first`)
+  console.error(`build:embed: ${source} is empty - run \`nuxt generate\` first`)
   process.exit(1)
 }
 

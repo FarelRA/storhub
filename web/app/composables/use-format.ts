@@ -3,7 +3,7 @@
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const
 
 export function formatBytes(value: number | undefined | null): string {
-  if (value === undefined || value === null || Number.isNaN(value)) return '—'
+  if (value === undefined || value === null || Number.isNaN(value)) return '-'
   if (value < 1024) return `${value} B`
   let amount = value
   let unit: (typeof BYTE_UNITS)[number] = 'B'
@@ -17,12 +17,12 @@ export function formatBytes(value: number | undefined | null): string {
 }
 
 export function formatCount(value: number | undefined | null): string {
-  if (value === undefined || value === null || Number.isNaN(value)) return '—'
+  if (value === undefined || value === null || Number.isNaN(value)) return '-'
   return Number(value).toLocaleString()
 }
 
 export function formatMode(mode: number | undefined): string {
-  if (mode === undefined) return '—'
+  if (mode === undefined) return '-'
   return `0${(mode & 0o777).toString(8).padStart(3, '0')}`
 }
 
@@ -39,13 +39,13 @@ function parseDate(input: string | number | undefined | null): Date | null {
 
 export function formatDateTime(input: string | number | undefined | null): string {
   const date = parseDate(input)
-  if (!date) return '—'
+  if (!date) return '-'
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 export function relativeTime(input: string | number | undefined | null, now = Date.now()): string {
   const date = parseDate(input)
-  if (!date) return '—'
+  if (!date) return '-'
   const diffMs = date.getTime() - now
   const abs = Math.abs(diffMs)
   const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })

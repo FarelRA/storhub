@@ -28,6 +28,11 @@ function shareLink(share: { id: string; token?: string }): string {
   return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
 }
 
+function directLink(share: { download_url?: string }): string {
+  if (!share.download_url) return ''
+  return new URL(share.download_url, window.location.origin).toString()
+}
+
 async function createShare(download: boolean) {
   const p = singlePath.value
   if (!p) return
@@ -51,7 +56,7 @@ async function remove(share: { id: string; path: string }) {
   <section v-if="console_.isSharedView.value" class="space-y-3">
     <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Share</h2>
     <p class="text-sm text-mist">
-      Viewing <span class="font-mono text-xs">{{ console_.shareRootPath.value || '/' }}</span> — read-only.
+      Viewing <span class="font-mono text-xs">{{ console_.shareRootPath.value || '/' }}</span> read only.
     </p>
     <p class="text-xs text-mist">Links expire with the share.</p>
   </section>
@@ -89,11 +94,7 @@ async function remove(share: { id: string; path: string }) {
         </div>
         <div class="flex flex-wrap gap-1.5">
           <button v-if="share.token" class="btn btn-sm" @click="copy('Share link', shareLink(share))">Link</button>
-          <button
-            v-if="share.download && share.download_url"
-            class="btn btn-sm"
-            @click="copy('Direct link', new URL(share.download_url, window.location.origin).toString())"
-          >
+          <button v-if="share.download && share.download_url" class="btn btn-sm" @click="copy('Direct link', directLink(share))">
             Direct
           </button>
           <button class="btn btn-danger btn-sm ml-auto" @click="remove(share)">Delete</button>

@@ -100,7 +100,7 @@ func TestSleepWithContext(t *testing.T) {
 
 // TestWithDefaultsFillsEachFieldIndependently walks every field: starting
 // from a zero Config, each field must end up at its default value. Log
-// knobs are the deliberate exception — WithDefaults consumes them into a
+// knobs are the deliberate exception - WithDefaults consumes them into a
 // built Logger and clears them, keeping Validate's single-mechanism
 // invariant true for every defaulted config.
 func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {

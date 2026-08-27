@@ -248,7 +248,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	pm.mu.Unlock()
 	// Wait for the evicted commit loop to fully exit before replacing its
 	// channels: the loop reads stopCh/triggerCh unsynchronized, and the
-	// eviction close(stopCh) only requests exit — stoppedCh closes when it
+	// eviction close(stopCh) only requests exit - stoppedCh closes when it
 	// has actually returned.
 	select {
 	case <-pm.stoppedCh:
@@ -268,7 +268,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 			"project", project)
 	case exists && current == pm && !current.stopped:
 		// Another goroutine completed the revival while we waited on
-		// stoppedCh/metaMu; the instance is live again — just mark dirty.
+		// stoppedCh/metaMu; the instance is live again - just mark dirty.
 		live = true
 	case pm.reviving:
 		// A concurrent revival is between channel swap and loop start;
@@ -494,7 +494,7 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	logger := h.projectLogger(project)
 	// Conflict (stale previous_sha against remote HEAD) means another
 	// writer advanced the metadata: reload and discard local uncommitted
-	// state, matching what actually happened remotely — but only when no
+	// state, matching what actually happened remotely - but only when no
 	// newer mutation landed after the failed snapshot. Any other failure
 	// is transient: retain dirty state so the loop retries with it.
 	var apiErr *ghapi.APIError

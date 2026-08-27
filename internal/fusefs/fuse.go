@@ -2029,7 +2029,7 @@ func totalByteRanges(ranges []ByteRange) int64 {
 // shouldReplaceLocked decides whether pending writes escalate to a
 // full-file replace (one atomic remote rewrite) instead of ranged patching.
 //
-// The ladder, checked top to bottom — every arm is live policy, tuned for
+// The ladder, checked top to bottom - every arm is live policy, tuned for
 // when ranged patching costs more than replacing:
 //
 //   - dirty ≥ 75% of the file: patching would rewrite most of the file a
@@ -2364,7 +2364,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		// materialized snapshots (e.g. displaced handles) land here. The
 		// kernel never routes WRITE to such handles under enforced mode
 		// flags, and historically this branch wrote into the snapshot temp
-		// without dirty tracking — the data was acknowledged but silently
+		// without dirty tracking - the data was acknowledged but silently
 		// discarded at commit. Fail loudly instead of pretending the write
 		// landed.
 		h.fs.debugf("write rejected path=%s inode=%d reason=no-write-state", h.path, h.inode)
@@ -2509,7 +2509,7 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		// owning process; mirroring it here prevents locks from other
 		// (crashed or sloppy) owners from lingering on the inode forever.
 		// go-fuse does not surface FUSE_RELEASE's LockOwner (fs API v2.11),
-		// so per-fd close semantics cannot be mirrored exactly — last
+		// so per-fd close semantics cannot be mirrored exactly - last
 		// close is the guarantee that matters in practice.
 		h.fs.dropAllLocksForInode(h.inode)
 	}

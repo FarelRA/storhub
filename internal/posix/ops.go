@@ -352,7 +352,7 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 
 // ChtimesExplicitContext sets timestamps with POSIX utimensat trinary
 // semantics: a nil pointer omits that timestamp entirely (UTIME_OMIT), a
-// non-nil pointer sets it to exactly that value — the epoch included,
+// non-nil pointer sets it to exactly that value - the epoch included,
 // unlike ChtimesContext whose omit-on-zero contract maps zero to "now".
 // Provided values are marked authoritative in metadata.
 func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) (err error) {
@@ -762,7 +762,7 @@ func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.F
 	}
 	// WriteFileDirect: routing through UpsertFile would send family members
 	// down the new-node path (RemoveFile erased the "existing" side),
-	// letting creation defaults overwrite preserved values — including
+	// letting creation defaults overwrite preserved values - including
 	// authoritative epoch zeros.
 	for _, name := range names {
 		repo.RemoveFile(name)

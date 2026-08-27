@@ -34,7 +34,7 @@ func (x XAttrMap) Clone() XAttrMap {
 
 type FileMeta struct {
 	// Normalize materializes Chunks as an empty (non-nil) slice for every
-	// regular file and symlink — it is NEVER nil after normalization, and
+	// regular file and symlink - it is NEVER nil after normalization, and
 	// empty files carry zero chunks since the sentinel-part removal.
 	// Compare with len(), never DeepEqual against nil or []int64{}.
 	Chunks     []int64 `json:"cs,omitempty"`
@@ -218,7 +218,7 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 
 // FromJSON parses a metadata document into current form. Version detection
 // and any upgrades belong entirely to Migrate (stacked, eager); this parser
-// understands ONLY the current schema — legacy spellings never reach it.
+// understands ONLY the current schema - legacy spellings never reach it.
 func (m *RepoMetadata) FromJSON(data []byte) error {
 	upgraded, _, err := Migrate(data)
 	if err != nil {
@@ -233,7 +233,7 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 
 // UnmarshalJSON enforces the single-version contract at the type level:
 // only documents written in the CURRENT schema decode. Older payloads must
-// go through FromJSON/Migrate — a direct unmarshal fails loudly instead of
+// go through FromJSON/Migrate - a direct unmarshal fails loudly instead of
 // silently yielding an empty tree from ignored unknown fields.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	var probe struct {
@@ -350,7 +350,7 @@ func (m *RepoMetadata) RecomputeStats() {
 // and every subsequent commit fails permanently. Callers must only prune at
 // points where no retained history still needs the records (storhub prunes
 // immediately before squashing git history, after PurgeUntracked has
-// reclaimed the corresponding remote assets) — a rollback to an older
+// reclaimed the corresponding remote assets) - a rollback to an older
 // revision restores its own chunk catalog wholesale.
 func (m *RepoMetadata) PruneUnreferencedChunks() int {
 	referenced := make(map[int64]struct{})
@@ -456,7 +456,7 @@ func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	// package (fs rename swaps Dirs entries directly; posix patch copies
 	// do the same), so a lazily invalidated index cache would silently go
 	// stale. Rebuilding here keeps every read correct at O(entries) per
-	// call — readdir frequencies make that the right trade.
+	// call - readdir frequencies make that the right trade.
 	m.RebuildIndexes()
 	return m.childDirs[path], m.childFiles[path]
 }
@@ -495,7 +495,7 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 
 // FindFile returns a SNAPSHOT of the entry: the pointer targets a copy of
 // the struct, so FIELD-level mutations never reach stored state. (Slices
-// and maps inside — Chunks, XAttrs — still share backing storage; clone
+// and maps inside - Chunks, XAttrs - still share backing storage; clone
 // before mutating those.) Apply changes through UpsertFile or an
 // UpdateRepoMetadataContext transaction.
 func (m *RepoMetadata) FindFile(name string) *FileMeta {
@@ -514,7 +514,7 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 	return out
 }
 
-// WriteFileDirect stores an entry verbatim — no creation defaults, no
+// WriteFileDirect stores an entry verbatim - no creation defaults, no
 // identity repair. It exists for family updates that must preserve every
 // field exactly (including authoritative epoch zeros) while bypassing the
 // new-node path of UpsertFile.
@@ -659,7 +659,7 @@ func (m *RepoMetadata) NLink(inode uint64) int {
 func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 	// A type change (regular file <-> symlink) replaces the whole node rather
 	// than updating it: no identity carries over. In particular the old
-	// symlink target must never leak onto a regular file — Normalize treats
+	// symlink target must never leak onto a regular file - Normalize treats
 	// any file with a symlink target as pure link data and would silently
 	// discard the freshly written content.
 	if (file.Symlink == "") != (existing.Symlink == "") {
@@ -886,7 +886,7 @@ func (m *RepoMetadata) Validate() error {
 	}
 
 	// Note: chunk.Release tags are intentionally allowed to reference tags
-	// absent from the Releases catalog — DeleteRelease hides catalog entries
+	// absent from the Releases catalog - DeleteRelease hides catalog entries
 	// while live chunks keep pointing at them, and PurgeUntracked treats any
 	// chunk-referenced release as tracked.
 

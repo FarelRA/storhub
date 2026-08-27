@@ -571,7 +571,7 @@ type restAuthFile struct {
 
 // flexDuration accepts either a Go duration string ("2h", "30m") or a bare
 // JSON number meaning SECONDS. time.Duration's own unmarshaler would read a
-// number as nanoseconds — the difference between an hour and 3.6
+// number as nanoseconds - the difference between an hour and 3.6
 // microseconds, silently.
 type flexDuration time.Duration
 

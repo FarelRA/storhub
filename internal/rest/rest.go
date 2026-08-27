@@ -178,7 +178,7 @@ type shareRecord struct {
 // readOnlyShare supplies every mutating Client method as a denial. It is
 // embedded by restrictedClient so the read-only-share policy lives in
 // exactly ONE place: a future Client method cannot silently delegate to the
-// underlying client, because the compiler forces a decision here — either a
+// underlying client, because the compiler forces a decision here - either a
 // new denial lands in this struct (policy stays centralized) or an explicit,
 // reviewed override is written on restrictedClient itself.
 type readOnlyShare struct{}
@@ -1140,7 +1140,7 @@ func (h *restHandler) enforceFreshPrecondition(r *http.Request, project, targetP
 // revisionPrecondition implements the revision flavor of If-Match. When the
 // header carries the project's CURRENT metadata revision, it is returned as
 // an fs.WithExpectedRevision option so storage re-verifies against remote
-// HEAD immediately before applying — true compare-and-swap. Header values
+// HEAD immediately before applying - true compare-and-swap. Header values
 // that are not the current revision (e.g. classic attribute ETags from
 // earlier clients) yield no options here; those flows keep their existing
 // freshness semantics via enforceFreshPrecondition, which still answers 412

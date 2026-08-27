@@ -174,7 +174,7 @@ export function useConsole() {
         }
         if (token.value) {
           logout()
-          toasts.error('Session expired — please sign in again')
+          toasts.error('Session expired - please sign in again')
           return null
         }
       }
@@ -263,6 +263,8 @@ export function useConsole() {
   }
   async function loadStats(): Promise<void> {
     if (sharedMode.value) {
+      // For shared view, stats are not available via /projects/{p} (read-only).
+      // Hide the grid instead of showing dashes.
       stats.value = {}
       return
     }
@@ -738,7 +740,28 @@ export function useConsole() {
    * resume, and disk I/O. No JS buffering, no size cap. The same URL works
    * with curl/wget.
    */
+  function isParentOrSame(parent: string, child: string): boolean {
+    const a = normalizePath(parent)
+    const b = normalizePath(child)
+    return b === a || b.startsWith(a ? `${a}/` : '')
+  }
+
   async function downloadEntry(entry: EntryInfo): Promise<void> {
+    if (isSharedView.value) {
+      const share = shares.value.find((s) => entry.path === s.path || isParentOrSame(s.path, entry.path))
+      const target = share?.download_url ? new URL(share.download_url, window.location.origin).toString() : null
+      if (!target) {
+        toasts.error('Download not available for this share')
+        return
+      }
+      const anchor = document.createElement('a')
+      anchor.href = target
+      anchor.rel = 'noopener'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      return
+    }
     const share = await createShare(entry.path, true, 300)
     if (!share?.download_url) {
       toasts.error('Failed to create download link')
@@ -754,6 +777,18 @@ export function useConsole() {
   }
 
   async function copyDirectLink(entry: EntryInfo): Promise<void> {
+    if (isSharedView.value) {
+      const share = shares.value.find((s) => entry.path === s.path || isParentOrSame(s.path, entry.path))
+      const url = share?.download_url
+      if (!url) {
+        toasts.error('Direct link not available for this share')
+        return
+      }
+      const absolute = new URL(url, window.location.origin).toString()
+      const ok = await copyText(absolute)
+      if (ok) toasts.success('Direct link copied')
+      return
+    }
     const share = await createShare(entry.path, true, 300)
     if (!share?.download_url) {
       toasts.error('Failed to create direct link')
@@ -783,7 +818,7 @@ export function useConsole() {
         await postJSON(projectURL('/ops/mkdir'), { path: cur })
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
-          // Already exists — treat as success for mkdir -p
+          // Already exists - treat as success for mkdir -p
         } else {
           return false
         }
@@ -881,7 +916,7 @@ export function useConsole() {
     await refreshAll()
     const { done, failed, total } = uploadProgress.value
     if (failed === 0) toasts.success(`Uploaded ${done}/${total} · ${formatBytes(bytesTotal)}`)
-    else toasts.error(`Uploaded ${done - failed}/${total} — ${firstError}`)
+    else toasts.error(`Uploaded ${done - failed}/${total} - ${firstError}`)
   }
 
   // ---- Modal ---------------------------------------------------------------

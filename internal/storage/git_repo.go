@@ -134,7 +134,7 @@ func (r *gitRepo) sync(ctx context.Context) error {
 	// Resolve origin/main after fetch
 	remoteRef, err := r.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/"+defaultBranch), false)
 	if err != nil {
-		// No remote tracking ref yet — use HEAD as-is
+		// No remote tracking ref yet - use HEAD as-is
 		return nil
 	}
 	w, err := r.repo.Worktree()
@@ -328,7 +328,7 @@ func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error
 	// Walk up the directory chain to build parent trees
 	dir = filepath.Clean(dir)
 	if dir == "." || dir == "" {
-		// File is in the root — treeHash is already the root tree
+		// File is in the root - treeHash is already the root tree
 	} else {
 		parts := strings.Split(dir, string(filepath.Separator))
 		for i := len(parts) - 1; i >= 0; i-- {

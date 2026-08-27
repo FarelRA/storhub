@@ -232,7 +232,7 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :
 Open `http://localhost:8080/` for the built-in web console (the REST API stays under `/api/v1`).
 
 The console is a Nuxt 4 + Tailwind CSS v4 SPA in `web/`, compiled ahead of time
-and embedded into the binary — no runtime CDN or external asset fetches. The
+and embedded into the binary - no runtime CDN or external asset fetches. The
 built `internal/rest/static/dist` is committed, so plain `go build` always
 ships a working console. To change the console:
 

@@ -3815,7 +3815,7 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 
 // TestMarkProjectDirtyRevivesEvictedMetadata pins the eviction-race guard:
 // an operation that captured pm before eviction can still land its
-// acknowledged mutation — the instance is revived with a live commit loop
+// acknowledged mutation - the instance is revived with a live commit loop
 // instead of silently stranding dirty state on a dead loop.
 func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 	backend := newMockGitHub(t)

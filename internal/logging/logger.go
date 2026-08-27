@@ -45,7 +45,7 @@ func NewLogger(opts Options) *slog.Logger {
 }
 
 // WithComponent returns a logger tagged with the component name. A nil
-// logger resolves to the process-default logger — operational context must
+// logger resolves to the process-default logger - operational context must
 // never be dropped just because a caller skipped logger setup.
 func WithComponent(logger *slog.Logger, component string) *slog.Logger {
 	if logger == nil {

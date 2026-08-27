@@ -9,7 +9,7 @@ const meta = computed(() => {
   const { shown, total } = previewMeta.value
   if (!selectedPath.value || !selectedEntry.value) return ''
   if (selectedEntry.value.is_dir || selectedEntry.value.is_symlink) return ''
-  if (previewKind.value === 'too-large') return `file is ${formatBytes(total)} — too large to auto-preview`
+  if (previewKind.value === 'too-large') return `file is ${formatBytes(total)} - too large to auto-preview`
   if (previewKind.value === 'binary') return `first ${formatBytes(shown)} of ${formatBytes(total)}`
   if (previewKind.value === 'text' && shown < total) return `first ${formatBytes(shown)} of ${formatBytes(total)}`
   return ''

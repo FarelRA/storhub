@@ -23,21 +23,21 @@ const stateCard = computed<{ icon: string; title: string; hint: string } | null>
     return {
       icon: '📄',
       title: 'No file selected',
-      hint: 'Pick an entry from the directory pane — its preview will appear here.',
+      hint: 'Pick an entry from the directory pane - its preview will appear here.',
     }
   }
   if (entry.is_dir) {
     return {
       icon: '🗂',
       title: 'Directory selected',
-      hint: 'Directories have no content to preview — browse or open the files inside via the ⋮ menu.',
+      hint: 'Directories have no content to preview - browse or open the files inside via the ⋮ menu.',
     }
   }
   if (entry.is_symlink) {
     return {
       icon: '↪',
       title: 'Symlink selected',
-      hint: `Points to ${entry.symlink_target ?? 'an unknown target'} — preview the target file itself.`,
+      hint: `Points to ${entry.symlink_target ?? 'an unknown target'} - preview the target file itself.`,
     }
   }
   return null

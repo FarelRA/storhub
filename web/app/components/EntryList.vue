@@ -67,7 +67,7 @@ function toggleMenu(entry: EntryInfo) {
   // Flip only if the menu wouldn't fit below and there's more room above
   const flipUp = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow
   const available = flipUp ? spaceAbove : spaceBelow
-  // Only limit height to what the viewport actually offers — the menu
+  // Only limit height to what the viewport actually offers - the menu
   // will scroll internally (overflowY) only when its natural height
   // exceeds this available space.
   const maxHeight = Math.max(160, available - 4)

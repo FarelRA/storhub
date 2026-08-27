@@ -30,7 +30,7 @@ func run() error {
 		return err
 	}
 	project := fmt.Sprintf("storhub-fs-%d", os.Getpid())
-	// A demo repository is garbage once the demo ends — delete it even when
+	// A demo repository is garbage once the demo ends - delete it even when
 	// something below fails, so runs never litter the account.
 	var created bool
 	defer func() {

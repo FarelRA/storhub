@@ -40,7 +40,7 @@ func run() error {
 		}
 	}()
 	project := fmt.Sprintf("storhub-posix-%d", os.Getpid())
-	// A demo repository is garbage once the demo ends — delete it even when
+	// A demo repository is garbage once the demo ends - delete it even when
 	// something below fails, so runs never litter the account. Errors unwind
 	// through run() instead of exiting, which is what lets this defer fire.
 	var created bool

@@ -8,7 +8,7 @@ async function confirmDelete() {
   const name = project.value
   const ok = await ask({
     title: 'Delete project',
-    body: `Type nothing twice — this deletes the GitHub repository backing "${name}" along with every file, revision, and share. This cannot be undone.`,
+    body: `Type nothing twice - this deletes the GitHub repository backing "${name}" along with every file, revision, and share. This cannot be undone.`,
     confirmLabel: `Delete ${name}`,
     danger: true,
   })
