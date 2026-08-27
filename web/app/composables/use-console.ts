@@ -545,7 +545,9 @@ export function useConsole() {
   }
 
   async function removeSelected(entry: EntryInfo): Promise<boolean> {
-    const done = await op(`Remove ${entry.path}`, entry.is_dir ? 'rmdir' : 'unlink', { path: entry.path })
+    // For directories, use recursive path via removeMany
+    if (entry.is_dir) return removeMany([entry.path])
+    const done = await op(`Remove ${entry.path}`, 'unlink', { path: entry.path })
     if (done) {
       selectedPaths.value.delete(entry.path)
       selectedPaths.value = new Set(selectedPaths.value)
@@ -555,23 +557,45 @@ export function useConsole() {
     return done
   }
 
+  async function removeRecursive(path: string): Promise<boolean> {
+    // List children and delete them first (depth-first)
+    try {
+      const payload = await getJSON<{ entries?: EntryInfo[] }>(url(projectURL('/children'), { path }))
+      const kids = payload.entries ?? []
+      for (const kid of kids) {
+        const ok = await removeRecursive(kid.path)
+        if (!ok) return false
+      }
+    } catch {
+      // If we can't list, try to unlink as file
+      const res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/unlink'), { path }), true)
+      return res !== null
+    }
+    // Now the directory should be empty, try rmdir; if it fails because it's a file, try unlink
+    let res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/rmdir'), { path }), true)
+    if (res !== null) return true
+    res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/unlink'), { path }), true)
+    return res !== null
+  }
+
   async function removeMany(paths: string[]): Promise<boolean> {
-    // Parallel deletes, single refresh (op() does refreshAll per item → 15× slow)
     const results = await Promise.all(
       paths.map(async (p) => {
-        const entry = entries.value.find((e) => e.path === p) ?? { path: p, is_dir: false, is_symlink: false } as EntryInfo
-        const res = await run(`Remove ${p}`, () => postJSON(projectURL(`/ops/${(entry as EntryInfo).is_dir ? 'rmdir' : 'unlink'}`), { path: p }), true)
-        return res !== null
+        const entry = entries.value.find((e) => e.path === p)
+        // If we know it's a dir, use recursive; otherwise try recursive which handles both
+        if (entry?.is_dir) return removeRecursive(p)
+        // For files or unknown, try direct unlink, fallback to recursive
+        const res = await run(`Remove ${p}`, () => postJSON(projectURL('/ops/unlink'), { path: p }), true)
+        if (res !== null) return true
+        return removeRecursive(p)
       }),
     )
     const ok = results.every(Boolean)
     if (!ok) toasts.error(`Failed to remove ${results.filter((v) => !v).length}/${paths.length} items`)
-    // Clear those that were removed from selection
     for (const p of paths) selectedPaths.value.delete(p)
     selectedPaths.value = new Set(selectedPaths.value)
     if (selectedPaths.value.size === 0) clearSelection()
     else {
-      // Keep primary selected as last remaining
       const last = [...selectedPaths.value].pop()!
       selectedPath.value = last
       await inspectPath(last)

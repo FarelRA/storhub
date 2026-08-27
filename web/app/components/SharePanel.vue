@@ -2,7 +2,7 @@
 import { copyText } from '~/utils/clipboard'
 
 const console_ = useConsole()
-const { shares, selectedEntry } = console_
+const { shares } = console_
 const toasts = useToasts()
 const { ask } = useConfirm()
 
@@ -16,10 +16,13 @@ function shareLink(share: { id: string; token?: string }): string {
 }
 
 async function createShare(download: boolean) {
-  const path = console_.selectedPath.value
-  if (!path) return
-  const share = await console_.createShare(path, download)
-  if (share) await copy('Share link', shareLink(share))
+  const paths = console_.selectedPaths.value.size > 0 ? [...console_.selectedPaths.value] : [console_.selectedPath.value].filter(Boolean) as string[]
+  if (!paths.length) return
+  for (const p of paths) {
+    const share = await console_.createShare(p, download)
+    if (share) await copy('Share link', shareLink(share))
+  }
+  if (paths.length > 1) toasts.success(`Created ${paths.length} shares`)
 }
 
 async function remove(share: { id: string; path: string }) {
@@ -41,15 +44,15 @@ async function remove(share: { id: string; path: string }) {
       <button
         class="btn btn-sm"
         :disabled="!console_.selectedPath.value || !console_.project.value"
-        title="Create a browser-only share for the selected entry"
+        title="Create a browser-only share for the selected entry (works for files and folders)"
         @click="createShare(false)"
       >
         Share selected…
       </button>
       <button
         class="btn btn-sm"
-        :disabled="!console_.selectedPath.value || !console_.project.value || !!selectedEntry?.is_dir"
-        title="Create a direct-download share for the selected file"
+        :disabled="!console_.selectedPath.value || !console_.project.value"
+        title="Create a share that allows direct download (works for files and folders)"
         @click="createShare(true)"
       >
         Direct download…

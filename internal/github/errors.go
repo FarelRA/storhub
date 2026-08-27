@@ -70,11 +70,14 @@ func (e *APIError) IsRetryable() bool {
 	if e == nil {
 		return false
 	}
+	if e.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
 	if e.RateLimited {
 		return true
 	}
 	switch e.StatusCode {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	case http.StatusForbidden:
 		return e.RateLimited

@@ -169,30 +169,22 @@ async function onDrop(event: DragEvent) {
       >
         ☰
       </button>
-      <span class="font-mono text-sm font-semibold sm:text-base">StorHub</span>
+      <span class="hidden font-mono text-sm font-semibold sm:text-base lg:inline">StorHub</span>
 
       <PathBar :project="project" :path="currentPath" @navigate="navigate" />
 
       <div class="ml-auto flex shrink-0 items-center gap-2">
         <span v-if="busy" class="chip animate-pulse motion-reduce:animate-none" role="status">working…</span>
         <span v-if="isSharedView && sharedMode" class="chip text-sage">shared · read-only</span>
-        <template v-if="authEnabled && console_.principal.value">
-          <span class="chip">
-            {{ console_.principal.value.username }}
-            <template v-if="console_.principal.value.admin"> · admin</template>
-          </span>
-          <button class="btn btn-sm hidden sm:inline-flex" @click="console_.logout()">Sign out</button>
-        </template>
       </div>
     </header>
 
     <div class="flex min-h-0 flex-1">
       <!-- First column: controls sidebar (resizable at lg+) -->
       <SideDrawer :open="drawerOpen" :width="panels.sidebar" @close="closeDrawer">
-        <nav class="mb-5 flex items-center justify-between lg:hidden">
-          <span class="font-mono text-base font-semibold">StorHub</span>
+        <div class="mb-5 flex justify-end lg:hidden">
           <button type="button" class="btn btn-sm" aria-label="Close menu" @click="closeDrawer">✕</button>
-        </nav>
+        </div>
 
         <!-- Project: hidden entirely when pinned by the server -->
         <section v-if="!lockedProject" class="space-y-3 border-b border-hair pb-4">

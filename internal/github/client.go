@@ -649,6 +649,18 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
 		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload)
 		if err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && attempt < c.maxRetries && opts.retryable && apiErr.IsRetryable() {
+				delay := c.retryDelay(attempt, apiErr)
+				if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
+					return nil, err
+				}
+				logging.Warn(c.logger, "rate governor throttled, retrying", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay, "err", err)
+				if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
+					return nil, sleepErr
+				}
+				continue
+			}
 			return nil, err
 		}
 		reader, err := bodyFactory()
