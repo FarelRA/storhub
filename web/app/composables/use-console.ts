@@ -753,8 +753,15 @@ export function useConsole() {
       cur = cur ? `${cur}/${part}` : part
       const key = `${project.value}/${cur}`
       if (uploadedDirs.has(key)) continue
-      const ok = await run('Create folder', () => postJSON(projectURL('/ops/mkdir'), { path: cur }), true)
-      if (ok === null) return false
+      try {
+        await postJSON(projectURL('/ops/mkdir'), { path: cur })
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          // Already exists — treat as success for mkdir -p
+        } else {
+          return false
+        }
+      }
       uploadedDirs.add(key)
     }
     return true
