@@ -208,7 +208,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 	if body := string(readBody(t, config)); !strings.Contains(body, "authEnabled") || !strings.Contains(body, "/api/v1") {
 		t.Fatalf("unexpected config body: %q", body)
 	}
-	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}})
+	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}})
 	if err != nil {
 		t.Fatalf("new authed handler: %v", err)
 	}
@@ -250,16 +250,15 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=hello.txt", strings.NewReader("hello world"), nil, http.StatusCreated)
-	download := false
-	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt", Download: &download}, http.StatusCreated)
+	shareResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "hello.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, shareResp, &share)
-	if share.Download {
-		t.Fatalf("expected disabled download in response: %+v", share)
-	}
+	// Shares are always download-capable after normalization.
 	resp := mustRequest(t, handler, http.MethodGet,
-		"/shares/"+share.ID+"/download?token="+url.QueryEscape(share.Token), nil, nil, http.StatusForbidden)
-	assertErrorCode(t, resp, "forbidden")
+		"/api/v1/shares/"+share.ID+"/download?token="+url.QueryEscape(share.Token), nil, nil, http.StatusOK)
+	if body := string(readBody(t, resp)); body != "hello world" {
+		t.Fatalf("unexpected body: %q", body)
+	}
 }
 
 func TestRESTShareCanonicalizesPath(t *testing.T) {
@@ -633,6 +632,129 @@ func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, ne
 	}
 	p.files = updatedFiles
 	c.recordRevisionLocked(p, "rename "+oldClean+" to "+newClean)
+	return nil
+}
+
+func (c *fakeRESTClient) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, err := c.getExistingProject(project)
+	if err != nil {
+		return err
+	}
+	srcClean, err := cleanRESTPath(srcPath)
+	if err != nil {
+		return err
+	}
+	dstClean, err := cleanRESTPath(dstPath)
+	if err != nil {
+		return err
+	}
+	if srcClean == dstClean {
+		return shfs.AlreadyExists(srcClean)
+	}
+	if _, ok := p.files[dstClean]; ok {
+		return shfs.AlreadyExists(dstClean)
+	}
+	if _, ok := p.dirs[dstClean]; ok {
+		return shfs.AlreadyExists(dstClean)
+	}
+	if parent := parentPath(dstClean); parent != "" {
+		if _, ok := p.dirs[parent]; !ok {
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+		}
+	}
+	if node, ok := p.files[srcClean]; ok {
+		now := c.tick()
+		cloned := *node
+		cloned.entry = &shfs.EntryInfo{
+			Path:       dstClean,
+			IsDir:      node.entry.IsDir,
+			IsSymlink:  node.entry.IsSymlink,
+			Size:       node.entry.Size,
+			Inode:      c.nextInode,
+			Mode:       node.entry.Mode,
+			UID:        node.entry.UID,
+			GID:        node.entry.GID,
+			CreatedAt:  now,
+			ModifiedAt: now,
+			ChangedAt:  now,
+		}
+		c.nextInode++
+		p.files[dstClean] = &cloned
+		c.recordRevisionLocked(p, "copy "+srcClean+" to "+dstClean)
+		return nil
+	}
+	if _, ok := p.dirs[srcClean]; !ok {
+		return shfs.NotFound(srcClean)
+	}
+	if strings.HasPrefix(dstClean, srcClean+"/") {
+		return fmt.Errorf("cannot copy directory %s into itself %s", srcClean, dstClean)
+	}
+	now := c.tick()
+	dirsToAdd := make(map[string]*fakeRESTNode)
+	for name, node := range p.dirs {
+		if name == srcClean || strings.HasPrefix(name, srcClean+"/") {
+			remapped := strings.TrimPrefix(name, srcClean)
+			newName := dstClean + remapped
+			if _, exists := p.dirs[newName]; exists {
+				return shfs.AlreadyExists(newName)
+			}
+			if _, exists := p.files[newName]; exists {
+				return shfs.AlreadyExists(newName)
+			}
+			cloned := *node
+			cloned.entry = &shfs.EntryInfo{
+				Path:       newName,
+				IsDir:      true,
+				Inode:      c.nextInode,
+				Mode:       node.entry.Mode,
+				UID:        node.entry.UID,
+				GID:        node.entry.GID,
+				CreatedAt:  now,
+				ModifiedAt: now,
+				ChangedAt:  now,
+			}
+			c.nextInode++
+			dirsToAdd[newName] = &cloned
+		}
+	}
+	for k, v := range dirsToAdd {
+		p.dirs[k] = v
+	}
+	filesToAdd := make(map[string]*fakeRESTNode)
+	for name, node := range p.files {
+		if strings.HasPrefix(name, srcClean+"/") {
+			remapped := strings.TrimPrefix(name, srcClean)
+			newName := dstClean + remapped
+			if _, exists := p.dirs[newName]; exists {
+				return shfs.AlreadyExists(newName)
+			}
+			if _, exists := p.files[newName]; exists {
+				return shfs.AlreadyExists(newName)
+			}
+			cloned := *node
+			cloned.entry = &shfs.EntryInfo{
+				Path:       newName,
+				IsDir:      node.entry.IsDir,
+				IsSymlink:  node.entry.IsSymlink,
+				Size:       node.entry.Size,
+				Inode:      c.nextInode,
+				Mode:       node.entry.Mode,
+				UID:        node.entry.UID,
+				GID:        node.entry.GID,
+				CreatedAt:  now,
+				ModifiedAt: now,
+				ChangedAt:  now,
+			}
+			c.nextInode++
+			filesToAdd[newName] = &cloned
+		}
+	}
+	for k, v := range filesToAdd {
+		p.files[k] = v
+	}
+	c.recordRevisionLocked(p, "copy "+srcClean+" to "+dstClean)
 	return nil
 }
 

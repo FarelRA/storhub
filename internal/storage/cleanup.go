@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	implposix "github.com/FarelRA/storhub/internal/posix"
@@ -169,12 +170,20 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	repoMeta, _, err := h.loadRepoMetadata(ctx, project)
-	if err != nil {
+	var repoMeta *metadata.RepoMetadata
+	var releases []ghapi.Release
+	if err := h.purgeRetry(ctx, "load_metadata", func() error {
+		var err error
+		repoMeta, _, err = h.loadRepoMetadata(ctx, project)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	releases, err := h.listReleases(ctx, project)
-	if err != nil {
+	if err := h.purgeRetry(ctx, "list_releases", func() error {
+		var err error
+		releases, err = h.listReleases(ctx, project)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases))
@@ -219,13 +228,17 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	}
 	result := &PurgeResult{}
 	for _, task := range releaseTasks {
-		if err := h.deleteReleaseByID(ctx, project, task.id); err != nil {
+		if err := h.purgeRetry(ctx, "delete_release", func() error {
+			return h.deleteReleaseByID(ctx, project, task.id)
+		}); err != nil {
 			return nil, fmt.Errorf("delete untracked release %s: %w", task.tag, err)
 		}
 	}
 	result.DeletedReleases = len(releaseTasks)
 	for _, task := range assetTasks {
-		if err := h.deleteAssetByID(ctx, project, task.id); err != nil {
+		if err := h.purgeRetry(ctx, "delete_asset", func() error {
+			return h.deleteAssetByID(ctx, project, task.id)
+		}); err != nil {
 			return nil, fmt.Errorf("delete untracked asset %d: %w", task.id, err)
 		}
 	}
@@ -238,10 +251,13 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	// pruning, the catalog grows monotonically until metadata hits the
 	// size ceiling and every subsequent commit fails permanently.
 	var pruned int
-	if _, err := h.UpdateRepoMetadataContext(ctx, project, func(meta *metadata.RepoMetadata) error {
-		pruned = meta.PruneUnreferencedChunks()
-		return nil
-	}, "storhub: prune unreferenced chunks"); err != nil {
+	if err := h.purgeRetry(ctx, "prune_chunks", func() error {
+		_, perr := h.UpdateRepoMetadataContext(ctx, project, func(meta *metadata.RepoMetadata) error {
+			pruned = meta.PruneUnreferencedChunks()
+			return nil
+		}, "storhub: prune unreferenced chunks")
+		return perr
+	}); err != nil {
 		return nil, fmt.Errorf("prune unreferenced chunks: %w", err)
 	}
 	if pruned > 0 {
@@ -249,7 +265,9 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	}
 	// Commit the prune synchronously so the squash below cannot race it and
 	// preserve a stale catalog in HEAD.
-	if err := h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project)); err != nil {
+	if err := h.purgeRetry(ctx, "commit_prune", func() error {
+		return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
+	}); err != nil {
 		return nil, fmt.Errorf("commit pruned metadata: %w", err)
 	}
 
@@ -260,10 +278,44 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 		if err := h.ensureOwner(ctx); err != nil {
 			return nil, err
 		}
-		if err := repo.squashHistory(ctx, metadataFilePath, "storhub: squash metadata history"); err != nil {
+		if err := h.purgeRetry(ctx, "squash_history", func() error {
+			return repo.squashHistory(ctx, metadataFilePath, "storhub: squash metadata history")
+		}); err != nil {
 			return nil, fmt.Errorf("squash metadata history: %w", err)
 		}
 	}
 
 	return result, nil
+}
+
+func (h *StorHub) purgeRetry(ctx context.Context, op string, fn func() error) error {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		var apiErr *ghapi.APIError
+		if errors.As(err, &apiErr) && apiErr.IsRetryable() {
+			delay := h.retryDelay(attempt, apiErr)
+			if delay < 0 {
+				delay = 0
+			}
+			// Always honor the advertised window (Retry-After / RateLimitReset)
+			// for purge: wait it out and retry; only after retries are
+			// exhausted does the 429 surface to the client.
+			logging.Warn(h.projectLogger("purge"), "purge retry", "op", op, "attempt", attempt+1, "delay", delay, "err", err)
+			if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
+				return sleepErr
+			}
+			lastErr = err
+			continue
+		}
+		return err
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("purge retry exhausted for %s", op)
 }

@@ -49,7 +49,6 @@ export interface Share {
   download_url?: string
   token?: string
   expires_at: string
-  download: boolean
   is_dir: boolean
 }
 

@@ -49,7 +49,7 @@ func TestShareTTLDefaultClamp(t *testing.T) {
 // creation works immediately AND existing links keep verifying after a
 // restart or across handler instances.
 func TestShareKeyDerivedFromAuthSigningKey(t *testing.T) {
-	auth := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}
+	auth := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}
 
 	newAuthed := func(t *testing.T, client *fakeRESTClient) (http.Handler, string) {
 		t.Helper()

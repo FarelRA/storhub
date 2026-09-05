@@ -41,7 +41,7 @@ func TestDownloadLinkLifecycle(t *testing.T) {
 
 	handler, bearer := newAuthedShareHandler(t, fake)
 	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		strings.NewReader(`{"path":"docs/report.txt","download":true,"expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
+		strings.NewReader(`{"path":"docs/report.txt","expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, resp, &share)
 	if share.DownloadURL == "" || share.Token == "" {
@@ -79,7 +79,7 @@ func TestDownloadLinkLifecycle(t *testing.T) {
 		t.Fatalf("mkdir archive: %v", err)
 	}
 	resp2 := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		strings.NewReader(`{"path":"docs/archive","download":true,"expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
+		strings.NewReader(`{"path":"docs/archive","expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
 	var share2 shareResponse
 	decodeJSONBody(t, resp2, &share2)
 	if share2.DownloadURL != "" {
@@ -97,7 +97,7 @@ func TestDownloadLinkRequiresSigningKey(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	errResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		strings.NewReader(`{"path":"f.txt","download":true}`), nil, http.StatusForbidden)
+		strings.NewReader(`{"path":"f.txt"}`), nil, http.StatusForbidden)
 	if body := readBody(t, errResp); !strings.Contains(string(body), "--share-key") {
 		t.Fatalf("expected actionable message, got: %s", body)
 	}

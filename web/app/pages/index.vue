@@ -168,7 +168,7 @@ async function onDrop(event: DragEvent) {
       >
         ☰
       </button>
-      <span class="hidden font-mono text-sm font-semibold sm:text-base lg:inline">StorHub</span>
+      <span class="hidden font-mono text-sm font-semibold lg:inline">StorHub</span>
 
       <PathBar :project="project" :path="currentPath" @navigate="navigate" />
 
@@ -180,7 +180,8 @@ async function onDrop(event: DragEvent) {
     <div class="flex min-h-0 flex-1">
       <!-- First column: controls sidebar (resizable at lg+) -->
       <SideDrawer :open="drawerOpen" :width="panels.sidebar" @close="closeDrawer">
-        <div class="mb-5 flex justify-end lg:hidden">
+        <div class="mb-5 flex items-center justify-between lg:hidden">
+          <span class="font-mono text-sm font-semibold">StorHub</span>
           <button type="button" class="btn btn-sm" aria-label="Close menu" @click="closeDrawer">✕</button>
         </div>
 

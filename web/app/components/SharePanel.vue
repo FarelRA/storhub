@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { copyText } from '~/utils/clipboard'
+import { directLink, shareLink, SHARE_TTL_7D } from '~/utils/share-links'
 
 const console_ = useConsole()
 const { shares } = console_
@@ -24,21 +25,20 @@ async function copy(label: string, value: string) {
   toasts.success(`${label} copied`)
 }
 
-function shareLink(share: { id: string; token?: string }): string {
-  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
-}
-
-function directLink(share: { download_url?: string }): string {
-  if (!share.download_url) return ''
-  return new URL(share.download_url, window.location.origin).toString()
-}
-
-async function createShare(download: boolean) {
+// A. Shares Panel - User: both 7 days, one copies ?share, one copies download
+async function createShare() {
   const p = singlePath.value
   if (!p) return
-  // 7 days = 604800 seconds
-  const share = await console_.createShare(p, download, 604800)
+  const share = await console_.createShare(p, SHARE_TTL_7D)
   if (share) await copy('Share link', shareLink(share))
+}
+
+async function createDirect() {
+  const p = singlePath.value
+  if (!p) return
+  const share = await console_.createShare(p, SHARE_TTL_7D)
+  if (share?.download_url) await copy('Direct link', directLink(share))
+  else if (share) await copy('Share link', shareLink(share))
 }
 
 async function remove(share: { id: string; path: string }) {
@@ -53,22 +53,15 @@ async function remove(share: { id: string; path: string }) {
 </script>
 
 <template>
-  <section v-if="console_.isSharedView.value" class="space-y-3">
-    <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Share</h2>
-    <p class="text-sm text-mist">
-      Viewing <span class="font-mono text-xs">{{ console_.shareRootPath.value || '/' }}</span> read only.
-    </p>
-    <p class="text-xs text-mist">Links expire with the share.</p>
-  </section>
-  <section v-else class="space-y-3">
+  <section v-if="!console_.isSharedView.value" class="space-y-3">
     <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Shares</h2>
 
     <div class="flex flex-wrap gap-2">
       <button
         class="btn btn-sm"
         :disabled="!singlePath || !console_.project.value"
-        title="Share the selected file or folder in browser (7 days, single only)"
-        @click="createShare(false)"
+        title="Share the selected file or folder (7 days, single only)"
+        @click="createShare()"
       >
         Share selected…
       </button>
@@ -76,7 +69,7 @@ async function remove(share: { id: string; path: string }) {
         class="btn btn-sm"
         :disabled="!singlePath || !console_.project.value || !!singleEntry?.is_dir"
         title="Direct download share for the selected file (7 days, single file only)"
-        @click="createShare(true)"
+        @click="createDirect()"
       >
         Direct download…
       </button>
@@ -89,12 +82,11 @@ async function remove(share: { id: string; path: string }) {
         <p class="truncate font-mono text-xs font-medium">{{ share.path || '/' }}</p>
         <div class="flex flex-wrap gap-1">
           <span class="chip">{{ share.is_dir ? 'folder' : 'file' }}</span>
-          <span class="chip">{{ share.download ? 'download' : 'browser' }}</span>
           <span class="chip" :title="share.expires_at">expires {{ relativeTime(share.expires_at) }}</span>
         </div>
         <div class="flex flex-wrap gap-1.5">
           <button v-if="share.token" class="btn btn-sm" @click="copy('Share link', shareLink(share))">Link</button>
-          <button v-if="share.download && share.download_url" class="btn btn-sm" @click="copy('Direct link', directLink(share))">
+          <button v-if="share.download_url" class="btn btn-sm" @click="copy('Direct link', directLink(share))">
             Direct
           </button>
           <button class="btn btn-danger btn-sm ml-auto" @click="remove(share)">Delete</button>

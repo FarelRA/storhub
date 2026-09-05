@@ -103,11 +103,10 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
-	download := true
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("payload"), nil, http.StatusCreated)
 	createResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
-		shareRequest{Path: "docs/f.txt", Download: &download}, http.StatusCreated)
+		shareRequest{Path: "docs/f.txt"}, http.StatusCreated)
 	var share shareResponse
 	decodeJSONBody(t, createResp, &share)
 
@@ -126,7 +125,6 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 // in-memory registry is only bookkeeping for listings/revocation), listings
 // never leak it, and deletion revokes immediately for this process.
 func TestShareRedemptionIsStateless(t *testing.T) {
-	dl := true
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -136,7 +134,7 @@ func TestShareRedemptionIsStateless(t *testing.T) {
 	decodeJSONBody(t, loginResp, &login)
 	auth := map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}
 
-	shareReq := bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared", Download: &dl}))
+	shareReq := bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"}))
 	shareResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareReq, auth, http.StatusCreated)
 	var created shareResponse
 	decodeJSONBody(t, shareResp, &created)
@@ -158,9 +156,9 @@ func TestShareRedemptionIsStateless(t *testing.T) {
 		t.Fatalf("unexpected stateless share info: %+v", public)
 	}
 
-	// Download via token-bearing URL.
+	// Download via token-bearing URL under /api/v1.
 	mustRequest(t, handler, http.MethodGet,
-		"/shares/"+created.ID+"/download?token="+url.QueryEscape(created.Token)+"&path=shared/readme.txt",
+		"/api/v1/shares/"+created.ID+"/download?token="+url.QueryEscape(created.Token)+"&path=shared/readme.txt",
 		nil, nil, http.StatusOK)
 
 	// Listings never leak tokens or mintable URLs.

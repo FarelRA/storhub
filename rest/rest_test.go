@@ -30,7 +30,7 @@ func TestDefaultOptionsAndNewValidation(t *testing.T) {
 		t.Fatalf("hash password: %q %v", hash, err)
 	}
 	opts := DefaultOptions()
-	opts.Auth = &AuthOptions{Users: []User{{Username: "u", PasswordHash: hash, UID: 1, PrimaryGID: 1}}, TokenSigningKey: []byte("0123456789abcdef0123456789abcdef")}
+	opts.Auth = &AuthOptions{Users: []User{{Username: "u", PasswordHash: hash, UID: 1, PrimaryGID: 1}}, TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg")}
 	if _, err := New(hub, opts); err != nil {
 		t.Fatalf("new authenticated rest: %v", err)
 	}

@@ -338,6 +338,143 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 	return err
 }
 
+func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath string) (err error) {
+	started := time.Now().UTC()
+	logging.Info(s.logger(project), "copy start", "src", srcPath, "dst", dstPath)
+	defer func() { s.logFinish(project, "copy", started, err, "src", srcPath, "dst", dstPath) }()
+	srcClean, err := NormalizePath(srcPath)
+	if err != nil {
+		return err
+	}
+	dstClean, err := NormalizePath(dstPath)
+	if err != nil {
+		return err
+	}
+	if srcClean == dstClean {
+		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+		if err != nil {
+			return err
+		}
+		if repo.FindFile(srcClean) == nil && !repo.HasDirectory(srcClean) {
+			return NotFound(srcClean)
+		}
+		return AlreadyExists(srcClean)
+	}
+	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		srcFile := repo.FindFile(srcClean)
+		srcIsDir := repo.HasDirectory(srcClean)
+		if srcFile == nil && !srcIsDir {
+			return NotFound(srcClean)
+		}
+		if err := CheckTraverse(ctx, repo, srcClean); err != nil {
+			return err
+		}
+		if err := CheckParentWrite(ctx, repo, dstClean); err != nil {
+			return err
+		}
+		if parent := ParentPath(dstClean); parent != "" && !repo.HasDirectory(parent) {
+			return NotFound(parent)
+		}
+		dstFile := repo.FindFile(dstClean)
+		dstDir := repo.GetDirectory(dstClean)
+		now := s.backend.Now()
+		if srcFile != nil {
+			if dstDir != nil {
+				return syscall.EISDIR
+			}
+			if dstFile != nil {
+				if err := CheckStickyDelete(ctx, repo, ParentPath(dstClean), dstClean); err != nil {
+					return err
+				}
+				repo.RemoveFile(dstClean)
+			}
+			cloned := srcFile.Clone()
+			cloned.Inode = repo.AllocateInode()
+			cloned.ChangedAt = now
+			repo.UpsertFile(dstClean, cloned, now)
+			TouchParentDirectory(repo, dstClean, now)
+			return nil
+		}
+		if dstFile != nil {
+			return syscall.ENOTDIR
+		}
+		if dstDir != nil {
+			childDirs, childFiles := repo.DirectoryChildren(dstClean)
+			if len(childDirs) > 0 || len(childFiles) > 0 {
+				return NotEmpty(dstClean)
+			}
+			if err := CheckStickyDelete(ctx, repo, ParentPath(dstClean), dstClean); err != nil {
+				return err
+			}
+			repo.RemoveDirectory(dstClean)
+		}
+		if IsParentOrSame(srcClean, dstClean) {
+			return fmt.Errorf("cannot copy directory %s into itself %s", srcClean, dstClean)
+		}
+		srcDir := repo.GetDirectory(srcClean)
+		if srcDir == nil {
+			return NotFound(srcClean)
+		}
+		newDir := srcDir.Clone()
+		newDir.Inode = repo.AllocateInode()
+		newDir.ModifiedAt = now
+		newDir.ChangedAt = now
+		newDir.AccessedAt = now
+		newDir.CreatedAt = now
+		repo.Dirs[dstClean] = newDir
+		dirsToCopy := make(map[string]meta.DirMeta)
+		for p, d := range repo.Dirs {
+			if p == srcClean {
+				continue
+			}
+			if IsParentOrSame(srcClean, p) {
+				newPath := RemapPath(srcClean, dstClean, p)
+				if repo.HasDirectory(newPath) || repo.FindFile(newPath) != nil {
+					return AlreadyExists(newPath)
+				}
+				if _, pending := dirsToCopy[newPath]; pending {
+					return AlreadyExists(newPath)
+				}
+				cloned := d.Clone()
+				cloned.Inode = repo.AllocateInode()
+				cloned.ModifiedAt = now
+				cloned.ChangedAt = now
+				cloned.AccessedAt = now
+				dirsToCopy[newPath] = cloned
+			}
+		}
+		for newPath, d := range dirsToCopy {
+			repo.Dirs[newPath] = d
+		}
+		filesToCopy := make(map[string]meta.FileMeta)
+		for p, f := range repo.Files {
+			if IsParentOrSame(srcClean, p) {
+				newPath := RemapPath(srcClean, dstClean, p)
+				if repo.HasDirectory(newPath) || repo.FindFile(newPath) != nil {
+					return AlreadyExists(newPath)
+				}
+				if _, pending := filesToCopy[newPath]; pending {
+					return AlreadyExists(newPath)
+				}
+				if _, pending := dirsToCopy[newPath]; pending {
+					return AlreadyExists(newPath)
+				}
+				cloned := f.Clone()
+				cloned.Inode = repo.AllocateInode()
+				cloned.ChangedAt = now
+				filesToCopy[newPath] = cloned
+			}
+		}
+		for newPath, f := range filesToCopy {
+			repo.UpsertFile(newPath, f, now)
+		}
+		TouchParentDirectory(repo, dstClean, now)
+		repo.RecomputeStats()
+		return nil
+	}, fmt.Sprintf("storhub: copy %s to %s", srcClean, dstClean))
+	return err
+}
+
 func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "truncate start", "path", filePath, "size", size)

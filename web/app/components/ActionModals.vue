@@ -7,7 +7,7 @@ const { modalOpen, modalKind, modalForm: form, modalError } = console_
 const isPathKind = computed(() =>
   ['mkdir', 'create-file'].includes(modalKind.value),
 )
-const isNewPathKind = computed(() => ['rename', 'link', 'symlink'].includes(modalKind.value))
+const isNewPathKind = computed(() => ['rename', 'move', 'copy', 'link', 'symlink'].includes(modalKind.value))
 const isMetaKind = computed(() => ['chmod', 'chown', 'utimes', 'xattr-set', 'xattr-remove'].includes(modalKind.value))
 const isTextOpKind = computed(() => ['append', 'patch', 'truncate'].includes(modalKind.value))
 
@@ -16,6 +16,8 @@ const submitLabel = computed(() => {
     mkdir: 'Create',
     'create-file': 'Create',
     rename: 'Rename',
+    move: 'Move',
+    copy: 'Copy',
     link: 'Link',
     symlink: 'Link',
     append: 'Append',
@@ -24,6 +26,9 @@ const submitLabel = computed(() => {
   }
   return map[modalKind.value] ?? 'Apply'
 })
+
+const isMoveOrCopy = computed(() => ['move', 'copy'].includes(modalKind.value))
+const bulkCount = computed(() => console_.selectedPaths.value.size)
 </script>
 
 <template>
@@ -49,18 +54,30 @@ const submitLabel = computed(() => {
     </div>
 
     <div v-else-if="isNewPathKind" class="flex flex-col gap-3">
-      <label v-if="modalKind !== 'symlink'" class="block">
-        <span class="field-label">Existing path</span>
-        <input :value="console_.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
-      </label>
-      <label class="block">
-        <span class="field-label">{{ modalKind === 'symlink' ? 'Link path' : 'New path' }}</span>
-        <input v-model="form.newPath" type="text" class="input font-mono" required >
-      </label>
-      <label v-if="modalKind === 'symlink'" class="block">
-        <span class="field-label">Target</span>
-        <input v-model="form.target" type="text" class="input font-mono" placeholder="../other/file.txt" required >
-      </label>
+      <template v-if="isMoveOrCopy && bulkCount > 1">
+        <p class="text-sm text-mist">{{ modalKind === 'move' ? 'Move' : 'Copy' }} {{ bulkCount }} items to:</p>
+        <ul class="max-h-24 overflow-y-auto rounded border border-hair bg-surface px-2 py-1 font-mono text-xs">
+          <li v-for="p in [...console_.selectedPaths.value]" :key="p" class="truncate">{{ p }}</li>
+        </ul>
+        <label class="block">
+          <span class="field-label">Destination directory</span>
+          <input v-model="form.newPath" type="text" class="input font-mono" placeholder="target/folder" required >
+        </label>
+      </template>
+      <template v-else>
+        <label v-if="modalKind !== 'symlink'" class="block">
+          <span class="field-label">Existing path</span>
+          <input :value="modalKind === 'rename' ? form.path : console_.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
+        </label>
+        <label class="block">
+          <span class="field-label">{{ modalKind === 'symlink' ? 'Link path' : modalKind === 'move' ? 'Destination' : modalKind === 'copy' ? 'Destination' : 'New path' }}</span>
+          <input v-model="form.newPath" type="text" class="input font-mono" required >
+        </label>
+        <label v-if="modalKind === 'symlink'" class="block">
+          <span class="field-label">Target</span>
+          <input v-model="form.target" type="text" class="input font-mono" placeholder="../other/file.txt" required >
+        </label>
+      </template>
     </div>
 
     <div v-else-if="isMetaKind" class="flex flex-col gap-3">

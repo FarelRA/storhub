@@ -1848,6 +1848,14 @@ func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 	return h.fsService().RenameContext(ctx, project, oldPath, newPath)
 }
 
+func (h *StorHub) Copy(project, srcPath, dstPath string) error {
+	return h.CopyContext(context.Background(), project, srcPath, dstPath)
+}
+
+func (h *StorHub) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+	return h.fsService().CopyContext(ctx, project, srcPath, dstPath)
+}
+
 func (h *StorHub) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
 	return h.TruncateFileContext(context.Background(), project, filePath, size)
 }

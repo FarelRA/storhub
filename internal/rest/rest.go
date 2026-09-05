@@ -89,6 +89,7 @@ type Client interface {
 	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
 	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
 	RenameContext(ctx context.Context, project, oldPath, newPath string) error
+	CopyContext(ctx context.Context, project, srcPath, dstPath string) error
 	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
@@ -168,7 +169,6 @@ type shareRecord struct {
 	Token     string
 	Project   string
 	Path      string
-	Download  bool
 	IsDir     bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
@@ -202,6 +202,10 @@ func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string, 
 }
 
 func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
 	return errReadOnly()
 }
 
@@ -408,6 +412,13 @@ type renameRequest struct {
 	NewPath string `json:"new_path"`
 }
 
+type copyRequest struct {
+	SrcPath string `json:"src_path"`
+	DstPath string `json:"dst_path"`
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
 type linkRequest struct {
 	ExistingPath string `json:"existing_path"`
 	NewPath      string `json:"new_path"`
@@ -441,11 +452,8 @@ type rollbackRequest struct {
 
 type shareRequest struct {
 	Path string `json:"path"`
-	// ExpiresInSeconds expresses the lifetime in plain seconds. There is
-	// deliberately no time.Duration field: JSON numbers for a Duration are
-	// nanoseconds, a trap no client should be able to fall into.
+	// ExpiresInSeconds expresses the lifetime in plain seconds.
 	ExpiresInSeconds int64 `json:"expires_in_seconds,omitempty"`
-	Download         *bool `json:"download,omitempty"`
 }
 
 type shareResponse struct {
@@ -459,17 +467,15 @@ type shareResponse struct {
 	// through read endpoints.
 	Token     string `json:"token,omitempty"`
 	ExpiresAt string `json:"expires_at"`
-	Download  bool   `json:"download"`
 	IsDir     bool   `json:"is_dir"`
 }
 
 type shareClaims struct {
 	jwt.RegisteredClaims
-	ID       string `json:"id"`
-	Project  string `json:"prj"`
-	Path     string `json:"pth"`
-	Download bool   `json:"dl"`
-	IsDir    bool   `json:"dir"`
+	ID      string `json:"id"`
+	Project string `json:"prj"`
+	Path    string `json:"pth"`
+	IsDir   bool   `json:"dir"`
 }
 
 // revokedShares marks deleted share IDs so stateless redemption stops
@@ -512,6 +518,17 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
 		logger = logging.WithComponent(provider.Logger(), "rest")
 	}
+	// Unified key: all cards (auth and share) derive from TokenSigningKey.
+	// This gives one EdDSA key for the whole API, share and login are just
+	// different capabilities (kind) on the same JWT.
+	if opts.Auth != nil {
+		if len(opts.Auth.TokenSigningKey) < 32 {
+			return nil, errors.New("security constraint: token signing key must be at least 32 bytes")
+		}
+		if isWeakShareKey(opts.Auth.TokenSigningKey) {
+			return nil, errors.New("security constraint: token signing key is a known weak/default key")
+		}
+	}
 	if len(opts.ShareSigningKey) > 0 {
 		if len(opts.ShareSigningKey) < 32 {
 			return nil, errors.New("security constraint: share signing key must be at least 32 bytes")
@@ -521,16 +538,11 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 		}
 	}
 	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}}, logger: logger}
-	if len(opts.ShareSigningKey) == 0 && opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
-		// No explicit share key: derive one from the auth token signing key
-		// so an auth-file deployment gets working shares with zero extra
-		// configuration. Domain-separated hash => deterministic across
-		// restarts (existing share links keep verifying), unrelated to the
-		// JWT key material, and always >= 32 bytes.
-		hash := sha256.Sum256([]byte("storhub/share-signing/v1\x00" + string(opts.Auth.TokenSigningKey)))
-		opts.ShareSigningKey = hash[:]
-	}
-	if len(opts.ShareSigningKey) > 0 {
+	if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
+		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
+		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+		opts.ShareSigningKey = h.shareSignKey.Seed()
+	} else if len(opts.ShareSigningKey) > 0 {
 		seed := opts.ShareSigningKey
 		if len(seed) > 32 {
 			hash := sha256.Sum256(seed)
@@ -550,13 +562,13 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	r.Get("/_nuxt/*", h.serveUIAssets)
 	r.Get("/favicon.svg", h.serveUIPublic)
 
-	r.Get("/shares/{id}/download", h.serveShareDownload)
-	r.Head("/shares/{id}/download", h.serveShareDownload)
-
 	basePath := strings.TrimRight(opts.BasePath, "/")
 
 	r.Get(basePath, h.serveAPIInfo)
 	r.Get(basePath+"/shares/{id}", h.serveShareInfo)
+	r.Get(basePath+"/shares/{id}/download", h.serveShareDownload)
+	r.Head(basePath+"/shares/{id}/download", h.serveShareDownload)
+	r.Post(basePath+"/shares/{id}/derive", h.serveShareDerive)
 
 	if opts.Auth != nil {
 		auth, err := newAuthenticator(*opts.Auth)
@@ -635,6 +647,7 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/rmdir", h.handleRmdir)
 	r.Post("/ops/unlink", h.handleUnlink)
 	r.Post("/ops/rename", h.handleRename)
+	r.Post("/ops/copy", h.handleCopy)
 	r.Post("/ops/link", h.handleLink)
 	r.Post("/ops/symlink", h.handleSymlink)
 	r.Post("/ops/chmod", h.handleChmod)
@@ -683,13 +696,18 @@ func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := ""
 			authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-			if !strings.HasPrefix(authHeader, "Bearer ") {
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+			} else {
+				token = strings.TrimSpace(r.URL.Query().Get("token"))
+			}
+			if token == "" {
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
 				h.writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 				return
 			}
-			token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 
 			principal, err := auth.parseToken(token)
 			if err == nil {
@@ -781,7 +799,6 @@ func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
 		URL:       "/?share=" + url.QueryEscape(segment),
 		Token:     segment,
 		ExpiresAt: claims.ExpiresAt.Time.UTC().Format(time.RFC3339),
-		Download:  claims.Download,
 		IsDir:     claims.IsDir,
 	})
 }
@@ -1325,6 +1342,32 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
 }
 
+func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	var req copyRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	src := strings.TrimSpace(req.SrcPath)
+	if src == "" {
+		src = strings.TrimSpace(req.OldPath)
+	}
+	dst := strings.TrimSpace(req.DstPath)
+	if dst == "" {
+		dst = strings.TrimSpace(req.NewPath)
+	}
+	if src == "" || dst == "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "src_path and dst_path are required")
+		return
+	}
+	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.respondWithNode(w, r, project, dst, http.StatusCreated)
+}
+
 func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req linkRequest
@@ -1422,9 +1465,11 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	result, err := h.clientFor(r).PurgeUntrackedContext(r.Context(), project)
 	if err != nil {
+		logging.Error(h.logger, "purge failed", "project", project, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)
 		return
 	}
+	logging.Info(h.logger, "purge complete", "project", project, "deleted_releases", result.DeletedReleases, "deleted_assets", result.DeletedAssets)
 	h.writeJSON(w, http.StatusOK, purgeResponse{
 		Project:         project,
 		Status:          "purged",
@@ -1484,11 +1529,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
 		expiresIn = max
 	}
-	download := true
-	if req.Download != nil {
-		download = *req.Download
-	}
-	record, err := h.newShareRecord(project, sharePath, download, entry.IsDir, expiresIn)
+	record, err := h.newShareRecord(project, sharePath, entry.IsDir, expiresIn)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1542,13 +1583,10 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
 	// Same single pathway as info: the token (query here) is the credential.
+	// Shares are always download-capable after normalization; no dl flag check.
 	claims, err := h.parseShareToken(r.URL.Query().Get("token"))
 	if err != nil || h.isRevoked(claims.ID) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
-		return
-	}
-	if !claims.Download {
-		h.writeError(w, http.StatusForbidden, "forbidden", "download is disabled for this share")
 		return
 	}
 	targetPath, err := h.resolveSharePath(claims, r.URL.Query().Get("path"))
@@ -1557,6 +1595,70 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
+}
+
+func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
+	parentToken := r.URL.Query().Get("token")
+	if parentToken == "" {
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(strings.TrimSpace(auth), "Bearer ") {
+			parentToken = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(auth), "Bearer "))
+		}
+	}
+	claims, err := h.parseShareToken(parentToken)
+	if err != nil || h.isRevoked(claims.ID) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	// Only the share's own ID can derive children: URL id must match token jti
+	// when present, but allow mismatch for query-token alias? Enforce exact match.
+	urlID := chi.URLParam(r, "id")
+	if urlID != "" && urlID != claims.ID {
+		h.writeError(w, http.StatusForbidden, "forbidden", "share id mismatch")
+		return
+	}
+	var req shareRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	// Target path defaults to parent path when empty (derive same file).
+	targetRaw := strings.TrimSpace(req.Path)
+	if targetRaw == "" {
+		targetRaw = claims.Path
+	}
+	sharePath, err := canonicalSharePath(targetRaw)
+	if err != nil {
+		h.writeMappedError(w, errBadRequest("invalid share path"))
+		return
+	}
+	if !hasPathPrefix(sharePath, claims.Path) {
+		h.writeMappedError(w, errForbidden("access denied: path not shared"))
+		return
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if remaining <= 0 {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	expiresIn := remaining
+	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
+		expiresIn = max
+	}
+	// Stat to learn IsDir for new record.
+	entry, err := h.client.StatPathContext(r.Context(), claims.Project, sharePath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	record, err := h.newShareRecord(claims.Project, sharePath, entry.IsDir, expiresIn)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	w.Header().Set("Location", h.opts.BasePath+"/shares/"+url.PathEscape(record.ID))
+	created := h.shareResponse(record)
+	created.Token = record.Token
+	h.writeJSON(w, http.StatusCreated, created)
 }
 
 func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (string, error) {
@@ -1679,23 +1781,27 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	if h.shareSignKey == nil {
 		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
 	}
-	claims := &shareClaims{}
-	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), claims, func(token *jwt.Token) (any, error) {
+	uc := &unifiedClaims{}
+	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), uc, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodEd25519); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return h.shareSignKey.Public(), nil
-	}, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(time.Now))
-	if err != nil || !parsed.Valid {
+	}, jwt.WithIssuer(restTokenIssuer), jwt.WithAudience(restTokenAudience), jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(time.Now))
+	if err != nil || !parsed.Valid || uc.Kind != "share" || uc.Project == "" {
 		return nil, errForbidden("invalid or expired share token")
 	}
-	return claims, nil
+	return &shareClaims{
+		RegisteredClaims: uc.RegisteredClaims,
+		ID:               uc.ID,
+		Project:          uc.Project,
+		Path:             uc.Path,
+		IsDir:            uc.IsDir,
+	}, nil
 }
 
-func (h *restHandler) newShareRecord(project, sharePath string, download, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
+func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
 	if h.shareSignKey == nil {
-		// Configuration error surfaced through the API error mapper as a
-		// clean 403 (not a 500): the deployment is missing its share key.
 		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
 	}
 	id, err := newShareID()
@@ -1704,23 +1810,26 @@ func (h *restHandler) newShareRecord(project, sharePath string, download, isDir 
 	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(expiresIn)
-	claims := shareClaims{
+	claims := unifiedClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    restTokenIssuer,
+			Audience:  jwt.ClaimStrings{restTokenAudience},
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 		},
-		ID:       id,
-		Project:  project,
-		Path:     sharePath,
-		Download: download,
-		IsDir:    isDir,
+		Kind:    "share",
+		ID:      id,
+		Project: project,
+		Path:    sharePath,
+		IsDir:   isDir,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	signedToken, err := token.SignedString(h.shareSignKey)
 	if err != nil {
 		return nil, err
 	}
-	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, Download: download, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
+	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
 	h.shares.mu.Lock()
 	h.shares.items[id] = record
 	h.shares.mu.Unlock()
@@ -1793,13 +1902,13 @@ func (h *restHandler) projectShareResponses(project string) []shareResponse {
 // from the signed token (creation responses carry it; listings cannot, so
 // their URL fields stay empty - the token is the credential).
 func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
-	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), Download: record.Download, IsDir: record.IsDir}
+	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), IsDir: record.IsDir}
 	if record.Token == "" {
 		return resp
 	}
 	resp.URL = "/?share=" + url.QueryEscape(record.Token)
-	if record.Download && !record.IsDir {
-		resp.DownloadURL = "/shares/" + url.PathEscape(record.ID) + "/download?token=" + url.QueryEscape(record.Token)
+	if !record.IsDir {
+		resp.DownloadURL = h.opts.BasePath + "/shares/" + url.PathEscape(record.ID) + "/download?token=" + url.QueryEscape(record.Token)
 	}
 	return resp
 }
@@ -1971,7 +2080,20 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 		// infrastructure details in their bodies and Error() text; the
 		// client learns the upstream class through the mapped status, so
 		// no raw upstream message is ever forwarded.
-		message = "upstream GitHub request failed"
+		if apiErr.RateLimited {
+			// Preserve retry timing for clients so "purge" can surface
+			// "rate limited, retry after X" instead of generic 502.
+			if !apiErr.RateLimitReset.IsZero() {
+				if delay := time.Until(apiErr.RateLimitReset); delay > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())+1))
+				}
+			} else if apiErr.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(apiErr.RetryAfter.Seconds())+1))
+			}
+			message = "rate limit exceeded: retry after the advertised window"
+		} else {
+			message = "upstream GitHub request failed"
+		}
 	}
 	h.writeError(w, status, code, message)
 }
@@ -1988,6 +2110,8 @@ func mappedStatus(err error) int {
 		switch {
 		case apiErr.NotFound():
 			return http.StatusNotFound
+		case apiErr.RateLimited:
+			return http.StatusTooManyRequests
 		default:
 			// Every other upstream answer is GitHub's failure, not this
 			// server's: surface it as a gateway-class error.
@@ -2030,6 +2154,8 @@ func mappedCode(status int) string {
 		return "range_not_satisfiable"
 	case http.StatusMethodNotAllowed:
 		return "method_not_allowed"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
 	case http.StatusBadGateway:
 		return "bad_gateway"
 	case http.StatusNotImplemented:

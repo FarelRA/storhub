@@ -10,11 +10,14 @@ import {
   toHexDump,
 } from '~/utils/preview'
 import type { PreviewKind } from '~/utils/preview'
+import { directLink, SHARE_TTL_5M } from '~/utils/share-links'
 
 export type ModalKind =
   | 'mkdir'
   | 'create-file'
   | 'rename'
+  | 'move'
+  | 'copy'
   | 'link'
   | 'symlink'
   | 'chmod'
@@ -46,6 +49,8 @@ const MODAL_TITLES: Record<ModalKind, string> = {
   mkdir: 'New directory',
   'create-file': 'New file',
   rename: 'Rename',
+  move: 'Move',
+  copy: 'Copy',
   link: 'New hard link',
   symlink: 'New symlink',
   chmod: 'Change mode',
@@ -89,6 +94,8 @@ const principal = useState<Principal | null>('auth-principal', () => null)
 const shareRequested = ref(false)
 const shareToken = ref('')
 const shareRootPath = ref('')
+const shareId = ref('')
+const shareExpiresAt = ref('')
 const shareDownloadAllowed = ref(true)
 
 const modalOpen = ref(false)
@@ -383,7 +390,8 @@ export function useConsole() {
         token?: string
         project: string
         path: string
-        download?: boolean
+        expires_at?: string
+        is_dir?: boolean
       }>(`/shares/${enc(shareParam)}`)
       // The signed token is the credential - never the short registry id
       // (which the server may echo alongside it).
@@ -391,7 +399,19 @@ export function useConsole() {
       token.value = shareToken.value
       project.value = payload.project
       shareRootPath.value = normalizePath(payload.path)
-      shareDownloadAllowed.value = payload.download !== false
+      shareId.value = payload.id ?? ''
+      // Try to extract jti from JWT if id not in payload.
+      if (!shareId.value && shareToken.value.includes('.')) {
+        try {
+          const body = JSON.parse(atob(shareToken.value.split('.')[1] ?? ''))
+          shareId.value = body.jti ?? body.id ?? ''
+          if (body.exp) shareExpiresAt.value = new Date(body.exp * 1000).toISOString()
+        } catch {
+          void 0
+        }
+      }
+      if (payload.expires_at) shareExpiresAt.value = payload.expires_at
+      shareDownloadAllowed.value = true
       const root = shareRootPath.value
       const statResult = await run('Shared resource', () =>
         getJSON<{ entry?: EntryInfo }>(url(projectURL('/nodes'), { path: root })),
@@ -683,13 +703,22 @@ export function useConsole() {
     return op('Purge untracked', 'purge', {})
   }
 
-  async function createShare(path: string, download: boolean, expiresInSeconds?: number): Promise<Share | null> {
+  async function createShare(path: string, expiresInSeconds?: number): Promise<Share | null> {
     return run('Create share', async () => {
-      const body: Record<string, unknown> = { path, download }
+      const body: Record<string, unknown> = { path }
       if (expiresInSeconds) body.expires_in_seconds = expiresInSeconds
       const payload = await postJSON<Share>(projectURL('/shares'), body)
       await loadShares()
       return payload
+    })
+  }
+
+  async function deriveShare(path: string): Promise<Share | null> {
+    if (!shareId.value || !shareToken.value) return null
+    return run('Derive share', async () => {
+      const body: Record<string, unknown> = { path }
+      const payload = await postJSON<Share>(`/shares/${enc(shareId.value)}/derive?token=${enc(shareToken.value)}`, body)
+      return payload as Share
     })
   }
 
@@ -734,40 +763,19 @@ export function useConsole() {
     clearPreview()
   }
 
-  /**
-   * Native browser download: mint a short-lived signed URL server-side, then
-   * hand the plain link to the browser - its download manager owns streaming,
-   * resume, and disk I/O. No JS buffering, no size cap. The same URL works
-   * with curl/wget.
-   */
-  function isParentOrSame(parent: string, child: string): boolean {
-    const a = normalizePath(parent)
-    const b = normalizePath(child)
-    return b === a || b.startsWith(a ? `${a}/` : '')
-  }
-
+  // B3 + D2: immediate browser download via /api/v1/projects/{p}/content?path=&token= (token = auth or share)
   async function downloadEntry(entry: EntryInfo): Promise<void> {
-    if (isSharedView.value) {
-      const share = shares.value.find((s) => entry.path === s.path || isParentOrSame(s.path, entry.path))
-      const target = share?.download_url ? new URL(share.download_url, window.location.origin).toString() : null
-      if (!target) {
-        toasts.error('Download not available for this share')
-        return
-      }
-      const anchor = document.createElement('a')
-      anchor.href = target
-      anchor.rel = 'noopener'
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
+    if (entry.is_dir) {
+      toasts.error('Directory download not yet implemented')
       return
     }
-    const share = await createShare(entry.path, true, 300)
-    if (!share?.download_url) {
-      toasts.error('Failed to create download link')
+    const t = token.value
+    if (!t) {
+      toasts.error('Not authenticated')
       return
     }
-    const absolute = new URL(share.download_url, window.location.origin).toString()
+    const target = url(projectURL('/content'), { path: entry.path, token: t })
+    const absolute = new URL(target, window.location.origin).toString()
     const anchor = document.createElement('a')
     anchor.href = absolute
     anchor.rel = 'noopener'
@@ -776,25 +784,29 @@ export function useConsole() {
     anchor.remove()
   }
 
+  // B2: 5 min download_url via createShare; D1: remaining via deriveShare (server caps to parent)
   async function copyDirectLink(entry: EntryInfo): Promise<void> {
+    if (entry.is_dir) {
+      toasts.error('Directory direct links not yet implemented')
+      return
+    }
     if (isSharedView.value) {
-      const share = shares.value.find((s) => entry.path === s.path || isParentOrSame(s.path, entry.path))
-      const url = share?.download_url
-      if (!url) {
-        toasts.error('Direct link not available for this share')
+      const share = await deriveShare(entry.path)
+      if (!share?.download_url) {
+        toasts.error('Failed to create direct link')
         return
       }
-      const absolute = new URL(url, window.location.origin).toString()
+      const absolute = directLink(share)
       const ok = await copyText(absolute)
       if (ok) toasts.success('Direct link copied')
       return
     }
-    const share = await createShare(entry.path, true, 300)
+    const share = await createShare(entry.path, SHARE_TTL_5M)
     if (!share?.download_url) {
       toasts.error('Failed to create direct link')
       return
     }
-    const absolute = new URL(share.download_url, window.location.origin).toString()
+    const absolute = directLink(share)
     const ok = await copyText(absolute)
     if (ok) toasts.success('Direct link copied (valid 5 min)')
   }
@@ -930,6 +942,17 @@ export function useConsole() {
     if (kind === 'symlink') {
       form.target = targetPath ?? selectedPath.value ?? ''
       form.newPath = `${normalizePath(contextDir || currentPath.value)}/`
+    } else if (kind === 'move' || kind === 'copy') {
+      const paths = [...selectedPaths.value]
+      if (paths.length > 1) {
+        // Bulk: destination is a directory, default to current dir
+        form.newPath = currentPath.value ? `${currentPath.value}/` : ''
+      } else {
+        form.newPath = selectedPath.value ?? (paths[0] ?? '')
+      }
+    } else if (kind === 'rename') {
+      form.path = selectedPath.value ?? ''
+      form.newPath = selectedPath.value ?? ''
     } else {
       form.newPath = selectedPath.value ?? ''
     }
@@ -961,9 +984,61 @@ export function useConsole() {
         case 'create-file':
           await op('create file', 'create-file', { path: f.path })
           break
-        case 'rename':
-          await op('rename', 'rename', { old_path: selectedPath.value, new_path: f.newPath })
+        case 'rename': {
+          const oldPath = (f.path || selectedPath.value || '').trim()
+          const newPath = f.newPath.trim()
+          if (!oldPath) throw new Error('original path is required')
+          if (!newPath) throw new Error('new path is required')
+          if (oldPath === newPath) throw new Error('new path must be different')
+          const ok = await op('rename', 'rename', { old_path: oldPath, new_path: newPath })
+          if (!ok) throw new Error('rename failed - see notification for details')
           break
+        }
+        case 'move': {
+          const paths = [...selectedPaths.value]
+          const srcs = paths.length ? paths : selectedPath.value ? [selectedPath.value] : []
+          if (!srcs.length) throw new Error('no selection')
+          const dest = f.newPath.trim()
+          if (!dest) throw new Error('destination is required')
+          if (srcs.length === 1) {
+            await op('move', 'rename', { old_path: srcs[0], new_path: dest })
+          } else {
+            const destDir = normalizePath(dest)
+            let ok = true
+            for (const src of srcs) {
+              const base = src.split('/').pop()!
+              const dst = destDir ? `${destDir}/${base}` : base
+              const res = await run(`Move ${src}`, () => postJSON(projectURL('/ops/rename'), { old_path: src, new_path: dst }), true)
+              if (res === null) ok = false
+            }
+            if (!ok) throw new Error('some moves failed')
+            await refreshAll()
+            clearSelection()
+          }
+          break
+        }
+        case 'copy': {
+          const paths = [...selectedPaths.value]
+          const srcs = paths.length ? paths : selectedPath.value ? [selectedPath.value] : []
+          if (!srcs.length) throw new Error('no selection')
+          const dest = f.newPath.trim()
+          if (!dest) throw new Error('destination is required')
+          if (srcs.length === 1) {
+            await op('copy', 'copy', { src_path: srcs[0], dst_path: dest })
+          } else {
+            const destDir = normalizePath(dest)
+            let ok = true
+            for (const src of srcs) {
+              const base = src.split('/').pop()!
+              const dst = destDir ? `${destDir}/${base}` : base
+              const res = await run(`Copy ${src}`, () => postJSON(projectURL('/ops/copy'), { src_path: src, dst_path: dst }), true)
+              if (res === null) ok = false
+            }
+            if (!ok) throw new Error('some copies failed')
+            await refreshAll()
+          }
+          break
+        }
         case 'link':
           await op('hard link', 'link', { existing_path: selectedPath.value, new_path: f.newPath })
           break
@@ -1070,6 +1145,8 @@ export function useConsole() {
     sharedMode,
     shareToken,
     shareRootPath,
+    shareId,
+    shareExpiresAt,
     shareDownloadAllowed,
     canWrite,
     canEditFile,
@@ -1121,6 +1198,7 @@ export function useConsole() {
     copyDirectLink,
     focusEntry,
     createShare,
+    deriveShare,
     deleteShare,
     loadXattrs,
     uploadFiles,

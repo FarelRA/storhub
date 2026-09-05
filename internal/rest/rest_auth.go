@@ -2,6 +2,8 @@ package rest
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -57,6 +59,7 @@ type restAuthenticator struct {
 	realm    string
 	users    map[string]User
 	key      []byte
+	edKey    ed25519.PrivateKey
 	tokenTTL time.Duration
 	now      func() time.Time
 }
@@ -70,9 +73,21 @@ type restPrincipal struct {
 	Admin      bool     `json:"admin,omitempty"`
 }
 
-type restTokenClaims struct {
-	restPrincipal
+// unifiedClaims is the normalized shape: one EdDSA key, kind distinguishes
+// capabilities. Auth tokens carry identity, share tokens carry project/path.
+// Both use the same issuer/audience and are verified by the same key.
+type unifiedClaims struct {
 	jwt.RegisteredClaims
+	Kind       string   `json:"kind"`
+	Username   string   `json:"usr,omitempty"`
+	UID        uint32   `json:"uid,omitempty"`
+	PrimaryGID uint32   `json:"gid,omitempty"`
+	Groups     []uint32 `json:"groups,omitempty"`
+	Admin      bool     `json:"admin,omitempty"`
+	ID         string   `json:"id,omitempty"`
+	Project    string   `json:"prj,omitempty"`
+	Path       string   `json:"pth,omitempty"`
+	IsDir      bool     `json:"dir,omitempty"`
 }
 
 type restLoginRequest struct {
@@ -136,7 +151,9 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 		user.Groups = uniqueGIDs(append(groups, user.PrimaryGID))
 		users[user.Username] = user
 	}
-	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), tokenTTL: opts.TokenTTL, now: opts.Now}, nil
+	seed := sha256.Sum256(opts.TokenSigningKey)
+	edKey := ed25519.NewKeyFromSeed(seed[:32])
+	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), edKey: edKey, tokenTTL: opts.TokenTTL, now: opts.Now}, nil
 }
 
 func (a *restAuthenticator) login(username, password string) (restPrincipal, string, time.Duration, error) {
@@ -157,8 +174,7 @@ func (a *restAuthenticator) login(username, password string) (restPrincipal, str
 
 func (a *restAuthenticator) signToken(principal restPrincipal) (string, error) {
 	now := a.now()
-	claims := restTokenClaims{
-		restPrincipal: principal,
+	claims := unifiedClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    restTokenIssuer,
 			Audience:  jwt.ClaimStrings{restTokenAudience},
@@ -166,32 +182,41 @@ func (a *restAuthenticator) signToken(principal restPrincipal) (string, error) {
 			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(a.tokenTTL)),
 		},
+		Kind:       "auth",
+		Username:   principal.Username,
+		UID:        principal.UID,
+		PrimaryGID: principal.PrimaryGID,
+		Groups:     append([]uint32(nil), principal.Groups...),
+		Admin:      principal.Admin,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(a.key)
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	return token.SignedString(a.edKey)
 }
 
 func (a *restAuthenticator) parseToken(token string) (*restPrincipal, error) {
-	claims := &restTokenClaims{}
-	parsed, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+	uc := &unifiedClaims{}
+	parsed, err := jwt.ParseWithClaims(token, uc, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodEd25519); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return a.key, nil
+		return a.edKey.Public(), nil
 	},
 		jwt.WithIssuer(restTokenIssuer),
 		jwt.WithAudience(restTokenAudience),
-		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithValidMethods([]string{"EdDSA"}),
 		jwt.WithTimeFunc(a.now),
 	)
-	if err != nil {
+	if err != nil || !parsed.Valid || uc.Kind != "auth" {
 		return nil, errors.New("invalid bearer token")
 	}
-	principal := claims.restPrincipal
-	if principal.Kind != "auth" || !parsed.Valid {
-		return nil, errors.New("invalid bearer token")
-	}
-	return &principal, nil
+	return &restPrincipal{
+		Kind:       "auth",
+		Username:   uc.Username,
+		UID:        uc.UID,
+		PrimaryGID: uc.PrimaryGID,
+		Groups:     append([]uint32(nil), uc.Groups...),
+		Admin:      uc.Admin,
+	}, nil
 }
 
 func verifyPassword(password, encoded string) bool {
@@ -257,6 +282,28 @@ func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, 
 		return err
 	}
 	return c.base.RenameContext(ctx, project, oldPath, newPath)
+}
+func (c *authorizedClient) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+	if err := c.requireTraverse(ctx, project, srcPath); err != nil {
+		return err
+	}
+	entry, err := c.base.StatPathContext(ctx, project, srcPath)
+	if err != nil {
+		return err
+	}
+	if entry.IsDir {
+		if !c.hasPerm(entry, permRead|permExec) {
+			return errForbidden("permission denied")
+		}
+	} else {
+		if !c.hasPerm(entry, permRead) {
+			return errForbidden("permission denied")
+		}
+	}
+	if err := c.requireCreate(ctx, project, dstPath); err != nil {
+		return err
+	}
+	return c.base.CopyContext(ctx, project, srcPath, dstPath)
 }
 func (c *authorizedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
