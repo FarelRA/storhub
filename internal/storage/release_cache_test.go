@@ -83,6 +83,12 @@ func TestRegression422Handling(t *testing.T) {
 	if !isReleaseFull(&ghapi.APIError{StatusCode: http.StatusUnprocessableEntity, Message: "Validation Failed", Body: `too many assets`}) {
 		t.Fatal("expected too many detection")
 	}
+	// Exact live probe body from storhub-web v18 (2026-09-09): top-level
+	// message is bare "Validation Failed", the file_count signal lives in
+	// errors[].field/message. Regression lock: this shape must rotate.
+	if !isReleaseFull(&ghapi.APIError{StatusCode: http.StatusUnprocessableEntity, Message: "Validation Failed", Body: `{"message":"Validation Failed","request_id":"9870:3DBD4A:DC51C:167E39:6AA1054C","documentation_url":"https://docs.github.com/rest","errors":[{"resource":"ReleaseAsset","code":"custom","field":"file_count","message":"file_count limited to 1000 assets per release"}]}`}) {
+		t.Fatal("expected live v18 file_count probe body detection")
+	}
 	if isAlreadyExists(&ghapi.APIError{StatusCode: http.StatusUnprocessableEntity, Body: `file_count`}) {
 		t.Fatal("file_count should not be already_exists")
 	}
