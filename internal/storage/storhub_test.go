@@ -3426,6 +3426,26 @@ func (m *mockGitHub) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Mirror GitHub: a release holds at most 1000 assets; further uploads
+	// 422 with a file_count body (live shape from storhub-web v18).
+	count := 0
+	for _, asset := range repo.assets {
+		if asset.releaseTag == parts[2] {
+			count++
+		}
+	}
+	if count >= 1000 {
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"message": "Validation Failed",
+			"errors": []map[string]any{{
+				"resource": "ReleaseAsset",
+				"code":     "custom",
+				"field":    "file_count",
+				"message":  "file_count limited to 1000 assets per release",
+			}},
+		})
+		return
+	}
 	asset := &mockAsset{id: repo.nextAssetID, name: name, releaseTag: parts[2], data: append([]byte(nil), data...)}
 	repo.nextAssetID++
 	repo.assets[asset.id] = asset

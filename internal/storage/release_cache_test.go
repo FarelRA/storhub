@@ -100,6 +100,34 @@ func TestRegression422Handling(t *testing.T) {
 	}
 }
 
+func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
+	// Reproduces storhub-web v18 (2026-09-09): the cached release list shows
+	// space (prod: embedded 980) but the server is full (prod: true 1000).
+	// The upload must rotate to a new release instead of failing.
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
+	meta, err := hub.UploadFile("project-rotate-full", "a.txt", input)
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
+	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	// Fill the release server-side WITHOUT touching the client cache,
+	// exactly like prod where embedded counts lag the true count.
+	backend.addAssetsToRelease(t, "project-rotate-full", firstRelease, 999)
+	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
+	meta2, err := hub.UploadFile("project-rotate-full", "b.txt", input2)
+	if err != nil {
+		t.Fatalf("upload must rotate to a new release, got: %v", err)
+	}
+	repoMeta2, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
+	if got := repoMeta2.Chunks[meta2.Chunks[0]].Release; got == firstRelease {
+		t.Fatalf("upload landed on full release %s, must rotate", got)
+	}
+}
+
 func TestRegressionPreferredTagRemoved(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
