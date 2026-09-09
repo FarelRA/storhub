@@ -3009,6 +3009,11 @@ type mockGitHub struct {
 	owner     string
 	repos     map[string]*mockRepo
 	intercept atomic.Value
+	// embedCap simulates GitHub truncating the asset array embedded in
+	// release objects. When > 0, list/get-release responses carry at most
+	// embedCap embedded assets while the true count stays higher. The
+	// dedicated list-assets endpoint always serves the true set.
+	embedCap int
 }
 
 type mockRepo struct {
@@ -3167,6 +3172,8 @@ func (m *mockGitHub) handleRepos(w http.ResponseWriter, r *http.Request) {
 		m.handleDeleteRelease(w, repo, parts[4])
 	case len(parts) == 6 && parts[3] == "releases" && parts[4] == "assets" && r.Method == http.MethodGet:
 		m.handleDownloadAsset(w, r, repo, parts[5])
+	case len(parts) == 6 && parts[3] == "releases" && parts[5] == "assets" && r.Method == http.MethodGet:
+		m.handleListReleaseAssets(w, r, repo, parts[4])
 	case len(parts) == 6 && parts[3] == "releases" && parts[4] == "assets" && r.Method == http.MethodDelete:
 		m.handleDeleteAsset(w, repo, parts[5])
 	case len(parts) == 3 && r.Method == http.MethodDelete:
@@ -3346,7 +3353,7 @@ func (m *mockGitHub) handleGetReleaseByTag(w http.ResponseWriter, repo *mockRepo
 		"name":       release.name,
 		"upload_url": release.uploadURL,
 		"draft":      false,
-		"assets":     m.releaseAssetsLocked(repo, release.tag),
+		"assets":     m.embeddedAssetsLocked(repo, release.tag),
 	})
 }
 
@@ -3361,7 +3368,7 @@ func (m *mockGitHub) handleListReleases(w http.ResponseWriter, r *http.Request, 
 	pageReleases := paginateSlice(releases, r.URL.Query())
 	response := make([]map[string]any, 0, len(pageReleases))
 	for _, release := range pageReleases {
-		assets := m.releaseAssetsLocked(repo, release.tag)
+		assets := m.embeddedAssetsLocked(repo, release.tag)
 		response = append(response, map[string]any{
 			"id":         release.id,
 			"tag_name":   release.tag,
@@ -3372,6 +3379,32 @@ func (m *mockGitHub) handleListReleases(w http.ResponseWriter, r *http.Request, 
 		})
 	}
 	m.writeJSON(w, http.StatusOK, response)
+}
+
+func (m *mockGitHub) handleListReleaseAssets(w http.ResponseWriter, r *http.Request, repo *mockRepo, rawID string) {
+	releaseID, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		m.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	release := repo.releasesByID[releaseID]
+	if release == nil {
+		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "release not found"})
+		return
+	}
+	m.writeJSON(w, http.StatusOK, paginateSlice(m.releaseAssetsLocked(repo, release.tag), r.URL.Query()))
+}
+
+// embeddedAssetsLocked mirrors GitHub's truncated embedded asset array when
+// embedCap is set; the dedicated list-assets endpoint always serves truth.
+func (m *mockGitHub) embeddedAssetsLocked(repo *mockRepo, tag string) []map[string]any {
+	assets := m.releaseAssetsLocked(repo, tag)
+	if m.embedCap > 0 && len(assets) > m.embedCap {
+		assets = assets[:m.embedCap]
+	}
+	return assets
 }
 
 func (m *mockGitHub) releaseAssetsLocked(repo *mockRepo, tag string) []map[string]any {

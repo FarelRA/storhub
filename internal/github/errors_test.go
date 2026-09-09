@@ -1,7 +1,10 @@
 package github
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,5 +57,27 @@ func TestAPIErrorRetryability(t *testing.T) {
 				t.Fatalf("unexpected retryable value: %v", got)
 			}
 		})
+	}
+}
+
+func TestBodySnippetCarriesFileCountDetail(t *testing.T) {
+	full := `{"message":"Validation Failed","errors":[{"resource":"ReleaseAsset","code":"custom","field":"file_count","message":"file_count limited to 1000 assets per release"}]}`
+	err := &APIError{StatusCode: http.StatusUnprocessableEntity, Message: "Validation Failed", Body: full}
+	if got := err.BodySnippet(); got != full {
+		t.Fatalf("short body must pass through, got %q", got)
+	}
+	if got := uploadErrorBody(fmt.Errorf("upload asset: %w", err)); !strings.Contains(got, "file_count") {
+		t.Fatalf("wrapped upload error must expose file_count, got %q", got)
+	}
+	long := strings.Repeat("x", 2000)
+	if got := (&APIError{StatusCode: http.StatusBadRequest, Body: long}).BodySnippet(); len(got) != 1027 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("long body must truncate to 1024+marker, got len %d", len(got))
+	}
+	if got := uploadErrorBody(errors.New("boom")); got != "" {
+		t.Fatalf("non-API error must yield empty snippet, got %q", got)
+	}
+	var nilErr *APIError
+	if got := nilErr.BodySnippet(); got != "" {
+		t.Fatalf("nil error must yield empty snippet, got %q", got)
 	}
 }

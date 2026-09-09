@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -64,6 +65,31 @@ func IsPrimaryRateLimit(err error) (*APIError, bool) {
 		return nil, false
 	}
 	return apiErr, true
+}
+
+// BodySnippet returns up to the first kilobyte of the response body for
+// logs: enough to carry GitHub's errors[] detail (e.g. file_count), small
+// enough to keep failure logs readable. The v18 incident cost a manual
+// reconstruction precisely because only Message ("Validation Failed")
+// was logged while the signal sat in Body.
+func (e *APIError) BodySnippet() string {
+	if e == nil || e.Body == "" {
+		return ""
+	}
+	if len(e.Body) > 1024 {
+		return e.Body[:1024] + "..."
+	}
+	return e.Body
+}
+
+// uploadErrorBody extracts the response-body snippet from a (possibly
+// wrapped) upload failure for logs. Returns "" for non-API errors.
+func uploadErrorBody(err error) string {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return ""
+	}
+	return apiErr.BodySnippet()
 }
 
 func (e *APIError) IsRetryable() bool {

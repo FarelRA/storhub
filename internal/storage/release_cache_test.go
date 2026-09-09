@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
@@ -125,6 +127,63 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 	repoMeta2, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
 	if got := repoMeta2.Chunks[meta2.Chunks[0]].Release; got == firstRelease {
 		t.Fatalf("upload landed on full release %s, must rotate", got)
+	}
+}
+
+func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
+	// storhub-web v18 (2026-09-09): embedded list shows 980 while the true
+	// count is 1000. The picker must resolve the true count inside the
+	// danger band instead of trusting the truncated embedded list.
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	backend.embedCap = 980
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
+	meta, err := hub.UploadFile("project-true-count", "a.txt", input)
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-true-count")
+	fullRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	backend.addAssetsToRelease(t, "project-true-count", fullRelease, 999)
+	hub.invalidateReleaseCache("project-true-count")
+	workingMeta := repoMeta.Clone()
+	workingMeta.RemoveFile("a.txt")
+	tag, _, err := hub.getOrCreateUploadRelease(ctx, "project-true-count", &workingMeta, 1)
+	if err != nil {
+		t.Fatalf("getOrCreate: %v", err)
+	}
+	if tag == fullRelease {
+		t.Fatalf("picker trusted truncated embedded count and chose server-full %s", tag)
+	}
+}
+
+func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
+	// A file that dies on its second chunk must not leak the first chunk's
+	// asset: only the seed asset may remain afterwards.
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
+	if _, err := hub.UploadFile("project-compensate", "seed.txt", seed); err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	var posts atomic.Int32
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+			if posts.Add(1) == 2 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"message":"injected failure"}`))
+				return true
+			}
+		}
+		return false
+	})
+	two := writeTempFile(t, t.TempDir(), "two.txt", []byte("123456789"))
+	if _, err := hub.UploadFile("project-compensate", "two.txt", two); err == nil {
+		t.Fatal("expected injected failure")
+	}
+	if got := len(backend.repo("project-compensate").assets); got != 1 {
+		t.Fatalf("leaked orphan assets after mid-upload failure: got %d assets, want 1 (seed only)", got)
 	}
 }
 

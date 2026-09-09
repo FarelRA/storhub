@@ -17,25 +17,90 @@ import (
 
 const metadataFilePath = ".storhub/metadata.json"
 
-func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker) ([]ChunkInfo, error) {
-	results := make([]ChunkInfo, planner.NumChunks())
-	namer := newAssetNamer()
+func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker, prepare func(remaining int) (string, string, error)) ([]ChunkInfo, error) {
+	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, planner.NumChunks(), prepare)
 	for i := 0; i < planner.NumChunks(); i++ {
 		chunk, err := planner.GetChunk(i)
 		if err != nil {
-			return results, err
+			return sink.results, err
 		}
-		assetName, err := namer.Next()
-		if err != nil {
-			return results, err
+		if err := sink.put(chunk, chunk.Size(), chunk.Offset()); err != nil {
+			return sink.results, err
 		}
-		assetID, err := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, chunk, chunk.Size())
-		if err != nil {
-			return results, fmt.Errorf("upload chunk %d: %w", i, err)
-		}
-		results[i] = ChunkInfo{Size: chunk.Size(), Offset: chunk.Offset(), AssetOffset: 0, AssetID: assetID, Release: releaseTag}
 	}
-	return results, nil
+	return sink.results, nil
+}
+
+// chunkSink uploads chunk payloads one at a time, accumulating ChunkInfos
+// and rotating to a fresh release whenever the server reports the current
+// one full. It is the single home of name-collision retries and
+// release-full rotation; every upload loop (planner windows, reader
+// windows, inline edits, rewritten ranges) funnels through put so a stale
+// release choice can never strand an upload.
+//
+// Rotation terminates: each rotation invalidates the release cache and
+// re-resolves against a fresh server list (with true counts near the
+// ceiling), so a repeat pick means a concurrent writer filled it in the
+// millisecond race window, and the next re-list observes that fill.
+type chunkSink struct {
+	hub        *StorHub
+	ctx        context.Context
+	project    string
+	namer      *assetNamer
+	total      int // planned chunk count, for remaining-slot computation
+	results    []ChunkInfo
+	releaseTag string
+	uploadURL  string
+	// prepare resolves a fresh release with room for the given remaining
+	// chunk count. Invoked at most once per full release encountered.
+	prepare func(remaining int) (tag, url string, err error)
+}
+
+func (h *StorHub) newChunkSink(ctx context.Context, project, releaseTag, uploadURL string, total int, prepare func(int) (string, string, error)) *chunkSink {
+	return &chunkSink{
+		hub: h, ctx: ctx, project: project,
+		namer:      newAssetNamer(),
+		total:      total,
+		results:    make([]ChunkInfo, 0, total),
+		releaseTag: releaseTag, uploadURL: uploadURL,
+		prepare: prepare,
+	}
+}
+
+// put uploads one chunk payload. The transport rewinds the reader per
+// attempt. The returned ChunkInfo carries the release that actually holds
+// the bytes, which may differ from the sink's initial target after a
+// rotation. Partial results stay in s.results for the caller to compensate
+// on error; put itself never deletes.
+func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
+	const maxNameRetries = 5
+	for attempt := 0; attempt < maxNameRetries; attempt++ {
+		assetName, err := s.namer.Next()
+		if err != nil {
+			return err
+		}
+		assetID, err := s.hub.uploadAssetStreaming(s.ctx, s.project, s.releaseTag, s.uploadURL, assetName, reader, size)
+		if err == nil {
+			s.results = append(s.results, ChunkInfo{Size: size, Offset: offset, Release: s.releaseTag, AssetID: assetID, AssetOffset: 0})
+			return nil
+		}
+		if isReleaseFull(err) {
+			s.hub.debugf("upload release full, rotating release=%s uploaded=%d/%d", s.releaseTag, len(s.results), s.total)
+			s.hub.invalidateReleaseCache(s.project)
+			tag, url, err := s.prepare(s.total - len(s.results))
+			if err != nil {
+				return err
+			}
+			s.releaseTag, s.uploadURL = tag, url
+			continue
+		}
+		if isAlreadyExists(err) {
+			s.hub.debugf("upload chunk asset name collision, retry asset=%s", assetName)
+			continue
+		}
+		return fmt.Errorf("upload chunk (offset %d): %w", offset, err)
+	}
+	return fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
 }
 
 func (h *StorHub) ensureRepo(ctx context.Context, project string) error {
@@ -318,7 +383,11 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 		}
 	} else {
 		for _, r := range releases {
-			if len(r.Assets)+requiredSlots <= 1000 {
+			count, err := h.releaseAssetCount(ctx, project, r)
+			if err != nil {
+				return "", "", err
+			}
+			if count+requiredSlots <= 1000 {
 				metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
 				return r.TagName, r.UploadURL, nil
 			}
@@ -334,6 +403,46 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	}
 	metadata.EnsureRelease(tag, h.config.Now().Unix())
 	return tag, release.UploadURL, nil
+}
+
+// ensureChunkReleases registers every release holding new chunks in the
+// authoritative metadata so PurgeUntracked cannot delete live data and
+// rollback validation can resolve chunk references. Rotation may spread one
+// file's chunks across releases; ensuring only the originally targeted tag
+// would strand the rotated chunks.
+func ensureChunkReleases(meta *RepoMetadata, chunks []ChunkInfo, now int64) {
+	seen := make(map[string]struct{}, len(chunks))
+	for _, c := range chunks {
+		if _, ok := seen[c.Release]; ok {
+			continue
+		}
+		seen[c.Release] = struct{}{}
+		meta.EnsureRelease(c.Release, now)
+	}
+}
+
+// embeddedAssetTrustLimit bounds how far the asset array embedded in a
+// release object may be trusted for capacity decisions. GitHub truncates it
+// near the ceiling (worst observed skew: 57 assets on storhub-web v14), so
+// at or above this limit the true count is resolved through the paginated
+// ListReleaseAssets endpoint instead.
+const embeddedAssetTrustLimit = 900
+
+// releaseAssetCount returns the number of assets in a release for capacity
+// decisions: the embedded count when safely below the ceiling, the true
+// paginated count inside the danger band.
+func (h *StorHub) releaseAssetCount(ctx context.Context, project string, r ghapi.Release) (int, error) {
+	if len(r.Assets) < embeddedAssetTrustLimit {
+		return len(r.Assets), nil
+	}
+	if err := h.ensureOwner(ctx); err != nil {
+		return 0, err
+	}
+	assets, err := h.gh.ListReleaseAssets(ctx, h.owner, project, r.ID)
+	if err != nil {
+		return 0, err
+	}
+	return len(assets), nil
 }
 
 func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Release) (string, error) {

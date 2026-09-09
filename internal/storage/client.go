@@ -845,6 +845,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// delete live data. PrepareReplaceContext EnsureReleases only on a local
 	// clone that is discarded before this call.
 	pm.meta.EnsureRelease(releaseTag, now)
+	ensureChunkReleases(pm.meta, chunks, now)
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(chunks))
@@ -904,74 +905,35 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	// tee-mirrored to a spool file so transport retries rewind from disk
 	// instead of re-reading the network; a failed window compensates by
 	// deleting earlier windows of this call, keeping metadata-atomicity.
-	var chunks []ChunkInfo
+	// Name-collision retries and release-full rotation live in the sink.
+	totalChunks := 0
+	if size > 0 {
+		totalChunks = int((size + chunkSize - 1) / chunkSize)
+	}
+	prepare := func(remaining int) (string, string, error) {
+		return h.PrepareReplaceContext(ctx, project, filePath, remaining)
+	}
+	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, totalChunks, prepare)
 	var uploaded int64
-	namer := newAssetNamer()
 	for uploaded < size {
 		windowSize := min64(h.ChunkSize(), size-uploaded)
 
 		win, cleanup, werr := newWindowReader(body, windowSize)
 		if werr != nil {
-			h.compensateDeleteAssets(ctx, project, chunks)
+			h.compensateDeleteAssets(ctx, project, sink.results)
 			return nil, werr
 		}
 
-		const maxNameRetries = 5
-		var chunk ChunkInfo
-		applied := false
-		for renameAttempt := 0; renameAttempt < maxNameRetries; renameAttempt++ {
-			assetName, nameErr := namer.Next()
-			if nameErr != nil {
-				cleanup()
-				h.compensateDeleteAssets(ctx, project, chunks)
-				return nil, nameErr
-			}
-			if _, seekErr := win.Seek(0, io.SeekStart); seekErr != nil {
-				cleanup()
-				h.compensateDeleteAssets(ctx, project, chunks)
-				return nil, seekErr
-			}
-			assetID, uploadErr := h.uploadAssetStreaming(ctx, project, releaseTag, uploadURL, assetName, win, windowSize)
-			if uploadErr == nil {
-				chunk = ChunkInfo{Size: windowSize, Offset: uploaded, Release: releaseTag, AssetID: assetID, AssetOffset: 0}
-				applied = true
-				break
-			}
-			if isAlreadyExists(uploadErr) {
-				h.debugf("upload chunk asset name collision, retry=%d asset=%s", renameAttempt+1, assetName)
-				continue
-			}
-			if isReleaseFull(uploadErr) {
-				h.debugf("upload release full (422 file_count), creating new release, retry=%d asset=%s release=%s", renameAttempt+1, assetName, releaseTag)
-				h.invalidateReleaseCache(project)
-				remainingSlots := 1
-				if size > uploaded {
-					remainingSlots = int((size - uploaded + chunkSize - 1) / chunkSize)
-				}
-				newTag, newURL, err := h.PrepareReplaceContext(ctx, project, filePath, remainingSlots)
-				if err != nil {
-					cleanup()
-					h.compensateDeleteAssets(ctx, project, chunks)
-					return nil, err
-				}
-				releaseTag = newTag
-				uploadURL = newURL
-				continue
-			}
+		if err := sink.put(win, windowSize, uploaded); err != nil {
 			cleanup()
-			h.compensateDeleteAssets(ctx, project, chunks)
-			return nil, uploadErr
+			h.compensateDeleteAssets(ctx, project, sink.results)
+			return nil, err
 		}
 		cleanup()
-		if !applied {
-			h.compensateDeleteAssets(ctx, project, chunks)
-			return nil, fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
-		}
-		chunks = append(chunks, chunk)
 		uploaded += windowSize
 	}
 
-	return h.FinalizeReplaceChunksContext(ctx, project, filePath, releaseTag, uploaded, chunks)
+	return h.FinalizeReplaceChunksContext(ctx, project, filePath, sink.releaseTag, uploaded, sink.results)
 }
 
 func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chunk metadata.ChunkInfo, dst []byte) error {
@@ -1103,6 +1065,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	pm.meta.EnsureRelease(releaseTag, now)
+	ensureChunkReleases(pm.meta, newChunks, now)
 	chunkIDs := make([]int64, len(newChunks))
 	for i := range newChunks {
 		id := pm.meta.AllocateChunkID()
@@ -1160,6 +1123,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// delete live data. buildPatchedChunks EnsureReleases only on a local
 	// clone that is discarded here.
 	pm.meta.EnsureRelease(releaseTag, now)
+	ensureChunkReleases(pm.meta, newChunks, now)
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(newChunks))
@@ -1215,6 +1179,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	// delete live data. buildRewrittenChunks EnsureReleases only on a local
 	// clone that is discarded here.
 	pm.meta.EnsureRelease(releaseTag, now)
+	ensureChunkReleases(pm.meta, newChunks, now)
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(newChunks))
@@ -1311,8 +1276,15 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 
 	results := []ChunkInfo{}
 	if fileInfo.Size() > 0 {
-		results, err = h.uploadChunks(ctx, project, releaseTag, uploadURL, planner)
+		prepare := func(remaining int) (string, string, error) {
+			return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
+		}
+		results, err = h.uploadChunks(ctx, project, releaseTag, uploadURL, planner, prepare)
 		if err != nil {
+			// The file never commits: delete this call's orphaned assets so
+			// a mid-upload failure cannot leak storage. Rotation inside the
+			// sink already moved later chunks; only compensate what landed.
+			h.compensateDeleteAssets(ctx, project, results)
 			return nil, err
 		}
 	}

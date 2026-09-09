@@ -259,6 +259,25 @@ func (c *Client) ListReleases(ctx context.Context, owner, project string) ([]Rel
 	}
 }
 
+// ListReleaseAssets returns every asset of one release, paginating through
+// the dedicated endpoint. The asset array embedded in release objects is
+// truncated near the ceiling (storhub-web v18: 980 embedded vs 1000 true),
+// so capacity decisions must use this, never len(release.Assets).
+func (c *Client) ListReleaseAssets(ctx context.Context, owner, project string, releaseID int64) ([]Asset, error) {
+	assets := make([]Asset, 0)
+	for page := 1; ; page++ {
+		var batch []Asset
+		endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d/assets?per_page=%d&page=%d", owner, project, releaseID, pageSize, page))
+		if err := c.getJSON(ctx, endpoint, &batch); err != nil {
+			return nil, err
+		}
+		assets = append(assets, batch...)
+		if len(batch) < pageSize {
+			return assets, nil
+		}
+	}
+}
+
 func (c *Client) GetReleaseByTag(ctx context.Context, owner, project, tag string) (*Release, error) {
 	var release Release
 	if err := c.getJSON(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/tags/%s", owner, project, url.PathEscape(tag))), &release); err != nil {
@@ -334,7 +353,7 @@ func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, up
 	// would hand the caller an unverified ID (possibly stale or partial
 	// content) as if the fresh bytes had been stored. Callers that want
 	// name-based reuse can compose FindAssetIDByName themselves.
-	logging.Warn(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "err", err)
+	logging.Warn(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "body", uploadErrorBody(err), "err", err)
 	return 0, fmt.Errorf("upload asset: %w", err)
 }
 
@@ -717,7 +736,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 					}
 				}
 			}
-			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "err", apiErr)
+			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "body", apiErr.BodySnippet(), "err", apiErr)
 			if attempt == c.maxRetries || !opts.retryable || !apiErr.IsRetryable() {
 				return nil, apiErr
 			}
