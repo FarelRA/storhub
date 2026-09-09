@@ -229,6 +229,43 @@ func TestUploadAssetRetriesOnHeaderlessRateLimit(t *testing.T) {
 	}
 }
 
+func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
+	// Regression for the 2026-09-05 FUSE incident: uploads.github.com sends
+	// no X-RateLimit headers, so the governor paces bursts against a stale
+	// low core snapshot and throttles them client-side while the real
+	// budget is healthy. Asset uploads must not draw from the hourly bucket,
+	// so a burst against a low snapshot must fire with zero throttle sleeps.
+	// NOTE: the clock-advancing sleep is load-bearing — a recording no-op
+	// sleep sends acquire() into an infinite WARN-spinning loop (2026-09-09:
+	// 8.7M lines in 17s, OOM-killed the go process twice). Never use a
+	// frozen clock with throttle-asserting tests.
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1}`))
+	}))
+	defer server.Close()
+	var sleeps []time.Duration
+	c := NewClient("t", clockedTaxonomyConfig(server, newTestClock(), &sleeps))
+	low := http.Header{}
+	low.Set("X-RateLimit-Limit", "5000")
+	low.Set("X-RateLimit-Remaining", "30")
+	low.Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Hour).Unix()))
+	c.governor.observe(low)
+	for i := 0; i < 20; i++ {
+		if _, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", fmt.Sprintf("chunk-%d.bin", i), strings.NewReader("x"), 1); err != nil {
+			t.Fatalf("upload %d failed while server healthy (posts=%d): %v", i, posts.Load(), err)
+		}
+	}
+	if posts.Load() != 20 {
+		t.Fatalf("posts=%d, want 20", posts.Load())
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("burst throttled %d times against a stale hourly snapshot (first wait %v); asset uploads must skip hourly pacing", len(sleeps), sleeps[0])
+	}
+}
+
 func TestDownloadAssetStreamCachesSignedURL(t *testing.T) {
 	var apiHits, cdnHits atomic.Int32
 	mux := http.NewServeMux()

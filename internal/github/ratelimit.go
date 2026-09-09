@@ -137,7 +137,12 @@ func methodCost(method string) int64 {
 // returns a release func for the concurrency slot. It fails with an
 // *APIError when the required wait exceeds maxWait - honest refusal beats
 // silently stalling a command past its usefulness.
-func (g *rateGovernor) acquire(ctx context.Context, cost int64, content bool) (func(), error) {
+//
+// assetUpload marks POSTs to uploads.github.com, a separate authority that
+// sends no X-RateLimit headers and draws from no hourly core budget.
+// Such requests skip hourly pacing (floor + sustainable pace + local budget
+// accounting) but still honor the per-minute windows and concurrency cap.
+func (g *rateGovernor) acquire(ctx context.Context, cost int64, content, assetUpload bool) (func(), error) {
 	select {
 	case g.inflight <- struct{}{}:
 	case <-ctx.Done():
@@ -145,7 +150,7 @@ func (g *rateGovernor) acquire(ctx context.Context, cost int64, content bool) (f
 	}
 	release := func() { <-g.inflight }
 	for {
-		wait, apiErr := g.reserve(cost, content)
+		wait, apiErr := g.reserve(cost, content, assetUpload)
 		if apiErr != nil {
 			release()
 			return nil, apiErr
@@ -163,7 +168,7 @@ func (g *rateGovernor) acquire(ctx context.Context, cost int64, content bool) (f
 
 // reserve computes the wait before sending; commit happens only when the
 // caller accepts a zero wait.
-func (g *rateGovernor) reserve(cost int64, content bool) (time.Duration, *APIError) {
+func (g *rateGovernor) reserve(cost int64, content, assetUpload bool) (time.Duration, *APIError) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
@@ -188,7 +193,8 @@ func (g *rateGovernor) reserve(cost int64, content bool) (time.Duration, *APIErr
 	// reset helps, so wait for it or refuse. Until any response carries
 	// rate-limit headers there is no budget to pace against, so hourly
 	// gating stays dormant; the per-minute windows below still apply.
-	if g.budget.seen && now.Before(g.budget.resetAt) && g.budget.remaining <= g.cfg.reserve+cost {
+	// Asset uploads skip this entirely (no hourly budget on their endpoint).
+	if !assetUpload && g.budget.seen && now.Before(g.budget.resetAt) && g.budget.remaining <= g.cfg.reserve+cost {
 		untilReset := g.budget.resetAt.Sub(now)
 		if tooLong(untilReset) {
 			return 0, deny(true, fmt.Sprintf("hourly budget at reserve (%d left), resets in %s", g.budget.remaining, untilReset.Round(time.Second)))
@@ -199,32 +205,38 @@ func (g *rateGovernor) reserve(cost int64, content bool) (time.Duration, *APIErr
 	// Sustainable pace with burst tolerance: refill tokens at spendable /
 	// window per second since the last admission, capped by a 30s burst
 	// pool (+10 slack so the very first requests never wait).
-	refill := 0.0
-	if g.budget.seen && now.Before(g.budget.resetAt) {
-		spendable := float64(g.budget.remaining - g.cfg.reserve)
-		window := g.budget.resetAt.Sub(now).Seconds()
-		if spendable > 0 && window > 0 {
-			refill = spendable / window
+	// Asset uploads skip this: the upload endpoint never reports a budget,
+	// so pacing bursts against a stale core snapshot only manufactures
+	// denials for a server that would accept the traffic.
+	tokens := g.tokens
+	if !assetUpload {
+		refill := 0.0
+		if g.budget.seen && now.Before(g.budget.resetAt) {
+			spendable := float64(g.budget.remaining - g.cfg.reserve)
+			window := g.budget.resetAt.Sub(now).Seconds()
+			if spendable > 0 && window > 0 {
+				refill = spendable / window
+			}
 		}
-	}
-	if g.lastRefill.IsZero() {
-		g.lastRefill = now
-		g.tokens = float64(cost) + 10
-	}
-	elapsed := now.Sub(g.lastRefill).Seconds()
-	tokens := minf(g.tokens+refill*elapsed, refill*30+10)
-	if tokens < float64(cost) {
-		var paceWait time.Duration
-		switch {
-		case refill > 0:
-			paceWait = time.Duration((float64(cost) - tokens) / refill * float64(time.Second))
-		case !g.budget.resetAt.IsZero() && now.Before(g.budget.resetAt):
-			paceWait = g.budget.resetAt.Sub(now)
+		if g.lastRefill.IsZero() {
+			g.lastRefill = now
+			g.tokens = float64(cost) + 10
 		}
-		if tooLong(paceWait) {
-			return 0, deny(true, "sustainable request pace exhausted")
+		elapsed := now.Sub(g.lastRefill).Seconds()
+		tokens = minf(g.tokens+refill*elapsed, refill*30+10)
+		if tokens < float64(cost) {
+			var paceWait time.Duration
+			switch {
+			case refill > 0:
+				paceWait = time.Duration((float64(cost) - tokens) / refill * float64(time.Second))
+			case !g.budget.resetAt.IsZero() && now.Before(g.budget.resetAt):
+				paceWait = g.budget.resetAt.Sub(now)
+			}
+			if tooLong(paceWait) {
+				return 0, deny(true, "sustainable request pace exhausted")
+			}
+			wait = maxDuration(wait, paceWait)
 		}
-		wait = maxDuration(wait, paceWait)
 	}
 
 	// Per-minute secondary windows.
@@ -248,16 +260,20 @@ func (g *rateGovernor) reserve(cost int64, content bool) (time.Duration, *APIErr
 		wait = maxDuration(wait, contentWait)
 	}
 
-	// Commit the reservation when no wait is needed.
+	// Commit the reservation when no wait is needed. Hourly token and budget
+	// accounting apply to core requests only; asset uploads neither draw
+	// from nor replenish the hourly bucket (their endpoint reports nothing).
 	if wait == 0 {
-		g.lastRefill = now
-		g.tokens = tokens - float64(cost)
+		if !assetUpload {
+			g.lastRefill = now
+			g.tokens = tokens - float64(cost)
+			if g.budget.seen && g.budget.remaining > 0 {
+				g.budget.remaining--
+			}
+		}
 		g.winPoints += cost
 		if content {
 			g.winContent++
-		}
-		if g.budget.seen && g.budget.remaining > 0 {
-			g.budget.remaining--
 		}
 	}
 	return wait, nil

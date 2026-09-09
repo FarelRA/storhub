@@ -647,7 +647,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		started := time.Now().UTC()
 		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
-		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload)
+		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload, opts.assetUpload)
 		if err != nil {
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && attempt < c.maxRetries && opts.retryable && apiErr.IsRetryable() {

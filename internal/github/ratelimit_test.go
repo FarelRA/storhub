@@ -66,17 +66,17 @@ func TestGovernorObserveAndLocalAccounting(t *testing.T) {
 	if !snap.seen || snap.limit != 5000 || snap.remaining != 100 {
 		t.Fatalf("snapshot after observe: %+v", snap)
 	}
-	release, err := h.g.acquire(context.Background(), methodCost(http.MethodGet), false)
+	release, err := h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), methodCost(http.MethodGet), false)
+	release, err = h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	release()
-	release, _ = h.g.acquire(context.Background(), methodCost(http.MethodGet), false)
+	release, _ = h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
 	release()
 	if left := h.g.snapshot().remaining; left != 97 {
 		t.Fatalf("local accounting drift: remaining=%d, want 97", left)
@@ -86,7 +86,7 @@ func TestGovernorObserveAndLocalAccounting(t *testing.T) {
 func TestGovernorReserveFloorDeniesWhenFailFast(t *testing.T) {
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 0 })
 	h.observe(5000, 10, 40*time.Minute)
-	_, err := h.g.acquire(context.Background(), 1, false)
+	_, err := h.g.acquire(context.Background(), 1, false, false)
 	apiErr, ok := err.(*APIError)
 	if !ok {
 		t.Fatalf("expected *APIError, got %v", err)
@@ -103,7 +103,7 @@ func TestGovernorReserveFloorWaitsUntilReset(t *testing.T) {
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 15 * time.Minute })
 	resetIn := 5 * time.Minute
 	h.observe(5000, 10, resetIn)
-	release, err := h.g.acquire(context.Background(), 1, false)
+	release, err := h.g.acquire(context.Background(), 1, false, false)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -118,12 +118,12 @@ func TestGovernorPointsWindowThrottlesWrites(t *testing.T) {
 		c.RatePointsPerMin = 6
 		c.RateMaxWait = time.Hour
 	})
-	release, err := h.g.acquire(context.Background(), 5, false)
+	release, err := h.g.acquire(context.Background(), 5, false, false)
 	if err != nil || release == nil {
 		t.Fatalf("first write should pass: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 5, false)
+	release, err = h.g.acquire(context.Background(), 5, false, false)
 	if err != nil {
 		t.Fatalf("second write should wait, not fail: %v", err)
 	}
@@ -138,17 +138,17 @@ func TestGovernorContentWindowCapsUploadsOnly(t *testing.T) {
 		c.RateContentPerMin = 1
 		c.RateMaxWait = time.Hour
 	})
-	release, err := h.g.acquire(context.Background(), 5, true)
+	release, err := h.g.acquire(context.Background(), 5, true, false)
 	if err != nil {
 		t.Fatalf("first upload: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 1, false)
+	release, err = h.g.acquire(context.Background(), 1, false, false)
 	if err != nil || len(h.sleeps) != 0 {
 		t.Fatalf("reads must not draw from the content window: err=%v sleeps=%v", err, h.sleeps)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 5, true)
+	release, err = h.g.acquire(context.Background(), 5, true, false)
 	if err != nil {
 		t.Fatalf("second upload must wait, not fail: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestGovernorContentWindowCapsUploadsOnly(t *testing.T) {
 func TestGovernorDormantWithoutServerBudget(t *testing.T) {
 	h := newGovHarness(nil)
 	for i := 0; i < 20; i++ {
-		release, err := h.g.acquire(context.Background(), 1, false)
+		release, err := h.g.acquire(context.Background(), 1, false, false)
 		if err != nil {
 			t.Fatalf("request %d failed without budget data: %v", i, err)
 		}
