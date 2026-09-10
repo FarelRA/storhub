@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -396,7 +397,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		if err != nil {
 			return nil, 0, fmt.Errorf("download asset: %w", err)
 		}
-		if resp.StatusCode == http.StatusFound {
+		if isAssetRedirect(resp.StatusCode) {
 			location := resp.Header.Get("Location")
 			_ = resp.Body.Close()
 			if location == "" {
@@ -482,6 +483,19 @@ func (b *deadlineBoundBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.cancel)
 	return err
+}
+
+// isAssetRedirect reports whether a status carries the signed asset URL
+// in Location: the API answers the octet-stream GET with any of these
+// depending on endpoint and edge, so all of them resolve like 302 does.
+func isAssetRedirect(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
 }
 
 // isCDNRejection reports whether a CDN status indicates the signed URL is
@@ -710,12 +724,18 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			noTimeout.Timeout = 0
 			client = &noTimeout
 		}
+		// Per-attempt transfer context: derived from the caller's ctx (never
+		// from a previous attempt's) and canceled explicitly once this
+		// attempt's response arrives, so retries always get a full deadline
+		// and timers never pile up on a loop-shared defer.
+		reqCtx := ctx
+		cancel := context.CancelFunc(func() {})
 		if opts.assetUpload && opts.contentSize > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, c.transferDeadline(opts.contentSize))
-			defer cancel()
+			reqCtx, cancel = context.WithTimeout(ctx, c.transferDeadline(opts.contentSize))
+			req = req.WithContext(reqCtx)
 		}
 		resp, err := client.Do(req)
+		cancel()
 		release()
 		if err == nil {
 			c.governor.observe(resp.Header)
@@ -867,19 +887,24 @@ func containsAny(haystack string, needles []string) bool {
 // rejections follow GitHub's documented guidance instead of the generic
 // exponential backoff: primary exhaustion means waiting for
 // x-ratelimit-reset (the doRequest caller refuses waits beyond maxWait),
-// a present Retry-After is honored exactly, and other secondary limits
-// wait at least one minute with exponential growth.
+// a present Retry-After is honored exactly but bounded by maxRetryDelay,
+// and other secondary limits wait at least one minute with exponential
+// growth. Every branch is bounded and jittered so a hostile header or a
+// synchronized fleet cannot stall or thunder-herd callers.
 func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 	if apiErr != nil && apiErr.RateLimited {
 		if !apiErr.RateLimitReset.IsZero() {
 			// Wait for the documented reset; the floor only prevents a
 			// hot loop when the clock has already passed it.
-			return maxDuration(time.Until(apiErr.RateLimitReset)+c.baseRetryDelay, c.baseRetryDelay)
+			return addJitter(maxDuration(time.Until(apiErr.RateLimitReset)+c.baseRetryDelay, c.baseRetryDelay))
 		}
 		if apiErr.RetryAfter > 0 {
-			return apiErr.RetryAfter
+			return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
 		}
-		return minDuration(60*time.Second<<attempt, 15*time.Minute)
+		if attempt > 10 {
+			attempt = 10 // keep the shift below from overflowing on wild input
+		}
+		return addJitter(minDuration(60*time.Second<<attempt, 15*time.Minute))
 	}
 	if apiErr != nil && apiErr.RetryAfter > 0 {
 		return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
@@ -944,21 +969,46 @@ func parseUnixTime(value string) (time.Time, bool) {
 	return time.Unix(seconds, 0), true
 }
 
+// addJitter spreads a computed wait by up to +25% so retries from a fleet
+// of synchronized callers do not arrive as one thundering herd. The floor
+// of the input is always preserved: guidance minimums (60s secondary
+// patience, reset waits) stay intact.
+func addJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	quarter := int64(d / 4)
+	if quarter <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Int63n(quarter+1))
+}
+
 // isRetryableNetworkError reports whether a transport failure is worth
-// another attempt. User cancellation is never retried; timeouts are,
-// because a release-asset PUT is atomic (no partial asset on a dropped
-// connection) and range GETs are read-only - the only cost of a spurious
-// retry is bandwidth, while refusing to retry turns every capped-link
-// stall into a failed commit.
+// another attempt. User cancellation is never retried; timeouts, torn
+// connections and truncated reads are, because a release-asset PUT is
+// atomic (no partial asset on a dropped connection) and range GETs are
+// read-only - the only cost of a spurious retry is bandwidth, while
+// refusing to retry turns every capped-link stall into a failed commit.
+//
+// The semantic is shared with the storage layer's isRetryableNetworkError;
+// keep the two identical.
 func isRetryableNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var netErr net.Error
-	if errorAs(err, &netErr) && netErr.Timeout() {
+	if errorAs(err, &netErr) {
 		return true
 	}
-	return errors.Is(err, io.ErrUnexpectedEOF)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Bare syscall unwrapping: a connection reset can surface without a
+	// *net.OpError wrapper depending on where the transport fails, and
+	// killing the read on one dropped connection is exactly the failure
+	// mode retries exist to absorb.
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
 }
 
 func errorAs(err error, target any) bool {

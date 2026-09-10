@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -14,8 +15,12 @@ import (
 
 func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration {
 	if apiErr != nil {
+		// Primary rate-limit waits honor the server's reset window
+		// uncapped (pinned doctrine: TestRateLimitAwareRetry) — only
+		// generic Retry-After hints are bounded so one bad header
+		// cannot stall callers past MaxRetryDelay.
 		if apiErr.RetryAfter > 0 {
-			return nonNegativeDelay(apiErr.RetryAfter)
+			return h.boundedWait(apiErr.RetryAfter)
 		}
 		if apiErr.RateLimited && !apiErr.RateLimitReset.IsZero() {
 			return nonNegativeDelay(time.Until(apiErr.RateLimitReset))
@@ -33,6 +38,16 @@ func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration 
 	return delay + jitter
 }
 
+// boundedWait caps a server-provided wait hint (Retry-After, rate-limit
+// reset) at MaxRetryDelay so one bad header cannot stall callers.
+func (h *StorHub) boundedWait(d time.Duration) time.Duration {
+	d = nonNegativeDelay(d)
+	if h.config.MaxRetryDelay > 0 && d > h.config.MaxRetryDelay {
+		return h.config.MaxRetryDelay
+	}
+	return d
+}
+
 func nonNegativeDelay(delay time.Duration) time.Duration {
 	if delay < 0 {
 		return 0
@@ -40,7 +55,16 @@ func nonNegativeDelay(delay time.Duration) time.Duration {
 	return delay
 }
 
+// isRetryableNetworkError reports whether a transport failure is worth
+// another attempt. User cancellation is never retried; everything else
+// transport-shaped (timeouts, torn connections, truncated reads) is.
+//
+// The semantic is shared with the github layer's isRetryableNetworkError;
+// keep the two identical.
 func isRetryableNetworkError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return true
