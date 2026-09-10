@@ -162,6 +162,28 @@ func (h *StorHub) DeleteProjectContext(ctx context.Context, project string) erro
 	return h.deleteRepo(ctx, project)
 }
 
+// projectHasUncommittedState reports whether the project has local
+// metadata mutations that have not been committed yet. It is a cheap,
+// lock-only check (no I/O) suitable as a pre-flight gate.
+func (h *StorHub) projectHasUncommittedState(project string) bool {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if !ok {
+		return false
+	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.dirty
+}
+
+// NOTE (residual race, accepted): the dirty gate above is check-then-act,
+// so a mutation can land after the check passes, and a concurrent upload
+// can reference a release between purge's classification and its delete.
+// Closing that window needs a purge-wide write fence (or a server-side
+// lease), which this codebase has no primitive for yet. The gate removes
+// the cheap, common case — a visibly dirty tree — while true
+// concurrent-write-during-purge remains callers-must-quiesce territory.
 func (h *StorHub) PurgeUntracked(project string) (*PurgeResult, error) {
 	return h.PurgeUntrackedContext(context.Background(), project)
 }
@@ -170,11 +192,22 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
+	// Fail closed on in-flight state: a dirty tree means a mutation is
+	// still converging, and classifying (or prune-committing) against it
+	// risks deleting releases a pending commit is about to reference.
+	// Flush first, then purge.
+	if h.projectHasUncommittedState(project) {
+		return nil, fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
+	}
 	var repoMeta *metadata.RepoMetadata
 	var releases []ghapi.Release
 	if err := h.purgeRetry(ctx, "load_metadata", func() error {
 		var err error
-		repoMeta, _, err = h.loadRepoMetadata(ctx, project)
+		// Fresh read, never the cached snapshot: files committed after
+		// the local cache was populated must be visible, or purge
+		// deletes releases that are live remotely. This also refreshes
+		// the cache, so the prune/commit tail below operates on truth.
+		repoMeta, _, err = h.loadRepoMetadataFresh(ctx, project)
 		return err
 	}); err != nil {
 		return nil, err
@@ -219,10 +252,18 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 			// An empty release holds no orphaned storage, so there is
 			// nothing to reclaim and no reason to drop it. Fresh rotation
 			// targets awaiting their first upload are exactly such
-			// empties; deleting them destroys curated headroom. A count
-			// failure keeps the old behavior (delete) rather than
-			// blocking reclamation on a read error.
-			if count, countErr := h.releaseAssetCount(ctx, project, release); countErr == nil && count == 0 {
+			// empties; deleting them destroys curated headroom.
+			//
+			// Fail closed on a count error, consistent with the upload
+			// picker: a release whose size cannot be determined must be
+			// skipped, never deleted. Deleting on a read error turns a
+			// transient GitHub outage into permanent data loss.
+			count, countErr := h.releaseAssetCount(ctx, project, release)
+			if countErr != nil {
+				logging.Warn(h.projectLogger("purge"), "purge skipping release with unknown asset count", "tag", release.TagName, "err", countErr)
+				continue
+			}
+			if count == 0 {
 				continue
 			}
 			releaseTasks = append(releaseTasks, deleteRelease{id: release.ID, tag: release.TagName})
