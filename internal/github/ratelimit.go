@@ -210,7 +210,6 @@ func (g *rateGovernor) reserve(cost int64, content, assetUpload bool) (time.Dura
 	// denials for a server that would accept the traffic.
 	var tokens float64
 	if !assetUpload {
-		tokens = g.tokens
 		refill := 0.0
 		if g.budget.seen && now.Before(g.budget.resetAt) {
 			spendable := float64(g.budget.remaining - g.cfg.reserve)
