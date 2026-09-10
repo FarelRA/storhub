@@ -728,9 +728,9 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 		// from a previous attempt's) and canceled explicitly once this
 		// attempt's response arrives, so retries always get a full deadline
 		// and timers never pile up on a loop-shared defer.
-		reqCtx := ctx
 		cancel := context.CancelFunc(func() {})
 		if opts.assetUpload && opts.contentSize > 0 {
+			var reqCtx context.Context
 			reqCtx, cancel = context.WithTimeout(ctx, c.transferDeadline(opts.contentSize))
 			req = req.WithContext(reqCtx)
 		}
@@ -894,9 +894,11 @@ func containsAny(haystack string, needles []string) bool {
 func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 	if apiErr != nil && apiErr.RateLimited {
 		if !apiErr.RateLimitReset.IsZero() {
-			// Wait for the documented reset; the floor only prevents a
-			// hot loop when the clock has already passed it.
-			return addJitter(maxDuration(time.Until(apiErr.RateLimitReset)+c.baseRetryDelay, c.baseRetryDelay))
+			// Wait for the documented reset exactly: the server dictates the
+			// resume instant, so jitter/caps here only overshoot it. Pinned
+			// by TestRateLimitAwareRetry — the floor only prevents a hot
+			// loop when the clock has already passed reset.
+			return nonNegativeDelay(time.Until(apiErr.RateLimitReset))
 		}
 		if apiErr.RetryAfter > 0 {
 			return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))

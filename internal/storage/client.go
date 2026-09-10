@@ -1508,6 +1508,9 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if repo := h.getGitRepo(project); repo != nil {
 		if fresh, _, freshErr := h.loadRepoMetadataFresh(ctx, project); freshErr == nil {
 			currentMeta = fresh
+			if err := currentMeta.Validate(); err != nil {
+				return err
+			}
 			if head := repo.headCommitSHA(); head != "" {
 				currentSHA = head
 			}

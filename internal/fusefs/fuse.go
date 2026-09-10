@@ -1527,16 +1527,6 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 	return nil
 }
 
-func (s *Filesystem) attachWriteState(inode uint64) *inodeWriteState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ws := s.writeStates[inode]; ws != nil {
-		ws.refs++
-		return ws
-	}
-	return nil
-}
-
 func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, targetPath string, bootstrap *writeBootstrap) (*inodeWriteState, error) {
 	s.mu.Lock()
 	if existing := s.writeStates[inode]; existing != nil {
