@@ -3014,6 +3014,14 @@ type mockGitHub struct {
 	// embedCap embedded assets while the true count stays higher. The
 	// dedicated list-assets endpoint always serves the true set.
 	embedCap int
+	// collideNext forces the next upload to repo/tag to fail once with a
+	// 422 already_exists body, simulating a concurrent writer winning the
+	// same asset name. Keyed "repo/tag". Test-only fault injection.
+	collideNext map[string]bool
+	// NOTE: never send X-RateLimit-* headers from this mock. Observed
+	// headers arm the governor's sustainable-pace path, whose reset-based
+	// wait always exceeds fail-fast test configs and 429s the suite.
+	// Governor behavior is covered by its own unit tests instead.
 }
 
 type mockRepo struct {
@@ -3321,6 +3329,12 @@ func (m *mockGitHub) handleCreateRelease(w http.ResponseWriter, r *http.Request,
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Mirror GitHub: creating a tag that already exists 422s instead of
+	// overwriting. The production double-create race depends on this.
+	if existing := repo.releasesByTag[payload.TagName]; existing != nil {
+		m.writeAlreadyExists(w, "Release", "tag_name", payload.TagName)
+		return
+	}
 	release := &mockRelease{
 		id:        repo.nextReleaseID,
 		tag:       payload.TagName,
@@ -3459,6 +3473,24 @@ func (m *mockGitHub) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Mirror GitHub: uploads target a release that must exist.
+	if repo.releasesByTag[parts[2]] == nil {
+		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "release not found"})
+		return
+	}
+	// Fault injection: one forced name collision for the sink retry test.
+	if m.collideNext[parts[1]+"/"+parts[2]] {
+		delete(m.collideNext, parts[1]+"/"+parts[2])
+		m.writeAlreadyExists(w, "ReleaseAsset", "name", name)
+		return
+	}
+	// Mirror GitHub: asset names are unique per release; a duplicate 422s.
+	for _, asset := range repo.assets {
+		if asset.releaseTag == parts[2] && asset.name == name {
+			m.writeAlreadyExists(w, "ReleaseAsset", "name", name)
+			return
+		}
+	}
 	// Mirror GitHub: a release holds at most 1000 assets; further uploads
 	// 422 with a file_count body (live shape from storhub-web v18).
 	count := 0
@@ -3645,6 +3677,20 @@ func (m *mockGitHub) writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// writeAlreadyExists mirrors GitHub's 422 duplicate body (live shape: 422
+// Validation Failed with an already_exists error entry).
+func (m *mockGitHub) writeAlreadyExists(w http.ResponseWriter, resource, field, value string) {
+	m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"message": "Validation Failed",
+		"errors": []map[string]any{{
+			"resource": resource,
+			"code":     "already_exists",
+			"field":    field,
+			"message":  field + " already_exists: " + value,
+		}},
+	})
 }
 
 func writeTempFile(t *testing.T, dir, name string, data []byte) string {
