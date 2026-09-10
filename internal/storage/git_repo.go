@@ -5,17 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	gitclient "github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage"
 )
 
@@ -99,8 +101,8 @@ func (r *gitRepo) remoteURL() string {
 	return fmt.Sprintf("https://github.com/%s/%s.git", r.owner, r.project)
 }
 
-func (r *gitRepo) auth() *http.BasicAuth {
-	return &http.BasicAuth{Username: r.owner, Password: r.token}
+func (r *gitRepo) auth() *githttp.BasicAuth {
+	return &githttp.BasicAuth{Username: r.owner, Password: r.token}
 }
 
 // release drops this process's claim on the cache dir. remove also
@@ -208,6 +210,17 @@ func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error)
 
 // writeCommitPush writes a file, commits, and pushes. Returns (commitSHA, contentSHA, error).
 func (r *gitRepo) writeCommitPush(ctx context.Context, path string, content []byte, message string) (string, string, error) {
+	return r.writeCommitPushCAS(ctx, path, content, message, "")
+}
+
+// writeCommitPushCAS is writeCommitPush with compare-and-swap: expectedOld is
+// the caller-observed HEAD commit OID (empty disables the pre-check). After
+// syncing, a non-empty expectedOld that no longer matches HEAD aborts with a
+// 409 conflict instead of silently overwriting the concurrent writer.
+// Regardless of the pre-check, the push carries a force-with-lease on the
+// post-sync HEAD so a writer racing the sync→push window is rejected rather
+// than silently won or lost against.
+func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content []byte, message, expectedOld string) (string, string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.ensure(ctx); err != nil {
@@ -215,6 +228,18 @@ func (r *gitRepo) writeCommitPush(ctx context.Context, path string, content []by
 	}
 	if err := r.sync(ctx); err != nil {
 		return "", "", err
+	}
+	base, err := r.headHashNoLock()
+	if err != nil {
+		return "", "", err
+	}
+	if expectedOld != "" {
+		if base.IsZero() || base.String() != expectedOld {
+			return "", "", &ghapi.APIError{
+				StatusCode: http.StatusConflict,
+				Message:    fmt.Sprintf("stale metadata version: expected %s, HEAD is %s", shortSHA(expectedOld), shortSHA(base.String())),
+			}
+		}
 	}
 	w, err := r.repo.Worktree()
 	if err != nil {
@@ -241,13 +266,51 @@ func (r *gitRepo) writeCommitPush(ctx context.Context, path string, content []by
 	if err != nil {
 		return "", "", fmt.Errorf("commit: %w", err)
 	}
-	if err := r.repo.PushContext(ctx, &git.PushOptions{
+	pushOpts := &git.PushOptions{
 		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
-	}); err != nil {
-		return "", "", fmt.Errorf("push: %w", err)
+	}
+	if !base.IsZero() {
+		pushOpts.ForceWithLease = &git.ForceWithLease{
+			RefName: plumbing.ReferenceName("refs/heads/" + defaultBranch),
+			Hash:    base,
+		}
+	}
+	if err := r.repo.PushContext(ctx, pushOpts); err != nil {
+		return "", "", casConflict(err, base)
 	}
 	commitSHA := hash.String()
 	return commitSHA, commitSHA, nil
+}
+
+// headHashNoLock returns the post-sync HEAD commit hash, or the zero hash
+// when the repo has no HEAD yet (brand-new, nothing committed). Callers must
+// hold r.mu.
+func (r *gitRepo) headHashNoLock() (plumbing.Hash, error) {
+	ref, err := r.repo.Reference(plumbing.HEAD, true)
+	if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return plumbing.ZeroHash, nil
+		}
+		return plumbing.ZeroHash, fmt.Errorf("HEAD ref: %w", err)
+	}
+	return ref.Hash(), nil
+}
+
+// casConflict maps a rejected lease/non-fast-forward push to a 409 conflict
+// so git-path CAS failures surface exactly like the REST path's stale-SHA
+// rejection; any other push error passes through untouched.
+func casConflict(err error, base plumbing.Hash) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "stale info") || strings.Contains(msg, "lease") {
+		return &ghapi.APIError{
+			StatusCode: http.StatusConflict,
+			Message:    fmt.Sprintf("concurrent metadata write (HEAD moved past %s): %s", shortSHA(base.String()), msg),
+		}
+	}
+	return fmt.Errorf("push: %w", err)
 }
 
 // listFileCommits returns commits that touch the given path, newest first.
@@ -295,12 +358,40 @@ func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataR
 
 // squashHistory creates a single orphan commit with the current metadata content and force pushes it.
 func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error {
+	return r.squashHistoryCAS(ctx, path, message, "")
+}
+
+// squashHistoryCAS is squashHistory with compare-and-swap: it syncs from
+// remote BEFORE reading HEAD (so the squashed content is the latest remote
+// truth, never a stale local copy), and the force-push carries a
+// force-with-lease on the post-sync HEAD instead of a blind force-push, so a
+// concurrent writer racing the squash is rejected with a 409 conflict rather
+// than silently discarded. A non-empty expectedOld additionally aborts when
+// the post-sync HEAD no longer matches the caller's observation.
+func (r *gitRepo) squashHistoryCAS(ctx context.Context, path, message, expectedOld string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.ensure(ctx); err != nil {
 		return err
 	}
-	// Read current content from HEAD
+	// Sync first: HEAD and content below must reflect remote truth.
+	if err := r.sync(ctx); err != nil {
+		return err
+	}
+	base, err := r.headHashNoLock()
+	if err != nil {
+		return err
+	}
+	if base.IsZero() {
+		return fmt.Errorf("squash: no HEAD to squash")
+	}
+	if expectedOld != "" && base.String() != expectedOld {
+		return &ghapi.APIError{
+			StatusCode: http.StatusConflict,
+			Message:    fmt.Sprintf("stale squash base: expected %s, HEAD is %s", shortSHA(expectedOld), shortSHA(base.String())),
+		}
+	}
+	// Read current content from the post-sync HEAD
 	content, err := r.readFileContentsNoLock(ctx, path)
 	if err != nil {
 		return fmt.Errorf("read current content: %w", err)
@@ -374,12 +465,19 @@ func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error
 		return fmt.Errorf("set ref: %w", err)
 	}
 
-	// 5. Force push
-	if err := r.repo.PushContext(ctx, &git.PushOptions{
+	// 5. Force push with a lease on the post-sync HEAD: a concurrent
+	// writer that advanced the remote since our sync rejects the push
+	// with a conflict instead of being silently discarded.
+	pushOpts := &git.PushOptions{
 		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
 		Force:         true,
-	}); err != nil {
-		return fmt.Errorf("force push: %w", err)
+		ForceWithLease: &git.ForceWithLease{
+			RefName: plumbing.ReferenceName("refs/heads/" + defaultBranch),
+			Hash:    base,
+		},
+	}
+	if err := r.repo.PushContext(ctx, pushOpts); err != nil {
+		return casConflict(err, base)
 	}
 	return nil
 }

@@ -76,7 +76,8 @@ func (h *StorHub) newChunkSink(ctx context.Context, project, releaseTag, uploadU
 // on error; put itself never deletes.
 func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 	const maxNameRetries = 5
-	for attempt := 0; attempt < maxNameRetries; attempt++ {
+	nameRetries := 0
+	for {
 		assetName, err := s.namer.Next()
 		if err != nil {
 			return err
@@ -98,11 +99,14 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 		}
 		if isAlreadyExists(err) {
 			s.hub.debugf("upload chunk asset name collision, retry asset=%s", assetName)
+			nameRetries++
+			if nameRetries >= maxNameRetries {
+				return fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
+			}
 			continue
 		}
 		return fmt.Errorf("upload chunk (offset %d): %w", offset, err)
 	}
-	return fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
 }
 
 func (h *StorHub) ensureRepo(ctx context.Context, project string) error {
@@ -265,7 +269,10 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		return "", "", fmt.Errorf("metadata too large: %d bytes exceeds %d", len(payload), maxMetadataBytes)
 	}
 	if repo := h.getGitRepo(project); repo != nil {
-		commitSHA, contentSHA, err := repo.writeCommitPush(ctx, metadataFilePath, payload, message)
+		// Git path enforces previousSHA exactly like the REST path's
+		// conditional PUT: a stale token aborts with 409 instead of
+		// silently overwriting the concurrent writer (e.g. rollback).
+		commitSHA, contentSHA, err := repo.writeCommitPushCAS(ctx, metadataFilePath, payload, message, previousSHA)
 		if err != nil {
 			logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return "", "", err

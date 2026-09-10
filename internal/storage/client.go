@@ -1501,6 +1501,18 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if err := currentMeta.Validate(); err != nil {
 		return err
 	}
+	// Git-path CAS pin: cached/fresh loads carry "" as the version token,
+	// which would make the write-time compare vacuous and let this rollback
+	// silently overwrite a concurrent writer. Re-sync and pin the real HEAD
+	// commit, so commitRepoMetadata aborts with 409 when HEAD moved.
+	if repo := h.getGitRepo(project); repo != nil {
+		if fresh, _, freshErr := h.loadRepoMetadataFresh(ctx, project); freshErr == nil {
+			currentMeta = fresh
+			if head := repo.headCommitSHA(); head != "" {
+				currentSHA = head
+			}
+		}
+	}
 	rollbackMeta, err := h.getMetadataRevision(ctx, project, commitSHA)
 	if err != nil {
 		return err
@@ -1722,7 +1734,14 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	h.debugf("metadata update complete project=%s elapsed=%s", project, h.config.Now().UTC().Sub(started))
 	logging.Debug(h.projectLogger(project), "metadata update complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started))
 
-	return pm.meta, nil
+	// Return a snapshot Clone, never the live pointer: callers mutating the
+	// result must not corrupt the hub's in-memory truth (or the pending
+	// batch) behind pm.mu's back.
+	pm.mu.RLock()
+	out := pm.meta.Clone()
+	pm.mu.RUnlock()
+	out.RebuildIndexes()
+	return &out, nil
 }
 
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {
