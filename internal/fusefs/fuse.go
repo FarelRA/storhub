@@ -395,9 +395,11 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		return nil, err
 	}
 	// Startup sweep: handle-* and inode-* flat files from a crashed
-	// previous mount are pure garbage - nothing can reference them because
-	// no file is open yet and the filesystem constructed below owns every
-	// future temp. The recovery/ quarantine is preserved by design.
+	// previous mount may hold the only copy of SIGKILL-before-commit
+	// data, so they are QUARANTINED into recovery/ instead of deleted.
+	// Nothing can reference them (no file is open yet), but the bytes
+	// survive for manual recovery. The recovery/ directory itself is
+	// preserved by design.
 	// Construction past this point cannot fail, so no failed New leaves a
 	// claim behind; Close releases it.
 	if entries, err := os.ReadDir(cacheDir); err == nil {
@@ -406,9 +408,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 			if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
 				continue
 			}
-			if err := os.RemoveAll(path.Join(cacheDir, name)); err != nil {
-				logging.Warn(opts.Logger, "fuse startup sweep failed", "path", name, "err", err)
-			}
+			quarantinePath(path.Join(cacheDir, name), opts.Logger)
 		}
 	}
 	fsys := &Filesystem{
@@ -559,6 +559,26 @@ func (s *Filesystem) errorf(format string, args ...any) {
 
 func (s *Filesystem) recoveryDir() string {
 	return path.Join(s.cacheDir, "recovery")
+}
+
+// quarantinePath moves tempPath into <cacheDir>/recovery without needing
+// a Filesystem (used by the startup sweep before one exists). Failures
+// are logged, never fatal: the leftover stays for the next sweep.
+func quarantinePath(tempPath string, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	dir := path.Join(path.Dir(tempPath), "recovery")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logging.Error(logger, "startup sweep quarantine failed; leftover kept in cache", "path", tempPath, "err", err)
+		return
+	}
+	target := path.Join(dir, fmt.Sprintf("%s.%d", path.Base(tempPath), time.Now().UnixNano()))
+	if err := os.Rename(tempPath, target); err != nil {
+		logging.Error(logger, "startup sweep quarantine failed; leftover kept in cache", "path", tempPath, "err", err)
+		return
+	}
+	logging.Warn(logger, "startup sweep quarantined leftover for manual recovery", "path", tempPath, "saved", target)
 }
 
 // quarantineFile moves tempPath into the recovery directory, which the
@@ -1442,9 +1462,10 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			writeState.mu.Unlock()
 		}
 	}
-	if h.writeState == nil {
-		h.writeState = s.attachWriteState(inode)
-	}
+	// A read-only open never attaches to another writer's writeState:
+	// it serves the pinned snapshot instead. Sharing would let its
+	// commit() push another handle's dirty bytes and let its Release
+	// drop the writer's refcount.
 	return h, nil
 }
 
@@ -2560,6 +2581,11 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	}
 	if h.writeState.deleted || strings.TrimSpace(handlePath) == "" {
 		h.writeState.mu.Unlock()
+		// POSIX unlinked-open-handle semantics: writes via an open fd
+		// succeed and reads are served from the temp overlay; the data
+		// is discarded at Release (link count zero). Pinned by
+		// TestFUSEHandleRenameAndUnlinkSemantics — do NOT return an
+		// error here.
 		return 0
 	}
 	targetPath := handlePath
@@ -2861,14 +2887,19 @@ func (h *storhubHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileL
 	}
 	s := h.fs
 	s.lockCond.L.Lock()
-	defer s.lockCond.L.Unlock()
 	for {
 		errno := s.setLockLocked(h.inode, owner, *lk)
 		if errno == 0 {
+			// Release s.mu BEFORE taking handle.mu: Release's
+			// releaseTrackedLocks takes them in the opposite order
+			// (handle.mu, then s.mu), so nesting them here is an
+			// ABBA deadlock.
+			s.lockCond.L.Unlock()
 			h.trackLockOwner(owner, lk.Typ)
 			return 0
 		}
 		if err := ctx.Err(); err != nil {
+			s.lockCond.L.Unlock()
 			return errnoFromError(err)
 		}
 		s.lockCond.Wait()
