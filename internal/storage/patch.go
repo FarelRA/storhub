@@ -30,6 +30,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 	})
 	if err != nil {
+		h.compensateDeleteAssets(ctx, project, patchedChunks)
 		return nil, "", err
 	}
 
@@ -145,6 +146,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	}
 	defer func() { _ = snapshot.Close() }()
 	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
+	var uploadedAll []ChunkInfo
 	for offset := int64(0); offset < finalSize; offset += chunkSize {
 		end := offset + chunkSize
 		if end > finalSize {
@@ -156,13 +158,16 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 				return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 			})
 			if err != nil {
+				h.compensateDeleteAssets(ctx, project, append(uploadedAll, uploaded...))
 				return nil, "", err
 			}
+			uploadedAll = append(uploadedAll, uploaded...)
 			assembled = append(assembled, uploaded...)
 			continue
 		}
 		reused, err := h.referenceFileRangeChunks(ctx, project, repoMeta.Chunks, file, segment.start, segment.end)
 		if err != nil {
+			h.compensateDeleteAssets(ctx, project, uploadedAll)
 			return nil, "", err
 		}
 		assembled = append(assembled, reused...)
@@ -268,13 +273,16 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 
 	assembled := resolved
 	shift := int64(0)
+	var uploadedAll []ChunkInfo
 	for _, edit := range edits {
 		inserted, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, edit.Start+shift, edit.Data, func(remaining int) (string, string, error) {
 			return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 		})
 		if err != nil {
+			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))
 			return nil, "", err
 		}
+		uploadedAll = append(uploadedAll, inserted...)
 		assembled = spliceEdit(assembled, edit.Start+shift, edit.DeleteSize, edit.Len(), inserted)
 		shift += edit.Len() - edit.DeleteSize
 	}

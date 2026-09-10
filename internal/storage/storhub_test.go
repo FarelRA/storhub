@@ -3132,7 +3132,7 @@ func (m *mockGitHub) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.repos[payload.Name]; exists {
-		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "repository already exists"})
+		m.writeAlreadyExists(w, "Repository", "name", payload.Name)
 		return
 	}
 	m.repos[payload.Name] = &mockRepo{
