@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
@@ -371,11 +373,39 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 	return nil
 }
 
+// sortReleasesOldestFirst orders releases by numeric v tag ascending so
+// uploads pack elders full before opening new headroom. Tags without a
+// numeric suffix keep listed order after all numeric ones.
+func sortReleasesOldestFirst(releases []ghapi.Release) []ghapi.Release {
+	out := append([]ghapi.Release(nil), releases...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ni, oki := meta.ParseNumericReleaseTag(out[i].TagName)
+		nj, okj := meta.ParseNumericReleaseTag(out[j].TagName)
+		switch {
+		case oki && okj:
+			return ni < nj
+		case oki:
+			return true
+		case okj:
+			return false
+		default:
+			return false
+		}
+	})
+	return out
+}
+
 func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, metadata *RepoMetadata, requiredSlots int) (string, string, error) {
 	releases, err := h.listReleasesCached(ctx, project)
 	if err != nil {
 		return "", "", err
 	}
+	// Oldest-first: pack elders full before opening new headroom, and
+	// consume curated empty releases instead of stranding them. GitHub
+	// lists newest-first (and the mock sorts tags as strings, where
+	// "v10" < "v9"), so the preference is enforced here and is
+	// independent of listing order. Non-numeric tags sort last, stable.
+	releases = sortReleasesOldestFirst(releases)
 	if requiredSlots <= 0 {
 		for _, r := range releases {
 			metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
@@ -466,6 +496,18 @@ func (h *StorHub) createRelease(ctx context.Context, project, tag, name string) 
 	}
 	release, err := h.gh.CreateRelease(ctx, h.owner, project, tag, name)
 	if err != nil {
+		// Double-create race: a rival writer created this tag between our
+		// list and our create (suspected once in prod: v17/v18's shared
+		// timestamp). Reuse the rival's release instead of failing.
+		var apiErr *ghapi.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnprocessableEntity && isAlreadyExists(apiErr) {
+			existing, getErr := h.gh.GetReleaseByTag(ctx, h.owner, project, tag)
+			if getErr != nil {
+				return nil, fmt.Errorf("create release %s lost race, reuse failed: %w", tag, getErr)
+			}
+			h.addReleaseToCache(project, existing)
+			return existing, nil
+		}
 		return nil, err
 	}
 	h.addReleaseToCache(project, release)

@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -225,5 +228,171 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 	tag2, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", &workingMeta, 1)
 	if tag2 != "v999" {
 		t.Fatalf("expected v999 after invalidation, got %s", tag2)
+	}
+}
+
+// A rival writer may create the next release between our list and our
+// create (single suspected prod instance: v17/v18's shared timestamp).
+// GitHub answers the loser's create with 422 already_exists; we must reuse
+// the rival's release, not fail the upload.
+func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
+	meta, err := hub.UploadFile("project-race", "a.txt", input)
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-race")
+	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	backend.addAssetsToRelease(t, "project-race", firstRelease, 999)
+	// Prime the release cache with only the (now full) first release, then
+	// let the rival create v2 out-of-band: our cache is stale by design.
+	if _, err := hub.listReleases(context.Background(), "project-race"); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	rival := backend.addRelease(t, "project-race", "v2")
+	workingMeta := repoMeta.Clone()
+	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-race", &workingMeta, 1)
+	if err != nil {
+		t.Fatalf("must reuse rival release instead of failing: %v", err)
+	}
+	if tag != rival.tag {
+		t.Fatalf("expected rival release %s, got %s", rival.tag, tag)
+	}
+}
+
+// The picker must prefer the oldest release with space (lowest v number):
+// pack elders full before opening new headroom, and always consume the
+// curated empty releases instead of stranding them. API order is string
+// sort ("v10" < "v9"), so the preference is enforced prod-side and is
+// independent of listing order.
+func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
+	meta, err := hub.UploadFile("project-oldest", "a.txt", input)
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
+	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	backend.addAssetsToRelease(t, "project-oldest", firstRelease, 999)
+	backend.addRelease(t, "project-oldest", "v9")
+	backend.addAssetToRelease(t, "project-oldest", "v9", "elder.bin", []byte("elder"))
+	backend.addRelease(t, "project-oldest", "v10")
+	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
+	meta2, err := hub.UploadFile("project-oldest", "b.txt", input2)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	repoMeta2, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
+	if got := repoMeta2.Chunks[meta2.Chunks[0]].Release; got != "v9" {
+		t.Fatalf("expected oldest-with-space v9, landed %s", got)
+	}
+}
+
+// Purge reclaims orphaned storage; an empty release holds nothing, so it
+// must never be dropped. Curated rotation targets (and freshly created
+// releases awaiting their first upload) are exactly such empties.
+func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
+	if _, err := hub.UploadFile("project-purge-empty", "kept.txt", input); err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	if err := hub.FlushMetadata(context.Background()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	empty := backend.addRelease(t, "project-purge-empty", "v-empty")
+	result, err := hub.PurgeUntracked("project-purge-empty")
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if result.DeletedReleases != 0 {
+		t.Fatalf("purge must not drop empty releases, got %+v", result)
+	}
+	if backend.repo("project-purge-empty").releasesByTag[empty.tag] == nil {
+		t.Fatal("empty release was deleted by purge")
+	}
+}
+
+// A concurrent writer winning the same asset name surfaces as 422
+// already_exists; the sink must retry with a fresh name and the file must
+// land intact. collideNext injects exactly one such collision.
+func TestRegressionAssetNameCollisionRetries(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	backend.collideNext = map[string]bool{"project-collide/v1": true}
+	payload := bytes.Repeat([]byte("c"), int(testSmallChunkSize)) // exactly one chunk
+	input := writeTempFile(t, t.TempDir(), "collide.txt", payload)
+	if _, err := hub.UploadFile("project-collide", "collide.txt", input); err != nil {
+		t.Fatalf("upload must survive one name collision: %v", err)
+	}
+	if n := len(backend.repo("project-collide").assets); n != 1 {
+		t.Fatalf("expected exactly 1 stored asset after retry, got %d", n)
+	}
+	output := filepath.Join(t.TempDir(), "collide.out")
+	if err := hub.DownloadFile("project-collide", "collide.txt", output); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("downloaded content differs after collision retry")
+	}
+}
+
+// (2a) A multi-chunk file whose release fills mid-upload must spread the
+// remaining chunks onto a fresh release with both tags registered, and the
+// file must download intact. v1 sits at 999 true assets behind a truncated
+// 950 embedded array, so the picker targets it and chunk 2 forces rotation.
+func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
+	backend := newMockGitHub(t)
+	backend.embedCap = 950
+	hub := backend.newClient(t, smallTransferTestConfig())
+	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("s"))
+	seedMeta, err := hub.UploadFile("project-spread", "seed.txt", seed)
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
+	firstRelease := repoMeta.Chunks[seedMeta.Chunks[0]].Release
+	backend.addAssetsToRelease(t, "project-spread", firstRelease, 998) // 999 true, 950 embedded
+	payload := bytes.Repeat([]byte("m"), int(2*testSmallChunkSize+4))  // 3 chunks
+	input := writeTempFile(t, t.TempDir(), "spread.bin", payload)
+	meta, err := hub.UploadFile("project-spread", "spread.bin", input)
+	if err != nil {
+		t.Fatalf("spread upload: %v", err)
+	}
+	if len(meta.Chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(meta.Chunks))
+	}
+	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
+	seen := map[string]bool{}
+	for _, id := range meta.Chunks {
+		seen[metaState.Chunks[id].Release] = true
+	}
+	if len(seen) != 2 || !seen[firstRelease] {
+		t.Fatalf("expected chunks spread across %s and a new release, got %v", firstRelease, seen)
+	}
+	for tag := range seen {
+		if _, ok := metaState.Releases[tag]; !ok {
+			t.Fatalf("rotated release %s missing from metadata catalog", tag)
+		}
+	}
+	output := filepath.Join(t.TempDir(), "spread.out")
+	if err := hub.DownloadFile("project-spread", "spread.bin", output); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("downloaded content differs after mid-file rotation")
 	}
 }

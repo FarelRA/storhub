@@ -216,6 +216,15 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	var assetTasks []deleteAsset
 	for _, release := range releases {
 		if _, ok := trackedReleases[release.TagName]; !ok {
+			// An empty release holds no orphaned storage, so there is
+			// nothing to reclaim and no reason to drop it. Fresh rotation
+			// targets awaiting their first upload are exactly such
+			// empties; deleting them destroys curated headroom. A count
+			// failure keeps the old behavior (delete) rather than
+			// blocking reclamation on a read error.
+			if count, countErr := h.releaseAssetCount(ctx, project, release); countErr == nil && count == 0 {
+				continue
+			}
 			releaseTasks = append(releaseTasks, deleteRelease{id: release.ID, tag: release.TagName})
 			continue
 		}
