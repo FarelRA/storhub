@@ -208,8 +208,9 @@ func (g *rateGovernor) reserve(cost int64, content, assetUpload bool) (time.Dura
 	// Asset uploads skip this: the upload endpoint never reports a budget,
 	// so pacing bursts against a stale core snapshot only manufactures
 	// denials for a server that would accept the traffic.
-	tokens := g.tokens
+	var tokens float64
 	if !assetUpload {
+		tokens = g.tokens
 		refill := 0.0
 		if g.budget.seen && now.Before(g.budget.resetAt) {
 			spendable := float64(g.budget.remaining - g.cfg.reserve)

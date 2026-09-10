@@ -1319,6 +1319,10 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		return nil, shfs.AlreadyExists(cleanName)
 	}
 	pm.meta.EnsureRelease(releaseTag, h.config.Now().Unix())
+	// Rotation may have spread this file's chunks across releases;
+	// ensuring only the initial tag would strand rotated chunks outside
+	// the catalog where PurgeUntracked deletes live data.
+	ensureChunkReleases(pm.meta, results, h.config.Now().Unix())
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(results))
