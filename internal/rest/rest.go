@@ -1996,23 +1996,39 @@ func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, p
 }
 
 func (h *restHandler) readMutationBody(w http.ResponseWriter, r *http.Request, body io.Reader) ([]byte, error) {
-	payload, err := io.ReadAll(io.LimitReader(body, h.opts.MaxPatchBodySize+1))
+	payload, err := readCappedBody(body, h.opts.MaxPatchBodySize)
 	if err != nil {
+		if errors.Is(err, errCappedBody) {
+			return nil, errPayloadTooLarge(fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
+		}
 		return nil, err
-	}
-	if int64(len(payload)) > h.opts.MaxPatchBodySize {
-		return nil, errPayloadTooLarge(fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
 	}
 	return payload, nil
 }
 
 func (h *restHandler) readPatchBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
+	payload, err := readCappedBody(r.Body, h.opts.MaxPatchBodySize)
+	if err != nil {
+		if errors.Is(err, errCappedBody) {
+			return nil, errPayloadTooLarge("patch payload exceeds the configured limit")
+		}
+		return nil, err
+	}
+	return payload, nil
+}
+
+// readCappedBody buffers at most limit+1 bytes; a nil return with errCapped
+// signals the caller to map its own size-specific 413 message so existing
+// endpoint wordings stay unchanged.
+var errCappedBody = errPayloadTooLarge("body exceeds the configured limit")
+
+func readCappedBody(body io.Reader, limit int64) ([]byte, error) {
+	payload, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(payload)) > h.opts.MaxPatchBodySize {
-		return nil, errPayloadTooLarge("patch payload exceeds the configured limit")
+	if int64(len(payload)) > limit {
+		return nil, errCappedBody
 	}
 	return payload, nil
 }

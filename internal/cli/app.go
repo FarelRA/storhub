@@ -371,8 +371,7 @@ The --yes flag is mandatory so a typo can never destroy a project.`,
 }
 
 func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	confirmed, _ := cmd.Flags().GetBool("yes")
 	if !confirmed {
 		return &usageError{fmt.Errorf("deleting project %q removes its repository, releases, and every file; pass --yes to confirm", args[0])}
@@ -485,7 +484,7 @@ func (a *App) shutdownHub() {
 	if a.hub == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hubShutdownTimeout)
 	defer cancel()
 	if err := a.hub.Shutdown(ctx); err != nil && a.stderr != nil {
 		_, _ = fmt.Fprintf(a.stderr, "warning: metadata flush failed: %v\n", err)
@@ -601,8 +600,7 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 
 func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 	public, _ := cmd.Flags().GetBool("public")
 
@@ -627,8 +625,7 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runDownload(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
 	if err != nil {
 		return err
@@ -648,8 +645,7 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runList(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	long, _ := cmd.Flags().GetBool("long")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
@@ -675,8 +671,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runStat(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -698,8 +693,7 @@ func jsonOutStat(cmd *cobra.Command) bool {
 }
 
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -744,8 +738,7 @@ func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size i
 }
 
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -758,8 +751,7 @@ func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runRemove(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	recursive, _ := cmd.Flags().GetBool("recursive")
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
@@ -778,8 +770,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runMove(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -792,8 +783,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runAppend(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -811,8 +801,7 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runWrite(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid offset %q: %w", args[2], err)
@@ -834,8 +823,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runPatch(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid offset %q: %w", args[2], err)
@@ -861,8 +849,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -882,8 +869,7 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runRollback(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -896,8 +882,7 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
@@ -912,8 +897,7 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runMount(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
@@ -935,7 +919,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = fsys.Close() }()
-	if err := os.MkdirAll(args[1], 0o755); err != nil {
+	if err := os.MkdirAll(args[1], mountDirPerm); err != nil {
 		return err
 	}
 	if err := fsys.Mount(args[1]); err != nil {
@@ -989,7 +973,7 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 			return
 		}
 		time.Sleep(delay)
-		if delay < 8*time.Second {
+		if delay < unmountBackoffCap {
 			delay *= 2
 		}
 	}
@@ -1001,8 +985,7 @@ var (
 )
 
 func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	listen, _ := cmd.Flags().GetString("listen")
 	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
@@ -1081,15 +1064,15 @@ func newRESTServer(listen string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              listen,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: restReadHeaderBudget,
 		// No whole-request ReadTimeout: it bounds body reads too, killing
 		// large uploads mid-flight (a 400 MB file over a 15 MB/s link dies
 		// at 30 s with "context canceled" cascading into GitHub). Slow-loris
 		// protection lives in ReadHeaderTimeout; body abuse is bounded by
 		// explicit size enforcement in the content handlers instead.
 		ReadTimeout:  0,
-		WriteTimeout: 5 * time.Minute,
-		IdleTimeout:  2 * time.Minute,
+		WriteTimeout: restWriteBudget,
+		IdleTimeout:  restIdleBudget,
 	}
 }
 
@@ -1117,8 +1100,7 @@ before pending metadata is flushed.`,
 }
 
 func (a *App) runServe(cmd *cobra.Command, args []string) error {
-	token, _ := cmd.Flags().GetString("token")
-	apiBase, _ := cmd.Flags().GetString("api-base")
+	token, apiBase := cmdAuth(cmd)
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
@@ -1137,23 +1119,11 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	// setup must not kill the process with a half-attached mount left behind.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fsys, err := newFUSEFn(hub, args[0], fuseOpts)
+	fsys, err := a.setupServeMount(ctx, hub, args[0], args[1], fuseOpts)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = fsys.Close() }()
-	if err := os.MkdirAll(args[1], 0o755); err != nil {
-		return err
-	}
-	if err := fsys.Mount(args[1]); err != nil {
-		return err
-	}
-	if ctx.Err() != nil {
-		if uerr := fsys.Unmount(); uerr != nil {
-			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", uerr, args[1])
-		}
-		return errors.New("interrupted while mounting " + args[0])
-	}
 	// Single owner of fsys.Wait: everything below joins through fsDone.
 	fsDone := fsWait(fsys)
 	// abort stops a half-started serve: the mount comes down before the
@@ -1164,18 +1134,10 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 		<-fsDone
 		return err
 	}
-	opts, err := serveAuthOptions(cmd)
+	server, opts, err := a.setupServeREST(cmd, hub, args[0], listen)
 	if err != nil {
 		return abort(err)
 	}
-	// `serve <project> <mount>`: the REST surface (and thus the web console)
-	// is pinned to that project - no free-form selector needed.
-	opts.DefaultProject = args[0]
-	handler, err := a.buildRESTHandler(hub, opts)
-	if err != nil {
-		return abort(err)
-	}
-	server := newRESTServer(listen, handler)
 	errCh := make(chan error, 1)
 	errDone := make(chan struct{})
 	go func() {
@@ -1187,10 +1149,56 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
 	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to stop")
 
-	// Not errgroup: teardown must be ORDERED - drain HTTP before pulling
-	// the mount out from under in-flight readers, join both goroutines,
-	// and only then let Run flush metadata. A plain select with explicit
-	// joins keeps that contract visible.
+	return a.joinServe(ctx, stop, fsys, args[1], server, fsDone, errCh, errDone)
+}
+
+// setupServeMount creates the FUSE instance, attaches it at mountPoint, and
+// fails closed on an interrupt arriving mid-setup.
+func (a *App) setupServeMount(ctx context.Context, hub *storhub.StorHub, project, mountPoint string, fuseOpts storhub.FUSEOptions) (fuseMount, error) {
+	fsys, err := newFUSEFn(hub, project, fuseOpts)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(mountPoint, mountDirPerm); err != nil {
+		_ = fsys.Close()
+		return nil, err
+	}
+	if err := fsys.Mount(mountPoint); err != nil {
+		_ = fsys.Close()
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		if uerr := fsys.Unmount(); uerr != nil {
+			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", uerr, mountPoint)
+		}
+		_ = fsys.Close()
+		return nil, errors.New("interrupted while mounting " + project)
+	}
+	return fsys, nil
+}
+
+// setupServeREST resolves auth policy and builds the REST server for serve.
+// The REST surface is pinned to the served project.
+func (a *App) setupServeREST(cmd *cobra.Command, hub *storhub.StorHub, project, listen string) (*http.Server, shrest.Options, error) {
+	opts, err := serveAuthOptions(cmd)
+	if err != nil {
+		return nil, opts, err
+	}
+	// `serve <project> <mount>`: the REST surface (and thus the web console)
+	// is pinned to that project - no free-form selector needed.
+	opts.DefaultProject = project
+	handler, err := a.buildRESTHandler(hub, opts)
+	if err != nil {
+		return nil, opts, err
+	}
+	return newRESTServer(listen, handler), opts, nil
+}
+
+// joinServe waits for the first surface to stop, then tears the other down
+// in ORDER: drain HTTP before pulling the mount out from under in-flight
+// readers, join both goroutines, and only then let Run flush metadata.
+// A plain select with explicit joins keeps that contract visible (not errgroup).
+func (a *App) joinServe(ctx context.Context, stop context.CancelFunc, fsys fuseMount, mountPoint string, server *http.Server, fsDone <-chan struct{}, errCh <-chan error, errDone <-chan struct{}) error {
 	var serveErr error
 	fsDown := false
 	select {
@@ -1228,7 +1236,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	// any client that might still be reading through it.
 	shutdownRESTServer(server, a.stderr)
 	if !fsDown {
-		unmountWithRetry(fsys, args[1], a.stderr)
+		unmountWithRetry(fsys, mountPoint, a.stderr)
 	}
 	<-fsDone
 	// Join the listener goroutine so nothing outlives this function.
@@ -1239,7 +1247,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 }
 
 func shutdownRESTServer(server *http.Server, report io.Writer) {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), restShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil && report != nil {
 		_, _ = fmt.Fprintf(report, "graceful shutdown failed: %v\n", err)
@@ -1274,7 +1282,7 @@ func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) er
 		}
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), restShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_, _ = fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
@@ -1403,6 +1411,7 @@ func parseEnvInt64(key string, fallback int64) int64 {
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
+		warnEnvParse(key, value, err)
 		return fallback
 	}
 	return parsed
@@ -1415,6 +1424,7 @@ func parseEnvDuration(key string, fallback time.Duration) time.Duration {
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
+		warnEnvParse(key, value, err)
 		return fallback
 	}
 	return parsed
@@ -1444,10 +1454,38 @@ func parseEnvBool(key string, fallback bool) bool {
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
+		warnEnvParse(key, value, err)
 		return fallback
 	}
 	return parsed
 }
+
+// warnEnvParse reports an invalid STORHUB_* value that fell back to its
+// default. The fallback preserves behavior; the warning makes the
+// misconfiguration visible instead of silent.
+func warnEnvParse(key, value string, err error) {
+	_, _ = fmt.Fprintf(os.Stderr, "%s storhub: warning: invalid %s=%q (%v); using default\n",
+		time.Now().UTC().Format(time.RFC3339), key, value, err)
+}
+
+// cmdAuth extracts the auth flags every command shares: explicit --token
+// (resolved against $GITHUB_TOKEN) plus --api-base.
+func cmdAuth(cmd *cobra.Command) (token, apiBase string) {
+	token, _ = cmd.Flags().GetString("token")
+	apiBase, _ = cmd.Flags().GetString("api-base")
+	return token, apiBase
+}
+
+// Named timeouts/budgets so call sites read as policy, not literals.
+const (
+	hubShutdownTimeout   = 30 * time.Second
+	restShutdownTimeout  = 10 * time.Second
+	restReadHeaderBudget = 5 * time.Second
+	restWriteBudget      = 5 * time.Minute
+	restIdleBudget       = 2 * time.Minute
+	unmountBackoffCap    = 8 * time.Second
+	mountDirPerm         = 0o755
+)
 
 func ternary[T any](cond bool, left, right T) T {
 	if cond {
