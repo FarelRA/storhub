@@ -113,7 +113,9 @@ type Client interface {
 	RevisionContext(ctx context.Context, project string) (string, error)
 	ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
+	RevertPathContext(ctx context.Context, project, path, commitSHA string) error
 	PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error)
+	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error)
 	DeleteProjectContext(ctx context.Context, project string) error
 	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 }
@@ -261,7 +263,15 @@ func (readOnlyShare) RollbackMetadataContext(ctx context.Context, project, commi
 	return errReadOnly()
 }
 
+func (readOnlyShare) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+	return errReadOnly()
+}
+
 func (readOnlyShare) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
 	return nil, errReadOnly()
 }
 
@@ -448,6 +458,18 @@ type utimesRequest struct {
 
 type rollbackRequest struct {
 	CommitSHA string `json:"commit_sha"`
+}
+
+type revertPathRequest struct {
+	Path      string `json:"path"`
+	CommitSHA string `json:"commit_sha"`
+}
+
+type pruneRequest struct {
+	// Scope is one of objects|assets|history|all (empty means all).
+	Scope  string `json:"scope,omitempty"`
+	Keep   int    `json:"keep,omitempty"`
+	DryRun bool   `json:"dry_run,omitempty"`
 }
 
 type shareRequest struct {
@@ -654,7 +676,9 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/chown", h.handleChown)
 	r.Post("/ops/utimes", h.handleUtimes)
 	r.Post("/ops/rollback", h.handleRollback)
+	r.Post("/ops/revert-path", h.handleRevertPath)
 	r.Post("/ops/purge", h.handlePurge)
+	r.Post("/ops/prune", h.handlePrune)
 	r.Get("/shares", h.handleProjectShares)
 	r.Post("/shares", h.handleProjectShares)
 	r.Get("/shares/{shareID}", h.handleProjectShare)
@@ -1490,6 +1514,63 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 		Status:          "purged",
 		DeletedReleases: result.DeletedReleases,
 		DeletedAssets:   result.DeletedAssets,
+	})
+}
+
+func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	var req revertPathRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := h.clientFor(r).RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "reverted"})
+}
+
+// pruneResponse is the typed result of a granular prune.
+type pruneResponse struct {
+	Project          string   `json:"project"`
+	Status           string   `json:"status"`
+	Scope            string   `json:"scope"`
+	DryRun           bool     `json:"dry_run"`
+	DeletedObjects   int      `json:"deleted_objects"`
+	DeletedReleases  int      `json:"deleted_releases"`
+	DeletedAssets    int      `json:"deleted_assets"`
+	HistoryCompacted bool     `json:"history_compacted"`
+	Notes            []string `json:"notes,omitempty"`
+}
+
+func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	var req pruneRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	scope := req.Scope
+	if scope == "" {
+		scope = "all"
+	}
+	result, err := h.clientFor(r).PruneContext(r.Context(), project, scope, req.Keep, req.DryRun)
+	if err != nil {
+		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err))
+		h.writeMappedError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, pruneResponse{
+		Project:          project,
+		Status:           "pruned",
+		Scope:            string(result.Scope),
+		DryRun:           result.DryRun,
+		DeletedObjects:   result.DeletedObjects,
+		DeletedReleases:  result.DeletedReleases,
+		DeletedAssets:    result.DeletedAssets,
+		HistoryCompacted: result.HistoryCompacted,
+		Notes:            result.Notes,
 	})
 }
 

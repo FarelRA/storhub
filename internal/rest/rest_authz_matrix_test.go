@@ -93,6 +93,13 @@ func TestAuthorizationMatrix(t *testing.T) {
 		_, err := c.PurgeUntrackedContext(context.Background(), "demo")
 		return err
 	}
+	revertPath := func(c *authorizedClient) error {
+		return c.RevertPathContext(context.Background(), "demo", "team/plan.txt", "deadbeef")
+	}
+	prune := func(c *authorizedClient) error {
+		_, err := c.PruneContext(context.Background(), "demo", "objects", 1, true)
+		return err
+	}
 	deleteProject := func(c *authorizedClient) error {
 		return c.DeleteProjectContext(context.Background(), "demo")
 	}
@@ -126,6 +133,10 @@ func TestAuthorizationMatrix(t *testing.T) {
 		{name: "reader lists revisions on readable root", principal: outsider, op: listRevisions, allowed: true},
 		{name: "admin purges", principal: admin, op: purge, allowed: true},
 		{name: "non-admin denied purge", principal: outsider, op: purge, allowed: false},
+		{name: "admin reverts a path", principal: admin, op: revertPath, allowed: true},
+		{name: "non-admin denied path revert", principal: owner, op: revertPath, allowed: false},
+		{name: "admin prunes", principal: admin, op: prune, allowed: true},
+		{name: "non-admin denied prune", principal: owner, op: prune, allowed: false},
 		{name: "admin deletes project", principal: admin, op: deleteProject, allowed: true},
 		{name: "non-admin denied project deletion", principal: owner, op: deleteProject, allowed: false},
 	}

@@ -125,6 +125,35 @@ func TestRESTFilesystemWorkflow(t *testing.T) {
 	}
 }
 
+func TestRESTRevertPathAndPrune(t *testing.T) {
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/readme.txt", strings.NewReader("hello"), nil, http.StatusCreated)
+
+	// Per-path revert records the path + revision on the client.
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/revert-path",
+		revertPathRequest{Path: "docs/readme.txt", CommitSHA: "deadbeef"}, http.StatusOK)
+	client.mu.Lock()
+	rec := append([]string(nil), client.revertPaths...)
+	client.mu.Unlock()
+	if len(rec) != 1 || rec[0] != "docs/readme.txt@deadbeef" {
+		t.Fatalf("revert-path not recorded: %v", rec)
+	}
+
+	// Prune returns a typed result echoing scope + dry_run.
+	pruneResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune",
+		pruneRequest{Scope: "objects", DryRun: true}, http.StatusOK)
+	var pr pruneResponse
+	decodeJSONBody(t, pruneResp, &pr)
+	if pr.Scope != "objects" || !pr.DryRun || pr.Status != "pruned" {
+		t.Fatalf("unexpected prune response: %+v", pr)
+	}
+}
+
 func TestRESTPreconditionsAndDeleteErrors(t *testing.T) {
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
@@ -365,6 +394,7 @@ type fakeRESTClient struct {
 	deleted               map[string]bool
 	now                   int64
 	rollbacks             []string
+	revertPaths           []string
 	readCalls             []readCall
 	failReplaceFromReader error
 	revision              string
@@ -1180,6 +1210,25 @@ func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, c
 
 func (c *fakeRESTClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
 	return &storage.PurgeResult{}, nil
+}
+
+func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.getExistingProject(project); err != nil {
+		return err
+	}
+	c.revertPaths = append(c.revertPaths, path+"@"+commitSHA)
+	return nil
+}
+
+func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.getExistingProject(project); err != nil {
+		return nil, err
+	}
+	return &storage.PruneResult{Scope: storage.PruneScope(scope), DryRun: dryRun}, nil
 }
 
 func (c *fakeRESTClient) DeleteProjectContext(ctx context.Context, project string) error {
