@@ -37,6 +37,7 @@ type (
 	MetadataRevision = metadata.MetadataRevision
 	DirMeta          = metadata.DirMeta
 	NodeKind         = metadata.NodeKind
+	ReleaseRef       = metadata.ReleaseRef
 )
 
 const (
@@ -119,6 +120,11 @@ type projectMetadata struct {
 	// shrink paths (delete, UpdateRepoMetadataContext folding under the
 	// ceiling, purge) stay open, and the next fitting commit clears it.
 	sizeCapped bool
+	// opStack holds the pending, self-contained metadata operations this
+	// project has accumulated since the last successful commit. It drives
+	// the rich commit message, the crash-recovery journal, and (Phase B)
+	// rebase-on-conflict. Guarded by mu like every other mutable field.
+	opStack opStack
 }
 
 type releaseCacheEntry struct {
@@ -291,6 +297,17 @@ func (h *StorHub) ensureHydratedLocked(ctx context.Context, project string, pm *
 func markProjectDirtyLocked(pm *projectMetadata) {
 	pm.dirty = true
 	pm.version++
+}
+
+// appendOpLocked records one metadata mutation in the project's op stack
+// and mirrors it to the crash-recovery journal. Caller holds pm.mu. The
+// journal receives the post-coalescing op (the stack's latest state for its
+// path), so replay folds to exactly the in-memory stack.
+func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
+	pm.opStack.append(op)
+	if len(pm.opStack.ops) > 0 {
+		h.journalAppend(project, pm.opStack.ops[len(pm.opStack.ops)-1])
+	}
 }
 
 // markProjectDirtyLiveLocked marks pm dirty, reviving it first if it was
@@ -608,6 +625,11 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	working := pm.meta.Clone()
 	previousSHA := pm.sha
 	version := pm.version
+	// Snapshot the op stack with the working copy: the commit message
+	// describes exactly these ops, and only they may be dropped on
+	// success (mutations landing mid-commit carry higher seqs and stay).
+	ops := pm.opStack.snapshot()
+	opSeq := pm.opStack.maxSeq()
 	pm.mu.Unlock()
 
 	now := h.config.Now().Unix()
@@ -645,7 +667,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	}
 
 	// Commit metadata
-	message := "storhub: update metadata"
+	message := buildCommitMessage(ops, previousSHA)
 	var commitSHA, contentSHA string
 	if repo := h.getGitRepo(project); repo != nil {
 		commitSHA, contentSHA, err = repo.writeCommitPush(ctx, metadataFilePath, metaBytes, message)
@@ -671,6 +693,11 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.dirty = false
 		pm.lastCommit = h.config.Now()
 	}
+	// Drop exactly the committed ops: an op coalesced by a mutation that
+	// landed mid-commit carries a seq above the snapshot and survives for
+	// the next commit. The journal is rewritten to the surviving stack.
+	pm.opStack.clearUpTo(opSeq)
+	h.journalRewrite(project, pm.opStack.ops)
 	// A fitting commit lifts the D4 breach marker (re-armed on breach).
 	pm.sizeCapped = false
 	pm.mu.Unlock()
@@ -1004,6 +1031,13 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, latest, fileMeta, now)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	opFile := fileMeta.Clone()
+	h.appendOpLocked(project, pm, Op{
+		Type: OpPutFile, Paths: []string{cleanName}, Cause: "replace-chunks",
+		Timestamp: now,
+		File:      &opFile,
+		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -1237,6 +1271,13 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	opFile := patched.Clone()
+	h.appendOpLocked(project, pm, Op{
+		Type: OpPatch, Paths: []string{cleanName}, Cause: "patch-ranges",
+		Timestamp: now,
+		File:      &opFile,
+		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -1293,6 +1334,13 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, patched, now)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	opFile := patched.Clone()
+	h.appendOpLocked(project, pm, Op{
+		Type: OpPatch, Paths: []string{cleanName}, Cause: "patch",
+		Timestamp: now,
+		File:      &opFile,
+		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -1342,6 +1390,13 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
 	implposix.ReplaceInodeFamily(pm.meta, cleanName, current, rewritten, now)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	opFile := rewritten.Clone()
+	h.appendOpLocked(project, pm, Op{
+		Type: OpPutFile, Paths: []string{cleanName}, Cause: "rewrite-ranges",
+		Timestamp: now,
+		File:      &opFile,
+		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -1488,6 +1543,17 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}
 	shfs.TouchParentDirectory(pm.meta, cleanName, h.config.Now().Unix())
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	cause := "upload"
+	if replace {
+		cause = "replace"
+	}
+	opFile := fileMeta.Clone()
+	h.appendOpLocked(project, pm, Op{
+		Type: OpPutFile, Paths: []string{cleanName}, Cause: cause,
+		Timestamp: h.config.Now().Unix(),
+		File:      &opFile,
+		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -1916,6 +1982,14 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		h.debugf("metadata update failed project=%s step=apply elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
 		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
+	}
+	// Op synthesis: diff the pre-transaction tree against the candidate so
+	// every transaction-level mutation (fs/posix ops, prune, release
+	// catalog changes) lands in the op stack - rich commit messages, the
+	// crash-recovery journal, and rebase all read from it.
+	cause := causeFromMessage(message)
+	for _, op := range synthesizeOpsFromDiff(pm.meta, &candidate, cause, h.config.Now().Unix()) {
+		h.appendOpLocked(project, pm, op)
 	}
 	admitNow := h.config.Now().Unix()
 	candidate.Normalize(project, admitNow)

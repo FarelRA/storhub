@@ -191,7 +191,8 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 					return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
 				}
 				meta := NewRepoMetadata(project)
-				h.storeRepoMetadata(project, *meta, "")
+				pendingOps := h.journalReplayForLoad(project, meta)
+				h.storeRepoMetadataPending(project, *meta, "", pendingOps)
 				logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 				return meta, "", nil
 			}
@@ -206,8 +207,9 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		if err := meta.Validate(); err != nil {
 			return nil, "", fmt.Errorf("validate metadata: %w", err)
 		}
+		pendingOps := h.journalReplayForLoad(project, meta)
 		sha := repo.headCommitSHA()
-		h.storeRepoMetadata(project, *meta, sha)
+		h.storeRepoMetadataPending(project, *meta, sha, pendingOps)
 		logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
 		return meta, sha, nil
 	}
@@ -225,7 +227,8 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 				return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
 			}
 			meta := NewRepoMetadata(project)
-			h.storeRepoMetadata(project, *meta, "")
+			pendingOps := h.journalReplayForLoad(project, meta)
+			h.storeRepoMetadataPending(project, *meta, "", pendingOps)
 			logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 			return meta, "", nil
 		}
@@ -240,11 +243,12 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	if err := meta.Validate(); err != nil {
 		return nil, "", fmt.Errorf("validate metadata: %w", err)
 	}
+	pendingOps := h.journalReplayForLoad(project, meta)
 	// NOTE: sha here is the metadata BLOB sha from the contents API - it
 	// doubles as the version token for conditional PUTs. It must never be
 	// consumed as a git ref: pins capture chunk layouts instead, so no
 	// ref resolution is needed anywhere.
-	h.storeRepoMetadata(project, *meta, sha)
+	h.storeRepoMetadataPending(project, *meta, sha, pendingOps)
 	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
 	return meta, sha, nil
 }
@@ -716,6 +720,15 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 }
 
 func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string) {
+	h.storeRepoMetadataPending(project, meta, sha, nil)
+}
+
+// storeRepoMetadataPending caches remote truth. When pendingOps is
+// non-nil (a crash-recovery journal replayed onto the loaded state), the
+// ops become the project's pending stack: dirty stays set and the journal
+// is kept until the next commit lands them. Otherwise the cache is clean
+// and any stale stack/journal is discarded.
+func (h *StorHub) storeRepoMetadataPending(project string, meta RepoMetadata, sha string, pendingOps []Op) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
@@ -723,9 +736,52 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 	pm.mu.Lock()
 	pm.meta = &clone
 	pm.sha = sha
-	pm.dirty = false // Just stored, so not dirty
 	pm.hydrated = true
+	if len(pendingOps) > 0 {
+		pm.opStack.clear()
+		for _, op := range pendingOps {
+			pm.opStack.append(op)
+		}
+		pm.dirty = true
+		pm.mu.Unlock()
+		return
+	}
+	pm.dirty = false // Just stored, so not dirty
+	pm.opStack.clear()
 	pm.mu.Unlock()
+	h.journalRewrite(project, nil)
+}
+
+// journalReplayForLoad replays the crash-recovery journal onto a freshly
+// loaded remote state, but only for a cache entry that has never been
+// hydrated (cold start). A hydrated project with pending ops is in its
+// normal commit cycle; replaying there would resurrect discarded state.
+// Returns the replayed ops for the pending stack, or nil.
+func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if ok {
+		pm.mu.RLock()
+		cold := !pm.hydrated
+		pm.mu.RUnlock()
+		if !cold {
+			return nil
+		}
+	}
+	ops := h.journalRead(project)
+	if len(ops) == 0 {
+		return nil
+	}
+	if err := applyOps(meta, ops); err != nil {
+		logging.Error(h.projectLogger(project), "op journal replay failed; pending ops discarded", "err", err)
+		h.journalRewrite(project, nil)
+		return nil
+	}
+	meta.Normalize(project, h.config.Now().Unix())
+	meta.RecomputeStats()
+	logging.Info(h.projectLogger(project), "op journal replayed onto remote state", "ops", len(ops))
+	return ops
 }
 
 func (h *StorHub) invalidateRepoMetadata(project string) {

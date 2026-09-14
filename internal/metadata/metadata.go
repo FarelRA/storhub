@@ -548,6 +548,14 @@ func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
 	m.invalidateIndexes()
 }
 
+// WriteDirDirect stores a directory entry verbatim, mirroring
+// WriteFileDirect for op replay and family updates that must preserve
+// every field exactly.
+func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
+	m.Dirs[normalizeStoredPath(path)] = dir
+	m.invalidateIndexes()
+}
+
 func (m *RepoMetadata) RemoveFile(name string) bool {
 	name = normalizeStoredPath(name)
 	if _, ok := m.Files[name]; !ok {

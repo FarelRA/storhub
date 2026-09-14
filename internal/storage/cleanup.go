@@ -80,6 +80,10 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		return shfs.NotFound(cleanName)
 	}
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	h.appendOpLocked(project, pm, Op{
+		Type: OpDeleteFile, Paths: []string{cleanName}, Cause: "unlink",
+		Timestamp: now, FreedChunks: len(existing.Chunks),
+	})
 	pm.mu.Unlock()
 
 	select {
@@ -116,6 +120,10 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
+	h.appendOpLocked(project, pm, Op{
+		Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: "release-delete",
+		Timestamp: h.config.Now().Unix(),
+	})
 	pm.mu.Unlock()
 
 	select {

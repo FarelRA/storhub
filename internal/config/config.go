@@ -94,9 +94,15 @@ type Config struct {
 	// repos - plus one parked goroutine.
 	MaxTrackedProjects int
 	GitCacheDir        string
-	DisableGitBackend  bool
-	Now                func() time.Time
-	Sleep              func(context.Context, time.Duration) error
+	// JournalDir is where the client-side op journal is written
+	// (<dir>/<project>.jsonl): a write-ahead mirror of uncommitted
+	// metadata operations that replays onto freshly loaded remote state
+	// after a crash. Empty disables journaling; embedders and the CLI
+	// opt in explicitly (the CLI defaults it beneath CacheBase).
+	JournalDir        string
+	DisableGitBackend bool
+	Now               func() time.Time
+	Sleep             func(context.Context, time.Duration) error
 }
 
 func Default() Config {

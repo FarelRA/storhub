@@ -1,0 +1,144 @@
+package storage
+
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
+
+	"github.com/FarelRA/storhub/internal/logging"
+)
+
+// The op journal is the crash-survival mirror of a project's pending op
+// stack: every mutation appends its (post-coalescing) op as one JSON line
+// BEFORE the next commit can lose it, and a successful commit rewrites the
+// journal to exactly the still-pending ops (empty stack removes the file).
+// On a cold start, a journal present for a never-hydrated project replays
+// onto the freshly loaded remote state - acknowledged mutations survive a
+// crash that the previous discard-on-conflict design would have dropped.
+//
+// The journal is append-only and folded with the same coalescing rules as
+// the live stack, so a torn final line (crash mid-write) costs only that
+// append, and replaying a journal whose ops already committed is a no-op
+// (ops are full-state assertions).
+
+func (h *StorHub) journalPath(project string) string {
+	if h.config.JournalDir == "" {
+		return ""
+	}
+	return filepath.Join(h.config.JournalDir, project+".jsonl")
+}
+
+// journalAppend appends one op line. Best-effort: a journal write failure
+// is logged and never fails the mutation - the journal upgrades durability
+// for acknowledged mutations, it must not downgrade availability.
+func (h *StorHub) journalAppend(project string, op Op) {
+	path := h.journalPath(project)
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(h.config.JournalDir, 0o755); err != nil {
+		logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	line, err := json.Marshal(op)
+	if err != nil {
+		logging.Warn(h.projectLogger(project), "op journal marshal failed", "err", err)
+		return
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+	}
+}
+
+// journalRead loads and folds the project's journal. Corrupt lines are
+// skipped individually; a wholly unreadable journal yields nil (the crash
+// loses those pending ops, matching the pre-journal durability contract).
+func (h *StorHub) journalRead(project string) []Op {
+	path := h.journalPath(project)
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logging.Warn(h.projectLogger(project), "op journal read failed", "err", err)
+		}
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	var ops []Op
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var op Op
+		if err := json.Unmarshal(line, &op); err != nil {
+			logging.Warn(h.projectLogger(project), "op journal line unreadable; skipping", "err", err)
+			continue
+		}
+		ops = append(ops, op)
+	}
+	if err := scanner.Err(); err != nil {
+		logging.Warn(h.projectLogger(project), "op journal read failed", "err", err)
+		return nil
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	return foldOps(ops)
+}
+
+// journalRewrite replaces the journal with exactly the still-pending ops.
+// An empty list removes the file. Rewriting (instead of deleting) keeps the
+// journal correct when mutations landed while a commit was in flight.
+func (h *StorHub) journalRewrite(project string, ops []Op) {
+	path := h.journalPath(project)
+	if path == "" {
+		return
+	}
+	if len(ops) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logging.Warn(h.projectLogger(project), "op journal clear failed", "err", err)
+		}
+		return
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", err)
+		return
+	}
+	ok := true
+	for _, op := range ops {
+		line, err := json.Marshal(op)
+		if err != nil {
+			ok = false
+			break
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			ok = false
+			break
+		}
+	}
+	closeErr := f.Close()
+	if ok && closeErr == nil {
+		if err := os.Rename(tmp, path); err != nil {
+			logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", err)
+		}
+		return
+	}
+	_ = os.Remove(tmp)
+	if closeErr != nil {
+		logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", closeErr)
+	}
+}

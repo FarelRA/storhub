@@ -53,6 +53,11 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			if shfs.ShouldUpdateAtime(h.config.AtimePolicy, pm.meta.Root.AccessedAt, pm.meta.Root.ModifiedAt, pm.meta.Root.ChangedAt, now) {
 				pm.meta.Root.AccessedAt = now
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
+				root := pm.meta.Root.Clone()
+				h.appendOpLocked(project, pm, Op{
+					Type: OpSetattr, Paths: []string{""}, Cause: "atime",
+					Timestamp: now, Dir: &root,
+				})
 			}
 		} else {
 			// Subdirectory (SetDirAtime: GetDirectory returns a copy)
@@ -60,6 +65,11 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
 				if pm.meta.SetDirAtime(targetPath, now) {
 					trigger = h.markProjectDirtyLiveLocked(project, pm)
+					updated := pm.meta.GetDirectory(targetPath).Clone()
+					h.appendOpLocked(project, pm, Op{
+						Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
+						Timestamp: now, Dir: &updated,
+					})
 				}
 			}
 		}
@@ -69,6 +79,11 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
 			if pm.meta.SetFileAtime(targetPath, now) {
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
+				updated := pm.meta.FindFile(targetPath).Clone()
+				h.appendOpLocked(project, pm, Op{
+					Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
+					Timestamp: now, File: &updated,
+				})
 			}
 		}
 	}
