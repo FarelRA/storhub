@@ -3482,7 +3482,7 @@ func errnoFromError(err error) syscall.Errno {
 	case errors.Is(err, shfs.ErrXAttrNotFound):
 		return syscall.ENODATA
 	case errors.Is(err, shfs.ErrCorrupted):
-		return syscall.EUCLEAN
+		return errCorruptedErrno
 	default:
 		return syscall.EIO
 	}

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log/slog"
 	"os"
 	"testing"
 
@@ -20,5 +19,5 @@ func TestWithDefaultsPreservesSuppliedLogger(t *testing.T) {
 	if got.APIBaseURL == "" || got.Now == nil || got.Sleep == nil {
 		t.Fatal("non-logger defaults must still fill around a supplied logger")
 	}
-	var _ *slog.Logger = got.Logger
+	var _ = got.Logger
 }
