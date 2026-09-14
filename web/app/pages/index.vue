@@ -16,6 +16,7 @@ const {
 const drawerOpen = ref(false)
 const projectInput = ref('')
 const { ask } = useConfirm()
+const toasts = useToasts()
 
 onMounted(() => {
   void console_.init()
@@ -73,6 +74,33 @@ async function purge() {
     danger: true,
   })
   if (ok) await console_.purgeUntracked()
+}
+
+const pruneScope = ref('all')
+const pruneDryRun = ref(true)
+
+async function runPrune() {
+  const scope = pruneScope.value
+  const dry = pruneDryRun.value
+  if (!dry) {
+    const ok = await ask({
+      title: `Prune ${scope}`,
+      body: 'Reclaim storage now? Orphaned index objects and untracked assets are deleted; history compaction is git-backend only. This cannot be undone.',
+      confirmLabel: 'Prune',
+      danger: true,
+    })
+    if (!ok) return
+  }
+  const result = await console_.prune(scope, 1, dry)
+  if (!result) return
+  const parts = [
+    `${result.deleted_objects} objects`,
+    `${result.deleted_releases} releases`,
+    `${result.deleted_assets} assets`,
+  ]
+  if (result.history_compacted) parts.push('history compacted')
+  toasts.info(`${dry ? 'Would prune' : 'Pruned'} ${result.scope}: ${parts.join(', ')}`)
+  for (const note of result.notes ?? []) toasts.info(note)
 }
 
 const { panels } = usePanelWidths()
@@ -252,6 +280,28 @@ async function onDrop(event: DragEvent) {
           >
             Purge untracked assets…
           </button>
+          <div v-if="isAdmin" class="mt-2 space-y-1.5">
+            <div class="flex items-center gap-2">
+              <select v-model="pruneScope" class="input input-sm flex-1 font-mono" :disabled="busy || !project" aria-label="Prune scope">
+                <option value="all">all</option>
+                <option value="objects">objects</option>
+                <option value="assets">assets</option>
+                <option value="history">history</option>
+              </select>
+              <label class="flex items-center gap-1 text-xs text-mist" title="Report what would be reclaimed without deleting">
+                <input v-model="pruneDryRun" type="checkbox" >
+                dry run
+              </label>
+            </div>
+            <button
+              class="btn btn-sm w-full"
+              :disabled="busy || !project"
+              title="Admin only: reclaim orphaned index objects, untracked assets, or collapsed history"
+              @click="runPrune"
+            >
+              {{ pruneDryRun ? 'Preview prune' : 'Prune now…' }}
+            </button>
+          </div>
           <ConfirmDeleteProject v-if="project" @deleted="projectInput = ''" />
         </section>
 

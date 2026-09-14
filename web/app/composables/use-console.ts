@@ -1,5 +1,5 @@
 import { ApiError } from '~/utils/api-types'
-import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry } from '~/utils/api-types'
+import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry, PruneResult } from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
 import {
   PREVIEW_MAX_BYTES,
@@ -703,6 +703,26 @@ export function useConsole() {
     return op('Purge untracked', 'purge', {})
   }
 
+  // Revert a single path (file or directory subtree) to a historical revision,
+  // leaving the rest of the tree untouched. A revert is a new commit.
+  async function revertPath(path: string, sha: string): Promise<boolean> {
+    return op(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
+  }
+
+  // Granular prune: reclaim orphaned index objects, untracked assets, or
+  // (git backend) collapsed history. Returns the typed result for display.
+  async function prune(scope: string, keep: number, dryRun: boolean): Promise<PruneResult | null> {
+    return run(`Prune ${scope}`, async () => {
+      const payload = await postJSON<PruneResult>(projectURL('/ops/prune'), {
+        scope,
+        keep,
+        dry_run: dryRun,
+      })
+      if (!dryRun) await refreshAll()
+      return payload
+    })
+  }
+
   async function createShare(path: string, expiresInSeconds?: number): Promise<Share | null> {
     return run('Create share', async () => {
       const body: Record<string, unknown> = { path }
@@ -1193,7 +1213,9 @@ export function useConsole() {
     selectAll,
     deleteProject,
     rollbackRevision,
+    revertPath,
     purgeUntracked,
+    prune,
     downloadEntry,
     copyDirectLink,
     focusEntry,

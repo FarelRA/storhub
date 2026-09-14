@@ -58,6 +58,18 @@ export interface Revision {
   committed_at?: string
 }
 
+export interface PruneResult {
+  project: string
+  status: string
+  scope: string
+  dry_run: boolean
+  deleted_objects: number
+  deleted_releases: number
+  deleted_assets: number
+  history_compacted: boolean
+  notes?: string[]
+}
+
 export interface XattrEntry {
   name: string
   value: string
