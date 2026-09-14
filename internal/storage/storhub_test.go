@@ -1353,7 +1353,7 @@ func TestListFilesUsesMetadataCache(t *testing.T) {
 	}
 	var metadataGets atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/index.json") {
 			metadataGets.Add(1)
 		}
 		return false
@@ -1379,7 +1379,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 	}
 	var metadataGets atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/index.json") {
 			metadataGets.Add(1)
 		}
 		return false

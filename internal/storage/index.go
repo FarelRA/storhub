@@ -20,51 +20,54 @@ import (
 // readIndexHead fetches the project's current index: the split manifest when
 // present, otherwise the legacy metadata blob. found=false means neither exists
 // (brand-new or wiped project). The returned sha is the CAS token for the
-// blob that was found (manifest blob sha for split, metadata blob sha for
-// legacy).
-func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, split, found bool, err error) {
+// document that was found (manifest blob sha for a split project, metadata
+// blob sha for a legacy one). Callers distinguish the layout with
+// meta.IsManifest(data) rather than a flag threaded through here.
+func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, found bool, err error) {
 	if err := h.ensureOwner(ctx); err != nil {
-		return nil, "", false, false, err
+		return nil, "", false, err
 	}
 	if repo := h.getGitRepo(project); repo != nil {
 		if d, rerr := repo.readFileHead(ctx, indexFilePath); rerr == nil {
-			return d, repo.headCommitSHA(), true, true, nil
+			return d, repo.headCommitSHA(), true, nil
 		} else if !isMetadataNotFound(rerr) {
-			return nil, "", false, false, rerr
+			return nil, "", false, rerr
 		}
 		d, rerr := repo.readFileHead(ctx, metadataFilePath)
 		if rerr == nil {
-			return d, repo.headCommitSHA(), false, true, nil
+			return d, repo.headCommitSHA(), true, nil
 		}
 		if isMetadataNotFound(rerr) {
-			return nil, "", false, false, nil
+			return nil, "", false, nil
 		}
-		return nil, "", false, false, rerr
+		return nil, "", false, rerr
 	}
 	// REST: try the manifest, then the legacy blob.
 	d, s, rerr := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, "")
 	if rerr == nil {
-		return d, s, true, true, nil
+		return d, s, true, nil
 	}
 	var apiErr *ghapi.APIError
 	if !errors.As(rerr, &apiErr) || !apiErr.NotFound() {
-		return nil, "", false, false, rerr
+		return nil, "", false, rerr
 	}
 	d, s, rerr = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, "")
 	if rerr == nil {
-		return d, s, false, true, nil
+		return d, s, true, nil
 	}
 	if e, ok := rerr.(*ghapi.APIError); ok && e.NotFound() {
-		return nil, "", false, false, nil
+		return nil, "", false, nil
 	}
-	return nil, "", false, false, rerr
+	return nil, "", false, rerr
 }
 
-// loadIndexTree materializes a flat RepoMetadata from an index blob (the
-// version-5 manifest or a legacy document), fetching split objects through the cache + repo.
-func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte, split bool) (*RepoMetadata, uint64, error) {
-	m := NewRepoMetadata(project)
-	if !split {
+// loadIndexTree materializes a flat RepoMetadata from an index document,
+// detecting the layout by shape: a version-5 manifest loads its objects
+// through the cache + repo; a legacy blob parses directly. The returned tree
+// carries the matching document version (5 or <=4).
+func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte) (*RepoMetadata, uint64, error) {
+	if !meta.IsManifest(data) {
+		m := NewRepoMetadata(project)
 		if err := m.FromJSON(data); err != nil {
 			return nil, 0, fmt.Errorf("parse metadata: %w", err)
 		}

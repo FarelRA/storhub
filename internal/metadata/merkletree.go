@@ -43,7 +43,6 @@ type Manifest struct {
 	TreeRoot     string        `json:"tr"`
 	ChunkBuckets []string      `json:"cb,omitempty"`
 	Releases     string        `json:"rl"`
-	OpHead       uint64        `json:"oh,omitempty"`
 	ObjectCount  uint64        `json:"oc,omitempty"`
 	NextInode    uint64        `json:"ni,omitempty"`
 	NextChunkID  int64         `json:"nc,omitempty"`
@@ -257,7 +256,7 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		return nil, fmt.Errorf("nil manifest")
 	}
 	meta := &RepoMetadata{
-		Version:     maxBlobVersion,
+		Version:     maxMetadataVersion,
 		Project:     manifest.Project,
 		NextInode:   manifest.NextInode,
 		NextChunkID: manifest.NextChunkID,

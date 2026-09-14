@@ -84,7 +84,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	if err := repo.Validate(); err != nil {
 		t.Fatalf("validate normalized repo: %v", err)
 	}
-	if repo.Version != maxBlobVersion || repo.Project != "demo" {
+	if repo.Version != maxMetadataVersion || repo.Project != "demo" {
 		t.Fatalf("unexpected normalized repo: %+v", repo)
 	}
 	if repo.Root.Inode == 0 {

@@ -205,14 +205,14 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 // for the upstream layout (manifest blob sha for the split index, metadata
 // blob sha for a legacy blob, HEAD commit sha on the git backend).
 func (h *StorHub) loadUpstreamMetadata(ctx context.Context, project string) (*RepoMetadata, string, error) {
-	data, sha, split, found, err := h.readIndexHead(ctx, project)
+	data, sha, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		return nil, "", err
 	}
 	if !found {
 		return NewRepoMetadata(project), "", nil
 	}
-	meta, _, err := h.loadIndexTree(ctx, project, data, split)
+	meta, _, err := h.loadIndexTree(ctx, project, data)
 	if err != nil {
 		return nil, "", err
 	}

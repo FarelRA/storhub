@@ -112,11 +112,13 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 
 // pruneObjects deletes index objects referenced by no retained manifest.
 func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneResult, dryRun bool) error {
-	pm := h.getOrCreateProjectMeta(project)
-	pm.mu.RLock()
-	split := pm.split
-	pm.mu.RUnlock()
-	if !split {
+	// Detect the layout from actual HEAD, not the (possibly uninitialized)
+	// cache: a legacy single-blob project has no objects to prune.
+	headData, _, headFound, err := h.readIndexHead(ctx, project)
+	if err != nil {
+		return err
+	}
+	if !headFound || !meta.IsManifest(headData) {
 		res.Notes = append(res.Notes, "objects: project still uses the legacy single-blob layout; no content-addressed objects to prune (it migrates on its next write)")
 		return nil
 	}
@@ -167,8 +169,8 @@ func (h *StorHub) referencedObjects(ctx context.Context, project string) (map[st
 		return nil, err
 	}
 	for _, rev := range revs {
-		data, split, found, rerr := h.readIndexRevision(ctx, project, rev.CommitSHA)
-		if rerr != nil || !found || !split {
+		data, found, rerr := h.readIndexRevision(ctx, project, rev.CommitSHA)
+		if rerr != nil || !found || !meta.IsManifest(data) {
 			continue
 		}
 		manifest, perr := meta.ParseManifest(data)

@@ -13,20 +13,16 @@ import (
 const CurrentVersion = maxMetadataVersion
 
 // detectVersion reports a document's schema version. Historical spellings:
-// v1 documents wrote "version"; v2 onward write "v". A v5 split-index manifest
-// is recognized by its tree root and reported as version 5. That history
-// belongs to the migrator alone - the main parser never sees version detection.
+// v1 documents wrote "version"; v2 onward write "v". That history belongs to
+// the migrator alone - the main parser never sees version detection. A
+// split-index manifest is distinguished from a blob by IsManifest, not here.
 func detectVersion(data []byte) (int, error) {
 	var probe struct {
-		V        *int   `json:"v"`
-		Version  *int   `json:"version"` // v1-era spelling, consumed here only
-		TreeRoot string `json:"tr"`
+		V       *int `json:"v"`
+		Version *int `json:"version"` // v1-era spelling, consumed here only
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return 0, fmt.Errorf("metadata version probe failed: %w", err)
-	}
-	if probe.TreeRoot != "" {
-		return maxMetadataVersion, nil
 	}
 	switch {
 	case probe.V != nil:
@@ -40,35 +36,40 @@ func detectVersion(data []byte) (int, error) {
 
 // migrators stacks one step per version boundary: migrators[n] upgrades a
 // version-n document to version n+1. Every step is pure bytes->bytes:
-// no clock, no I/O, deterministic output for a given input.
+// no clock, no I/O, deterministic output for a given input. There is no
+// 4->5 step: that boundary is the write-time layout split (it emits objects),
+// not a blob transform.
 var migrators = [...]func([]byte) ([]byte, error){
 	1: migrateV1ToV2,
 	2: migrateV2ToV3,
 	3: migrateV3ToV4,
 }
 
-// Migrate upgrades a serialized metadata BLOB to maxBlobVersion by applying
-// every required step in order; a document already current passes through
-// unchanged. A v5 split-index manifest is rejected: it loads through
+// Migrate upgrades a serialized metadata BLOB to the current blob schema by
+// applying every required step in order; a document already current (version
+// maxBlobVersion or maxMetadataVersion, which share an entry shape) passes
+// through unchanged. A split-index manifest is rejected: it loads through
 // ParseManifest/LoadTree, never as a blob. Loading is eager: every blob parse
 // funnels through here, so no code path outside this file can observe an older
 // schema shape. The upgraded document persists when the next mutation commits
-// it (as a v5 split).
+// it (as a version-5 split).
 func Migrate(data []byte) ([]byte, int, error) {
+	if IsManifest(data) {
+		return nil, maxMetadataVersion, fmt.Errorf("metadata version %d is the split-index manifest; load it via ParseManifest, not Migrate", maxMetadataVersion)
+	}
 	from, err := detectVersion(data)
 	if err != nil {
 		return nil, 0, err
 	}
-	if from == maxMetadataVersion {
-		return nil, from, fmt.Errorf("metadata version %d is the split-index layout; load it via ParseManifest, not Migrate", from)
-	}
-	if from > maxBlobVersion {
-		return nil, from, fmt.Errorf("metadata version %d is newer than supported blob version %d", from, maxBlobVersion)
+	if from > maxMetadataVersion {
+		return nil, from, fmt.Errorf("metadata version %d is newer than supported version %d", from, maxMetadataVersion)
 	}
 	if from < 1 {
 		return nil, from, fmt.Errorf("invalid metadata version %d", from)
 	}
-	if from == maxBlobVersion {
+	if from >= maxBlobVersion {
+		// Version 4 (legacy blob) and version 5 (current-form blob) share the
+		// entry shape; both load as-is. The 4->5 split happens at write time.
 		return data, from, nil
 	}
 	for v := from; v < maxBlobVersion; v++ {

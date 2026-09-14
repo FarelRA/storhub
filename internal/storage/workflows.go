@@ -176,7 +176,7 @@ func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) 
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
 	started := h.config.Now().UTC()
 	logging.Debug(h.projectLogger(project), "load metadata start")
-	data, sha, split, found, err := h.readIndexHead(ctx, project)
+	data, sha, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
@@ -189,24 +189,24 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		if !exists {
 			return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
 		}
-		// Brand-new (or wiped) project: start on the configured layout.
+		// Brand-new (or wiped) project: start on the split layout (version 5).
 		m := NewRepoMetadata(project)
 		pendingOps := h.journalReplayForLoad(project, m)
-		h.storeRepoMetadataSplit(project, *m, "", pendingOps, true, 0)
+		h.storeRepoMetadata(project, *m, "", pendingOps, 0)
 		logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 		return m, "", nil
 	}
-	m, objectCount, err := h.loadIndexTree(ctx, project, data, split)
+	m, objectCount, err := h.loadIndexTree(ctx, project, data)
 	if err != nil {
 		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
 	pendingOps := h.journalReplayForLoad(project, m)
-	// NOTE: sha is the CAS token for the blob that was found (manifest blob
-	// sha for split, metadata blob sha for legacy). It must never be consumed as a
-	// git ref: pins capture chunk layouts instead.
-	h.storeRepoMetadataSplit(project, *m, sha, pendingOps, split, objectCount)
-	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "v2", split)
+	// NOTE: sha is the CAS token for the document that was found (manifest
+	// blob sha for a split project, metadata blob sha for a legacy one). It
+	// must never be consumed as a git ref: pins capture chunk layouts instead.
+	h.storeRepoMetadata(project, *m, sha, pendingOps, objectCount)
+	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "split", m.IsSplit())
 	return m, sha, nil
 }
 
@@ -226,6 +226,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	// cleanup republish the manifest, re-pointing the index at this tree's
 	// objects (rollback-as-revert, no force-push). A legacy project's first
 	// such commit also migrates it to the split layout.
+	metadata.MarkSplit()
 	var objectCount uint64
 	if pm := h.lookupProjectMeta(project); pm != nil {
 		pm.mu.RLock()
@@ -237,9 +238,9 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return "", "", err
 	}
-	h.storeRepoMetadataSplit(project, metadata, contentSHA, nil, true, newCount)
+	h.storeRepoMetadata(project, metadata, contentSHA, nil, newCount)
 	h.clearSizeCapped(project)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "split", true)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newCount)
 	return commitSHA, contentSHA, nil
 }
 
@@ -285,17 +286,17 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 func (h *StorHub) activeIndexPath(ctx context.Context, project string) (string, error) {
 	if pm := h.lookupProjectMeta(project); pm != nil {
 		pm.mu.RLock()
-		split := pm.split
+		split := pm.meta.IsSplit()
 		pm.mu.RUnlock()
 		if split {
 			return indexFilePath, nil
 		}
 	}
-	_, _, split, found, err := h.readIndexHead(ctx, project)
+	data, _, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		return "", err
 	}
-	if found && split {
+	if found && meta.IsManifest(data) {
 		return indexFilePath, nil
 	}
 	return metadataFilePath, nil
@@ -305,14 +306,14 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
-	// Detect the layout AT THIS REVISION: a split-era commit carries the
-	// manifest, a legacy-era commit the metadata blob. Reading the manifest
-	// first makes a legacy revision still readable across the migration
-	// boundary (the grace window) and a split revision load its objects.
-	if data, split, found, err := h.readIndexRevision(ctx, project, commitSHA); err != nil {
+	// Detect the layout AT THIS REVISION by shape: a split-era commit carries
+	// the manifest, a legacy-era commit the metadata blob. Reading the
+	// manifest first makes a legacy revision still readable across the
+	// migration boundary (the grace window) and a split revision load objects.
+	if data, found, err := h.readIndexRevision(ctx, project, commitSHA); err != nil {
 		return nil, err
 	} else if found {
-		m, _, err := h.loadIndexTreeAtRef(ctx, project, commitSHA, data, split)
+		m, _, err := h.loadIndexTreeAtRef(ctx, project, commitSHA, data)
 		if err != nil {
 			return nil, fmt.Errorf("parse metadata revision: %w", err)
 		}
@@ -325,46 +326,47 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	return nil, shfs.NotFound(fmt.Sprintf("metadata revision %s", shortSHA(commitSHA)))
 }
 
-// readIndexRevision fetches the manifest or metadata blob at a specific
-// commit SHA, reporting which layout it found.
-func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA string) ([]byte, bool, bool, error) {
+// readIndexRevision fetches the manifest or metadata blob at a specific commit
+// SHA. Callers distinguish the layout with meta.IsManifest(data).
+func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA string) ([]byte, bool, error) {
 	if repo := h.getGitRepo(project); repo != nil {
 		if d, err := repo.readFileRef(ctx, commitSHA, indexFilePath); err == nil {
-			return d, true, true, nil
+			return d, true, nil
 		} else if !isMetadataNotFound(err) {
-			return nil, false, false, err
+			return nil, false, err
 		}
 		d, err := repo.readFileRef(ctx, commitSHA, metadataFilePath)
 		if err == nil {
-			return d, false, true, nil
+			return d, true, nil
 		}
 		if isMetadataNotFound(err) {
-			return nil, false, false, nil
+			return nil, false, nil
 		}
-		return nil, false, false, err
+		return nil, false, err
 	}
 	d, _, err := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, commitSHA)
 	if err == nil {
-		return d, true, true, nil
+		return d, true, nil
 	}
 	var apiErr *ghapi.APIError
 	if !errors.As(err, &apiErr) || !apiErr.NotFound() {
-		return nil, false, false, err
+		return nil, false, err
 	}
 	d, _, err = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
 	if err == nil {
-		return d, false, true, nil
+		return d, true, nil
 	}
 	if e, ok := err.(*ghapi.APIError); ok && e.NotFound() {
-		return nil, false, false, nil
+		return nil, false, nil
 	}
-	return nil, false, false, err
+	return nil, false, err
 }
 
-// loadIndexTreeAtRef materializes a revision's tree, fetching split objects at
-// the same ref so a historical manifest resolves its historical objects.
-func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, data []byte, split bool) (*RepoMetadata, uint64, error) {
-	if !split {
+// loadIndexTreeAtRef materializes a revision's tree, detecting the layout by
+// shape and fetching split objects at the same ref so a historical manifest
+// resolves its historical objects.
+func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, data []byte) (*RepoMetadata, uint64, error) {
+	if !meta.IsManifest(data) {
 		m := NewRepoMetadata(project)
 		if err := m.FromJSON(data); err != nil {
 			return nil, 0, err
@@ -774,13 +776,13 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 	return &meta, pm.sha, true
 }
 
-// storeRepoMetadataSplit caches remote truth for a project, recording its
-// index layout (split vs legacy) and the running object-count hint. When
-// pendingOps is non-nil (a crash-recovery journal replayed onto the loaded
-// state), the ops become the project's pending stack: dirty stays set and the
-// journal is kept until the next commit lands them. Otherwise the cache is
-// clean and any stale stack/journal is discarded.
-func (h *StorHub) storeRepoMetadataSplit(project string, meta RepoMetadata, sha string, pendingOps []Op, split bool, objectCount uint64) {
+// storeRepoMetadata caches remote truth for a project. The tree's own version
+// records its layout (split vs legacy) and objectCount carries the running
+// hint. When pendingOps is non-nil (a crash-recovery journal replayed onto the
+// loaded state), the ops become the project's pending stack: dirty stays set
+// and the journal is kept until the next commit lands them. Otherwise the
+// cache is clean and any stale stack/journal is discarded.
+func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string, pendingOps []Op, objectCount uint64) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
@@ -789,7 +791,6 @@ func (h *StorHub) storeRepoMetadataSplit(project string, meta RepoMetadata, sha 
 	pm.meta = &clone
 	pm.sha = sha
 	pm.hydrated = true
-	pm.split = split
 	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
 	pm.basePaths = hashPaths(&clone)

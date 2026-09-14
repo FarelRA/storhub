@@ -341,9 +341,9 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	// compaction for the split layout is an explicit `storhub prune history`.
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.RLock()
-	split := pm.split
+	legacy := !pm.meta.IsSplit()
 	pm.mu.RUnlock()
-	if repo := h.getGitRepo(project); repo != nil && !split {
+	if repo := h.getGitRepo(project); repo != nil && legacy {
 		if err := h.ensureOwner(ctx); err != nil {
 			return nil, err
 		}

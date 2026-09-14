@@ -133,12 +133,6 @@ type projectMetadata struct {
 	// pending ops were built on; the rebase diffs upstream against it to
 	// detect real conflicts. Guarded by mu.
 	basePaths map[string][16]byte
-	// split records that this project's on-disk index uses the split layout
-	// (metadata version 5: a manifest plus content-addressed objects). Set on
-	// load when index.json is present, or on the first split commit (a legacy
-	// migration). Reads understand every version regardless; the write path
-	// always produces the split layout. Guarded by mu.
-	split bool
 	// objectCount is the running total of index objects written for this
 	// project (from the manifest), used for the history-accumulation
 	// threshold warning. Guarded by mu.
@@ -701,22 +695,23 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	ops := pm.opStack.snapshot()
 	opSeq := pm.opStack.maxSeq()
 	base := pm.basePaths
-	split := pm.split
 	objectCount := pm.objectCount
 	pm.mu.Unlock()
 
-	// The split index (metadata version 5) is the default and latest write
-	// path: every commit produces a manifest plus content-addressed objects.
-	// A project still on a legacy single-blob layout (version <= 4) migrates
-	// on this write.
-	const writeSplit = true
+	// The split index (metadata version 5) is the default and only write
+	// layout: every commit produces a manifest plus content-addressed objects.
+	// A project still on a legacy single-blob document (version <= 4) migrates
+	// on this write; its loaded tree carries that version, so the layout is
+	// read straight from the metadata version, not a separate flag.
+	headSplit := working.IsSplit()
+	working.MarkSplit()
 
 	now := h.config.Now().Unix()
 	working.Normalize(project, now)
 	working.LastMod = now
 	working.RecomputeStats()
 
-	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "split", writeSplit)
+	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "migrating", !headSplit)
 
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
@@ -730,9 +725,9 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// A legacy->split migration CASes the manifest, not the legacy blob:
 	// resolve the manifest's own token (empty when absent) so the migration
 	// commit is compare-and-swap safe against a concurrent migrator.
-	if writeSplit && !split && h.getGitRepo(project) == nil {
-		if _, s, isSplit, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
-			if isSplit && found {
+	if !headSplit && h.getGitRepo(project) == nil {
+		if data, s, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
+			if found && metadata.IsManifest(data) {
 				previousSHA = s
 			} else {
 				previousSHA = ""
@@ -788,7 +783,6 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	pm.mu.Lock()
 	pm.sha = contentSHA
-	pm.split = writeSplit
 	pm.objectCount = newObjectCount
 	if pm.version == version {
 		// D7 apply-back: the normalized working copy becomes the shared
@@ -842,7 +836,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	pm.mu.Unlock()
 
 	h.warnHistoryThreshold(project, pm)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "split", writeSplit, "objects", newObjectCount)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
 
 	return nil
 }

@@ -120,7 +120,7 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().Unix()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
-		Version:     maxBlobVersion,
+		Version:     maxMetadataVersion,
 		Project:     project,
 		NextInode:   2,
 		NextChunkID: 1,
@@ -205,13 +205,29 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 // in one metadata.json, entry shapes evolving); version 5 is the split layout
 // (a manifest plus content-addressed Merkle objects). The split is therefore
 // just the next step on the ONE version axis, not a parallel numbering.
+//
+// A RepoMetadata.Version records the document version its tree corresponds to:
+// 5 when loaded from a manifest or newly created (the split layout), or <=4
+// when loaded from a legacy single-blob document (it migrates to 5 on its next
+// write). The entry SHAPE is identical at 4 and 5; only the on-disk layout
+// differs, so no pure migrator crosses the 4->5 boundary (that step is the
+// write-time split, in the storage layer).
 const maxMetadataVersion = 5
 
-// maxBlobVersion is the newest single-blob schema, and the entry-shape the
-// in-memory RepoMetadata always normalizes to. Migrate upgrades legacy blobs
-// to this version; the 4->5 step is a write-time layout split (it produces
-// objects, so it is not a pure bytes transform and lives in the storage layer).
+// maxBlobVersion is the newest single-blob schema: what Migrate upgrades legacy
+// blobs to, and the version a tree loaded from a metadata.json carries until it
+// is written as a split (version 5) document.
 const maxBlobVersion = 4
+
+// IsSplit reports whether this tree corresponds to the split (version-5)
+// layout: a manifest plus content-addressed objects. A tree loaded from a
+// legacy single-blob document reports false until it is migrated on write.
+func (m *RepoMetadata) IsSplit() bool { return m.Version >= maxMetadataVersion }
+
+// MarkSplit records that this tree is (or will be) stored in the split
+// (version-5) layout. The write path calls it before publishing, so a legacy
+// tree migrates on its first commit.
+func (m *RepoMetadata) MarkSplit() { m.Version = maxMetadataVersion }
 
 // xattrMapFromStrings converts legacy string-valued xattrs from v1/v2
 // payloads into the v3 byte representation.
@@ -229,22 +245,25 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 // FromJSON parses a metadata document into current form. Version detection
 // and any upgrades belong entirely to Migrate (stacked, eager); this parser
 // understands ONLY the current blob schema - legacy spellings never reach it.
-// A v5 split-index manifest is NOT a blob and must go through ParseManifest.
+// A version-5 split-index manifest is NOT a blob and must go through
+// ParseManifest. The resulting tree carries the document version it was read
+// as (4 for a legacy blob, 5 for a current-form blob).
 func (m *RepoMetadata) FromJSON(data []byte) error {
-	upgraded, _, err := Migrate(data)
+	upgraded, version, err := Migrate(data)
 	if err != nil {
 		return err
 	}
 	if err := json.Unmarshal(upgraded, m); err != nil {
 		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
-	m.Version = maxBlobVersion
+	m.Version = version
 	return nil
 }
 
-// UnmarshalJSON enforces the single-version contract at the type level: only
-// documents written in the CURRENT blob schema decode. Older payloads must go
-// through FromJSON/Migrate, and a v5 split-index manifest must go through
+// UnmarshalJSON enforces the current-schema contract at the type level: only
+// documents written in a current blob schema (version maxBlobVersion or
+// maxMetadataVersion, which share an entry shape) decode. Older payloads must
+// go through FromJSON/Migrate, and a split-index manifest must go through
 // ParseManifest/LoadTree - a direct unmarshal fails loudly instead of silently
 // yielding an empty tree from ignored unknown fields.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
@@ -261,8 +280,8 @@ func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	if probe.TreeRoot != "" {
 		return fmt.Errorf("document is a v%d split-index manifest; load it via ParseManifest/LoadTree, not RepoMetadata", maxMetadataVersion)
 	}
-	if *probe.V != maxBlobVersion {
-		return fmt.Errorf("metadata version %d is not the parser's blob version %d; migrate first", *probe.V, maxBlobVersion)
+	if *probe.V != maxBlobVersion && *probe.V != maxMetadataVersion {
+		return fmt.Errorf("metadata version %d is not a current blob version (%d or %d); migrate first", *probe.V, maxBlobVersion, maxMetadataVersion)
 	}
 	type alias RepoMetadata
 	var raw alias
@@ -270,12 +289,14 @@ func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = RepoMetadata(raw)
-	m.Version = maxBlobVersion
+	m.Version = *probe.V
 	return nil
 }
 
 func (m *RepoMetadata) Normalize(project string, now int64) {
-	m.Version = maxBlobVersion
+	// Version is preserved (it records the document/layout the tree came from
+	// or will become), never forced here: a legacy blob stays maxBlobVersion
+	// until written as a split document, a split/new tree is maxMetadataVersion.
 	m.Project = chooseNonEmpty(m.Project, project)
 	m.normalizeRoot(now)
 	if m.Dirs == nil {
@@ -355,7 +376,7 @@ func (m *RepoMetadata) RecomputeStats() {
 	m.TotalFiles = totalFiles
 	m.TotalSize = totalSize
 	if m.Version == 0 {
-		m.Version = maxBlobVersion
+		m.Version = maxMetadataVersion
 	}
 	m.RebuildIndexes()
 }

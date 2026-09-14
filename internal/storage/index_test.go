@@ -47,6 +47,7 @@ func seedLegacyBlob(t *testing.T, hub *StorHub, project, dir, file string, chunk
 	m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
 	m.EnsureRelease("v1", 1700000000)
 	m.Normalize(project, 1700000000)
+	m.Version = 4 // pin the legacy single-blob schema (the split default is 5)
 	blob, err := m.ToJSON()
 	if err != nil {
 		t.Fatalf("marshal legacy blob: %v", err)
