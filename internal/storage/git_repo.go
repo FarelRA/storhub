@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -280,6 +281,86 @@ func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content [
 	}
 	commitSHA := hash.String()
 	return commitSHA, commitSHA, nil
+}
+
+// writeCommitPushCASMulti commits several files in ONE commit with the same
+// compare-and-swap semantics as writeCommitPushCAS: the v2 index writes its
+// content-addressed objects and the manifest together so the manifest CAS is
+// the single atomic point (objects become referenced exactly when the
+// manifest that names them lands). Git's own content addressing makes
+// re-writing an unchanged object file a no-op at the blob level.
+func (r *gitRepo) writeCommitPushCASMulti(ctx context.Context, files map[string][]byte, message, expectedOld string) (string, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensure(ctx); err != nil {
+		return "", "", err
+	}
+	if err := r.sync(ctx); err != nil {
+		return "", "", err
+	}
+	base, err := r.headHashNoLock()
+	if err != nil {
+		return "", "", err
+	}
+	if expectedOld != "" {
+		if base.IsZero() || base.String() != expectedOld {
+			return "", "", &ghapi.APIError{
+				StatusCode: http.StatusConflict,
+				Message:    fmt.Sprintf("stale metadata version: expected %s, HEAD is %s", shortSHA(expectedOld), shortSHA(base.String())),
+			}
+		}
+	}
+	w, err := r.repo.Worktree()
+	if err != nil {
+		return "", "", fmt.Errorf("worktree: %w", err)
+	}
+	for _, path := range sortedFileKeys(files) {
+		content := files[path]
+		metaDir := filepath.Join(r.dir, filepath.Dir(path))
+		if err := os.MkdirAll(metaDir, 0o755); err != nil {
+			return "", "", fmt.Errorf("mkdir %s: %w", metaDir, err)
+		}
+		fsPath := filepath.Join(r.dir, path)
+		if err := os.WriteFile(fsPath, content, 0o644); err != nil {
+			return "", "", fmt.Errorf("write %s: %w", fsPath, err)
+		}
+		if _, err := w.Add(path); err != nil {
+			return "", "", fmt.Errorf("add %s: %w", path, err)
+		}
+	}
+	hash, err := w.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "storhub",
+			Email: "storhub@users.noreply.github.com",
+			When:  time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("commit: %w", err)
+	}
+	pushOpts := &git.PushOptions{
+		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
+	}
+	if !base.IsZero() {
+		pushOpts.ForceWithLease = &git.ForceWithLease{
+			RefName: plumbing.ReferenceName("refs/heads/" + defaultBranch),
+			Hash:    base,
+		}
+	}
+	if err := r.repo.PushContext(ctx, pushOpts); err != nil {
+		return "", "", casConflict(err, base)
+	}
+	commitSHA := hash.String()
+	return commitSHA, commitSHA, nil
+}
+
+func sortedFileKeys(files map[string][]byte) []string {
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // headHashNoLock returns the post-sync HEAD commit hash, or the zero hash

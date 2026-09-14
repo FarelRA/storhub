@@ -106,8 +106,23 @@ type Config struct {
 	// require humans (or higher layers) to arbitrate every clash.
 	StrictConflicts   bool
 	DisableGitBackend bool
-	Now               func() time.Time
-	Sleep             func(context.Context, time.Duration) error
+	// IndexV2 opts a project's index into the v2 split layout (Merkle tree
+	// + content-addressed objects + manifest). It is opt-in because it
+	// changes the on-disk format of live data: v2 becomes the write path
+	// only when set, while reads always understand both layouts. New
+	// projects start v2 when set; v1 projects migrate on first write.
+	IndexV2 bool
+	// ObjectCacheMaxEntries bounds the per-project content-addressed object
+	// cache (LRU). Eviction only costs a later refetch, never correctness.
+	ObjectCacheMaxEntries int
+	// HistoryWarnObjects and HistoryWarnBytes are the advisory thresholds
+	// at which a commit logs a once-per-window warning pointing at
+	// `storhub prune`: full history is retained by design, so object
+	// accumulation is surfaced rather than silently pruned.
+	HistoryWarnObjects uint64
+	HistoryWarnBytes   uint64
+	Now                func() time.Time
+	Sleep              func(context.Context, time.Duration) error
 }
 
 func Default() Config {
@@ -136,10 +151,13 @@ func Default() Config {
 		// 64 entries is a generous working set for interactive use while
 		// bounding worst-case residency; embedders touching thousands of
 		// projects should size it deliberately.
-		MaxTrackedProjects: 64,
-		GitCacheDir:        defaultGitCacheDir(),
-		Now:                time.Now,
-		Sleep:              SleepWithContext,
+		MaxTrackedProjects:    64,
+		GitCacheDir:           defaultGitCacheDir(),
+		ObjectCacheMaxEntries: 8192,
+		HistoryWarnObjects:    5000,
+		HistoryWarnBytes:      64 << 20,
+		Now:                   time.Now,
+		Sleep:                 SleepWithContext,
 	}
 }
 
@@ -197,6 +215,15 @@ func (c Config) WithDefaults() Config {
 	if c.GitCacheDir == "" {
 		c.GitCacheDir = defaults.GitCacheDir
 	}
+	if c.ObjectCacheMaxEntries <= 0 {
+		c.ObjectCacheMaxEntries = defaults.ObjectCacheMaxEntries
+	}
+	if c.HistoryWarnObjects == 0 {
+		c.HistoryWarnObjects = defaults.HistoryWarnObjects
+	}
+	if c.HistoryWarnBytes == 0 {
+		c.HistoryWarnBytes = defaults.HistoryWarnBytes
+	}
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
@@ -251,6 +278,12 @@ func defaultGitCacheDir() string {
 // per-process roots beneath it.
 func DefaultGitCacheBase() string {
 	return filepath.Join(CacheBase(), "git")
+}
+
+// ObjectCacheDir returns the root directory for content-addressed index
+// object caches (CacheBase()/objects). Per-project caches live beneath it.
+func (c Config) ObjectCacheDir() string {
+	return filepath.Join(CacheBase(), "objects")
 }
 
 func newDefaultHTTPClient() *http.Client {

@@ -15,6 +15,8 @@ import (
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
+	"github.com/go-git/go-git/v6/plumbing"
+	gogitobject "github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const metadataFilePath = ".storhub/metadata.json"
@@ -174,83 +176,38 @@ func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) 
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
 	started := h.config.Now().UTC()
 	logging.Debug(h.projectLogger(project), "load metadata start")
-	if err := h.ensureOwner(ctx); err != nil {
-		return nil, "", err
-	}
-
-	// Try go-git backend first
-	if repo := h.getGitRepo(project); repo != nil {
-		data, err := repo.readFileHead(ctx, metadataFilePath)
-		if err != nil {
-			if isMetadataNotFound(err) {
-				exists, existsErr := h.repoExists(ctx, project)
-				if existsErr != nil {
-					return nil, "", existsErr
-				}
-				if !exists {
-					return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
-				}
-				meta := NewRepoMetadata(project)
-				pendingOps := h.journalReplayForLoad(project, meta)
-				h.storeRepoMetadataPending(project, *meta, "", pendingOps)
-				logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
-				return meta, "", nil
-			}
-			logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			return nil, "", err
-		}
-		meta := NewRepoMetadata(project)
-		if err := meta.FromJSON(data); err != nil {
-			return nil, "", fmt.Errorf("parse metadata: %w", err)
-		}
-		meta.Normalize(project, h.config.Now().Unix())
-		if err := meta.Validate(); err != nil {
-			return nil, "", fmt.Errorf("validate metadata: %w", err)
-		}
-		pendingOps := h.journalReplayForLoad(project, meta)
-		sha := repo.headCommitSHA()
-		h.storeRepoMetadataPending(project, *meta, sha, pendingOps)
-		logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
-		return meta, sha, nil
-	}
-
-	// Fall back to GitHub REST API
-	data, sha, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, "")
+	data, sha, isV2, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
-		var apiErr *ghapi.APIError
-		if errors.As(err, &apiErr) && apiErr.NotFound() {
-			exists, existsErr := h.repoExists(ctx, project)
-			if existsErr != nil {
-				return nil, "", existsErr
-			}
-			if !exists {
-				return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
-			}
-			meta := NewRepoMetadata(project)
-			pendingOps := h.journalReplayForLoad(project, meta)
-			h.storeRepoMetadataPending(project, *meta, "", pendingOps)
-			logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
-			return meta, "", nil
-		}
 		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
-	meta := NewRepoMetadata(project)
-	if err := meta.FromJSON(data); err != nil {
-		return nil, "", fmt.Errorf("parse metadata: %w", err)
+	if !found {
+		exists, existsErr := h.repoExists(ctx, project)
+		if existsErr != nil {
+			return nil, "", existsErr
+		}
+		if !exists {
+			return nil, "", shfs.NotFound(fmt.Sprintf("project %s", project))
+		}
+		// Brand-new (or wiped) project: start on the configured layout.
+		m := NewRepoMetadata(project)
+		pendingOps := h.journalReplayForLoad(project, m)
+		h.storeRepoMetadataV2(project, *m, "", pendingOps, h.config.IndexV2, 0)
+		logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
+		return m, "", nil
 	}
-	meta.Normalize(project, h.config.Now().Unix())
-	if err := meta.Validate(); err != nil {
-		return nil, "", fmt.Errorf("validate metadata: %w", err)
+	m, objectCount, err := h.loadIndexTree(ctx, project, data, isV2)
+	if err != nil {
+		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, "", err
 	}
-	pendingOps := h.journalReplayForLoad(project, meta)
-	// NOTE: sha here is the metadata BLOB sha from the contents API - it
-	// doubles as the version token for conditional PUTs. It must never be
-	// consumed as a git ref: pins capture chunk layouts instead, so no
-	// ref resolution is needed anywhere.
-	h.storeRepoMetadataPending(project, *meta, sha, pendingOps)
-	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data))
-	return meta, sha, nil
+	pendingOps := h.journalReplayForLoad(project, m)
+	// NOTE: sha is the CAS token for the blob that was found (manifest blob
+	// sha for v2, metadata blob sha for v1). It must never be consumed as a
+	// git ref: pins capture chunk layouts instead.
+	h.storeRepoMetadataV2(project, *m, sha, pendingOps, isV2, objectCount)
+	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "v2", isV2)
+	return m, sha, nil
 }
 
 func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metadata RepoMetadata, previousSHA, message string) (string, string, error) {
@@ -335,25 +292,110 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
+	// Detect the layout AT THIS REVISION: a v2-era commit carries the
+	// manifest, a v1-era commit the metadata blob. Reading the manifest
+	// first makes a v1 revision still readable across the migration
+	// boundary (the grace window) and a v2 revision load its objects.
+	if data, isV2, found, err := h.readIndexRevision(ctx, project, commitSHA); err != nil {
+		return nil, err
+	} else if found {
+		m, _, err := h.loadIndexTreeAtRef(ctx, project, commitSHA, data, isV2)
+		if err != nil {
+			return nil, fmt.Errorf("parse metadata revision: %w", err)
+		}
+		m.Normalize(project, h.config.Now().Unix())
+		if err := m.Validate(); err != nil {
+			return nil, fmt.Errorf("validate metadata revision: %w", err)
+		}
+		return m, nil
+	}
+	return nil, shfs.NotFound(fmt.Sprintf("metadata revision %s", shortSHA(commitSHA)))
+}
+
+// readIndexRevision fetches the manifest or metadata blob at a specific
+// commit SHA, reporting which layout it found.
+func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA string) ([]byte, bool, bool, error) {
+	if repo := h.getGitRepo(project); repo != nil {
+		if d, err := repo.readFileRef(ctx, commitSHA, indexFilePath); err == nil {
+			return d, true, true, nil
+		} else if !isMetadataNotFound(err) {
+			return nil, false, false, err
+		}
+		d, err := repo.readFileRef(ctx, commitSHA, metadataFilePath)
+		if err == nil {
+			return d, false, true, nil
+		}
+		if isMetadataNotFound(err) {
+			return nil, false, false, nil
+		}
+		return nil, false, false, err
+	}
+	d, _, err := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, commitSHA)
+	if err == nil {
+		return d, true, true, nil
+	}
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || !apiErr.NotFound() {
+		return nil, false, false, err
+	}
+	d, _, err = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
+	if err == nil {
+		return d, false, true, nil
+	}
+	if e, ok := err.(*ghapi.APIError); ok && e.NotFound() {
+		return nil, false, false, nil
+	}
+	return nil, false, false, err
+}
+
+// loadIndexTreeAtRef materializes a revision's tree, fetching v2 objects at
+// the same ref so a historical manifest resolves its historical objects.
+func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, data []byte, isV2 bool) (*RepoMetadata, uint64, error) {
+	if !isV2 {
+		m := NewRepoMetadata(project)
+		if err := m.FromJSON(data); err != nil {
+			return nil, 0, err
+		}
+		return m, 0, nil
+	}
+	manifest, err := meta.ParseManifest(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	fetched := func(sha string) ([]byte, error) { return h.fetchObjectAtRef(ctx, project, ref, sha) }
+	loaded, err := meta.LoadTree(manifest, fetched)
+	if err != nil {
+		return nil, 0, err
+	}
+	loaded.Project = project
+	return loaded, manifest.ObjectCount, nil
+}
+
+// fetchObjectAtRef loads one index object pinned to a commit SHA (cache is
+// content-addressed and layout-agnostic, so it serves any ref).
+func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string) ([]byte, error) {
+	cache := h.objectCacheFor(project)
+	if data, ok := cache.get(sha); ok {
+		return data, nil
+	}
 	var data []byte
 	var err error
 	if repo := h.getGitRepo(project); repo != nil {
-		data, err = repo.readFileRef(ctx, commitSHA, metadataFilePath)
+		data, err = repo.readFileRef(ctx, ref, objectRepoPath(sha))
 	} else {
-		data, _, err = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
+		if err = h.ensureOwner(ctx); err != nil {
+			return nil, err
+		}
+		data, _, err = h.gh.GetFileContent(ctx, h.owner, project, objectRepoPath(sha), ref)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch object %s at %s: %w", shortSHA(sha), shortSHA(ref), err)
 	}
-	meta := NewRepoMetadata(project)
-	if err := meta.FromJSON(data); err != nil {
-		return nil, fmt.Errorf("parse metadata revision: %w", err)
+	if meta.ObjectSHA(data) != sha {
+		return nil, fmt.Errorf("object %s failed content verification at %s", shortSHA(sha), shortSHA(ref))
 	}
-	meta.Normalize(project, h.config.Now().Unix())
-	if err := meta.Validate(); err != nil {
-		return nil, fmt.Errorf("validate metadata revision: %w", err)
-	}
-	return meta, nil
+	cache.put(sha, data)
+	return data, nil
 }
 
 func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
@@ -729,6 +771,12 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 // is kept until the next commit lands them. Otherwise the cache is clean
 // and any stale stack/journal is discarded.
 func (h *StorHub) storeRepoMetadataPending(project string, meta RepoMetadata, sha string, pendingOps []Op) {
+	h.storeRepoMetadataV2(project, meta, sha, pendingOps, false, 0)
+}
+
+// storeRepoMetadataV2 is storeRepoMetadataPending carrying the project's
+// index layout (v1 vs v2) and the running object-count hint.
+func (h *StorHub) storeRepoMetadataV2(project string, meta RepoMetadata, sha string, pendingOps []Op, isV2 bool, objectCount uint64) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
@@ -737,6 +785,8 @@ func (h *StorHub) storeRepoMetadataPending(project string, meta RepoMetadata, sh
 	pm.meta = &clone
 	pm.sha = sha
 	pm.hydrated = true
+	pm.isV2 = isV2
+	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
 	pm.basePaths = hashPaths(&clone)
 	if len(pendingOps) > 0 {
@@ -808,8 +858,12 @@ func isMetadataNotFound(err error) bool {
 		return false
 	}
 	// The git backend surfaces a missing metadata file as an fs-not-exist
-	// error chain; match sentinels, never message text.
+	// error chain (readFileHead) or a go-git file-not-found (readFileRef);
+	// match sentinels, never message text.
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, shfs.ErrNotFound) {
+		return true
+	}
+	if errors.Is(err, gogitobject.ErrFileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
 		return true
 	}
 	var apiErr *ghapi.APIError

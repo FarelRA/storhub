@@ -76,6 +76,10 @@ type StorHub struct {
 	gitMu    sync.Mutex
 	gitRepos map[string]*gitRepo
 
+	// Content-addressed index object caches (v2 layout), one per project.
+	objCacheMu sync.Mutex
+	objCaches  map[string]*objectCache
+
 	// Shutdown coordination
 	shutdownOnce sync.Once
 	// gitCleanupOnce guards the per-project git mirror removal so
@@ -129,6 +133,20 @@ type projectMetadata struct {
 	// pending ops were built on; the rebase diffs upstream against it to
 	// detect real conflicts. Guarded by mu.
 	basePaths map[string][16]byte
+	// isV2 records that this project's on-disk index uses the v2 split
+	// layout (manifest + content-addressed objects). Set on load when
+	// index.json is present, or on the first v2 commit (migration). Reads
+	// understand both layouts regardless; this drives the WRITE path.
+	// Guarded by mu.
+	isV2 bool
+	// objectCount is the running total of index objects written for this
+	// project (from the manifest), used for the history-accumulation
+	// threshold warning. Guarded by mu.
+	objectCount uint64
+	// historyWarned records that the object-count threshold warning has
+	// fired for the current crossing, so it logs once per window rather
+	// than on every commit. Guarded by mu.
+	historyWarned bool
 }
 
 type releaseCacheEntry struct {
@@ -487,6 +505,7 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 		metaCache:    make(map[string]*projectMetadata),
 		releaseCache: make(map[string]releaseCacheEntry),
 		gitRepos:     make(map[string]*gitRepo),
+		objCaches:    make(map[string]*objectCache),
 		logger:       logging.WithComponent(cfg.Logger, "storage"),
 		shutdownCh:   make(chan struct{}),
 		bufferPool: sync.Pool{New: func() any {
@@ -689,56 +708,65 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	ops := pm.opStack.snapshot()
 	opSeq := pm.opStack.maxSeq()
 	base := pm.basePaths
+	isV2 := pm.isV2
+	objectCount := pm.objectCount
 	pm.mu.Unlock()
+
+	// The write layout: stay v2 once migrated; adopt v2 for a v1 project
+	// only when IndexV2 is enabled (it then migrates on this first write).
+	targetV2 := isV2 || h.config.IndexV2
 
 	now := h.config.Now().Unix()
 	working.Normalize(project, now)
 	working.LastMod = now
 	working.RecomputeStats()
-	meta := working
 
-	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA))
+	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "v2", targetV2)
 
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
 	}
 
-	if err := meta.Validate(); err != nil {
+	if err := working.Validate(); err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "validate", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return &commitError{err: fmt.Errorf("invalid metadata: %w", err), version: version}
 	}
 
-	metaBytes, err := meta.ToJSON()
-	if err != nil {
-		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "serialize", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return &commitError{err: fmt.Errorf("marshal metadata: %w", err), version: version}
+	// A v1->v2 migration CASes the manifest, not the v1 blob: resolve the
+	// manifest's own token (empty when absent) so the migration commit is
+	// compare-and-swap safe against a concurrent migrator.
+	if targetV2 && !isV2 && h.getGitRepo(project) == nil {
+		if _, s, v2, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
+			if v2 && found {
+				previousSHA = s
+			} else {
+				previousSHA = ""
+			}
+		}
 	}
 
-	if len(metaBytes) > maxMetadataBytes {
-		err := fmt.Errorf("metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes)
-		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		// D4: fail-fast admission from here on: growth mutations are
-		// rejected until a shrink folds the tree back under the ceiling.
-		pm.mu.Lock()
-		pm.sizeCapped = true
-		pm.mu.Unlock()
-		return &commitError{err: err, version: version}
-	}
-
-	// Commit metadata with a bounded commit/rebase cycle: a CAS conflict
-	// (another writer advanced the metadata) rebases the pending ops onto
-	// upstream state instead of discarding them, then retries.
+	// Commit with a bounded commit/rebase cycle: a CAS conflict (another
+	// writer advanced the index) rebases the pending ops onto upstream
+	// state instead of discarding them, then retries.
 	message := buildCommitMessage(ops, previousSHA)
 	var commitSHA, contentSHA string
+	var newObjectCount uint64
 	didRebase := false
 	for attempt := 1; ; attempt++ {
-		if repo := h.getGitRepo(project); repo != nil {
-			commitSHA, contentSHA, err = repo.writeCommitPushCAS(ctx, metadataFilePath, metaBytes, message, previousSHA)
-		} else {
-			commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, metaBytes, previousSHA, message)
-		}
+		var err error
+		commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, &working, previousSHA, message, targetV2, objectCount)
 		if err == nil {
 			break
+		}
+		var over *oversizeError
+		if errors.As(err, &over) {
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			// D4: fail-fast admission from here on: growth mutations are
+			// rejected until a shrink folds the tree back under the ceiling.
+			pm.mu.Lock()
+			pm.sizeCapped = true
+			pm.mu.Unlock()
+			return &commitError{err: err, version: version}
 		}
 		var apiErr *ghapi.APIError
 		isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
@@ -760,21 +788,13 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		working = *rebased
 		working.LastMod = now
 		previousSHA = upstreamSHA
-		metaBytes, err = working.ToJSON()
-		if err != nil {
-			return &commitError{err: fmt.Errorf("marshal rebased metadata: %w", err), version: version}
-		}
-		if len(metaBytes) > maxMetadataBytes {
-			pm.mu.Lock()
-			pm.sizeCapped = true
-			pm.mu.Unlock()
-			return &commitError{err: fmt.Errorf("rebased metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes), version: version}
-		}
 		message = buildCommitMessage(ops, previousSHA) + "\n" + rebaseMessageNote(resolutions, upstreamSHA)
 	}
 
 	pm.mu.Lock()
 	pm.sha = contentSHA
+	pm.isV2 = targetV2
+	pm.objectCount = newObjectCount
 	if pm.version == version {
 		// D7 apply-back: the normalized working copy becomes the shared
 		// truth on success. Without this the cache keeps the raw mutation
@@ -826,7 +846,8 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	pm.sizeCapped = false
 	pm.mu.Unlock()
 
-	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(metaBytes))
+	h.warnHistoryThreshold(project, pm)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "v2", targetV2, "objects", newObjectCount)
 
 	return nil
 }
@@ -2106,6 +2127,10 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// usability stay exactly as they were. Shrinks stay open: a mutation
 	// that reduces the tree is admitted even while oversize, so the
 	// project can always fold back under the ceiling.
+	//
+	// The blob ceiling is a v1 constraint: a v2 project has no single-blob
+	// size limit (admission is per-object at commit), so measuring the v1
+	// serialization must not reject growth on the v2 path.
 	candidate := pm.meta.Clone()
 	candidate.RebuildIndexes()
 	if err := fn(&candidate); err != nil {
@@ -2125,28 +2150,31 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	admitNow := h.config.Now().Unix()
 	candidate.Normalize(project, admitNow)
 	candidate.RecomputeStats()
-	after, err := candidate.ToJSON()
-	if err != nil {
-		pm.mu.Unlock()
-		h.debugf("metadata update failed project=%s step=marshal elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
-		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return nil, fmt.Errorf("marshal metadata: %w", err)
-	}
-	if len(after) > maxMetadataBytes {
-		shrinking := false
-		if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
-			shrinking = true
-		}
-		if !shrinking {
-			pm.sizeCapped = true
+	targetV2 := pm.isV2 || h.config.IndexV2
+	if !targetV2 {
+		after, err := candidate.ToJSON()
+		if err != nil {
 			pm.mu.Unlock()
-			h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
-			logging.Error(h.projectLogger(project), "metadata update rejected: over size ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
-			return nil, fmt.Errorf("metadata too large: %d bytes exceeds %d: delete files or run PurgeUntracked to shrink below the ceiling", len(after), maxMetadataBytes)
+			h.debugf("metadata update failed project=%s step=marshal elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
+			logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			return nil, fmt.Errorf("marshal metadata: %w", err)
 		}
-		pm.sizeCapped = true
-	} else {
-		pm.sizeCapped = false
+		if len(after) > maxMetadataBytes {
+			shrinking := false
+			if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
+				shrinking = true
+			}
+			if !shrinking {
+				pm.sizeCapped = true
+				pm.mu.Unlock()
+				h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
+				logging.Error(h.projectLogger(project), "metadata update rejected: over size ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
+				return nil, fmt.Errorf("metadata too large: %d bytes exceeds %d: delete files or run PurgeUntracked to shrink below the ceiling", len(after), maxMetadataBytes)
+			}
+			pm.sizeCapped = true
+		} else {
+			pm.sizeCapped = false
+		}
 	}
 	pm.meta = &candidate
 

@@ -4,11 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
-	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -202,45 +200,21 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 
 // loadUpstreamMetadata fetches the current remote metadata WITHOUT touching
 // the project cache: the rebase needs pristine upstream state while the
-// cache holds local diverged truth. A missing metadata file (brand-new or
-// wiped project) is an empty tree, not an error.
+// cache holds local diverged truth. A missing index (brand-new or wiped
+// project) is an empty tree, not an error. The returned sha is the CAS token
+// for the upstream layout (manifest blob sha for v2, metadata blob sha for
+// v1, HEAD commit sha on the git backend).
 func (h *StorHub) loadUpstreamMetadata(ctx context.Context, project string) (*RepoMetadata, string, error) {
-	if err := h.ensureOwner(ctx); err != nil {
-		return nil, "", err
-	}
-	if repo := h.getGitRepo(project); repo != nil {
-		data, err := repo.readFileHead(ctx, metadataFilePath)
-		if err != nil {
-			if isMetadataNotFound(err) {
-				return NewRepoMetadata(project), "", nil
-			}
-			return nil, "", err
-		}
-		meta := NewRepoMetadata(project)
-		if err := meta.FromJSON(data); err != nil {
-			return nil, "", fmt.Errorf("parse upstream metadata: %w", err)
-		}
-		meta.Normalize(project, h.config.Now().Unix())
-		if err := meta.Validate(); err != nil {
-			return nil, "", fmt.Errorf("validate upstream metadata: %w", err)
-		}
-		return meta, repo.headCommitSHA(), nil
-	}
-	data, sha, err := h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, "")
+	data, sha, isV2, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
-		var apiErr *ghapi.APIError
-		if errors.As(err, &apiErr) && apiErr.NotFound() {
-			return NewRepoMetadata(project), "", nil
-		}
 		return nil, "", err
 	}
-	meta := NewRepoMetadata(project)
-	if err := meta.FromJSON(data); err != nil {
-		return nil, "", fmt.Errorf("parse upstream metadata: %w", err)
+	if !found {
+		return NewRepoMetadata(project), "", nil
 	}
-	meta.Normalize(project, h.config.Now().Unix())
-	if err := meta.Validate(); err != nil {
-		return nil, "", fmt.Errorf("validate upstream metadata: %w", err)
+	meta, _, err := h.loadIndexTree(ctx, project, data, isV2)
+	if err != nil {
+		return nil, "", err
 	}
 	return meta, sha, nil
 }
