@@ -1904,6 +1904,90 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	return nil
 }
 
+// RevertPath restores a single path (a file or an entire directory subtree) to
+// its state at commitSHA, leaving every other path untouched, as a NEW commit.
+func (h *StorHub) RevertPath(project, path, commitSHA string) error {
+	return h.RevertPathContext(context.Background(), project, path, commitSHA)
+}
+
+// RevertPathContext is the per-path counterpart of RollbackMetadataContext:
+// instead of repointing the whole index at an old revision, it replays just
+// `path`'s historical state onto the current tree. It is a revert, not a
+// force-push: history is preserved and the result flows through the normal
+// transaction path (op synthesis, journal, rebase, commit). The reverted
+// subtree's assets are validated against live releases before and after the
+// commit, so restoring a path whose bytes were purged fails loudly rather
+// than committing a dangling reference.
+func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSHA string) (err error) {
+	started := h.logOpStart(project, "revert-path", "path", path, "commit_sha", commitSHA)
+	defer func() { h.logOpFinish(project, "revert-path", started, err, "path", path, "commit_sha", commitSHA) }()
+	if err := validateProject(project); err != nil {
+		return err
+	}
+	cleanPath, err := shfs.NormalizePath(path)
+	if err != nil {
+		return err
+	}
+	if cleanPath == "" {
+		return errors.New("revert requires a non-root path")
+	}
+	if strings.TrimSpace(commitSHA) == "" {
+		return errors.New("commit sha is required")
+	}
+	// D9: a branch name is not a revision (the contents API resolves unknown
+	// refs to HEAD, which would silently "revert" to current).
+	if strings.ContainsAny(commitSHA, "/ \t\n") {
+		return fmt.Errorf("invalid metadata revision %q: not a commit SHA", commitSHA)
+	}
+	if err := h.validateMetadataRevision(ctx, project, commitSHA); err != nil {
+		return err
+	}
+	// Flush pending mutations so the revert is built on committed truth.
+	pm := h.getOrCreateProjectMeta(project)
+	if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
+		return err
+	}
+	historical, err := h.getMetadataRevision(ctx, project, commitSHA)
+	if err != nil {
+		return err
+	}
+	// Validate the would-be result before committing: the reverted subtree's
+	// chunks must resolve to releases/assets that still exist.
+	current, _, err := h.loadRepoMetadata(ctx, project)
+	if err != nil {
+		return err
+	}
+	preview := current.Clone()
+	if err := metadata.RevertSubtree(&preview, historical, cleanPath, h.config.Now().Unix()); err != nil {
+		return err
+	}
+	preview.Normalize(project, h.config.Now().Unix())
+	if err := h.validateMetadataSnapshot(ctx, project, &preview); err != nil {
+		return fmt.Errorf("revert %s: %w", cleanPath, err)
+	}
+	message := fmt.Sprintf("storhub: revert %s to %s", cleanPath, shortSHA(commitSHA))
+	if _, err := h.UpdateRepoMetadataContext(ctx, project, func(m *metadata.RepoMetadata) error {
+		return metadata.RevertSubtree(m, historical, cleanPath, h.config.Now().Unix())
+	}, message); err != nil {
+		return err
+	}
+	// Commit synchronously: a revert is a discrete operation the caller
+	// expects to be durable on return, not left to the async flush loop.
+	if err := h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project)); err != nil {
+		return err
+	}
+	// D6: assets can be deleted between the pre-check and the commit; re-check
+	// the committed state against fresh server truth.
+	committed, _, err := h.loadRepoMetadataFresh(ctx, project)
+	if err != nil {
+		return err
+	}
+	if err := h.validateMetadataSnapshot(ctx, project, committed); err != nil {
+		return fmt.Errorf("revert committed but snapshot no longer validates: %w", err)
+	}
+	return nil
+}
+
 // validateMetadataRevision ensures revision is a known commit SHA of the
 // project's metadata history, never a branch or tag name.
 func (h *StorHub) validateMetadataRevision(ctx context.Context, project, revision string) error {
