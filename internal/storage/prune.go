@@ -53,7 +53,13 @@ type PruneResult struct {
 // PruneProject is the context-free CLI/embedder entry point: scope is one of
 // "objects", "assets", "history", or "all".
 func (h *StorHub) PruneProject(project, scope string, keep int, dryRun bool) (*PruneResult, error) {
-	return h.Prune(context.Background(), project, PruneScope(scope), keep, dryRun)
+	return h.PruneContext(context.Background(), project, scope, keep, dryRun)
+}
+
+// PruneContext is the string-scoped entry point used by the REST layer (scope
+// is "objects"|"assets"|"history"|"all"); it adapts to the typed Prune.
+func (h *StorHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*PruneResult, error) {
+	return h.Prune(ctx, project, PruneScope(scope), keep, dryRun)
 }
 
 // Prune runs the requested scope. keep bounds history compaction (git):
