@@ -24,12 +24,7 @@ func printDirEntries(w io.Writer, entries []storhub.DirEntry, long bool) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	// Silence is golden: an empty directory prints nothing, like ls(1).
 	for _, entry := range entries {
-		kind := "file"
-		if entry.IsDir {
-			kind = "dir"
-		} else if entry.IsSymlink {
-			kind = "symlink"
-		}
+		kind := entry.KindLabel()
 		if long {
 			_, _ = fmt.Fprintf(w, "%s\t%#o\t%d\t%s\n", kind, entry.Mode, entry.Size, entry.Path)
 			continue
@@ -73,11 +68,8 @@ func printRevisions(w io.Writer, revisions []storhub.MetadataRevision) {
 }
 
 func entryKind(entry *storhub.EntryInfo) string {
-	if entry.IsDir {
-		return "directory"
+	if entry == nil {
+		return "file"
 	}
-	if entry.IsSymlink {
-		return "symlink"
-	}
-	return "file"
+	return entry.KindLabel()
 }

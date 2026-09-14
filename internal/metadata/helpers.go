@@ -1,9 +1,31 @@
 package metadata
 
 import (
+	"fmt"
 	"path"
 	"strings"
 )
+
+// normalizeStoredPathErr is the checked constructor: it canonicalizes
+// user-supplied paths to storage keys exactly like normalizeStoredPath, but
+// escaping paths fail with the offending value in context instead of passing
+// through silently. Prefer it wherever a caller can act on the error;
+// normalizeStoredPath stays total for the load/commit paths where Validate
+// rejects escaping keys at the boundary.
+func normalizeStoredPathErr(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	trimmed := strings.TrimLeft(value, "/")
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("metadata path escapes root: %q", value)
+	}
+	return cleaned, nil
+}
 
 // normalizeStoredPath canonicalizes user-supplied paths to storage keys:
 // relative, slash-clean, and without a leading separator. Surrounding
@@ -14,15 +36,8 @@ import (
 // mirror fs.NormalizePath; TestPathNormalizerConformance pins the two
 // implementations together so they cannot drift again.
 func normalizeStoredPath(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	trimmed := strings.TrimLeft(value, "/")
-	cleaned := path.Clean(trimmed)
-	if cleaned == "." {
-		return ""
-	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+	cleaned, err := normalizeStoredPathErr(value)
+	if err != nil {
 		return strings.Trim(strings.TrimSpace(value), "/")
 	}
 	return cleaned

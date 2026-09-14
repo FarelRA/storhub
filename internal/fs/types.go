@@ -24,6 +24,44 @@ type EntryInfo struct {
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 }
 
+// KindLabel returns the single display vocabulary for an entry:
+// "directory", "symlink", or "file". The IsDir/IsSymlink flags are the
+// source of truth (the Kind wire field only spans file/symlink); a set dir
+// bit wins, matching the historical renderer order. Every renderer must use
+// this instead of re-spelling the triple.
+func (e EntryInfo) KindLabel() string {
+	if e.IsDir {
+		return "directory"
+	}
+	if e.IsSymlink {
+		return "symlink"
+	}
+	return "file"
+}
+
+// KindLabel mirrors EntryInfo.KindLabel for directory listings.
+func (e DirEntry) KindLabel() string {
+	if e.IsDir {
+		return "directory"
+	}
+	if e.IsSymlink {
+		return "symlink"
+	}
+	return "file"
+}
+
+// IsDirectory reports the dir flag behind one name.
+func (e EntryInfo) IsDirectory() bool { return e.IsDir }
+
+// IsLink reports the symlink flag behind one name.
+func (e EntryInfo) IsLink() bool { return e.IsSymlink }
+
+// IsDirectory reports the dir flag behind one name.
+func (e DirEntry) IsDirectory() bool { return e.IsDir }
+
+// IsLink reports the symlink flag behind one name.
+func (e DirEntry) IsLink() bool { return e.IsSymlink }
+
 type MetadataPatch struct {
 	HasMode  bool
 	Mode     uint32

@@ -693,14 +693,22 @@ func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 	})
 }
 
+// requestBearerToken extracts the Authorization: Bearer *** token from a
+// request, tolerating inline whitespace. Empty unless the scheme is Bearer.
+// Callers keep their own header-vs-query precedence on top of it.
+func requestBearerToken(r *http.Request) string {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+}
+
 func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := ""
-			authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-			} else {
+			token := requestBearerToken(r)
+			if token == "" {
 				token = strings.TrimSpace(r.URL.Query().Get("token"))
 			}
 			if token == "" {
@@ -1075,66 +1083,73 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	op := strings.TrimSpace(r.URL.Query().Get("op"))
+	var err error
 	switch op {
 	case "append":
-		if err := h.streamAppendBody(w, r, project, filePath, r.Body); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
+		err = h.patchOpAppend(r, project, filePath)
 	case "write":
-		offset, parseErr := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
-		if parseErr != nil {
-			h.writeMappedError(w, parseErr)
-			return
-		}
-		if err := h.streamWriteBody(w, r, project, filePath, r.Body, offset); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
+		err = h.patchOpWrite(r, project, filePath)
 	case "patch":
-		offset, parseErr := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
-		if parseErr != nil {
-			h.writeMappedError(w, parseErr)
-			return
-		}
-		deleteSize, parseErr := parseRequiredInt64(r.URL.Query().Get("delete_size"), "delete_size")
-		if parseErr != nil {
-			h.writeMappedError(w, parseErr)
-			return
-		}
-		edit, readErr := h.readPatchBody(w, r)
-		if readErr != nil {
-			h.writeMappedError(w, readErr)
-			return
-		}
-		revOpts, perr := h.mutationPrecondition(r, project, filePath)
-		if perr != nil {
-			h.writeMappedError(w, perr)
-			return
-		}
-		if _, err := h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
+		err = h.patchOpPatch(r, project, filePath)
 	case "truncate":
-		size, parseErr := parseRequiredInt64(r.URL.Query().Get("size"), "size")
-		if parseErr != nil {
-			h.writeMappedError(w, parseErr)
-			return
-		}
-		revOpts, perr := h.mutationPrecondition(r, project, filePath)
-		if perr != nil {
-			h.writeMappedError(w, perr)
-			return
-		}
-		if _, err := h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size, revOpts...); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
+		err = h.patchOpTruncate(r, project, filePath)
 	default:
 		h.writeError(w, http.StatusBadRequest, "invalid_patch_op", "query parameter op must be one of append, write, patch, truncate")
 		return
 	}
+	if err != nil {
+		h.writeMappedError(w, err)
+	}
+}
+
+// patchOpAppend applies one atomic append from the request body.
+func (h *restHandler) patchOpAppend(r *http.Request, project, filePath string) error {
+	return h.streamAppendBody(r, project, filePath, r.Body)
+}
+
+// patchOpWrite applies one atomic write at the required offset.
+func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) error {
+	offset, err := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
+	if err != nil {
+		return err
+	}
+	return h.streamWriteBody(r, project, filePath, r.Body, offset)
+}
+
+// patchOpPatch applies one range replacement (offset/delete_size/edit).
+func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) error {
+	offset, err := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
+	if err != nil {
+		return err
+	}
+	deleteSize, err := parseRequiredInt64(r.URL.Query().Get("delete_size"), "delete_size")
+	if err != nil {
+		return err
+	}
+	edit, err := h.readSizedBody(r.Body, "patch payload exceeds the configured limit")
+	if err != nil {
+		return err
+	}
+	revOpts, err := h.mutationPrecondition(r, project, filePath)
+	if err != nil {
+		return err
+	}
+	_, err = h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...)
+	return err
+}
+
+// patchOpTruncate resizes the file to the required size.
+func (h *restHandler) patchOpTruncate(r *http.Request, project, filePath string) error {
+	size, err := parseRequiredInt64(r.URL.Query().Get("size"), "size")
+	if err != nil {
+		return err
+	}
+	revOpts, err := h.mutationPrecondition(r, project, filePath)
+	if err != nil {
+		return err
+	}
+	_, err = h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size, revOpts...)
+	return err
 }
 
 // enforceFreshPrecondition restates the client's If-Match requirement against
@@ -1600,9 +1615,7 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
 	parentToken := r.URL.Query().Get("token")
 	if parentToken == "" {
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(strings.TrimSpace(auth), "Bearer ") {
-			parentToken = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(auth), "Bearer "))
-		}
+		parentToken = requestBearerToken(r)
 	}
 	claims, err := h.parseShareToken(parentToken)
 	if err != nil || h.isRevoked(claims.ID) {
@@ -1968,8 +1981,8 @@ func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string
 // multi-call writes would expose torn intermediate states to concurrent
 // readers and leave partial data committed on failure; bodies beyond the
 // cap are rejected so clients fall back to the atomic full-file PUT.
-func (h *restHandler) streamWriteBody(w http.ResponseWriter, r *http.Request, project, filePath string, body io.Reader, offset int64) error {
-	payload, err := h.readMutationBody(w, r, body)
+func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
+	payload, err := h.readSizedBody(body, fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
 	if err != nil {
 		return err
 	}
@@ -1982,8 +1995,8 @@ func (h *restHandler) streamWriteBody(w http.ResponseWriter, r *http.Request, pr
 }
 
 // streamAppendBody mirrors streamWriteBody: one AppendFile call, or 413.
-func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, project, filePath string, body io.Reader) error {
-	payload, err := h.readMutationBody(w, r, body)
+func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
+	payload, err := h.readSizedBody(body, fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
 	if err != nil {
 		return err
 	}
@@ -1995,22 +2008,15 @@ func (h *restHandler) streamAppendBody(w http.ResponseWriter, r *http.Request, p
 	return err
 }
 
-func (h *restHandler) readMutationBody(w http.ResponseWriter, r *http.Request, body io.Reader) ([]byte, error) {
+// readSizedBody buffers at most MaxPatchBodySize bytes from a mutation body;
+// oversized payloads fail with the caller's 413 wording so the existing
+// endpoint messages stay unchanged. It replaces the former readMutationBody /
+// readPatchBody pair, which differed only in that message.
+func (h *restHandler) readSizedBody(body io.Reader, tooLargeMessage string) ([]byte, error) {
 	payload, err := readCappedBody(body, h.opts.MaxPatchBodySize)
 	if err != nil {
 		if errors.Is(err, errCappedBody) {
-			return nil, errPayloadTooLarge(fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
-		}
-		return nil, err
-	}
-	return payload, nil
-}
-
-func (h *restHandler) readPatchBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	payload, err := readCappedBody(r.Body, h.opts.MaxPatchBodySize)
-	if err != nil {
-		if errors.Is(err, errCappedBody) {
-			return nil, errPayloadTooLarge("patch payload exceeds the configured limit")
+			return nil, errPayloadTooLarge(tooLargeMessage)
 		}
 		return nil, err
 	}

@@ -175,16 +175,7 @@ func (c Config) WithDefaults() Config {
 		c.LogFormat = defaults.LogFormat
 	}
 	if c.Logger == nil {
-		c.Logger = logging.NewLogger(logging.Options{
-			Level:  c.LogLevel,
-			Format: c.LogFormat,
-			Color:  c.LogColor,
-			Output: c.LogOutput,
-		})
-		// The knobs have been consumed into the logger; clearing them
-		// keeps the single-mechanism invariant (Validate rejects Logger+
-		// knobs) true for every config that went through WithDefaults.
-		c.LogLevel, c.LogFormat, c.LogColor, c.LogOutput = "", "", false, nil
+		c = c.resolveLogger()
 	}
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
@@ -201,6 +192,25 @@ func (c Config) WithDefaults() Config {
 	if c.Sleep == nil {
 		c.Sleep = defaults.Sleep
 	}
+	return c
+}
+
+// resolveLogger builds the default logger from the already-normalized log
+// knobs, and clears the consumed knobs so the single-mechanism invariant
+// (Validate rejects Logger+knobs) holds for every defaulted config. It is a
+// no-op when the caller supplied a logger. Split out of WithDefaults so
+// default-filling and logger construction read as separate steps.
+func (c Config) resolveLogger() Config {
+	if c.Logger != nil {
+		return c
+	}
+	c.Logger = logging.NewLogger(logging.Options{
+		Level:  c.LogLevel,
+		Format: c.LogFormat,
+		Color:  c.LogColor,
+		Output: c.LogOutput,
+	})
+	c.LogLevel, c.LogFormat, c.LogColor, c.LogOutput = "", "", false, nil
 	return c
 }
 

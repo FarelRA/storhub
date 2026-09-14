@@ -620,7 +620,11 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printFileSummary(a.stderr, ternary(replace, "replaced", "uploaded"), meta)
+	action := "uploaded"
+	if replace {
+		action = "replaced"
+	}
+	printFileSummary(a.stderr, action, meta)
 	return nil
 }
 
@@ -680,16 +684,11 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutStat(cmd) {
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
 		return json.NewEncoder(a.stdout).Encode(entry)
 	}
 	printEntryInfo(a.stdout, entry)
 	return nil
-}
-
-func jsonOutStat(cmd *cobra.Command) bool {
-	v, _ := cmd.Flags().GetBool("json")
-	return v
 }
 
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
@@ -918,7 +917,11 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = fsys.Close() }()
+	defer func() {
+		if err := fsys.Close(); err != nil {
+			_, _ = fmt.Fprintf(a.stderr, "warning: closing filesystem session: %v\n", err)
+		}
+	}()
 	if err := os.MkdirAll(args[1], mountDirPerm); err != nil {
 		return err
 	}
@@ -1123,7 +1126,11 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = fsys.Close() }()
+	defer func() {
+		if err := fsys.Close(); err != nil {
+			_, _ = fmt.Fprintf(a.stderr, "warning: closing filesystem session: %v\n", err)
+		}
+	}()
 	// Single owner of fsys.Wait: everything below joins through fsDone.
 	fsDone := fsWait(fsys)
 	// abort stops a half-started serve: the mount comes down before the
@@ -1486,13 +1493,6 @@ const (
 	unmountBackoffCap    = 8 * time.Second
 	mountDirPerm         = 0o755
 )
-
-func ternary[T any](cond bool, left, right T) T {
-	if cond {
-		return left
-	}
-	return right
-}
 
 func formatTime(t int64) string {
 	if t == 0 {
