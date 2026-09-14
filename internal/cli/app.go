@@ -57,6 +57,7 @@ type hubClient interface {
 	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
 	RollbackMetadata(project, commitSHA string) error
 	PurgeUntracked(project string) (*storhub.PurgeResult, error)
+	PruneProject(project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
 	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 
@@ -174,6 +175,7 @@ Examples:
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
+	rootCmd.AddCommand(a.newPruneCmd())
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newMountCmd())
@@ -353,6 +355,62 @@ This cleans up orphaned releases and assets (e.g. from interrupted writes or man
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runPurge,
 	}
+}
+
+func (a *App) newPruneCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "prune <project> [objects|assets|history|all]",
+		Short: "Reclaim index objects, release assets, or git history",
+		Long: `Prune reclaims storage under the full-history retention policy.
+
+  objects   delete content-addressed index objects referenced by no retained
+            manifest (orphans from failed commits or after a history prune)
+  assets    delete release assets tracked by no file (the classic purge)
+  history   collapse old index manifests into a checkpoint (git backend only;
+            on the REST backend GitHub owns history and the API cannot delete
+            revisions, so this reports honestly instead of pretending)
+  all       history (where possible) + objects + assets
+
+Use --dry-run to see what would be reclaimed without deleting anything.
+--keep bounds history compaction (manifests newer than keep are retained).`,
+		Args: usageArgs(cobra.RangeArgs(1, 2)),
+		RunE: a.runPrune,
+	}
+	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting")
+	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
+	return cmd
+}
+
+func (a *App) runPrune(cmd *cobra.Command, args []string) error {
+	token, apiBase := cmdAuth(cmd)
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	if err != nil {
+		return err
+	}
+	scope := "all"
+	if len(args) >= 2 {
+		scope = args[1]
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	keep, _ := cmd.Flags().GetInt("keep")
+	result, err := hub.PruneProject(args[0], scope, keep, dryRun)
+	if err != nil {
+		return err
+	}
+	verb := "pruned"
+	if dryRun {
+		verb = "would prune"
+	}
+	_, _ = fmt.Fprintf(a.stderr, "%s %s (%s): %d objects, %d releases, %d assets",
+		verb, args[0], result.Scope, result.DeletedObjects, result.DeletedReleases, result.DeletedAssets)
+	if result.HistoryCompacted {
+		_, _ = fmt.Fprint(a.stderr, ", history compacted")
+	}
+	_, _ = fmt.Fprintln(a.stderr)
+	for _, note := range result.Notes {
+		_, _ = fmt.Fprintf(a.stderr, "  note: %s\n", note)
+	}
+	return nil
 }
 
 func (a *App) newDeleteProjectCmd() *cobra.Command {

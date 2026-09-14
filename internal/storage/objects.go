@@ -108,6 +108,15 @@ func (c *objectCache) contains(sha string) bool {
 	return err == nil
 }
 
+// remove drops a sha from the cache (in-memory order + disk file). Used by
+// prune after deleting an object upstream so a later load refetches.
+func (c *objectCache) remove(sha string) {
+	c.mu.Lock()
+	c.removeLocked(sha)
+	c.mu.Unlock()
+	_ = os.Remove(c.path(sha))
+}
+
 func (c *objectCache) touchLocked(sha string, size int) {
 	if _, ok := c.sizes[sha]; ok {
 		c.removeLocked(sha)

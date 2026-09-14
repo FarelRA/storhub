@@ -144,6 +144,11 @@ type putFileRequest struct {
 	Content string `json:"content"` // base64-encoded file bytes
 }
 
+type deleteFileRequest struct {
+	Message string `json:"message"`
+	SHA     string `json:"sha"`
+}
+
 func NewClient(token string, cfg storcfg.Config) *Client {
 	client := cfg.HTTPClient
 	if client == nil {
@@ -637,6 +642,57 @@ func (c *Client) ListFileCommits(ctx context.Context, owner, project, filePath s
 			return commits, nil
 		}
 	}
+}
+
+// ContentEntry is one item in a contents-API directory listing.
+type ContentEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Type string `json:"type"` // "file" or "dir"
+	SHA  string `json:"sha"`
+}
+
+// ListDir returns the entries of a directory path via the contents API. A
+// missing directory surfaces as a 404 APIError so callers can distinguish an
+// absent tree from a transport failure.
+func (c *Client) ListDir(ctx context.Context, owner, project, dirPath string) ([]ContentEntry, error) {
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(dirPath)))
+	var entries []ContentEntry
+	if err := c.getJSON(ctx, endpoint, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// DeleteFileContent removes filePath, using sha as the optimistic-concurrency
+// precondition (GitHub requires the current blob sha). Returns the commit SHA.
+func (c *Client) DeleteFileContent(ctx context.Context, owner, project, filePath, sha, message string) (string, error) {
+	body, err := json.Marshal(deleteFileRequest{Message: message, SHA: sha})
+	if err != nil {
+		return "", fmt.Errorf("marshal delete-file request: %w", err)
+	}
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
+	resp, err := c.doRequest(ctx, http.MethodDelete, endpoint, func() (io.Reader, error) {
+		return bytes.NewReader(body), nil
+	}, requestOptions{
+		contentType: "application/json",
+		accept:      "application/vnd.github+json",
+		contentSize: int64(len(body)),
+		retryable:   true,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var result struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode delete response: %w", err)
+	}
+	return result.Commit.SHA, nil
 }
 
 func (c *Client) FindAssetIDByName(ctx context.Context, owner, project, tag, name string) (int64, error) {

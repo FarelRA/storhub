@@ -222,6 +222,26 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	if err := metadata.Validate(); err != nil {
 		return "", "", fmt.Errorf("validate metadata: %w", err)
 	}
+	// A v2 project's rollback/cleanup must republish the manifest, not the
+	// v1 blob: re-point the index at this tree's objects (rollback-as-revert,
+	// no force-push). The project's layout is authoritative for the write.
+	if pm := h.lookupProjectMeta(project); pm != nil {
+		pm.mu.RLock()
+		isV2 := pm.isV2
+		objectCount := pm.objectCount
+		pm.mu.RUnlock()
+		if isV2 {
+			commitSHA, contentSHA, newCount, err := h.publishIndex(ctx, project, &metadata, previousSHA, message, true, objectCount)
+			if err != nil {
+				logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+				return "", "", err
+			}
+			h.storeRepoMetadataV2(project, metadata, contentSHA, nil, true, newCount)
+			h.clearSizeCapped(project)
+			logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "v2", true)
+			return commitSHA, contentSHA, nil
+		}
+	}
 	payload, err := metadata.ToJSON()
 	if err != nil {
 		return "", "", err
@@ -261,8 +281,12 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
+	path, err := h.activeIndexPath(ctx, project)
+	if err != nil {
+		return nil, err
+	}
 	if repo := h.getGitRepo(project); repo != nil {
-		revisions, err := repo.listFileCommits(ctx, metadataFilePath)
+		revisions, err := repo.listFileCommits(ctx, path)
 		if err != nil {
 			// Infrastructure failures must not masquerade as "project not
 			// found"; propagate them so callers can retry or report.
@@ -273,7 +297,7 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 		}
 		return revisions, nil
 	}
-	commits, err := h.gh.ListFileCommits(ctx, h.owner, project, metadataFilePath)
+	commits, err := h.gh.ListFileCommits(ctx, h.owner, project, path)
 	if err != nil {
 		var apiErr *ghapi.APIError
 		if errors.As(err, &apiErr) && apiErr.NotFound() {
@@ -286,6 +310,29 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 		revisions = append(revisions, MetadataRevision{CommitSHA: commit.SHA, Message: commit.Message, CommittedAt: commit.CommittedAt.Unix()})
 	}
 	return revisions, nil
+}
+
+// activeIndexPath returns the repo path carrying the project's current index
+// history: the v2 manifest when the project is (or will be) v2, else the v1
+// metadata blob. Revision listing and history walks must follow the active
+// layout or they see an empty history for a v2 project.
+func (h *StorHub) activeIndexPath(ctx context.Context, project string) (string, error) {
+	if pm := h.lookupProjectMeta(project); pm != nil {
+		pm.mu.RLock()
+		isV2 := pm.isV2
+		pm.mu.RUnlock()
+		if isV2 {
+			return indexFilePath, nil
+		}
+	}
+	_, _, isV2, found, err := h.readIndexHead(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	if found && isV2 {
+		return indexFilePath, nil
+	}
+	return metadataFilePath, nil
 }
 
 func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA string) (*RepoMetadata, error) {

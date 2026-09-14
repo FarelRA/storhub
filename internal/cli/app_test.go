@@ -188,6 +188,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"patch", "--token", "x", "demo", "docs/readme.txt", "1", "2", "x"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
+		{"prune", "--token", "x", "demo", "objects", "--dry-run"},
 		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
 		{"serve", "--token", "x", "demo", mountDir, "--allow-anonymous"},
@@ -199,7 +200,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	// Status chatter belongs on stderr; stdout carries only data.
 	chatter := stderr()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "would prune demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
 		if !strings.Contains(chatter, want) {
 			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
@@ -555,6 +556,9 @@ func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevis
 func (h *fakeHub) RollbackMetadata(project, commitSHA string) error { return nil }
 func (h *fakeHub) PurgeUntracked(project string) (*storhub.PurgeResult, error) {
 	return &storhub.PurgeResult{}, nil
+}
+func (h *fakeHub) PruneProject(project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *fakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return fakeMount{}, nil

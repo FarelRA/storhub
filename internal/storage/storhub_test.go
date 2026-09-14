@@ -3250,9 +3250,39 @@ func (m *mockGitHub) handleContents(w http.ResponseWriter, r *http.Request, repo
 		m.handleGetContent(w, r, repo, cleanPath)
 	case http.MethodPut:
 		m.handlePutContent(w, r, repo, cleanPath)
+	case http.MethodDelete:
+		m.handleDeleteContent(w, r, repo, cleanPath)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleDeleteContent removes a file, verifying the caller's blob sha matches
+// (GitHub's optimistic-concurrency precondition for deletes).
+func (m *mockGitHub) handleDeleteContent(w http.ResponseWriter, r *http.Request, repo *mockRepo, filePath string) {
+	var payload struct {
+		Message string `json:"message"`
+		SHA     string `json:"sha"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		m.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := repo.files[filePath]
+	if current == nil {
+		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		return
+	}
+	if payload.SHA != "" && payload.SHA != current.sha {
+		m.writeJSON(w, http.StatusConflict, map[string]any{"message": "sha does not match"})
+		return
+	}
+	delete(repo.files, filePath)
+	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
+	repo.nextCommitID++
+	m.writeJSON(w, http.StatusOK, map[string]any{"commit": map[string]any{"sha": commitSHA}})
 }
 
 func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, repo *mockRepo, filePath string) {
@@ -3286,6 +3316,13 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 	}
 	file := repo.files[filePath]
 	if file == nil {
+		// Not an exact file: it may be a directory prefix. GitHub's contents
+		// API returns an array of entries for a directory. Prune's object
+		// enumeration relies on this, so mirror it.
+		if entries, ok := m.dirEntriesLocked(repo, filePath); ok {
+			m.writeJSON(w, http.StatusOK, entries)
+			return
+		}
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
 		return
 	}
@@ -3304,6 +3341,36 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 			"content":  base64.StdEncoding.EncodeToString(file.data),
 		})
 	}
+}
+
+// dirEntriesLocked returns the immediate children of a directory prefix
+// (files stored under path/...). ok=false when nothing lives under it.
+// Caller holds m.mu.
+func (m *mockGitHub) dirEntriesLocked(repo *mockRepo, dirPath string) ([]map[string]any, bool) {
+	prefix := strings.TrimSuffix(dirPath, "/") + "/"
+	seen := map[string]map[string]any{}
+	for p, f := range repo.files {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(p, prefix)
+		if i := strings.Index(rest, "/"); i >= 0 {
+			name := rest[:i]
+			if _, ok := seen[name]; !ok {
+				seen[name] = map[string]any{"name": name, "path": prefix + name, "type": "dir"}
+			}
+			continue
+		}
+		seen[rest] = map[string]any{"name": rest, "path": p, "type": "file", "sha": f.sha}
+	}
+	if len(seen) == 0 {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, len(seen))
+	for _, e := range seen {
+		out = append(out, e)
+	}
+	return out, true
 }
 
 func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, repo *mockRepo, filePath string) {

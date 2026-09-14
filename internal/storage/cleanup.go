@@ -334,7 +334,16 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	// Squash the entire metadata git history into a single orphan commit.
 	// Since we cannot roll back individual files (content-addressed storage),
 	// the commit history serves no purpose other than consuming space.
-	if repo := h.getGitRepo(project); repo != nil {
+	//
+	// v2 projects keep their history: rollback-as-revert depends on old
+	// manifests pointing at live objects, and collapsing history here would
+	// also drop the objects a single-path squash does not carry. History
+	// compaction for v2 is an explicit `storhub prune history`.
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.RLock()
+	isV2 := pm.isV2
+	pm.mu.RUnlock()
+	if repo := h.getGitRepo(project); repo != nil && !isV2 {
 		if err := h.ensureOwner(ctx); err != nil {
 			return nil, err
 		}

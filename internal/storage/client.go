@@ -218,6 +218,15 @@ func (h *StorHub) clearSizeCapped(project string) {
 	pm.mu.Unlock()
 }
 
+// lookupProjectMeta returns the cached projectMetadata if present, without
+// creating one. Read-only callers (rollback layout detection) must not spawn
+// a cache entry as a side effect.
+func (h *StorHub) lookupProjectMeta(project string) *projectMetadata {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.metaCache[project]
+}
+
 func (h *StorHub) invalidateReleaseCache(project string) {
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()

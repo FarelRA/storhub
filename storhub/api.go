@@ -59,6 +59,10 @@ type (
 	NodeKind = meta.NodeKind
 	// PurgeResult reports what PurgeUntracked removed and kept.
 	PurgeResult = impl.PurgeResult
+	// PruneResult reports what a granular prune reclaimed.
+	PruneResult = impl.PruneResult
+	// PruneScope selects what a prune run reclaims (objects|assets|history|all).
+	PruneScope = impl.PruneScope
 	// APIError is an error returned by the GitHub API layer, carrying the
 	// HTTP status and parsed message.
 	APIError = ghapi.APIError

@@ -363,6 +363,98 @@ func sortedFileKeys(files map[string][]byte) []string {
 	return keys
 }
 
+// listTreePaths returns every tracked file path under prefix (e.g.
+// ".storhub/objects") from the synced worktree. Used by prune to enumerate
+// the repo's content-addressed objects.
+func (r *gitRepo) listTreePaths(ctx context.Context, prefix string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensure(ctx); err != nil {
+		return nil, err
+	}
+	if err := r.sync(ctx); err != nil {
+		return nil, err
+	}
+	root := filepath.Join(r.dir, filepath.FromSlash(prefix))
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(r.dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return out, nil
+}
+
+// deleteCommitPushCAS removes the given paths in one commit with the same
+// compare-and-swap semantics as writeCommitPushCASMulti. Prune uses it to
+// drop orphaned objects atomically.
+func (r *gitRepo) deleteCommitPushCAS(ctx context.Context, paths []string, message, expectedOld string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensure(ctx); err != nil {
+		return "", err
+	}
+	if err := r.sync(ctx); err != nil {
+		return "", err
+	}
+	base, err := r.headHashNoLock()
+	if err != nil {
+		return "", err
+	}
+	if expectedOld != "" && (base.IsZero() || base.String() != expectedOld) {
+		return "", &ghapi.APIError{
+			StatusCode: http.StatusConflict,
+			Message:    fmt.Sprintf("stale prune base: expected %s, HEAD is %s", shortSHA(expectedOld), shortSHA(base.String())),
+		}
+	}
+	w, err := r.repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("worktree: %w", err)
+	}
+	for _, path := range paths {
+		fsPath := filepath.Join(r.dir, filepath.FromSlash(path))
+		if err := os.Remove(fsPath); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("remove %s: %w", path, err)
+		}
+		if _, err := w.Remove(path); err != nil {
+			// go-git reports an untracked removal as "not found"; that is
+			// benign here (the file was already absent from the index).
+			if !strings.Contains(err.Error(), "not found") {
+				return "", fmt.Errorf("git rm %s: %w", path, err)
+			}
+		}
+	}
+	hash, err := w.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{Name: "storhub", Email: "storhub@users.noreply.github.com", When: time.Now().UTC()},
+	})
+	if err != nil {
+		return "", fmt.Errorf("commit delete: %w", err)
+	}
+	pushOpts := &git.PushOptions{ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())}}
+	if !base.IsZero() {
+		pushOpts.ForceWithLease = &git.ForceWithLease{RefName: plumbing.ReferenceName("refs/heads/" + defaultBranch), Hash: base}
+	}
+	if err := r.repo.PushContext(ctx, pushOpts); err != nil {
+		return "", casConflict(err, base)
+	}
+	return hash.String(), nil
+}
+
 // headHashNoLock returns the post-sync HEAD commit hash, or the zero hash
 // when the repo has no HEAD yet (brand-new, nothing committed). Callers must
 // hold r.mu.
@@ -549,6 +641,75 @@ func (r *gitRepo) squashHistoryCAS(ctx context.Context, path, message, expectedO
 	// 5. Force push with a lease on the post-sync HEAD: a concurrent
 	// writer that advanced the remote since our sync rejects the push
 	// with a conflict instead of being silently discarded.
+	pushOpts := &git.PushOptions{
+		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
+		Force:         true,
+		ForceWithLease: &git.ForceWithLease{
+			RefName: plumbing.ReferenceName("refs/heads/" + defaultBranch),
+			Hash:    base,
+		},
+	}
+	if err := r.repo.PushContext(ctx, pushOpts); err != nil {
+		return casConflict(err, base)
+	}
+	return nil
+}
+
+// squashTreeCAS collapses history into a single orphan commit that keeps the
+// ENTIRE current tree (manifest + every object), unlike squashHistoryCAS
+// which rebuilds a tree from one path. The v2 index must never lose its
+// objects to a history prune, so this is the history-compaction primitive for
+// v2 projects. The force-push carries a lease on the post-sync HEAD so a
+// concurrent writer is rejected with 409 rather than discarded.
+func (r *gitRepo) squashTreeCAS(ctx context.Context, message, expectedOld string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensure(ctx); err != nil {
+		return err
+	}
+	if err := r.sync(ctx); err != nil {
+		return err
+	}
+	base, err := r.headHashNoLock()
+	if err != nil {
+		return err
+	}
+	if base.IsZero() {
+		return fmt.Errorf("squash: no HEAD to squash")
+	}
+	if expectedOld != "" && base.String() != expectedOld {
+		return &ghapi.APIError{
+			StatusCode: http.StatusConflict,
+			Message:    fmt.Sprintf("stale squash base: expected %s, HEAD is %s", shortSHA(expectedOld), shortSHA(base.String())),
+		}
+	}
+	head, err := r.repo.CommitObject(base)
+	if err != nil {
+		return fmt.Errorf("head commit: %w", err)
+	}
+	storer := r.repo.Storer
+	now := time.Now().UTC()
+	commit := &object.Commit{
+		Author:    object.Signature{Name: "storhub", Email: "storhub@users.noreply.github.com", When: now},
+		Committer: object.Signature{Name: "storhub", Email: "storhub@users.noreply.github.com", When: now},
+		Message:   message,
+		TreeHash:  head.TreeHash,
+	}
+	obj := storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		return fmt.Errorf("encode squash commit: %w", err)
+	}
+	commitHash, err := storer.SetEncodedObject(obj)
+	if err != nil {
+		return fmt.Errorf("store squash commit: %w", err)
+	}
+	refName := plumbing.ReferenceName("refs/heads/" + defaultBranch)
+	if err := storer.RemoveReference(refName); err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("remove ref: %w", err)
+	}
+	if err := storer.SetReference(plumbing.NewHashReference(refName, commitHash)); err != nil {
+		return fmt.Errorf("set ref: %w", err)
+	}
 	pushOpts := &git.PushOptions{
 		ClientOptions: []gitclient.Option{gitclient.WithHTTPAuth(r.auth())},
 		Force:         true,
