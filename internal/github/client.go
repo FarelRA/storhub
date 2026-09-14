@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -509,12 +508,23 @@ func (c *Client) cachedAssetURL(assetID int64) (cachedAssetURL, bool) {
 	c.assetMu.Lock()
 	defer c.assetMu.Unlock()
 	cached, ok := c.assetURLs[assetID]
-	return cached, ok && c.governor.now().Before(cached.expires)
+	return cached, ok && c.now().Before(cached.expires)
+}
+
+// now is the client's single clock: the governor clock (injectable via
+// cfg.Now) when present, wall time otherwise. Asset-cache TTLs are both
+// stored and checked on this clock so injected test time moves them
+// together.
+func (c *Client) now() time.Time {
+	if c.governor != nil && c.governor.now != nil {
+		return c.governor.now()
+	}
+	return time.Now()
 }
 
 func (c *Client) storeAssetURL(assetID int64, rawURL string) {
 	parsed, err := url.Parse(rawURL)
-	expires := time.Now().Add(60 * time.Second)
+	expires := c.now().Add(60 * time.Second)
 	if err == nil {
 		// GitHub release assets redirect to Azure blob storage whose SAS
 		// token carries the expiry in 'se' (RFC3339). Honoring it avoids
@@ -847,10 +857,11 @@ func decodeAPIError(resp *http.Response) *APIError {
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBodyBytes))
 	var payload struct {
-		Message string `json:"message"`
+		Message string           `json:"message"`
+		Errors  []APIErrorDetail `json:"errors"`
 	}
 	_ = json.Unmarshal(body, &payload)
-	err := &APIError{StatusCode: resp.StatusCode, Message: payload.Message, Body: string(body), Headers: resp.Header.Clone()}
+	err := &APIError{StatusCode: resp.StatusCode, Message: payload.Message, Body: string(body), Headers: resp.Header.Clone(), Details: payload.Errors}
 	if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); retryAfter > 0 {
 		err.RetryAfter = retryAfter
 	}
@@ -868,7 +879,13 @@ func decodeAPIError(resp *http.Response) *APIError {
 	// Header-less rejections (uploads.github.com): the body text is the
 	// only evidence of rate limiting. These are not provably primary -
 	// the honest classification is secondary-style pacing.
-	if !err.RateLimited && marker {
+	//
+	// The marker only counts on the statuses GitHub uses for rate/abuse
+	// rejections (403/429): the same prose quoted inside a 404, 422 or
+	// 5xx body (docs links, echoed text) is not a rejection and must not
+	// take the rate-limit retry path.
+	if !err.RateLimited && marker &&
+		(resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) {
 		err.RateLimited = true
 	}
 	return err
@@ -1032,11 +1049,24 @@ func (c *Client) boundedWait(d time.Duration) time.Duration {
 
 // escapeContentPath URL-escapes each path segment; raw '#', '?' or '%'
 // characters in filenames would otherwise truncate or rewrite the request.
+//
+// Segments normalize instead of reject: "" and "." drop out, ".." pops
+// the previous segment clamped at the repo root (it can never escape
+// into the URL the way path.Clean's leading ".." did). An empty result
+// means the input named nothing addressable.
 func escapeContentPath(filePath string) string {
-	cleaned := path.Clean(strings.TrimLeft(filePath, "/"))
-	segments := strings.Split(cleaned, "/")
-	for i, seg := range segments {
-		segments[i] = url.PathEscape(seg)
+	var kept []string
+	for _, seg := range strings.Split(strings.TrimLeft(filePath, "/"), "/") {
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if len(kept) > 0 {
+				kept = kept[:len(kept)-1]
+			}
+		default:
+			kept = append(kept, url.PathEscape(seg))
+		}
 	}
-	return strings.Join(segments, "/")
+	return strings.Join(kept, "/")
 }

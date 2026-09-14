@@ -21,6 +21,22 @@ type APIError struct {
 	// recovery is waiting for x-ratelimit-reset. Secondary limits carry
 	// their own shorter waits.
 	Primary bool
+	// Details carries GitHub's structured errors[] array verbatim. It is
+	// the only honest basis for fine-grained classification (e.g. 422
+	// "already_exists" vs capacity "custom"/file_count): matching message
+	// prose with bare substrings ("1000", "too many") false-positives on
+	// unrelated variants and false-negatives on rewordings.
+	Details []APIErrorDetail
+}
+
+// APIErrorDetail is one entry of GitHub's structured errors[] payload:
+// a machine-readable (resource, code, field) triple that survives
+// message rewording.
+type APIErrorDetail struct {
+	Resource string `json:"resource"`
+	Code     string `json:"code"`
+	Field    string `json:"field"`
+	Message  string `json:"message"`
 }
 
 func (e *APIError) Error() string {
@@ -35,6 +51,23 @@ func (e *APIError) Error() string {
 }
 
 func (e *APIError) NotFound() bool { return e != nil && e.StatusCode == http.StatusNotFound }
+
+// IsValidationIssue matches status + structured code: a 422 whose
+// errors[] array carries the given code (case-insensitive), narrowed by
+// field when field != "". Prose-only bodies never match, so message
+// variants ("file_count limited to 1000...", "too many ...") classify
+// only through the code GitHub actually assigned.
+func (e *APIError) IsValidationIssue(code, field string) bool {
+	if e == nil || e.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	for _, d := range e.Details {
+		if strings.EqualFold(d.Code, code) && (field == "" || strings.EqualFold(d.Field, field)) {
+			return true
+		}
+	}
+	return false
+}
 
 // CDNError reports a failed range fetch against a signed asset URL. The
 // status is carried structurally so callers can distinguish transient

@@ -138,32 +138,35 @@ func methodCost(method string) int64 {
 // *APIError when the required wait exceeds maxWait - honest refusal beats
 // silently stalling a command past its usefulness.
 //
+// The concurrency slot is taken AFTER the throttle wait, never across
+// it: a throttled waiter holding a slot head-of-line-blocks cheap
+// requests behind it while it sleeps. Local budget accounting commits in
+// reserve() at zero-wait exactly as before; the slot only gates sending.
+//
 // assetUpload marks POSTs to uploads.github.com, a separate authority that
 // sends no X-RateLimit headers and draws from no hourly core budget.
 // Such requests skip hourly pacing (floor + sustainable pace + local budget
 // accounting) but still honor the per-minute windows and concurrency cap.
 func (g *rateGovernor) acquire(ctx context.Context, cost int64, content, assetUpload bool) (func(), error) {
+	for {
+		wait, apiErr := g.reserve(cost, content, assetUpload)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		if wait == 0 {
+			break
+		}
+		logging.Warn(g.logger, "rate limit throttle", "wait", wait.Round(time.Millisecond), "cost", cost, "content", content)
+		if err := g.sleep(ctx, wait); err != nil {
+			return nil, err
+		}
+	}
 	select {
 	case g.inflight <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	release := func() { <-g.inflight }
-	for {
-		wait, apiErr := g.reserve(cost, content, assetUpload)
-		if apiErr != nil {
-			release()
-			return nil, apiErr
-		}
-		if wait == 0 {
-			return release, nil
-		}
-		logging.Warn(g.logger, "rate limit throttle", "wait", wait.Round(time.Millisecond), "cost", cost, "content", content)
-		if err := g.sleep(ctx, wait); err != nil {
-			release()
-			return nil, err
-		}
-	}
+	return func() { <-g.inflight }, nil
 }
 
 // reserve computes the wait before sending; commit happens only when the
@@ -281,7 +284,11 @@ func (g *rateGovernor) reserve(cost int64, content, assetUpload bool) (time.Dura
 
 // observe folds x-ratelimit-* headers from any response into the budget
 // snapshot. Responses without them (the upload endpoint) leave local
-// accounting untouched.
+// accounting untouched. Late-arriving snapshots never regress the
+// budget: an older window, or a higher remaining count for the current
+// window, is strictly older information (remaining only decreases within
+// a window for one token) and is ignored. Adopting a newer window
+// re-arms the one-shot budget warnings so every hour warns again.
 func (g *rateGovernor) observe(header http.Header) {
 	limit, hasLimit := parseIntHeader(header.Get("X-RateLimit-Limit"))
 	remaining, hasRemaining := parseIntHeader(header.Get("X-RateLimit-Remaining"))
@@ -291,6 +298,18 @@ func (g *rateGovernor) observe(header http.Header) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.budget.seen {
+		if resetAt.Before(g.budget.resetAt) {
+			return
+		}
+		if resetAt.Equal(g.budget.resetAt) && remaining > g.budget.remaining {
+			return
+		}
+		if resetAt.After(g.budget.resetAt) {
+			g.warnedHigh = false
+			g.warnedLow = false
+		}
+	}
 	g.budget = budgetState{limit: limit, remaining: remaining, resetAt: resetAt, seen: true}
 	g.lastRefill = g.now()
 	switch {
