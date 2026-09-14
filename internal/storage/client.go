@@ -77,8 +77,11 @@ type StorHub struct {
 
 	// Shutdown coordination
 	shutdownOnce sync.Once
-	shutdownCh   chan struct{}
-	shutdownWg   sync.WaitGroup
+	// gitCleanupOnce guards the per-project git mirror removal so
+	// repeated Shutdown calls still drain (D5) without releasing twice.
+	gitCleanupOnce sync.Once
+	shutdownCh     chan struct{}
+	shutdownWg     sync.WaitGroup
 	// capWarned records that the MaxTrackedProjects overflow warning has
 	// fired for the current threshold crossing; guarded by metaMu.
 	capWarned bool
@@ -110,6 +113,12 @@ type projectMetadata struct {
 	// before eviction must not strand its acknowledged mutations on a dead
 	// commit loop; markProjectDirtyLive revives the instance instead.
 	stopped bool
+	// sizeCapped is set when a commit observes the serialized metadata
+	// above maxMetadataBytes (D4). Growth mutations are then rejected fast
+	// at admission instead of accepted into a tree that can never commit;
+	// shrink paths (delete, UpdateRepoMetadataContext folding under the
+	// ceiling, purge) stay open, and the next fitting commit clears it.
+	sizeCapped bool
 }
 
 type releaseCacheEntry struct {
@@ -123,17 +132,62 @@ func (h *StorHub) getCachedReleases(project string) ([]ghapi.Release, bool) {
 	if !ok {
 		return nil, false
 	}
-	out := make([]ghapi.Release, len(entry.releases))
-	copy(out, entry.releases)
-	return out, true
+	return cloneReleases(entry.releases), true
 }
 
 func (h *StorHub) setCachedReleases(project string, releases []ghapi.Release) {
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()
-	cp := make([]ghapi.Release, len(releases))
-	copy(cp, releases)
-	h.releaseCache[project] = releaseCacheEntry{releases: cp}
+	h.releaseCache[project] = releaseCacheEntry{releases: cloneReleases(releases)}
+}
+
+// cloneReleases deep-copies releases including their embedded asset slices.
+// A shallow struct copy would alias the Assets backing arrays, letting any
+// caller that mutates a fetched Release corrupt the cache (B7).
+func cloneReleases(in []ghapi.Release) []ghapi.Release {
+	if in == nil {
+		return nil
+	}
+	out := make([]ghapi.Release, len(in))
+	for i, r := range in {
+		out[i] = r
+		if r.Assets != nil {
+			cp := make([]ghapi.Asset, len(r.Assets))
+			copy(cp, r.Assets)
+			out[i].Assets = cp
+		}
+	}
+	return out
+}
+
+// markSizeCapped records that project's serialized metadata breached the
+// 8MB ceiling (D4) so the breach is visible to admission. Defined here
+// (not at the call site) because both the REST/direct commit path
+// (commitRepoMetadata) and the commit-loop path set it.
+func (h *StorHub) markSizeCapped(project string) {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if !ok {
+		return
+	}
+	pm.mu.Lock()
+	pm.sizeCapped = true
+	pm.mu.Unlock()
+}
+
+// clearSizeCapped lifts the breach marker after a fitting commit or an
+// admitted shrink; growth past the ceiling re-arms it.
+func (h *StorHub) clearSizeCapped(project string) {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if !ok {
+		return
+	}
+	pm.mu.Lock()
+	pm.sizeCapped = false
+	pm.mu.Unlock()
 }
 
 func (h *StorHub) invalidateReleaseCache(project string) {
@@ -157,7 +211,7 @@ func (h *StorHub) addReleaseToCache(project string, release *ghapi.Release) {
 	h.releaseCache[project] = entry
 }
 
-func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string) {
+func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string, assetID int64) {
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()
 	entry, ok := h.releaseCache[project]
@@ -166,26 +220,42 @@ func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string) {
 	}
 	for i := range entry.releases {
 		if entry.releases[i].TagName == tag {
-			entry.releases[i].Assets = append(entry.releases[i].Assets, ghapi.Asset{ID: -1})
+			// Record the real asset ID, not a -1 placeholder: the picker
+			// counts embedded assets for capacity, and a fake ID both
+			// skews that math and can never match server truth (B8).
+			entry.releases[i].Assets = append(entry.releases[i].Assets, ghapi.Asset{ID: assetID})
 			h.releaseCache[project] = entry
 			return
 		}
 	}
 }
 
+// isAlreadyExists reports GitHub's duplicate-resource 422. The structural
+// errors[] array (code "already_exists") is authoritative; the flat-body
+// substring remains as a fallback for responses that predate structured
+// parsing (proxies, older mocks).
 func isAlreadyExists(err error) bool {
 	var apiErr *ghapi.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
+	if apiErr.IsValidationIssue("already_exists", "") {
+		return true
+	}
 	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
 	return strings.Contains(bodyLower, "already_exists")
 }
 
+// isReleaseFull reports the release-asset ceiling 422. The live prod body
+// (v18 probe) carries errors[].field "file_count" - matched structurally;
+// the legacy substrings cover older body shapes.
 func isReleaseFull(err error) bool {
 	var apiErr *ghapi.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
 		return false
+	}
+	if apiErr.IsValidationIssue("", "file_count") {
+		return true
 	}
 	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
 	return strings.Contains(bodyLower, "file_count") || strings.Contains(bodyLower, "1000") || strings.Contains(bodyLower, "too many")
@@ -456,8 +526,6 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 	defer h.shutdownWg.Done()
 	defer close(pm.stoppedCh)
 
-	logger := h.projectLogger(project)
-
 	for {
 		select {
 		case <-pm.stopCh:
@@ -470,11 +538,11 @@ func (h *StorHub) commitLoop(project string, pm *projectMetadata) {
 			}
 
 		case <-h.shutdownCh:
-			// Shutdown requested
-			if err := h.commitProjectMetadata(context.Background(), project, pm); err != nil {
-				logging.Error(logger, "shutdown metadata commit failed", "err", err)
-				return
-			}
+			// Shutdown requested. The final drain belongs to Shutdown's
+			// sweep (drainDirtyMetadata), which runs after every loop has
+			// exited and also covers projects whose loop died earlier.
+			// Committing here as well would double-attempt every dirty
+			// project and race the sweep.
 			return
 		}
 	}
@@ -533,13 +601,20 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.mu.Unlock()
 		return nil
 	}
-	pm.meta.Normalize(project, h.config.Now().Unix())
-	pm.meta.LastMod = h.config.Now().Unix()
-	pm.meta.RecomputeStats()
-	meta := pm.meta.Clone()
+	// D7: normalize a clone, never the shared tree. A failed commit
+	// (validation, size ceiling, push error) must leave pm.meta exactly as
+	// the mutations left it; the normalized working copy is applied back
+	// only on success below.
+	working := pm.meta.Clone()
 	previousSHA := pm.sha
 	version := pm.version
 	pm.mu.Unlock()
+
+	now := h.config.Now().Unix()
+	working.Normalize(project, now)
+	working.LastMod = now
+	working.RecomputeStats()
+	meta := working
 
 	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA))
 
@@ -561,6 +636,11 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	if len(metaBytes) > maxMetadataBytes {
 		err := fmt.Errorf("metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes)
 		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		// D4: fail-fast admission from here on: growth mutations are
+		// rejected until a shrink folds the tree back under the ceiling.
+		pm.mu.Lock()
+		pm.sizeCapped = true
+		pm.mu.Unlock()
 		return &commitError{err: err, version: version}
 	}
 
@@ -581,9 +661,18 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	pm.mu.Lock()
 	pm.sha = contentSHA
 	if pm.version == version {
+		// D7 apply-back: the normalized working copy becomes the shared
+		// truth on success. Without this the cache keeps the raw mutation
+		// state (stale stats, unrepaired inode counter) and every later
+		// Validate of cached state - rollback, drain, explicit checks -
+		// trips over it. Version-guarded: a mutation that landed while the
+		// commit ran owns the newer state; its own commit normalizes.
+		pm.meta = &working
 		pm.dirty = false
 		pm.lastCommit = h.config.Now()
 	}
+	// A fitting commit lifts the D4 breach marker (re-armed on breach).
+	pm.sizeCapped = false
 	pm.mu.Unlock()
 
 	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(metaBytes))
@@ -654,9 +743,10 @@ func (h *StorHub) evictForCapacityLocked() {
 
 // Shutdown gracefully shuts down the StorHub, committing any dirty metadata.
 // It is safe to call on a client that was never fully started (or twice);
-// uninitialized machinery is simply skipped.
+// uninitialized machinery is simply skipped. Only the stop broadcast is
+// once-guarded: every call waits for loops and sweeps stranded dirty state
+// (D5), so a mutation that landed after its loop exited still converges.
 func (h *StorHub) Shutdown(ctx context.Context) error {
-	var shutdownErr error
 	h.shutdownOnce.Do(func() {
 		logging.Info(h.logger, "shutdown initiated")
 
@@ -664,34 +754,70 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 			// Signal all commit loops to stop
 			close(h.shutdownCh)
 		}
-
-		// Wait for all commit loops to finish with timeout
-		done := make(chan struct{})
-		go func() {
-			h.shutdownWg.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			// Contract: the per-project git cache is a pure mirror of
-			// remote state, so Shutdown removes the directories this
-			// hub claimed. Re-clone on next use.
-			h.gitMu.Lock()
-			for name, r := range h.gitRepos {
-				if err := r.release(true); err != nil {
-					logging.Warn(h.logger, "shutdown git cache cleanup failed", "project", name, "err", err)
-				}
-			}
-			h.gitMu.Unlock()
-			logging.Info(h.logger, "shutdown complete")
-		case <-ctx.Done():
-			shutdownErr = fmt.Errorf("shutdown timeout: %w", ctx.Err())
-			logging.Error(h.logger, "shutdown timeout", "err", ctx.Err())
-		}
 	})
 
-	return shutdownErr
+	// Wait for all commit loops to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		h.shutdownWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		shutdownErr := fmt.Errorf("shutdown timeout: %w", ctx.Err())
+		logging.Error(h.logger, "shutdown timeout", "err", ctx.Err())
+		return shutdownErr
+	}
+
+	// Contract: the per-project git cache is a pure mirror of
+	// remote state, so Shutdown removes the directories this
+	// hub claimed. Re-clone on next use. Once-guarded: a second
+	// Shutdown must still drain below without releasing twice.
+	h.gitCleanupOnce.Do(func() {
+		h.gitMu.Lock()
+		for name, r := range h.gitRepos {
+			if err := r.release(true); err != nil {
+				logging.Warn(h.logger, "shutdown git cache cleanup failed", "project", name, "err", err)
+			}
+		}
+		h.gitMu.Unlock()
+	})
+
+	// D5 sweep: a trigger poke to a loop that already exited wakes
+	// nobody, and a post-shutdown mutation never had a live loop at
+	// all. Commit any still-dirty projects synchronously so Shutdown
+	// converges instead of dropping them.
+	if err := h.drainDirtyMetadata(ctx); err != nil {
+		return err
+	}
+	logging.Info(h.logger, "shutdown complete")
+	return nil
+}
+
+// drainDirtyMetadata synchronously commits every project left dirty -
+// mutations stranded by an exited loop or a prior Shutdown. Best effort
+// across projects: every failure is reported, none skips the rest.
+func (h *StorHub) drainDirtyMetadata(ctx context.Context) error {
+	h.metaMu.RLock()
+	type projectWithName struct {
+		name string
+		meta *projectMetadata
+	}
+	projects := make([]projectWithName, 0, len(h.metaCache))
+	for name, pm := range h.metaCache {
+		projects = append(projects, projectWithName{name: name, meta: pm})
+	}
+	h.metaMu.RUnlock()
+
+	var errs []error
+	for _, p := range projects {
+		if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
+			errs = append(errs, fmt.Errorf("shutdown drain %s: %w", p.name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // FlushMetadata forces an immediate commit of all dirty metadata for all projects
@@ -713,6 +839,11 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 	var errs []error
 	for _, p := range projects {
 		if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
+			// D8: FlushMetadata gets the same conflict recovery as the
+			// commit loop: a 409 reloads remote HEAD into the cache so a
+			// stale flush converges instead of staying stale. The error
+			// is still reported to the caller.
+			h.recoverMetadataCommitFailure(p.name, err)
 			errs = append(errs, fmt.Errorf("flush %s: %w", p.name, err))
 		}
 	}
@@ -858,7 +989,16 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	fileMeta.Size = size
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
+		// N2: the file vanished between the readonly pre-check and this
+		// locked re-check (concurrent delete). The chunks are already
+		// uploaded and their IDs already allocated into the catalog:
+		// roll both back or the assets leak until PurgeUntracked and the
+		// catalog carries chunks no file references.
+		for _, id := range chunkIDs {
+			delete(pm.meta.Chunks, id)
+		}
 		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, chunks)
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
@@ -1292,7 +1432,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		Size:   fileInfo.Size(),
 		Chunks: nil,
 	}
-	implposix.ApplyUploadIdentity(repoMeta, cleanName, existing, &fileMeta, h.config.Now().Unix())
+	implposix.ApplyUploadIdentity(cleanName, existing, &fileMeta, h.config.Now().Unix())
 	if existing == nil {
 		defaultUID, defaultGID := h.DefaultOwnerIDs()
 		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -1308,14 +1448,19 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		pm.mu.Unlock()
+		// N1: the chunks are already uploaded by now; a late permission
+		// failure must not leak them as orphans.
+		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
 	}
 	if err := shfs.RequireParentDirectory(pm.meta, cleanName); err != nil {
 		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
 	}
 	if !replace && pm.meta.FindFile(cleanName) != nil {
 		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
 		return nil, shfs.AlreadyExists(cleanName)
 	}
 	pm.meta.EnsureRelease(releaseTag, h.config.Now().Unix())
@@ -1488,6 +1633,16 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if strings.TrimSpace(commitSHA) == "" {
 		return errors.New("commit sha is required")
 	}
+	// D9: a branch name is not a revision. The contents API resolves
+	// unknown refs to HEAD content, so passing 'main' would silently
+	// roll back to HEAD (a no-op that reports success). Only a commit
+	// SHA from this file's own revision history is accepted.
+	if strings.ContainsAny(commitSHA, "/ 	\n") {
+		return fmt.Errorf("invalid metadata revision %q: not a commit SHA", commitSHA)
+	}
+	if err := h.validateMetadataRevision(ctx, project, commitSHA); err != nil {
+		return err
+	}
 	// Flush any dirty metadata first so cached SHA matches GitHub
 	pm := h.getOrCreateProjectMeta(project)
 	if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
@@ -1523,8 +1678,38 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
 		return err
 	}
+	// D6: the snapshot was validated against a listing taken moments ago;
+	// assets can be deleted between that check and this commit. Re-check
+	// immediately before committing to narrow the race window.
+	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
+		return fmt.Errorf("rollback snapshot changed before commit: %w", err)
+	}
 	_, _, err = h.commitRepoMetadata(ctx, project, *rollbackMeta, currentSHA, fmt.Sprintf("storhub: rollback metadata to %s", shortSHA(commitSHA)))
-	return err
+	if err != nil {
+		return err
+	}
+	// D6: the delete can also land mid-commit (after the re-check above).
+	// Verify the committed snapshot against fresh server state and fail
+	// loudly instead of blessing bytes that can no longer be downloaded.
+	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
+		return fmt.Errorf("rollback committed but snapshot no longer validates: %w", err)
+	}
+	return nil
+}
+
+// validateMetadataRevision ensures revision is a known commit SHA of the
+// project's metadata history, never a branch or tag name.
+func (h *StorHub) validateMetadataRevision(ctx context.Context, project, revision string) error {
+	revisions, err := h.listMetadataRevisions(ctx, project)
+	if err != nil {
+		return err
+	}
+	for _, rev := range revisions {
+		if rev.CommitSHA == revision {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid metadata revision %q: not a known commit SHA for project %s", revision, project)
 }
 
 func (h *StorHub) getBuffer() *[]byte { return h.bufferPool.Get().(*[]byte) }
@@ -1717,13 +1902,48 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		}
 	}
 
-	// Apply mutation to in-memory metadata
-	if err := fn(pm.meta); err != nil {
+	// D4 (8MB CEILING — fail fast, never accept-then-never-commit): apply
+	// the mutation to a throwaway clone and measure the serialized result
+	// before touching shared state. An oversize growth is rejected at
+	// admission with a remediation pointer; shared state, dirty, and
+	// usability stay exactly as they were. Shrinks stay open: a mutation
+	// that reduces the tree is admitted even while oversize, so the
+	// project can always fold back under the ceiling.
+	candidate := pm.meta.Clone()
+	candidate.RebuildIndexes()
+	if err := fn(&candidate); err != nil {
 		pm.mu.Unlock()
 		h.debugf("metadata update failed project=%s step=apply elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
 		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
+	admitNow := h.config.Now().Unix()
+	candidate.Normalize(project, admitNow)
+	candidate.RecomputeStats()
+	after, err := candidate.ToJSON()
+	if err != nil {
+		pm.mu.Unlock()
+		h.debugf("metadata update failed project=%s step=marshal elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, fmt.Errorf("marshal metadata: %w", err)
+	}
+	if len(after) > maxMetadataBytes {
+		shrinking := false
+		if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
+			shrinking = true
+		}
+		if !shrinking {
+			pm.sizeCapped = true
+			pm.mu.Unlock()
+			h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
+			logging.Error(h.projectLogger(project), "metadata update rejected: over size ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
+			return nil, fmt.Errorf("metadata too large: %d bytes exceeds %d: delete files or run PurgeUntracked to shrink below the ceiling", len(after), maxMetadataBytes)
+		}
+		pm.sizeCapped = true
+	} else {
+		pm.sizeCapped = false
+	}
+	pm.meta = &candidate
 
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	pm.mu.Unlock()

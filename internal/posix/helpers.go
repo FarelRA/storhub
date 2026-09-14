@@ -6,12 +6,18 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-func ApplyUploadIdentity(repo *meta.RepoMetadata, name string, existing *meta.FileMeta, file *meta.FileMeta, now int64) {
+// ApplyUploadIdentity stamps creation/update identity fields onto the file
+// entry being staged. It deliberately does NOT mint an inode: the caller
+// stages against a readonly snapshot whose inode counter is a throwaway.
+// The authoritative allocation happens later, against the live metadata
+// under its lock (InitializeNewFileIdentity), so the counter bumps exactly
+// once and the next allocation can never re-issue this inode.
+func ApplyUploadIdentity(name string, existing *meta.FileMeta, file *meta.FileMeta, now int64) {
 	if existing != nil {
 		ApplyUpdatedFileIdentity(name, file, existing, now)
 		return
 	}
-	meta.InitializeNewFileIdentity(repo, file, now)
+	meta.InitializeNewFileIdentityFields(file, now)
 }
 
 func ApplyUpdatedFileIdentity(name string, file *meta.FileMeta, existing *meta.FileMeta, now int64) {

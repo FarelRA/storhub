@@ -8,11 +8,13 @@ import (
 
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	now := int64(100)
-	repo := meta.NewRepoMetadata("demo")
 	file := &meta.FileMeta{Chunks: []int64{}}
-	ApplyUploadIdentity(repo, "docs/file.txt", nil, file, now)
-	if file.Inode == 0 || file.Mode == 0 {
-		t.Fatalf("unexpected initialized file identity: %+v", file)
+	ApplyUploadIdentity("docs/file.txt", nil, file, now)
+	// ApplyUploadIdentity stamps creation fields but deliberately leaves
+	// the inode at 0: minting happens against the authoritative metadata
+	// (InitializeNewFileIdentity), never against a staged snapshot.
+	if file.Inode != 0 || file.Mode == 0 || file.UID == 0 || file.GID == 0 || file.UploadedAt != now {
+		t.Fatalf("unexpected staged file identity: %+v", file)
 	}
 	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, XAttrs: meta.XAttrMap{"user.demo": []byte("1")}}
 	updated := &meta.FileMeta{Chunks: []int64{}}

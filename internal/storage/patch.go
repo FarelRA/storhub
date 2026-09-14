@@ -26,7 +26,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		return nil, "", err
 	}
 
-	patchedChunks, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit, func(remaining int) (string, string, error) {
+	patchedChunks, actualTag, _, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit, func(remaining int) (string, string, error) {
 		return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 	})
 	if err != nil {
@@ -43,7 +43,10 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 
 	assembled := spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks)
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, releaseTag, nil
+	// B3: report the release that actually holds the new chunks. A
+	// release-full rotation inside the sink moves later chunks; the
+	// initial tag may no longer hold them.
+	return assembled, actualTag, nil
 }
 
 // spliceEdit rewrites a playlist for one edit: chunks entirely before the
@@ -83,7 +86,7 @@ func spliceEdit(chunks []ChunkInfo, patchOffset, deleteSize, insertedLen int64, 
 	return assembled
 }
 
-func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte, prepare func(remaining int) (string, string, error)) ([]ChunkInfo, error) {
+func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte, prepare func(remaining int) (string, string, error)) (chunks []ChunkInfo, actualTag, actualURL string, err error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, count, prepare)
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
@@ -94,10 +97,10 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 			end = int64(len(data))
 		}
 		if err := sink.put(bytes.NewReader(data[start:end]), end-start, fileOffset+start); err != nil {
-			return sink.results, err
+			return sink.results, sink.releaseTag, sink.uploadURL, err
 		}
 	}
-	return sink.results, nil
+	return sink.results, sink.releaseTag, sink.uploadURL, nil
 }
 
 func (h *StorHub) sliceChunk(ctx context.Context, project string, original ChunkInfo, newOffset, newSize int64) (ChunkInfo, error) {
@@ -147,6 +150,9 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	defer func() { _ = snapshot.Close() }()
 	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
 	var uploadedAll []ChunkInfo
+	// B3: track where the bytes actually land; a rotation mid-rewrite
+	// moves the sink and the reported tag must follow it.
+	curTag, curURL := releaseTag, uploadURL
 	for offset := int64(0); offset < finalSize; offset += chunkSize {
 		end := offset + chunkSize
 		if end > finalSize {
@@ -154,13 +160,14 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		}
 		segment := byteRange{start: offset, end: end}
 		if rangeOverlapsAny(segment, dirtySegments) {
-			uploaded, err := h.uploadFileRangeChunks(ctx, project, releaseTag, uploadURL, snapshot, segment.start, segment.end, func(remaining int) (string, string, error) {
+			uploaded, landedTag, landedURL, err := h.uploadFileRangeChunks(ctx, project, curTag, curURL, snapshot, segment.start, segment.end, func(remaining int) (string, string, error) {
 				return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 			})
 			if err != nil {
 				h.compensateDeleteAssets(ctx, project, append(uploadedAll, uploaded...))
 				return nil, "", err
 			}
+			curTag, curURL = landedTag, landedURL
 			uploadedAll = append(uploadedAll, uploaded...)
 			assembled = append(assembled, uploaded...)
 			continue
@@ -173,7 +180,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		assembled = append(assembled, reused...)
 	}
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, releaseTag, nil
+	return assembled, curTag, nil
 }
 
 func rangeOverlapsAny(target byteRange, ranges []byteRange) bool {
@@ -189,9 +196,9 @@ func rangeOverlapsAny(target byteRange, ranges []byteRange) bool {
 	return false
 }
 
-func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag, uploadURL string, snapshot *os.File, start, end int64, prepare func(remaining int) (string, string, error)) ([]ChunkInfo, error) {
+func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag, uploadURL string, snapshot *os.File, start, end int64, prepare func(remaining int) (string, string, error)) (chunks []ChunkInfo, actualTag, actualURL string, err error) {
 	if end <= start {
-		return nil, nil
+		return nil, releaseTag, uploadURL, nil
 	}
 	chunkSize := normalizedChunkSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
@@ -204,10 +211,10 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 		}
 		section := io.NewSectionReader(snapshot, chunkStart, chunkEnd-chunkStart)
 		if err := sink.put(section, chunkEnd-chunkStart, chunkStart); err != nil {
-			return sink.results, err
+			return sink.results, sink.releaseTag, sink.uploadURL, err
 		}
 	}
-	return sink.results, nil
+	return sink.results, sink.releaseTag, sink.uploadURL, nil
 }
 
 func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[int64]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
@@ -274,18 +281,22 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	assembled := resolved
 	shift := int64(0)
 	var uploadedAll []ChunkInfo
+	curTag, curURL := releaseTag, uploadURL
 	for _, edit := range edits {
-		inserted, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, edit.Start+shift, edit.Data, func(remaining int) (string, string, error) {
+		inserted, landedTag, landedURL, err := h.uploadInlineChunks(ctx, project, curTag, curURL, edit.Start+shift, edit.Data, func(remaining int) (string, string, error) {
 			return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
 		})
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))
 			return nil, "", err
 		}
+		// B3: a rotation inside this edit moves the sink; later edits
+		// must upload to where the bytes actually land.
+		curTag, curURL = landedTag, landedURL
 		uploadedAll = append(uploadedAll, inserted...)
 		assembled = spliceEdit(assembled, edit.Start+shift, edit.DeleteSize, edit.Len(), inserted)
 		shift += edit.Len() - edit.DeleteSize
 	}
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, releaseTag, nil
+	return assembled, curTag, nil
 }

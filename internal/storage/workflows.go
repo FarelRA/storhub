@@ -266,6 +266,9 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		return "", "", err
 	}
 	if len(payload) > maxMetadataBytes {
+		// D4: remember the breach so growth mutations fail fast at
+		// admission instead of piling onto a tree that can never commit.
+		h.markSizeCapped(project)
 		return "", "", fmt.Errorf("metadata too large: %d bytes exceeds %d", len(payload), maxMetadataBytes)
 	}
 	if repo := h.getGitRepo(project); repo != nil {
@@ -278,6 +281,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 			return "", "", err
 		}
 		h.storeRepoMetadata(project, metadata, contentSHA)
+		h.clearSizeCapped(project)
 		logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
 		return commitSHA, contentSHA, nil
 	}
@@ -287,6 +291,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		return "", "", err
 	}
 	h.storeRepoMetadata(project, metadata, contentSHA)
+	h.clearSizeCapped(project)
 	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
 	return commitSHA, contentSHA, nil
 }
@@ -348,6 +353,12 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 }
 
 func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
+	// D6: structural validation first - chunk/file size consistency
+	// (chunks beyond EOF, negative geometry, dangling references,
+	// totals) is verified here, not assumed from elsewhere.
+	if err := metadata.Validate(); err != nil {
+		return fmt.Errorf("rollback metadata failed validation: %w", err)
+	}
 	releases, err := h.listReleases(ctx, project)
 	if err != nil {
 		return err
@@ -362,11 +373,19 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 		}
 		assetIndex[release.TagName] = assets
 	}
-	for _, file := range metadata.AllFiles() {
+	for path, file := range metadata.Files {
 		for _, chunkName := range file.Chunks {
+			// D6: a dangling chunk reference must fail validation outright.
+			// Skipping it here would bless a snapshot whose bytes cannot be
+			// downloaded after commit.
 			chunk, ok := metadata.Chunks[chunkName]
 			if !ok {
-				continue
+				return fmt.Errorf("rollback metadata references missing chunk %d (file %s)", chunkName, path)
+			}
+			// D6: structural size/offset sanity beyond Validate(): negative
+			// geometry can never address real bytes.
+			if chunk.Size < 0 || chunk.Offset < 0 {
+				return fmt.Errorf("rollback metadata chunk %d has invalid geometry (offset %d, size %d)", chunkName, chunk.Offset, chunk.Size)
 			}
 			release, ok := releaseIndex[chunk.Release]
 			if !ok {
@@ -469,9 +488,24 @@ const embeddedAssetTrustLimit = 900
 // decisions: the embedded count when safely below the ceiling, the true
 // paginated count inside the danger band.
 func (h *StorHub) releaseAssetCount(ctx context.Context, project string, r ghapi.Release) (int, error) {
+	// B8: a cached entry carrying upload placeholders (legacy ID -1 bumps)
+	// cannot be trusted for picker math: the embedded list may be a
+	// truncated view with local guesses appended, arbitrarily far from
+	// server truth. Resolve the real count instead.
+	for _, a := range r.Assets {
+		if a.ID < 0 {
+			return h.trueReleaseAssetCount(ctx, project, r)
+		}
+	}
 	if len(r.Assets) < embeddedAssetTrustLimit {
 		return len(r.Assets), nil
 	}
+	return h.trueReleaseAssetCount(ctx, project, r)
+}
+
+// trueReleaseAssetCount resolves a release's asset count through the
+// paginated ListReleaseAssets endpoint instead of the embedded array.
+func (h *StorHub) trueReleaseAssetCount(ctx context.Context, project string, r ghapi.Release) (int, error) {
 	if err := h.ensureOwner(ctx); err != nil {
 		return 0, err
 	}
@@ -587,7 +621,7 @@ func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag,
 	if err != nil {
 		return 0, err
 	}
-	h.bumpCachedReleaseAssetCount(project, releaseTag)
+	h.bumpCachedReleaseAssetCount(project, releaseTag, assetID)
 	return assetID, nil
 }
 

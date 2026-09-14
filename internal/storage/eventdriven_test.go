@@ -145,8 +145,13 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 		t.Fatalf("mutate for shutdown drain: %v", err)
 	}
 	pollUntil(t, 3*time.Second, "pre-shutdown failed attempt", func() bool { return attempts.Load() > beforeShutdown })
-	if err := hub.Shutdown(ctx); err != nil {
-		t.Fatalf("shutdown: %v", err)
+	// The drain is best effort but never silent: its final attempt runs
+	// with the fault still armed, so Shutdown must report the failure
+	// (the dirty state it could not push dies with the process) while
+	// still making exactly one attempt.
+	drainErr := hub.Shutdown(ctx)
+	if drainErr == nil || !strings.Contains(drainErr.Error(), "injected failure") {
+		t.Fatalf("shutdown must report the failed drain attempt, got: %v", drainErr)
 	}
 	if got := attempts.Load(); got != beforeShutdown+2 {
 		t.Fatalf("shutdown must make exactly one final attempt: before=%d after=%d", beforeShutdown, got)
