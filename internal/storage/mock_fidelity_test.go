@@ -209,6 +209,12 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 	if _, err := hub.UploadFileContext(ctx, "project-throttle", "throttle.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
+	// Settle the upload's metadata BEFORE arming: otherwise the async
+	// commit loop races the arm and may leave nothing dirty, so the flush
+	// PUT that is supposed to take the 429 never happens.
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("settle flush: %v", err)
+	}
 	var metaPuts atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) {
@@ -217,6 +223,12 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 		return false
 	})
 	backend.rateLimitOnce.Store(true)
+	// A fresh mutation guarantees a dirty metadata commit, so a PUT must
+	// follow the armed fault no matter whether the async loop or this
+	// flush lands it first.
+	if err := hub.MkdirContext(ctx, "project-throttle", "docs"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush after throttled fault: %v", err)
 	}

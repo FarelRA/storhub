@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"sync"
 )
 
 const (
@@ -28,6 +29,12 @@ const (
 // section reader: Seek is supported, Read stops at the window end, and the
 // window's wire name/index travel with it via Name/Index.
 type ChunkReader struct {
+	// mu serializes Read against Seek: the GitHub uploader rewinds via
+	// Seek(0) before a transport retry, but the previous attempt's request
+	// body may still be draining on net/http's persistConn writeLoop.
+	// Without this lock the rewind races that leftover read (and the
+	// rewind's effect can be clobbered mid-retry).
+	mu        sync.Mutex
 	reader    *io.SectionReader
 	offset    int64
 	size      int64
@@ -36,10 +43,14 @@ type ChunkReader struct {
 }
 
 func (c *ChunkReader) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.reader.Read(p)
 }
 
 func (c *ChunkReader) Seek(offset int64, whence int) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.reader.Seek(offset, whence)
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 )
@@ -23,6 +24,11 @@ import (
 // Invariant: `mirrored` is the high-water mark of live bytes durably written
 // to the spool, and reads below it always come from disk.
 type windowReader struct {
+	// mu serializes Read against Seek for the same reason as
+	// chunking.ChunkReader: the uploader rewinds between transport retries
+	// while the previous attempt's body may still be draining on the
+	// http transport's writeLoop.
+	mu       sync.Mutex
 	spool    *os.File  // flat spool file: full-window mirror (sparse until written)
 	live     io.Reader // upstream cursor, shared across sequential windows
 	size     int64     // window length
@@ -57,6 +63,8 @@ func newWindowReader(live io.Reader, size int64) (*windowReader, func(), error) 
 // everything else is pulled from the live stream and simultaneously written
 // through to the spool at its absolute offset.
 func (w *windowReader) Read(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	total := 0
 	for total < len(p) {
 		switch {
@@ -108,6 +116,8 @@ func (w *windowReader) Read(p []byte) (int, error) {
 // Seek supports the rewind GitHub's uploader performs between attempts
 // (Seek(0, Start)); arbitrary offsets are provided for completeness.
 func (w *windowReader) Seek(offset int64, whence int) (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	var target int64
 	switch whence {
 	case io.SeekStart:

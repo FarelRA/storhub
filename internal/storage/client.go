@@ -752,12 +752,13 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		}
 		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(ops))
 		rebased, upstreamSHA, resolutions, rerr := h.rebaseOntoUpstream(ctx, project, ops, base)
-		didRebase = true
 		if rerr != nil {
 			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "rebase", "elapsed", h.config.Now().UTC().Sub(started), "err", rerr)
 			return &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: version}
 		}
+		didRebase = true
 		working = *rebased
+		working.LastMod = now
 		previousSHA = upstreamSHA
 		metaBytes, err = working.ToJSON()
 		if err != nil {

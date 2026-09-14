@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
 // TestJournalCrashReplay covers the cold-start recovery contract: a hub
@@ -489,7 +491,7 @@ func TestBulkImportStackPerformance(t *testing.T) {
 	_, err := hub.UpdateRepoMetadataContext(ctx, "proj", func(meta *RepoMetadata) error {
 		for i := 0; i < files; i++ {
 			path := "bulk/dir" + itoa(i%20) + "/f" + itoa(i) + ".txt"
-			meta.EnsureDirectory(parentOf(path), 1700000000)
+			meta.EnsureDirectory(shfs.ParentPath(path), 1700000000)
 			meta.UpsertFile(path, FileMeta{Size: 1, Inode: meta.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}, 1700000000)
 		}
 		return nil
@@ -508,11 +510,4 @@ func TestBulkImportStackPerformance(t *testing.T) {
 	if n < files {
 		t.Fatalf("expected at least %d ops (one per file), got %d", files, n)
 	}
-}
-
-func parentOf(path string) string {
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		return path[:i]
-	}
-	return ""
 }

@@ -529,9 +529,10 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 		dirChanges = append(dirChanges, dirChange{path: "", entry: after.Root, kind: OpSetattr})
 	}
 
-	// Rename pairing: each removed entry consumes at most one added entry
-	// with an equivalent body. Depth-descending emission keeps replay
-	// correct (children move before their parent directory).
+	// Rename pairing: a rename preserves the inode, so pair removed and
+	// added entries by inode (O(n)) and confirm with a body comparison
+	// that ignores the ChangedAt bump a rename applies. Depth-descending
+	// emission keeps replay correct (children move before their parent).
 	type renamePair struct {
 		from, to string
 		file     *FileMeta
@@ -540,14 +541,18 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 	var renames []renamePair
 	consumedFiles := map[string]bool{}
 	consumedDirs := map[string]bool{}
+	addedByInode := make(map[uint64][]string)
+	for path, entry := range after.Files {
+		if _, existed := before.Files[path]; !existed {
+			addedByInode[entry.Inode] = append(addedByInode[entry.Inode], path)
+		}
+	}
 	for fromPath, fromEntry := range removedFiles {
-		for toPath, toEntry := range after.Files {
+		for _, toPath := range addedByInode[fromEntry.Inode] {
 			if consumedFiles[toPath] {
 				continue
 			}
-			if _, wasRemoved := removedFiles[toPath]; wasRemoved {
-				continue
-			}
+			toEntry := after.Files[toPath]
 			if fileRenameEquivalent(fromEntry, toEntry) {
 				entry := toEntry.Clone()
 				renames = append(renames, renamePair{from: fromPath, to: toPath, file: &entry})
@@ -557,23 +562,26 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 			}
 		}
 	}
+	addedDirByInode := make(map[uint64]string, len(addedDirs))
+	for path, entry := range addedDirs {
+		addedDirByInode[entry.Inode] = path
+	}
 	for fromPath, fromEntry := range removedDirs {
-		for toPath, toEntry := range addedDirs {
-			if consumedDirs[toPath] {
-				continue
-			}
-			if dirRenameEquivalent(fromEntry, toEntry) {
-				entry := toEntry.Clone()
-				renames = append(renames, renamePair{from: fromPath, to: toPath, dir: &entry})
-				consumedDirs[toPath] = true
-				delete(removedDirs, fromPath)
-				break
-			}
+		toPath, ok := addedDirByInode[fromEntry.Inode]
+		if !ok || consumedDirs[toPath] {
+			continue
+		}
+		toEntry := addedDirs[toPath]
+		if dirRenameEquivalent(fromEntry, toEntry) {
+			entry := toEntry.Clone()
+			renames = append(renames, renamePair{from: fromPath, to: toPath, dir: &entry})
+			consumedDirs[toPath] = true
+			delete(removedDirs, fromPath)
 		}
 	}
 	sort.Slice(renames, func(i, j int) bool { return depthOf(renames[i].from) > depthOf(renames[j].from) })
 	for _, rn := range renames {
-		op := Op{Type: OpRename, Paths: []string{rn.from, rn.to}, Cause: "rename", Timestamp: now}
+		op := Op{Type: OpRename, Paths: []string{rn.from, rn.to}, Cause: cause, Timestamp: now}
 		if rn.file != nil {
 			op.File = rn.file
 			op.Chunks = chunkRecordsFor(after, rn.file.Chunks)
@@ -595,10 +603,10 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 	sort.Slice(delPaths, func(i, j int) bool { return depthOf(delPaths[i]) > depthOf(delPaths[j]) })
 	for _, path := range delPaths {
 		if entry, ok := removedFiles[path]; ok {
-			stack.append(Op{Type: OpDeleteFile, Paths: []string{path}, Cause: "unlink", Timestamp: now, FreedChunks: len(entry.Chunks)})
+			stack.append(Op{Type: OpDeleteFile, Paths: []string{path}, Cause: cause, Timestamp: now, FreedChunks: len(entry.Chunks)})
 			continue
 		}
-		stack.append(Op{Type: OpRmdir, Paths: []string{path}, Cause: "rmdir", Timestamp: now})
+		stack.append(Op{Type: OpRmdir, Paths: []string{path}, Cause: cause, Timestamp: now})
 	}
 
 	// Directory creates/changes, shallowest first; root setattr (path "")
@@ -632,15 +640,11 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 			continue
 		}
 		kind := OpPutFile
-		causeKind := "upload"
-		if ok {
-			if chunksEqual(prev.Chunks, entry.Chunks) && prev.Size == entry.Size && prev.Symlink == entry.Symlink {
-				kind = OpSetattr
-				causeKind = "setattr"
-			}
+		if ok && chunksEqual(prev.Chunks, entry.Chunks) && prev.Size == entry.Size && prev.Symlink == entry.Symlink {
+			kind = OpSetattr
 		}
 		clone := entry.Clone()
-		op := Op{Type: kind, Paths: []string{path}, Cause: causeKind, Timestamp: now, File: &clone}
+		op := Op{Type: kind, Paths: []string{path}, Cause: cause, Timestamp: now, File: &clone}
 		if kind == OpPutFile {
 			op.Chunks = chunkRecordsFor(after, clone.Chunks)
 		}
@@ -654,11 +658,11 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 			continue
 		}
 		clone := ref.Clone()
-		stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Release: &clone, Cause: "release", Timestamp: now})
+		stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Release: &clone, Cause: cause, Timestamp: now})
 	}
 	for tag := range before.Releases {
 		if _, ok := after.Releases[tag]; !ok {
-			stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: "release", Timestamp: now})
+			stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: cause, Timestamp: now})
 		}
 	}
 
@@ -671,7 +675,7 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 	}
 	if len(removedChunks) > 0 {
 		sort.Slice(removedChunks, func(i, j int) bool { return removedChunks[i] < removedChunks[j] })
-		stack.append(Op{Type: OpChunkPrune, Cause: "prune", Timestamp: now, RemovedChunks: removedChunks})
+		stack.append(Op{Type: OpChunkPrune, Cause: cause, Timestamp: now, RemovedChunks: removedChunks})
 	}
 
 	return stack.ops

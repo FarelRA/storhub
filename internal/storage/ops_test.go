@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestMeta(project string) *RepoMetadata {
@@ -379,6 +381,40 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 	}
 	if err := replayed.Validate(); err != nil {
 		t.Fatalf("replayed metadata invalid: %v", err)
+	}
+}
+
+func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
+	before := newTestMeta("p")
+	before.EnsureDirectory("src", 1700000000)
+	for i := 0; i < 3000; i++ {
+		path := "src/f" + strconv.Itoa(i) + ".txt"
+		before.UpsertFile(path, FileMeta{Size: 0, Mode: 0o644, Inode: before.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}, 1700000000)
+	}
+	after := before.Clone()
+	remapSubtree(&after, "src", "dst")
+	for path, dir := range after.Dirs {
+		dir.ChangedAt = 1700000500
+		after.Dirs[path] = dir
+	}
+	for path, file := range after.Files {
+		file.ChangedAt = 1700000500
+		after.Files[path] = file
+	}
+
+	started := time.Now()
+	ops := synthesizeOpsFromDiff(before, &after, "rename", 1700000500)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("bulk subtree rename synthesis took %s; pairing regressed to quadratic?", elapsed)
+	}
+	renames := 0
+	for _, op := range ops {
+		if op.Type == OpRename {
+			renames++
+		}
+	}
+	if renames < 3000 {
+		t.Fatalf("expected ~3000 rename ops, got %d", renames)
 	}
 }
 

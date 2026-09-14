@@ -22,6 +22,11 @@ import (
 // append, and replaying a journal whose ops already committed is a no-op
 // (ops are full-state assertions).
 
+const (
+	journalLineInitialBytes = 64 * 1024
+	journalLineMaxBytes     = 16 * 1024 * 1024
+)
+
 func (h *StorHub) journalPath(project string) string {
 	if h.config.JournalDir == "" {
 		return ""
@@ -75,7 +80,7 @@ func (h *StorHub) journalRead(project string) []Op {
 	defer func() { _ = f.Close() }()
 	var ops []Op
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	scanner.Buffer(make([]byte, 0, journalLineInitialBytes), journalLineMaxBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

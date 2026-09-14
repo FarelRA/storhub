@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
-	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 )
@@ -181,6 +179,10 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 	return &working, resolutions, nil
 }
 
+// maxRebaseNoteBytes bounds the resolution detail carried in a commit
+// message so a pathological conflict storm cannot bloat the summary line.
+const maxRebaseNoteBytes = 300
+
 // rebaseMessageNote renders the rebase summary appended to a commit
 // message that landed after conflict resolution.
 func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) string {
@@ -192,8 +194,8 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 		notes = append(notes, r.Note)
 	}
 	joined := strings.Join(notes, "; ")
-	if len(joined) > 300 {
-		joined = joined[:300] + "..."
+	if len(joined) > maxRebaseNoteBytes {
+		joined = joined[:maxRebaseNoteBytes] + "..."
 	}
 	return fmt.Sprintf("rebase: rebased onto %s: %d resolved (%s)", shortSHA(upstreamSHA), len(resolutions), joined)
 }
@@ -345,6 +347,3 @@ func inodeTakenByAnyNode(meta *RepoMetadata, inode uint64) bool {
 	}
 	return false
 }
-
-var _ = shfs.ParentPath
-var _ = http.StatusConflict
