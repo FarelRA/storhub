@@ -2,6 +2,7 @@ package fusefs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +89,10 @@ type Filesystem struct {
 	lockFile  *os.File
 	closing   bool
 	unmounted bool
+	// invalCount counts kernel-cache invalidation requests issued by
+	// mutation paths (C9). Production mounts observe them as Notify
+	// calls; tests read them via Invalidations.
+	invalCount atomic.Uint64
 }
 
 type lockRecord struct {
@@ -411,6 +417,9 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 			quarantinePath(path.Join(cacheDir, name), opts.Logger)
 		}
 	}
+	// Startup replay: surface whatever earlier crashes quarantined so
+	// operators (and RecoveryInventory callers) see it immediately.
+	logRecoveryInventory(path.Join(cacheDir, "recovery"), opts.Logger)
 	fsys := &Filesystem{
 		hub:         hub,
 		project:     project,
@@ -521,7 +530,7 @@ func (s *Filesystem) Close() error {
 	// would silently discard acknowledged writes.
 	for _, writeState := range writeStates {
 		if writeState.hasUncommittedChanges() {
-			writeState.quarantineTemps()
+			writeState.quarantineTempsReason(quarantineReasonClose)
 		}
 	}
 	for _, handle := range handles {
@@ -561,41 +570,219 @@ func (s *Filesystem) recoveryDir() string {
 	return path.Join(s.cacheDir, "recovery")
 }
 
+// RecoveryEntry describes one quarantined overlay: uncommitted bytes that
+// survived a commit failure or a crashed mount. The manifest sidecar
+// (<saved>.json) records the original target path so the data can be
+// replayed or manually recovered; without it the bytes are anonymous.
+type RecoveryEntry struct {
+	SavedPath  string `json:"saved_path"`
+	OrigTemp   string `json:"orig_temp"`
+	TargetPath string `json:"target_path,omitempty"`
+	Reason     string `json:"reason"`
+	Size       int64  `json:"size"`
+	PID        int    `json:"pid"`
+	CreatedAt  int64  `json:"created_unix_nano"`
+}
+
+// quarantine reasons recorded in manifests.
+const (
+	quarantineReasonCommitFailure = "commit-failure"
+	quarantineReasonClose         = "close-dirty"
+	quarantineReasonStartupSweep  = "startup-sweep"
+)
+
+// quarantineIntoDir persists tempPath into recoveryDir crash-safely: the
+// file is fsynced before the rename, the manifest is written atomically
+// (temp + fsync + rename), and the directory itself is fsynced after, so
+// a crash at any point leaves either the old state or the complete new
+// state - never a renamed file with lost bytes or a manifest without data.
+// It returns the saved data path, or "" when nothing could be preserved
+// (failures are logged, never fatal: the leftover stays for the next sweep).
+func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger *slog.Logger) string {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		logging.Error(logger, "quarantine skipped; leftover vanished", "path", tempPath, "err", err)
+		return ""
+	}
+	if err := os.MkdirAll(recoveryDir, 0o700); err != nil {
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	// Flush the payload before the rename moves it: otherwise a crash
+	// between rename and page writeback loses acknowledged writes.
+	if f, err := os.OpenFile(tempPath, os.O_RDWR, 0o600); err == nil {
+		syncErr := f.Sync()
+		closeErr := f.Close()
+		if syncErr != nil || closeErr != nil {
+			logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "syncErr", syncErr, "closeErr", closeErr)
+			return ""
+		}
+	} else {
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	stamp := time.Now().UnixNano()
+	target := path.Join(recoveryDir, fmt.Sprintf("%s.%d", path.Base(tempPath), stamp))
+	entry := RecoveryEntry{
+		SavedPath:  target,
+		OrigTemp:   tempPath,
+		TargetPath: targetPath,
+		Reason:     reason,
+		Size:       info.Size(),
+		PID:        os.Getpid(),
+		CreatedAt:  stamp,
+	}
+	manifest, err := json.Marshal(entry)
+	if err != nil {
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	manifestTmp, err := os.CreateTemp(recoveryDir, ".manifest-*.tmp")
+	if err != nil {
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	manifestTmpName := manifestTmp.Name()
+	if _, err := manifestTmp.Write(append(manifest, '\n')); err != nil {
+		_ = manifestTmp.Close()
+		_ = os.Remove(manifestTmpName)
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	if err := manifestTmp.Sync(); err != nil {
+		_ = manifestTmp.Close()
+		_ = os.Remove(manifestTmpName)
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	if err := manifestTmp.Close(); err != nil {
+		_ = os.Remove(manifestTmpName)
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	if err := os.Rename(manifestTmpName, target+".json"); err != nil {
+		_ = os.Remove(manifestTmpName)
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	if err := os.Rename(tempPath, target); err != nil {
+		// The manifest is already durable; remove it so a manifest
+		// never points at data that did not arrive.
+		_ = os.Remove(target + ".json")
+		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
+		return ""
+	}
+	syncDir(recoveryDir)
+	logging.Warn(logger, "quarantined dirty overlay for manual recovery", "path", tempPath, "saved", target, "reason", reason)
+	return target
+}
+
+// syncDir fsyncs a directory so preceding renames inside it survive a
+// crash. Best-effort: the quarantine above is already complete without it.
+func syncDir(dir string) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = f.Sync()
+	_ = f.Close()
+}
+
 // quarantinePath moves tempPath into <cacheDir>/recovery without needing
 // a Filesystem (used by the startup sweep before one exists). Failures
 // are logged, never fatal: the leftover stays for the next sweep.
 func quarantinePath(tempPath string, logger *slog.Logger) {
-	if logger == nil {
-		logger = slog.Default()
-	}
 	dir := path.Join(path.Dir(tempPath), "recovery")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		logging.Error(logger, "startup sweep quarantine failed; leftover kept in cache", "path", tempPath, "err", err)
-		return
-	}
-	target := path.Join(dir, fmt.Sprintf("%s.%d", path.Base(tempPath), time.Now().UnixNano()))
-	if err := os.Rename(tempPath, target); err != nil {
-		logging.Error(logger, "startup sweep quarantine failed; leftover kept in cache", "path", tempPath, "err", err)
-		return
-	}
-	logging.Warn(logger, "startup sweep quarantined leftover for manual recovery", "path", tempPath, "saved", target)
+	quarantineIntoDir(tempPath, dir, "", quarantineReasonStartupSweep, logger)
 }
 
 // quarantineFile moves tempPath into the recovery directory, which the
 // mount-start sweep preserves. Called when a commit fails and the overlay
 // holds the only copy of data the application has already written.
-func (s *Filesystem) quarantineFile(tempPath string) {
-	dir := s.recoveryDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		s.errorf("quarantine failed; dirty overlay left in cache path=%s mkdir err=%v", tempPath, err)
+// targetPath is the file the bytes belong to ("" when unknown); reason
+// records which path triggered the quarantine.
+func (s *Filesystem) quarantineFile(tempPath, targetPath, reason string) {
+	if reason == "" {
+		reason = quarantineReasonCommitFailure
+	}
+	saved := quarantineIntoDir(tempPath, s.recoveryDir(), targetPath, reason, s.opts.Logger)
+	if saved == "" {
+		s.errorf("quarantine failed; dirty overlay left in cache path=%s", tempPath)
 		return
 	}
-	target := path.Join(dir, fmt.Sprintf("%s.%d", path.Base(tempPath), time.Now().UnixNano()))
-	if err := os.Rename(tempPath, target); err != nil {
-		s.errorf("quarantine failed; dirty overlay left in cache path=%s rename err=%v", tempPath, err)
+	s.errorf("commit failed; dirty overlay quarantined for manual recovery path=%s saved=%s", tempPath, saved)
+}
+
+// RecoveryInventory replays the recovery directory: every quarantined
+// overlay from earlier commit failures or crash sweeps, newest last.
+// Manifest-less files (pre-hardening leftovers, manual drops) are reported
+// with best-effort stat so nothing is silently hidden.
+func (s *Filesystem) RecoveryInventory() ([]RecoveryEntry, error) {
+	return readRecoveryInventory(s.recoveryDir())
+}
+
+func readRecoveryInventory(recoveryDir string) ([]RecoveryEntry, error) {
+	entries, err := os.ReadDir(recoveryDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []RecoveryEntry
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".manifest-") {
+			continue
+		}
+		full := path.Join(recoveryDir, name)
+		if raw, err := os.ReadFile(full + ".json"); err == nil {
+			var entry RecoveryEntry
+			if err := json.Unmarshal(raw, &entry); err == nil && entry.SavedPath != "" {
+				entry.SavedPath = full
+				out = append(out, entry)
+				continue
+			}
+		}
+		var size int64
+		if info, err := e.Info(); err == nil {
+			size = info.Size()
+		}
+		out = append(out, RecoveryEntry{SavedPath: full, OrigTemp: name, Reason: "unknown", Size: size})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SavedPath < out[j].SavedPath })
+	return out, nil
+}
+
+// logRecoveryInventory replays quarantined state at startup: operators see
+// what survived the last crash instead of discovering it by accident.
+func logRecoveryInventory(recoveryDir string, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	inventory, err := readRecoveryInventory(recoveryDir)
+	if err != nil {
+		logging.Error(logger, "recovery inventory scan failed", "dir", recoveryDir, "err", err)
 		return
 	}
-	s.errorf("commit failed; dirty overlay quarantined for manual recovery path=%s saved=%s", tempPath, target)
+	if len(inventory) == 0 {
+		return
+	}
+	var total int64
+	targets := make([]string, 0, len(inventory))
+	for _, e := range inventory {
+		total += e.Size
+		target := e.TargetPath
+		if target == "" {
+			target = e.OrigTemp
+		}
+		targets = append(targets, target)
+	}
+	logging.Warn(logger, "replaying quarantined overlays from previous run; manual recovery may be needed",
+		"dir", recoveryDir, "files", len(inventory), "bytes", total, "targets", strings.Join(targets, ","))
 }
 
 // soleWriteStateRef reports whether state is registered and held by exactly
@@ -816,6 +1003,9 @@ func (s *Filesystem) materializeHandlesForPath(ctx context.Context, inode uint64
 }
 
 func (s *Filesystem) notifyEntryForPath(dirPath, name string) {
+	// Count first: the kernel notify below is skipped on unmounted
+	// (test-driven) filesystems, but the invalidation was still issued.
+	s.invalCount.Add(1)
 	s.mu.RLock()
 	node := s.nodeForPathLocked(dirPath)
 	s.mu.RUnlock()
@@ -826,7 +1016,16 @@ func (n *storhubNode) notifyEntry(name string) {
 	n.fs.notifyEntryForPath(n.currentPath(), name)
 }
 
+// Invalidations reports how many kernel-cache invalidation requests this
+// filesystem has issued. Every namespace or attribute mutation must move
+// this counter; the 60s entry/attr timeouts turn a missed invalidation
+// into a minute of stale reads.
+func (s *Filesystem) Invalidations() uint64 {
+	return s.invalCount.Load()
+}
+
 func (n *storhubNode) notifyDelete(name string, childInode uint64) {
+	n.fs.invalCount.Add(1)
 	n.fs.mu.RLock()
 	child := n.fs.nodes[childInode]
 	n.fs.mu.RUnlock()
@@ -1062,6 +1261,9 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
+	// The kernel may hold a negative entry for this name (NegativeTimeout);
+	// the create must evict it or the file stays invisible until expiry.
+	n.fs.notifyEntryForPath(n.currentPath(), name)
 	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
 	return ino, h, 0, 0
 }
@@ -1092,6 +1294,7 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.notifyEntryForPath(n.currentPath(), name)
 	n.fs.debugf("mkdir path=%s mode=%#o", childPath, mode)
 	return ino, 0
 }
@@ -1174,6 +1377,14 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
 	if err == nil {
 		n.fs.rememberPath(entry.Inode, newPath)
+	}
+	// Both parents cached the old namespace; evict both or lookups serve
+	// the pre-rename tree until EntryTimeout expires.
+	oldDir, oldBase := shfs.ParentPath(oldPath), path.Base(oldPath)
+	newDir, newBase := shfs.ParentPath(newPath), path.Base(newPath)
+	n.fs.notifyEntryForPath(oldDir, oldBase)
+	if newDir != oldDir || newBase != oldBase {
+		n.fs.notifyEntryForPath(newDir, newBase)
 	}
 	n.fs.debugf("rename old=%s new=%s flags=%#x", oldPath, newPath, flags)
 	return 0
@@ -1318,6 +1529,9 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	}
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
+	// The attr response updates this handle's cache line, but other cached
+	// copies (other nodes, readdir-plus) expire only via invalidation.
+	n.fs.notifyKernelContentChanged(n.inode)
 	n.fs.debugf("setattr path=%s valid=%#x", targetPath, in.Valid)
 	_ = f
 	return 0
@@ -1335,6 +1549,7 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.notifyEntryForPath(n.currentPath(), name)
 	return ino, 0
 }
 
@@ -1363,6 +1578,7 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.notifyEntryForPath(n.currentPath(), name)
 	return ino, 0
 }
 
@@ -1450,9 +1666,15 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 		}
 		h.writeState = writeState
 		if flags&syscall.O_TRUNC != 0 && bootstrap == nil {
+			// Serialize with in-flight commits and writes on opMu: the
+			// truncate must land wholly before or after them, never in
+			// the middle of a commit that already captured its plan.
+			// Lock order is always opMu before mu.
+			writeState.opMu.Lock()
 			writeState.mu.Lock()
 			if err := writeState.setSizeLocked(0); err != nil {
 				writeState.mu.Unlock()
+				writeState.opMu.Unlock()
 				s.releaseWriteState(writeState)
 				s.mu.Lock()
 				delete(s.handles, h.id)
@@ -1460,6 +1682,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 				return nil, err
 			}
 			writeState.mu.Unlock()
+			writeState.opMu.Unlock()
 		}
 	}
 	// A read-only open never attaches to another writer's writeState:
@@ -2168,6 +2391,19 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		}
 		return "", err
 	}
+	// C4 crash ordering: the snapshot is the commit's input. Sync it
+	// after the content lands and before any remote mutation reads it,
+	// so a local crash in between cannot rewrite the backend from a
+	// torn local file.
+	if err := temp.Sync(); err != nil {
+		if closeErr := temp.Close(); closeErr != nil {
+			logging.Error(nil, "failed to close commit snapshot temp after sync error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+		}
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove commit snapshot temp after sync error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
+		return "", err
+	}
 	if err := temp.Close(); err != nil {
 		if removeErr := os.Remove(temp.Name()); removeErr != nil {
 			logging.Error(nil, "failed to remove commit snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
@@ -2237,6 +2473,17 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 			offset += int64(n)
 		}
 	}
+	// C4 crash ordering: same durability contract as the full commit
+	// snapshot - the chunk rewrite must read complete local bytes.
+	if err := temp.Sync(); err != nil {
+		if closeErr := temp.Close(); closeErr != nil {
+			logging.Error(nil, "failed to close range snapshot temp after sync error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+		}
+		if removeErr := os.Remove(temp.Name()); removeErr != nil {
+			logging.Error(nil, "failed to remove range snapshot temp after sync error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		}
+		return "", err
+	}
 	if err := temp.Close(); err != nil {
 		if removeErr := os.Remove(temp.Name()); removeErr != nil {
 			logging.Error(nil, "failed to remove range snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
@@ -2280,6 +2527,12 @@ func (w *inodeWriteState) closeTemp() {
 // written data) into the recovery directory; the re-downloadable base snapshot
 // is discarded as usual. Marks the state closed so a later closeTemp is a no-op.
 func (w *inodeWriteState) quarantineTemps() {
+	w.quarantineTempsReason(quarantineReasonCommitFailure)
+}
+
+// quarantineTempsReason is quarantineTemps with an explicit manifest
+// reason (commit failure vs dirty-at-close).
+func (w *inodeWriteState) quarantineTempsReason(reason string) {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -2290,6 +2543,7 @@ func (w *inodeWriteState) quarantineTemps() {
 	tempPath := w.tempPath
 	baseTemp := w.baseTemp
 	baseTempPath := w.baseTempPath
+	targetPath := w.path
 	w.temp = nil
 	w.tempPath = ""
 	w.baseTemp = nil
@@ -2305,7 +2559,7 @@ func (w *inodeWriteState) quarantineTemps() {
 		_ = temp.Close()
 	}
 	if tempPath != "" {
-		w.fs.quarantineFile(tempPath)
+		w.fs.quarantineFile(tempPath, targetPath, reason)
 	}
 }
 
@@ -2319,10 +2573,16 @@ func (w *inodeWriteState) hasUncommittedChanges() bool {
 
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if writeState := h.writeState; writeState != nil {
+		// Serialize with commits on opMu (always opMu before mu): commit
+		// drops mu across its network window while mutating the plan,
+		// and a read straddling that window would serve half-old,
+		// half-new bytes.
+		writeState.opMu.Lock()
+		defer writeState.opMu.Unlock()
 		writeState.mu.Lock()
+		defer writeState.mu.Unlock()
 		buf := make([]byte, len(dest))
 		n, err := writeState.readIntoLocked(ctx, buf, off)
-		writeState.mu.Unlock()
 		if err != nil {
 			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
@@ -2483,9 +2743,13 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 // The opMu lock in commit() ensures all FUSE_WRITE handlers complete before
 // the commit runs, so dirtyRanges is always populated correctly.
 
+// Flush pushes dirty overlay data before the kernel releases the fd.
+// The mount enables writeback caching, so close(2) may be the only
+// durability signal the kernel sends for buffered writes: a no-op Flush
+// would acknowledge data the next crash loses. Commit is idempotent, so
+// the later Release commit is a no-op when Flush already pushed.
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
-	_ = ctx
-	return 0
+	return h.commit(ctx)
 }
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
@@ -2543,6 +2807,7 @@ func (h *storhubHandle) quarantineTemps() {
 	h.closed = true
 	temp := h.temp
 	tempPath := h.tempPath
+	targetPath := h.path
 	h.temp = nil
 	h.tempPath = ""
 	h.mu.Unlock()
@@ -2550,7 +2815,7 @@ func (h *storhubHandle) quarantineTemps() {
 		_ = temp.Close()
 	}
 	if tempPath != "" {
-		h.fs.quarantineFile(tempPath)
+		h.fs.quarantineFile(tempPath, targetPath, quarantineReasonCommitFailure)
 	}
 }
 
@@ -2587,6 +2852,17 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 
 // commitTemp handles all temp-based commit paths (truncate, chunk-rewrite, replace, patch).
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu as needed.
+//
+// C4 crash-ordering contract (and its limit): within one commit, data lands
+// before the size reconcile, and the size reconcile lands before the
+// metadata patch, so a crash can never leave metadata pointing at data
+// that never arrived. Ranges stay dirty until the whole pair succeeds, so
+// a retry replays instead of resuming mid-step. What this is NOT is
+// atomic: patch+truncate+metadata are separate backend operations, and a
+// crash between them leaves a partially applied commit the next mount
+// does not reconcile. Full atomicity (single backend transaction or a
+// write-ahead log with startup replay) is DEFERRED: it needs server-side
+// multi-op commit support that does not exist yet.
 func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseSize, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
 	if len(h.writeState.dirtyRanges) == 0 {
 		h.writeState.mu.Unlock()
@@ -2747,13 +3023,11 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		h.fs.debugf("commit failed path=%s inode=%d step=patch-batch err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
-	// Mark all applied ranges consumed so a retry resumes instead of
-	// re-applying committed edits (which would duplicate bytes).
-	h.writeState.mu.Lock()
-	for _, dirty := range planned {
-		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
-	}
-	h.writeState.mu.Unlock()
+	// C4 crash ordering: the commit is not done until the size is
+	// reconciled. Consume the dirty ranges only after the post-patch
+	// truncate succeeds, so a truncate failure leaves the full patch
+	// replayable instead of half-applied. Replayed edits are idempotent
+	// (each replaces the same span with the same bytes).
 	if logicalSize != baseSize {
 		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
 		if !appendOnly {
@@ -2763,6 +3037,13 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 			}
 		}
 	}
+	// Mark all applied ranges consumed so a retry resumes instead of
+	// re-applying committed edits (which would duplicate bytes).
+	h.writeState.mu.Lock()
+	for _, dirty := range planned {
+		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
+	}
+	h.writeState.mu.Unlock()
 	h.writeState.mu.Lock()
 	if err := h.writeState.refreshBaseSnapshotLocked(); err != nil {
 		h.fs.debugf("commit cache refresh failed path=%s inode=%d step=patch-cache err=%v", targetPath, h.inode, err)
@@ -3022,6 +3303,7 @@ func subtractLock(existing, cut fuse.FileLock) []fuse.FileLock {
 }
 
 func (s *Filesystem) notifyKernelContentChanged(inode uint64) {
+	s.invalCount.Add(1)
 	s.mu.Lock()
 	node := s.nodes[inode]
 	s.mu.Unlock()
@@ -3151,21 +3433,37 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 }
 
 // errnoFromError maps storage-layer errors onto POSIX errnos. The ladder
-// is ordered most-specific first: raw Errno passthrough, context
-// cancellation/deadline, then the fs sentinel family, with EIO as the
-// honest catch-all for anything unmapped (never success, never ENOENT).
+// is ordered most-specific first: raw Errno passthrough (except ECANCELED,
+// which the kernel must see as EINTR), context cancellation/deadline,
+// then the fs sentinel family, with EIO as the honest catch-all for
+// anything unmapped (never success, never ENOENT).
 func errnoFromError(err error) syscall.Errno {
 	if err == nil {
 		return 0
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
+		// ECANCELED (async cancellation) is not a file error; report it
+		// as an interrupt so callers retry instead of caching a bogus
+		// per-file failure.
+		if errno == syscall.ECANCELED {
+			return syscall.EINTR
+		}
 		return errno
 	}
 	if errors.Is(err, context.Canceled) {
 		return syscall.EINTR
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return syscall.ETIMEDOUT
+	}
+	// Cancellations and timeouts that lost their error chain (%v
+	// formatting, status strings) still read as what they are.
+	lowered := strings.ToLower(err.Error())
+	if strings.Contains(lowered, "context canceled") {
+		return syscall.EINTR
+	}
+	if strings.Contains(lowered, "deadline exceeded") {
 		return syscall.ETIMEDOUT
 	}
 	switch {
@@ -3183,6 +3481,8 @@ func errnoFromError(err error) syscall.Errno {
 		return syscall.EINVAL
 	case errors.Is(err, shfs.ErrXAttrNotFound):
 		return syscall.ENODATA
+	case errors.Is(err, shfs.ErrCorrupted):
+		return syscall.EUCLEAN
 	default:
 		return syscall.EIO
 	}

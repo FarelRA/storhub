@@ -13,6 +13,7 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrInvalidSymlink = errors.New("invalid symlink")
 	ErrXAttrNotFound  = errors.New("xattr not found")
+	ErrCorrupted      = errors.New("corrupted")
 )
 
 func AlreadyExists(path string) error  { return fmt.Errorf("%w: %s", ErrAlreadyExists, path) }
@@ -22,3 +23,4 @@ func NotDirectory(path string) error   { return fmt.Errorf("%w: %s", ErrNotDirec
 func NotFound(path string) error       { return fmt.Errorf("%w: %s", ErrNotFound, path) }
 func InvalidSymlink(path string) error { return fmt.Errorf("%w: %s", ErrInvalidSymlink, path) }
 func XAttrNotFound(path string) error  { return fmt.Errorf("%w: %s", ErrXAttrNotFound, path) }
+func Corrupted(path string) error      { return fmt.Errorf("%w: %s", ErrCorrupted, path) }

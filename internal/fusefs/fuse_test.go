@@ -1359,10 +1359,21 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 	}
 	recovery := filepath.Join(cacheDir, "recovery")
 	entries, err := os.ReadDir(recovery)
-	if err != nil || len(entries) != 1 {
+	if err != nil {
+		t.Fatalf("read recovery dir: %v", err)
+	}
+	// Manifest sidecars (.json) describe the quarantined payload; only
+	// data files count here.
+	var payload string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			payload = e.Name()
+		}
+	}
+	if payload == "" {
 		t.Fatalf("expected one quarantined overlay in %s, got %v (err=%v)", recovery, entries, err)
 	}
-	data, err := os.ReadFile(filepath.Join(recovery, entries[0].Name()))
+	data, err := os.ReadFile(filepath.Join(recovery, payload))
 	if err != nil {
 		t.Fatalf("read quarantined overlay: %v", err)
 	}
@@ -1409,10 +1420,19 @@ func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
 	}
 	recovery := filepath.Join(cacheDir, "recovery")
 	entries, err := os.ReadDir(recovery)
-	if err != nil || len(entries) == 0 {
+	if err != nil {
+		t.Fatalf("read recovery dir: %v", err)
+	}
+	var payload string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			payload = e.Name()
+		}
+	}
+	if payload == "" {
 		t.Fatalf("expected quarantined overlay after close, got %v (err=%v)", entries, err)
 	}
-	data, err := os.ReadFile(filepath.Join(recovery, entries[0].Name()))
+	data, err := os.ReadFile(filepath.Join(recovery, payload))
 	if err != nil || string(data) != "dirty" {
 		t.Fatalf("quarantined overlay content wrong: %q (err=%v)", data, err)
 	}

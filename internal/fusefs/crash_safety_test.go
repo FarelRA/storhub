@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -29,11 +30,19 @@ func TestStartupSweepQuarantinesLeftovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected recovery dir: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 quarantined files, got %d", len(entries))
+	// Manifest sidecars (.json) describe each quarantined payload; only
+	// data files count here.
+	var payloads []os.DirEntry
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			payloads = append(payloads, e)
+		}
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("expected 2 quarantined files, got %d", len(payloads))
 	}
 	found := map[string]bool{}
-	for _, e := range entries {
+	for _, e := range payloads {
 		data, err := os.ReadFile(filepath.Join(cacheDir, "recovery", e.Name()))
 		if err != nil {
 			t.Fatal(err)
