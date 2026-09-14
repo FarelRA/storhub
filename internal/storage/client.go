@@ -76,7 +76,7 @@ type StorHub struct {
 	gitMu    sync.Mutex
 	gitRepos map[string]*gitRepo
 
-	// Content-addressed index object caches (v2 layout), one per project.
+	// Content-addressed index object caches (split layout), one per project.
 	objCacheMu sync.Mutex
 	objCaches  map[string]*objectCache
 
@@ -133,12 +133,12 @@ type projectMetadata struct {
 	// pending ops were built on; the rebase diffs upstream against it to
 	// detect real conflicts. Guarded by mu.
 	basePaths map[string][16]byte
-	// isV2 records that this project's on-disk index uses the v2 split
-	// layout (manifest + content-addressed objects). Set on load when
-	// index.json is present, or on the first v2 commit (migration). Reads
-	// understand both layouts regardless; this drives the WRITE path.
-	// Guarded by mu.
-	isV2 bool
+	// split records that this project's on-disk index uses the split layout
+	// (metadata version 5: a manifest plus content-addressed objects). Set on
+	// load when index.json is present, or on the first split commit (a legacy
+	// migration). Reads understand every version regardless; the write path
+	// always produces the split layout. Guarded by mu.
+	split bool
 	// objectCount is the running total of index objects written for this
 	// project (from the manifest), used for the history-accumulation
 	// threshold warning. Guarded by mu.
@@ -186,22 +186,6 @@ func cloneReleases(in []ghapi.Release) []ghapi.Release {
 		}
 	}
 	return out
-}
-
-// markSizeCapped records that project's serialized metadata breached the
-// 8MB ceiling (D4) so the breach is visible to admission. Defined here
-// (not at the call site) because both the REST/direct commit path
-// (commitRepoMetadata) and the commit-loop path set it.
-func (h *StorHub) markSizeCapped(project string) {
-	h.metaMu.RLock()
-	pm, ok := h.metaCache[project]
-	h.metaMu.RUnlock()
-	if !ok {
-		return
-	}
-	pm.mu.Lock()
-	pm.sizeCapped = true
-	pm.mu.Unlock()
 }
 
 // clearSizeCapped lifts the breach marker after a fitting commit or an
@@ -717,20 +701,22 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	ops := pm.opStack.snapshot()
 	opSeq := pm.opStack.maxSeq()
 	base := pm.basePaths
-	isV2 := pm.isV2
+	split := pm.split
 	objectCount := pm.objectCount
 	pm.mu.Unlock()
 
-	// The write layout: stay v2 once migrated; adopt v2 for a v1 project
-	// only when IndexV2 is enabled (it then migrates on this first write).
-	targetV2 := isV2 || h.config.IndexV2
+	// The split index (metadata version 5) is the default and latest write
+	// path: every commit produces a manifest plus content-addressed objects.
+	// A project still on a legacy single-blob layout (version <= 4) migrates
+	// on this write.
+	const writeSplit = true
 
 	now := h.config.Now().Unix()
 	working.Normalize(project, now)
 	working.LastMod = now
 	working.RecomputeStats()
 
-	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "v2", targetV2)
+	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "split", writeSplit)
 
 	if err := h.ensureOwner(ctx); err != nil {
 		return err
@@ -741,12 +727,12 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		return &commitError{err: fmt.Errorf("invalid metadata: %w", err), version: version}
 	}
 
-	// A v1->v2 migration CASes the manifest, not the v1 blob: resolve the
-	// manifest's own token (empty when absent) so the migration commit is
-	// compare-and-swap safe against a concurrent migrator.
-	if targetV2 && !isV2 && h.getGitRepo(project) == nil {
-		if _, s, v2, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
-			if v2 && found {
+	// A legacy->split migration CASes the manifest, not the legacy blob:
+	// resolve the manifest's own token (empty when absent) so the migration
+	// commit is compare-and-swap safe against a concurrent migrator.
+	if writeSplit && !split && h.getGitRepo(project) == nil {
+		if _, s, isSplit, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
+			if isSplit && found {
 				previousSHA = s
 			} else {
 				previousSHA = ""
@@ -763,7 +749,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	didRebase := false
 	for attempt := 1; ; attempt++ {
 		var err error
-		commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, &working, previousSHA, message, targetV2, objectCount)
+		commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, &working, previousSHA, message, objectCount)
 		if err == nil {
 			break
 		}
@@ -802,7 +788,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	pm.mu.Lock()
 	pm.sha = contentSHA
-	pm.isV2 = targetV2
+	pm.split = writeSplit
 	pm.objectCount = newObjectCount
 	if pm.version == version {
 		// D7 apply-back: the normalized working copy becomes the shared
@@ -856,7 +842,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	pm.mu.Unlock()
 
 	h.warnHistoryThreshold(project, pm)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "v2", targetV2, "objects", newObjectCount)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "split", writeSplit, "objects", newObjectCount)
 
 	return nil
 }
@@ -2137,9 +2123,9 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// that reduces the tree is admitted even while oversize, so the
 	// project can always fold back under the ceiling.
 	//
-	// The blob ceiling is a v1 constraint: a v2 project has no single-blob
-	// size limit (admission is per-object at commit), so measuring the v1
-	// serialization must not reject growth on the v2 path.
+	// The blob ceiling is a legacy constraint: a split project has no
+	// single-blob size limit (admission is per-object at commit), so
+	// measuring the blob serialization must not reject growth on it.
 	candidate := pm.meta.Clone()
 	candidate.RebuildIndexes()
 	if err := fn(&candidate); err != nil {
@@ -2159,31 +2145,50 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	admitNow := h.config.Now().Unix()
 	candidate.Normalize(project, admitNow)
 	candidate.RecomputeStats()
-	targetV2 := pm.isV2 || h.config.IndexV2
-	if !targetV2 {
-		after, err := candidate.ToJSON()
-		if err != nil {
-			pm.mu.Unlock()
-			h.debugf("metadata update failed project=%s step=marshal elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
-			logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			return nil, fmt.Errorf("marshal metadata: %w", err)
+	// D4 admission, expressed for the split layout (version 5). The whole
+	// blob size is a cheap upper bound: if the entire tree serializes under
+	// the contents-API limit, every object (a strict subset) does too, so
+	// the mutation is admitted without building the tree. Only when the
+	// whole-tree size breaches the limit do we pay for a BuildTree to find
+	// whether a SINGLE object (one enormous directory) is the culprit; a
+	// tree that merely exceeds the old blob ceiling but splits into small
+	// objects is admitted, because the split removed that ceiling. Shrinks
+	// always stay open so an over-large tree can fold back down.
+	after, err := candidate.ToJSON()
+	if err != nil {
+		pm.mu.Unlock()
+		h.debugf("metadata update failed project=%s step=marshal elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, fmt.Errorf("marshal metadata: %w", err)
+	}
+	if len(after) > maxMetadataBytes {
+		shrinking := false
+		if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
+			shrinking = true
 		}
-		if len(after) > maxMetadataBytes {
-			shrinking := false
-			if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
-				shrinking = true
+		oversizeObject := false
+		if !shrinking {
+			if res, berr := metadata.BuildTree(&candidate); berr == nil {
+				for _, obj := range res.Objects {
+					if len(obj) > maxMetadataBytes {
+						oversizeObject = true
+						break
+					}
+				}
 			}
-			if !shrinking {
-				pm.sizeCapped = true
-				pm.mu.Unlock()
-				h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
-				logging.Error(h.projectLogger(project), "metadata update rejected: over size ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
-				return nil, fmt.Errorf("metadata too large: %d bytes exceeds %d: delete files or run PurgeUntracked to shrink below the ceiling", len(after), maxMetadataBytes)
-			}
+		}
+		if oversizeObject {
 			pm.sizeCapped = true
-		} else {
-			pm.sizeCapped = false
+			pm.mu.Unlock()
+			h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
+			logging.Error(h.projectLogger(project), "metadata update rejected: single index object over ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
+			return nil, fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run PurgeUntracked to shrink", maxMetadataBytes)
 		}
+		// The tree exceeds the old blob ceiling but splits into small
+		// objects: admitted under the split layout.
+		pm.sizeCapped = false
+	} else {
+		pm.sizeCapped = false
 	}
 	pm.meta = &candidate
 

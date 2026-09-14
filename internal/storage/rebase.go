@@ -202,17 +202,17 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 // the project cache: the rebase needs pristine upstream state while the
 // cache holds local diverged truth. A missing index (brand-new or wiped
 // project) is an empty tree, not an error. The returned sha is the CAS token
-// for the upstream layout (manifest blob sha for v2, metadata blob sha for
-// v1, HEAD commit sha on the git backend).
+// for the upstream layout (manifest blob sha for the split index, metadata
+// blob sha for a legacy blob, HEAD commit sha on the git backend).
 func (h *StorHub) loadUpstreamMetadata(ctx context.Context, project string) (*RepoMetadata, string, error) {
-	data, sha, isV2, found, err := h.readIndexHead(ctx, project)
+	data, sha, split, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		return nil, "", err
 	}
 	if !found {
 		return NewRepoMetadata(project), "", nil
 	}
-	meta, _, err := h.loadIndexTree(ctx, project, data, isV2)
+	meta, _, err := h.loadIndexTree(ctx, project, data, split)
 	if err != nil {
 		return nil, "", err
 	}

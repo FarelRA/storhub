@@ -6,20 +6,27 @@ import (
 	"fmt"
 )
 
-// CurrentVersion is the newest metadata schema version this build reads
-// and writes.
+// CurrentVersion is the newest document version this build reads and writes
+// (5, the split layout). The pure blob migrators below only ever produce
+// maxBlobVersion (4); the 4->5 step is a write-time layout split, not a bytes
+// transform.
 const CurrentVersion = maxMetadataVersion
 
 // detectVersion reports a document's schema version. Historical spellings:
-// v1 documents wrote "version"; v2 onward write "v". That history belongs
-// to the migrator alone - the main parser never sees version detection.
+// v1 documents wrote "version"; v2 onward write "v". A v5 split-index manifest
+// is recognized by its tree root and reported as version 5. That history
+// belongs to the migrator alone - the main parser never sees version detection.
 func detectVersion(data []byte) (int, error) {
 	var probe struct {
-		V       *int `json:"v"`
-		Version *int `json:"version"` // v1-era spelling, consumed here only
+		V        *int   `json:"v"`
+		Version  *int   `json:"version"` // v1-era spelling, consumed here only
+		TreeRoot string `json:"tr"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return 0, fmt.Errorf("metadata version probe failed: %w", err)
+	}
+	if probe.TreeRoot != "" {
+		return maxMetadataVersion, nil
 	}
 	switch {
 	case probe.V != nil:
@@ -40,26 +47,31 @@ var migrators = [...]func([]byte) ([]byte, error){
 	3: migrateV3ToV4,
 }
 
-// Migrate upgrades a serialized metadata document to CurrentVersion by
-// applying every required step in order; a document already current passes
-// through unchanged. Loading is eager: every parse funnels through here,
-// so no code path outside this file can observe an older schema shape.
-// The upgraded document persists when the next mutation commits it.
+// Migrate upgrades a serialized metadata BLOB to maxBlobVersion by applying
+// every required step in order; a document already current passes through
+// unchanged. A v5 split-index manifest is rejected: it loads through
+// ParseManifest/LoadTree, never as a blob. Loading is eager: every blob parse
+// funnels through here, so no code path outside this file can observe an older
+// schema shape. The upgraded document persists when the next mutation commits
+// it (as a v5 split).
 func Migrate(data []byte) ([]byte, int, error) {
 	from, err := detectVersion(data)
 	if err != nil {
 		return nil, 0, err
 	}
-	if from > CurrentVersion {
-		return nil, from, fmt.Errorf("metadata version %d is newer than supported version %d", from, CurrentVersion)
+	if from == maxMetadataVersion {
+		return nil, from, fmt.Errorf("metadata version %d is the split-index layout; load it via ParseManifest, not Migrate", from)
+	}
+	if from > maxBlobVersion {
+		return nil, from, fmt.Errorf("metadata version %d is newer than supported blob version %d", from, maxBlobVersion)
 	}
 	if from < 1 {
 		return nil, from, fmt.Errorf("invalid metadata version %d", from)
 	}
-	if from == CurrentVersion {
+	if from == maxBlobVersion {
 		return data, from, nil
 	}
-	for v := from; v < CurrentVersion; v++ {
+	for v := from; v < maxBlobVersion; v++ {
 		step := migrators[v]
 		if step == nil {
 			return nil, v, fmt.Errorf("no migration path from metadata version %d", v)
@@ -68,7 +80,7 @@ func Migrate(data []byte) ([]byte, int, error) {
 			return nil, v, fmt.Errorf("migrate metadata v%d->v%d: %w", v, v+1, err)
 		}
 	}
-	return data, CurrentVersion, nil
+	return data, maxBlobVersion, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +337,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 	}
 	m.NextInode = in.NextInode
 	m.NextChunkID = in.NextChunkID
-	m.Version = CurrentVersion
+	m.Version = maxBlobVersion
 	return json.Marshal(m)
 }
 

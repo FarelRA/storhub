@@ -10,14 +10,14 @@ import (
 	"strings"
 )
 
-// The v2 index splits the single metadata blob into a Merkle hierarchy of
+// The v5 index splits the single metadata blob into a Merkle hierarchy of
 // content-addressed objects plus a small manifest (the only CAS point). The
 // in-memory RepoMetadata model stays FLAT; this file is purely a
 // (de)serialization layer between the flat maps and the object set.
 //
 // Layout of one project's index:
 //
-//	.storhub/index.json                 the manifest (ManifestV2)
+//	.storhub/index.json                 the manifest (Manifest, version 5)
 //	.storhub/objects/<2-hex>/<62-hex>   content-addressed objects (sha256)
 //
 // Object kinds: TreeNode (one directory), ChunkBucket (a range of chunk
@@ -25,22 +25,19 @@ import (
 // subdirectories by child sha, so an unchanged subtree dedups to one object
 // and a mutation rewrites only the chain from the changed node to the root.
 
-// ManifestVersion is the index-format version this build writes. It is
-// distinct from the metadata schema version (CurrentVersion): the manifest
-// describes the SPLIT layout, the schema describes the entry fields.
-const ManifestVersion = 2
-
 // ChunkBucketSize is the number of chunk IDs packed into one bucket object.
 // Bucketing by id/ChunkBucketSize keeps objects small and gives append
 // locality: freshly allocated chunks land in the highest bucket, so older
 // buckets stay immutable and dedup across commits.
 const ChunkBucketSize = 65536
 
-// ManifestV2 is the index manifest: the single contended CAS point of a v2
-// project. Everything it does not name lives in objects. Stats are an
+// Manifest is the v5 index manifest: the single contended CAS point of a
+// split-layout project. Its Version field carries the ONE metadata document
+// version (maxMetadataVersion = 5); there is no separate index-format number.
+// Everything the manifest does not name lives in objects. Stats are an
 // ADVISORY hint (recomputed authoritatively on load); the counters live here
 // because the manifest is small, always loaded, and already the CAS point.
-type ManifestV2 struct {
+type Manifest struct {
 	Version      int           `json:"v"`
 	Project      string        `json:"p"`
 	TreeRoot     string        `json:"tr"`
@@ -106,10 +103,10 @@ func ObjectPath(sha string) string {
 	return "objects/" + sha[:2] + "/" + sha[2:]
 }
 
-// IsManifestV2 reports whether a serialized blob is a v2 index manifest (as
-// opposed to a v1 metadata document). Detection is by shape: a manifest
-// carries a non-empty tree root "tr".
-func IsManifestV2(data []byte) bool {
+// IsManifest reports whether a serialized blob is a v5 split-index manifest
+// (as opposed to a v1-v4 single metadata document). Detection is by shape: a
+// manifest carries the current document version and a non-empty tree root.
+func IsManifest(data []byte) bool {
 	var probe struct {
 		V        *int   `json:"v"`
 		TreeRoot string `json:"tr"`
@@ -117,17 +114,17 @@ func IsManifestV2(data []byte) bool {
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return false
 	}
-	return probe.V != nil && *probe.V == ManifestVersion && probe.TreeRoot != ""
+	return probe.V != nil && *probe.V == maxMetadataVersion && probe.TreeRoot != ""
 }
 
-// ParseManifest decodes a v2 manifest.
-func ParseManifest(data []byte) (*ManifestV2, error) {
-	var m ManifestV2
+// ParseManifest decodes a v5 manifest.
+func ParseManifest(data []byte) (*Manifest, error) {
+	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
-	if m.Version != ManifestVersion {
-		return nil, fmt.Errorf("manifest version %d is not %d", m.Version, ManifestVersion)
+	if m.Version != maxMetadataVersion {
+		return nil, fmt.Errorf("manifest version %d is not %d", m.Version, maxMetadataVersion)
 	}
 	if m.TreeRoot == "" {
 		return nil, fmt.Errorf("manifest has no tree root")
@@ -135,8 +132,8 @@ func ParseManifest(data []byte) (*ManifestV2, error) {
 	return &m, nil
 }
 
-// MarshalManifest serializes a v2 manifest deterministically.
-func MarshalManifest(m *ManifestV2) ([]byte, error) {
+// MarshalManifest serializes a v5 manifest deterministically.
+func MarshalManifest(m *Manifest) ([]byte, error) {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return nil, fmt.Errorf("marshal manifest: %w", err)
@@ -255,12 +252,12 @@ func buildChunkBuckets(meta *RepoMetadata, objects map[string][]byte) ([]string,
 // referenced object through getObject (which the caller backs with the
 // content-addressed cache + repo). The returned tree is not yet normalized;
 // callers Normalize/RecomputeStats as they do after any load.
-func LoadTree(manifest *ManifestV2, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
+func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("nil manifest")
 	}
 	meta := &RepoMetadata{
-		Version:     CurrentVersion,
+		Version:     maxBlobVersion,
 		Project:     manifest.Project,
 		NextInode:   manifest.NextInode,
 		NextChunkID: manifest.NextChunkID,

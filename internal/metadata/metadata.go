@@ -120,7 +120,7 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().Unix()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
-		Version:     maxMetadataVersion,
+		Version:     maxBlobVersion,
 		Project:     project,
 		NextInode:   2,
 		NextChunkID: 1,
@@ -200,8 +200,18 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 	return data, nil
 }
 
-// maxMetadataVersion is the newest schema version this build reads and writes.
-const maxMetadataVersion = 4
+// maxMetadataVersion is the newest DOCUMENT version this build reads and
+// writes. Versions 1..maxBlobVersion are single-blob layouts (the whole index
+// in one metadata.json, entry shapes evolving); version 5 is the split layout
+// (a manifest plus content-addressed Merkle objects). The split is therefore
+// just the next step on the ONE version axis, not a parallel numbering.
+const maxMetadataVersion = 5
+
+// maxBlobVersion is the newest single-blob schema, and the entry-shape the
+// in-memory RepoMetadata always normalizes to. Migrate upgrades legacy blobs
+// to this version; the 4->5 step is a write-time layout split (it produces
+// objects, so it is not a pure bytes transform and lives in the storage layer).
+const maxBlobVersion = 4
 
 // xattrMapFromStrings converts legacy string-valued xattrs from v1/v2
 // payloads into the v3 byte representation.
@@ -218,7 +228,8 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 
 // FromJSON parses a metadata document into current form. Version detection
 // and any upgrades belong entirely to Migrate (stacked, eager); this parser
-// understands ONLY the current schema - legacy spellings never reach it.
+// understands ONLY the current blob schema - legacy spellings never reach it.
+// A v5 split-index manifest is NOT a blob and must go through ParseManifest.
 func (m *RepoMetadata) FromJSON(data []byte) error {
 	upgraded, _, err := Migrate(data)
 	if err != nil {
@@ -227,17 +238,19 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 	if err := json.Unmarshal(upgraded, m); err != nil {
 		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
-	m.Version = maxMetadataVersion
+	m.Version = maxBlobVersion
 	return nil
 }
 
-// UnmarshalJSON enforces the single-version contract at the type level:
-// only documents written in the CURRENT schema decode. Older payloads must
-// go through FromJSON/Migrate - a direct unmarshal fails loudly instead of
-// silently yielding an empty tree from ignored unknown fields.
+// UnmarshalJSON enforces the single-version contract at the type level: only
+// documents written in the CURRENT blob schema decode. Older payloads must go
+// through FromJSON/Migrate, and a v5 split-index manifest must go through
+// ParseManifest/LoadTree - a direct unmarshal fails loudly instead of silently
+// yielding an empty tree from ignored unknown fields.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	var probe struct {
-		V *int `json:"v"`
+		V        *int   `json:"v"`
+		TreeRoot string `json:"tr"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return fmt.Errorf("metadata probe: %w", err)
@@ -245,8 +258,11 @@ func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	if probe.V == nil {
 		return errors.New("metadata document lacks a schema version; use metadata.Migrate for older formats")
 	}
-	if *probe.V != maxMetadataVersion {
-		return fmt.Errorf("metadata version %d is not the parser's version %d; migrate first", *probe.V, maxMetadataVersion)
+	if probe.TreeRoot != "" {
+		return fmt.Errorf("document is a v%d split-index manifest; load it via ParseManifest/LoadTree, not RepoMetadata", maxMetadataVersion)
+	}
+	if *probe.V != maxBlobVersion {
+		return fmt.Errorf("metadata version %d is not the parser's blob version %d; migrate first", *probe.V, maxBlobVersion)
 	}
 	type alias RepoMetadata
 	var raw alias
@@ -254,12 +270,12 @@ func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = RepoMetadata(raw)
-	m.Version = maxMetadataVersion
+	m.Version = maxBlobVersion
 	return nil
 }
 
 func (m *RepoMetadata) Normalize(project string, now int64) {
-	m.Version = maxMetadataVersion
+	m.Version = maxBlobVersion
 	m.Project = chooseNonEmpty(m.Project, project)
 	m.normalizeRoot(now)
 	if m.Dirs == nil {
@@ -339,7 +355,7 @@ func (m *RepoMetadata) RecomputeStats() {
 	m.TotalFiles = totalFiles
 	m.TotalSize = totalSize
 	if m.Version == 0 {
-		m.Version = maxMetadataVersion
+		m.Version = maxBlobVersion
 	}
 	m.RebuildIndexes()
 }
@@ -1071,7 +1087,7 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 		return fmt.Errorf("unmarshal v1 metadata: %w", err)
 	}
 
-	m.Version = maxMetadataVersion
+	m.Version = maxBlobVersion
 	m.Project = v1.Project
 	m.TotalFiles = v1.TotalFiles
 	m.TotalSize = v1.TotalSize

@@ -184,11 +184,16 @@ func TestRollbackGitPathHappyPath(t *testing.T) {
 	if err := hub.RollbackMetadataContext(ctx, "demo", oldest); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	data, err := hub.getGitRepo("demo").readFileRef(ctx, "HEAD", metadataFilePath)
-	if err != nil {
-		t.Fatalf("read HEAD: %v", err)
+	// The rollback republished the index on the split layout (version 5):
+	// HEAD now carries a manifest, and the rolled-back tree loads.
+	if _, err := hub.getGitRepo("demo").readFileRef(ctx, "HEAD", indexFilePath); err != nil {
+		t.Fatalf("rollback did not publish a v5 manifest on the git path: %v", err)
 	}
-	if strings.Contains(string(data), `"tf":1`) {
-		t.Fatalf("expected rollback to oldest revision, got %s", data)
+	m, _, err := hub.loadRepoMetadataFresh(ctx, "demo")
+	if err != nil {
+		t.Fatalf("read rolled-back tree: %v", err)
+	}
+	if m.TotalFiles != 0 {
+		t.Fatalf("expected rollback to the empty oldest revision, got %d files", m.TotalFiles)
 	}
 }

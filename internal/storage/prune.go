@@ -114,10 +114,10 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneResult, dryRun bool) error {
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.RLock()
-	isV2 := pm.isV2
+	split := pm.split
 	pm.mu.RUnlock()
-	if !isV2 {
-		res.Notes = append(res.Notes, "objects: project uses the v1 single-blob layout; no content-addressed objects to prune")
+	if !split {
+		res.Notes = append(res.Notes, "objects: project still uses the legacy single-blob layout; no content-addressed objects to prune (it migrates on its next write)")
 		return nil
 	}
 	referenced, err := h.referencedObjects(ctx, project)
@@ -167,8 +167,8 @@ func (h *StorHub) referencedObjects(ctx context.Context, project string) (map[st
 		return nil, err
 	}
 	for _, rev := range revs {
-		data, isV2, found, rerr := h.readIndexRevision(ctx, project, rev.CommitSHA)
-		if rerr != nil || !found || !isV2 {
+		data, split, found, rerr := h.readIndexRevision(ctx, project, rev.CommitSHA)
+		if rerr != nil || !found || !split {
 			continue
 		}
 		manifest, perr := meta.ParseManifest(data)
@@ -182,7 +182,7 @@ func (h *StorHub) referencedObjects(ctx context.Context, project string) (map[st
 	return referenced, nil
 }
 
-func (h *StorHub) addManifestReachable(ctx context.Context, project string, m *meta.ManifestV2, out map[string]bool) error {
+func (h *StorHub) addManifestReachable(ctx context.Context, project string, m *meta.Manifest, out map[string]bool) error {
 	var walk func(sha string) error
 	walk = func(sha string) error {
 		if sha == "" || out[sha] {

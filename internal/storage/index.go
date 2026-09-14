@@ -10,18 +10,19 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// The v2 index layout behind a version gate. Reads understand both layouts
-// always; the WRITE path uses v2 only when the project is already v2 or the
-// IndexV2 config opts it in (a v1 project then migrates on its first write).
+// The split index layout (metadata version 5) behind a version gate. Reads
+// understand every version always; the write path always produces the split
+// layout, so a legacy single-blob project migrates on its first write.
 // The manifest is the single CAS point; content-addressed objects are written
 // idempotently before it, so a crash between object writes and the manifest
 // CAS leaves only unreferenced garbage for `storhub prune` to reclaim.
 
-// readIndexHead fetches the project's current index: the v2 manifest when
-// present, otherwise the v1 metadata blob. found=false means neither exists
+// readIndexHead fetches the project's current index: the split manifest when
+// present, otherwise the legacy metadata blob. found=false means neither exists
 // (brand-new or wiped project). The returned sha is the CAS token for the
-// blob that was found (manifest blob sha for v2, metadata blob sha for v1).
-func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, isV2, found bool, err error) {
+// blob that was found (manifest blob sha for split, metadata blob sha for
+// legacy).
+func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, split, found bool, err error) {
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, "", false, false, err
 	}
@@ -40,7 +41,7 @@ func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byt
 		}
 		return nil, "", false, false, rerr
 	}
-	// REST: try the manifest, then the v1 blob.
+	// REST: try the manifest, then the legacy blob.
 	d, s, rerr := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, "")
 	if rerr == nil {
 		return d, s, true, true, nil
@@ -59,11 +60,11 @@ func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byt
 	return nil, "", false, false, rerr
 }
 
-// loadIndexTree materializes a flat RepoMetadata from an index blob (v2
-// manifest or v1 document), fetching v2 objects through the cache + repo.
-func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte, isV2 bool) (*RepoMetadata, uint64, error) {
+// loadIndexTree materializes a flat RepoMetadata from an index blob (the
+// version-5 manifest or a legacy document), fetching split objects through the cache + repo.
+func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte, split bool) (*RepoMetadata, uint64, error) {
 	m := NewRepoMetadata(project)
-	if !isV2 {
+	if !split {
 		if err := m.FromJSON(data); err != nil {
 			return nil, 0, fmt.Errorf("parse metadata: %w", err)
 		}
@@ -80,46 +81,29 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 	fetched := func(sha string) ([]byte, error) { return h.fetchObject(ctx, project, sha) }
 	loaded, err := meta.LoadTree(manifest, fetched)
 	if err != nil {
-		return nil, 0, fmt.Errorf("load v2 index: %w", err)
+		return nil, 0, fmt.Errorf("load split index: %w", err)
 	}
 	loaded.Project = project
 	loaded.Normalize(project, h.config.Now().Unix())
 	if err := loaded.Validate(); err != nil {
-		return nil, 0, fmt.Errorf("validate v2 index: %w", err)
+		return nil, 0, fmt.Errorf("validate split index: %w", err)
 	}
 	return loaded, manifest.ObjectCount, nil
 }
 
-// publishIndex performs ONE commit attempt for the given layout: it writes
-// any new content-addressed objects, then compare-and-swaps the manifest (v2)
-// or the metadata blob (v1). It returns the new running object count so the
-// caller can carry the threshold hint forward. A 409 from the CAS propagates
-// unchanged so the commit loop can rebase and retry.
-func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, isV2 bool, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
-	if !isV2 {
-		blob, merr := tree.ToJSON()
-		if merr != nil {
-			return "", "", prevObjectCount, fmt.Errorf("marshal metadata: %w", merr)
-		}
-		if len(blob) > maxMetadataBytes {
-			return "", "", prevObjectCount, &oversizeError{size: len(blob), limit: maxMetadataBytes}
-		}
-		if repo := h.getGitRepo(project); repo != nil {
-			commitSHA, contentSHA, err = repo.writeCommitPushCAS(ctx, metadataFilePath, blob, message, prevSHA)
-		} else {
-			commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, blob, prevSHA, message)
-		}
-		return commitSHA, contentSHA, prevObjectCount, err
-	}
-
+// publishIndex performs ONE commit attempt: it writes any new content-addressed
+// objects, then compare-and-swaps the manifest (the version-5 split layout,
+// the default and latest write path). It returns the new running object count
+// so the caller can carry the threshold hint forward. A 409 from the CAS
+// propagates unchanged so the commit loop can rebase and retry.
+func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
 	res, merr := meta.BuildTree(tree)
 	if merr != nil {
 		return "", "", prevObjectCount, fmt.Errorf("build index tree: %w", merr)
 	}
-	// Per-object admission (v2 replaces the whole-blob ceiling): no single
-	// object may exceed the contents-API limit. A breach means one directory
-	// holds an enormous number of entries; the remedy is structural, not a
-	// ceiling raise.
+	// Per-object admission: no single object may exceed the contents-API
+	// limit. A breach means one directory holds an enormous number of
+	// entries; the remedy is structural, not a ceiling raise.
 	for _, data := range res.Objects {
 		if len(data) > maxMetadataBytes {
 			return "", "", prevObjectCount, &oversizeError{size: len(data), limit: maxMetadataBytes}
@@ -164,9 +148,9 @@ func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.R
 	return commitSHA, contentSHA, objectCount, err
 }
 
-func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, res *meta.TreeResult, objectCount uint64) *meta.ManifestV2 {
-	return &meta.ManifestV2{
-		Version:      meta.ManifestVersion,
+func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, res *meta.TreeResult, objectCount uint64) *meta.Manifest {
+	return &meta.Manifest{
+		Version:      meta.CurrentVersion,
 		Project:      project,
 		TreeRoot:     res.RootSHA,
 		ChunkBuckets: res.ChunkBuckets,
@@ -197,18 +181,19 @@ func (h *StorHub) cacheObjects(project string, objects map[string][]byte) {
 	}
 }
 
-// oversizeError marks a v1 commit that breached the blob ceiling so the
-// commit loop can arm the D4 admission marker without string matching.
+// oversizeError marks a commit whose single index object breached the
+// contents-API limit so the commit loop can arm the D4 admission marker
+// without string matching.
 type oversizeError struct {
 	size  int
 	limit int
 }
 
 func (e *oversizeError) Error() string {
-	return fmt.Sprintf("metadata too large: %d bytes (max %d); run `storhub prune` to reclaim history, or enable the v2 split index (index_v2) to remove the ceiling", e.size, e.limit)
+	return fmt.Sprintf("metadata too large: one index object is %d bytes (max %d); distribute entries across subdirectories or run `storhub prune` to reclaim", e.size, e.limit)
 }
 
-// warnHistoryThreshold logs once per threshold crossing that a v2 project has
+// warnHistoryThreshold logs once per threshold crossing that a split project has
 // accumulated many index objects under full-history retention, pointing at
 // the granular prune. The counter is advisory; the warning never blocks a
 // commit.

@@ -28,6 +28,7 @@ import (
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
+	meta "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -2832,7 +2833,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/metadata.json") {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/index.json") {
 			metadataWrites.Add(1)
 		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
@@ -3837,18 +3838,42 @@ func (m *mockGitHub) removeAsset(t *testing.T, project string, assetID int64) {
 	delete(repo.assets, assetID)
 }
 
-func (m *mockGitHub) setMetadata(t *testing.T, project string, meta RepoMetadata) {
+func (m *mockGitHub) setMetadata(t *testing.T, project string, md RepoMetadata) {
 	t.Helper()
 	repo := m.repo(project)
 	if repo == nil {
 		t.Fatalf("repo %s not found", project)
 	}
-	payload, err := meta.ToJSON()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Match the project's current layout: a split (version-5) project stores
+	// a manifest plus objects; a legacy project a single blob.
+	if repo.files[indexFilePath] != nil {
+		res, err := meta.BuildTree(&md)
+		if err != nil {
+			t.Fatalf("build tree: %v", err)
+		}
+		for sha, data := range res.Objects {
+			p := objectRepoPath(sha)
+			repo.files[p] = &mockFile{path: p, sha: computeGitBlobSHA(data), data: append([]byte(nil), data...)}
+		}
+		mf := &meta.Manifest{
+			Version: meta.CurrentVersion, Project: md.Project, TreeRoot: res.RootSHA,
+			ChunkBuckets: res.ChunkBuckets, Releases: res.ReleasesSHA,
+			NextInode: md.NextInode, NextChunkID: md.NextChunkID,
+			Stats: meta.ManifestStats{Files: md.TotalFiles, Bytes: md.TotalSize}, LastMod: md.LastMod,
+		}
+		mb, err := meta.MarshalManifest(mf)
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		repo.files[indexFilePath] = &mockFile{path: indexFilePath, sha: computeGitBlobSHA(mb), data: mb}
+		return
+	}
+	payload, err := md.ToJSON()
 	if err != nil {
 		t.Fatalf("marshal metadata: %v", err)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	file := repo.files[metadataFilePath]
 	if file == nil {
 		file = &mockFile{path: metadataFilePath}
@@ -3873,15 +3898,36 @@ func (m *mockGitHub) assertRepoStats(t *testing.T, project string, files int, si
 
 func mustLoadMetadata(t *testing.T, repo *mockRepo) RepoMetadata {
 	t.Helper()
+	// Layout-aware: a split (version-5) project stores its index as a
+	// manifest plus content-addressed objects; a legacy project as one blob.
+	if idx := repo.files[indexFilePath]; idx != nil {
+		manifest, err := meta.ParseManifest(idx.data)
+		if err != nil {
+			t.Fatalf("parse manifest: %v", err)
+		}
+		get := func(sha string) ([]byte, error) {
+			f := repo.files[objectRepoPath(sha)]
+			if f == nil {
+				return nil, fmt.Errorf("missing object %s", sha)
+			}
+			return f.data, nil
+		}
+		m, err := meta.LoadTree(manifest, get)
+		if err != nil {
+			t.Fatalf("load split index: %v", err)
+		}
+		m.Normalize(manifest.Project, m.LastMod)
+		return *m
+	}
 	file := repo.files[metadataFilePath]
 	if file == nil {
 		return RepoMetadata{}
 	}
-	var meta RepoMetadata
-	if err := meta.FromJSON(file.data); err != nil {
+	var legacy RepoMetadata
+	if err := legacy.FromJSON(file.data); err != nil {
 		t.Fatalf("parse metadata: %v", err)
 	}
-	return meta
+	return legacy
 }
 
 func (m *mockGitHub) writeJSON(w http.ResponseWriter, status int, payload any) {

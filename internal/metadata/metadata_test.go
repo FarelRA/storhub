@@ -84,7 +84,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	if err := repo.Validate(); err != nil {
 		t.Fatalf("validate normalized repo: %v", err)
 	}
-	if repo.Version != maxMetadataVersion || repo.Project != "demo" {
+	if repo.Version != maxBlobVersion || repo.Project != "demo" {
 		t.Fatalf("unexpected normalized repo: %+v", repo)
 	}
 	if repo.Root.Inode == 0 {
@@ -400,8 +400,8 @@ func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
 	if err := m.FromJSON([]byte(v2JSON)); err != nil {
 		t.Fatalf("migrate v2: %v", err)
 	}
-	if m.Version != maxMetadataVersion {
-		t.Fatalf("expected version %d after migration, got %d", maxMetadataVersion, m.Version)
+	if m.Version != maxBlobVersion {
+		t.Fatalf("expected version %d after migration, got %d", maxBlobVersion, m.Version)
 	}
 	file := m.FindFile("a.txt")
 	if file == nil {
@@ -689,7 +689,7 @@ func TestV3PayloadMigratesTimestamps(t *testing.T) {
 	if err := m.FromJSON([]byte(v3)); err != nil {
 		t.Fatalf("migrate v3: %v", err)
 	}
-	if m.Version != maxMetadataVersion {
+	if m.Version != maxBlobVersion {
 		t.Fatalf("version not advanced: %d", m.Version)
 	}
 	if m.Root.CreatedAt != 100 || m.Root.ChangedAt != 103 {

@@ -32,7 +32,7 @@ func (s *syncBuffer) String() string {
 	return s.buf.String()
 }
 
-const testMetadataPath = "/contents/.storhub/metadata.json"
+const testIndexPath = "/contents/.storhub/index.json"
 
 // pollUntil spins until cond holds or the deadline passes; event-driven
 // commits are async, so tests synchronize on observable effects instead
@@ -74,7 +74,7 @@ func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
 	hub := backend.newClient(t, singleChunkTestConfig())
 	var puts atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) {
 			puts.Add(1)
 		}
 		return false
@@ -98,7 +98,7 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 	var attempts atomic.Int32
 	var fail atomic.Bool
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method != http.MethodPut || !strings.Contains(r.URL.Path, testMetadataPath) {
+		if r.Method != http.MethodPut || !strings.Contains(r.URL.Path, testIndexPath) {
 			return false
 		}
 		attempts.Add(1)
@@ -184,7 +184,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 
 	var puts atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) {
 			puts.Add(1)
 		}
 		return false

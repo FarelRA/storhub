@@ -45,10 +45,10 @@ func sampleTree(t *testing.T) *RepoMetadata {
 	return m
 }
 
-func manifestFrom(t *testing.T, m *RepoMetadata, res *TreeResult) *ManifestV2 {
+func manifestFrom(t *testing.T, m *RepoMetadata, res *TreeResult) *Manifest {
 	t.Helper()
-	return &ManifestV2{
-		Version:      ManifestVersion,
+	return &Manifest{
+		Version:      CurrentVersion,
 		Project:      m.Project,
 		TreeRoot:     res.RootSHA,
 		ChunkBuckets: res.ChunkBuckets,

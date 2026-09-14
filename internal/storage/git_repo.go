@@ -284,7 +284,7 @@ func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content [
 }
 
 // writeCommitPushCASMulti commits several files in ONE commit with the same
-// compare-and-swap semantics as writeCommitPushCAS: the v2 index writes its
+// compare-and-swap semantics as writeCommitPushCAS: the split index writes its
 // content-addressed objects and the manifest together so the manifest CAS is
 // the single atomic point (objects become referenced exactly when the
 // manifest that names them lands). Git's own content addressing makes
@@ -657,9 +657,9 @@ func (r *gitRepo) squashHistoryCAS(ctx context.Context, path, message, expectedO
 
 // squashTreeCAS collapses history into a single orphan commit that keeps the
 // ENTIRE current tree (manifest + every object), unlike squashHistoryCAS
-// which rebuilds a tree from one path. The v2 index must never lose its
+// which rebuilds a tree from one path. The split index must never lose its
 // objects to a history prune, so this is the history-compaction primitive for
-// v2 projects. The force-push carries a lease on the post-sync HEAD so a
+// split (version-5) projects. The force-push carries a lease on the post-sync HEAD so a
 // concurrent writer is rejected with 409 rather than discarded.
 func (r *gitRepo) squashTreeCAS(ctx context.Context, message, expectedOld string) error {
 	r.mu.Lock()

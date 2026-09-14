@@ -38,8 +38,8 @@ func mustMigrateAll(t *testing.T, data []byte) []byte {
 	if err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if version != CurrentVersion {
-		t.Fatalf("version %d != current %d", version, CurrentVersion)
+	if version != maxBlobVersion {
+		t.Fatalf("version %d != current blob version %d", version, maxBlobVersion)
 	}
 	return out
 }
@@ -74,7 +74,7 @@ func TestMigrateIdentityOnCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, version, err := Migrate(blob)
-	if err != nil || version != CurrentVersion {
+	if err != nil || version != maxBlobVersion {
 		t.Fatalf("identity migrate failed: %d %v", version, err)
 	}
 	if string(out) != string(blob) {

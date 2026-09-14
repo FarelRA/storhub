@@ -106,12 +106,6 @@ type Config struct {
 	// require humans (or higher layers) to arbitrate every clash.
 	StrictConflicts   bool
 	DisableGitBackend bool
-	// IndexV2 opts a project's index into the v2 split layout (Merkle tree
-	// + content-addressed objects + manifest). It is opt-in because it
-	// changes the on-disk format of live data: v2 becomes the write path
-	// only when set, while reads always understand both layouts. New
-	// projects start v2 when set; v1 projects migrate on first write.
-	IndexV2 bool
 	// ObjectCacheMaxEntries bounds the per-project content-addressed object
 	// cache (LRU). Eviction only costs a later refetch, never correctness.
 	ObjectCacheMaxEntries int

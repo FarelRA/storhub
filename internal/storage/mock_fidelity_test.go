@@ -217,7 +217,10 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 	}
 	var metaPuts atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) {
+		// The v5 commit writes content-addressed objects then the manifest;
+		// a 429 on any of them must trigger a retry, so count the whole
+		// .storhub commit surface.
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/") {
 			metaPuts.Add(1)
 		}
 		return false

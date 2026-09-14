@@ -26,7 +26,7 @@ func injectOrphanObject(t *testing.T, hub *StorHub, project string) string {
 func TestPruneObjectsRemovesOrphans(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "pruneobj", "docs", "a.txt", 1)
 
 	orphan := injectOrphanObject(t, hub, "pruneobj")
@@ -59,34 +59,36 @@ func TestPruneObjectsRemovesOrphans(t *testing.T) {
 		t.Fatal("orphan survived prune")
 	}
 	// The live tree still loads (referenced objects untouched).
-	hub2 := backend.newClient(t, indexV2Config())
+	hub2 := backend.newClient(t, smallTransferTestConfig())
 	files, err := hub2.ListFilesContext(ctx, "pruneobj")
 	if err != nil || len(files) != 1 {
 		t.Fatalf("tree broken after prune: %v (%d files)", err, len(files))
 	}
 }
 
-func TestPruneObjectsV1IsNoop(t *testing.T) {
+func TestPruneObjectsLegacyIsNoop(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig()) // v1
-	seedMeta(t, hub, "v1prune", "docs", "a.txt", 1)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	// A legacy version-4 blob that has NOT been migrated: HEAD is a single
+	// blob, so there are no content-addressed objects to prune.
+	seedLegacyBlob(t, hub, "v1prune", "docs", "a.txt", 1)
 	res, err := hub.Prune(ctx, "v1prune", PruneObjects, 0, false)
 	if err != nil {
-		t.Fatalf("prune v1: %v", err)
+		t.Fatalf("prune legacy: %v", err)
 	}
 	if res.DeletedObjects != 0 {
-		t.Fatalf("v1 has no objects to prune, deleted %d", res.DeletedObjects)
+		t.Fatalf("legacy layout has no objects to prune, deleted %d", res.DeletedObjects)
 	}
-	if len(res.Notes) == 0 || !strings.Contains(res.Notes[0], "v1") {
-		t.Fatalf("expected a v1-layout note, got %v", res.Notes)
+	if len(res.Notes) == 0 || !strings.Contains(res.Notes[0], "legacy") {
+		t.Fatalf("expected a legacy-layout note, got %v", res.Notes)
 	}
 }
 
 func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "resthist", "docs", "a.txt", 1)
 	res, err := hub.Prune(ctx, "resthist", PruneHistory, 1, false)
 	if err != nil {
@@ -103,7 +105,7 @@ func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
 func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
 	ctx := context.Background()
 	url := seedBareMetadataRepo(t)
-	hub := newGitBackedHub(t, url, indexV2Config())
+	hub := newGitBackedHub(t, url, smallTransferTestConfig())
 	seedMeta(t, hub, "demo", "docs", "a.txt", 1)
 	seedMeta(t, hub, "demo", "photos", "b.txt", 2)
 
@@ -131,7 +133,7 @@ func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
 		t.Fatalf("history not compacted: %d -> %d", len(before), len(after))
 	}
 	// Objects survive the squash: a cold reader still sees both files.
-	hub2 := newGitBackedHub(t, url, indexV2Config())
+	hub2 := newGitBackedHub(t, url, smallTransferTestConfig())
 	files, err := hub2.ListFilesContext(ctx, "demo")
 	if err != nil {
 		t.Fatalf("read after history prune: %v", err)
@@ -144,7 +146,7 @@ func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
 func TestRollbackAsRevertV2(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	if err := hub.MkdirContext(ctx, "rb", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
@@ -179,7 +181,7 @@ func TestRollbackAsRevertV2(t *testing.T) {
 	}
 	// After rollback the newer file is gone, the older survives, and the
 	// project is STILL v2 (the manifest was repointed, not the v1 blob).
-	hub2 := backend.newClient(t, indexV2Config())
+	hub2 := backend.newClient(t, smallTransferTestConfig())
 	m, _, err := hub2.loadRepoMetadataFresh(ctx, "rb")
 	if err != nil {
 		t.Fatalf("reload after rollback: %v", err)
@@ -202,7 +204,7 @@ func TestRollbackAsRevertV2(t *testing.T) {
 func TestPruneAssetsWiresPurge(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "pa", "docs", "a.txt", 1)
 	// An empty untracked release is skipped by PurgeUntracked (curated
 	// headroom), so create one WITH an asset that no chunk references.

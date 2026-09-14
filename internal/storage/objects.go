@@ -13,7 +13,8 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// indexFilePath is the v2 manifest: the single CAS point of a v2 project.
+// indexFilePath is the split manifest: the single CAS point of a
+// version-5 project.
 const indexFilePath = ".storhub/index.json"
 
 // objectRepoPath maps an object sha to its repo path under .storhub.

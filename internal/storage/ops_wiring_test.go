@@ -37,7 +37,7 @@ func TestJournalWrittenByMutations(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) && fail.Load() {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
 			http.Error(w, "injected failure", http.StatusInternalServerError)
 			return true
 		}
@@ -107,7 +107,7 @@ func TestJournalReplayOnColdStart(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) && fail.Load() {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
 			http.Error(w, "injected failure", http.StatusInternalServerError)
 			return true
 		}
@@ -159,7 +159,7 @@ func TestJournalCorruptTailDropped(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) && fail.Load() {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
 			http.Error(w, "injected failure", http.StatusInternalServerError)
 			return true
 		}
@@ -261,7 +261,7 @@ func TestStackClearedOnCommitRetainedOnFailure(t *testing.T) {
 	// stack must be retained for the retry.
 	var fail atomic.Bool
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) && fail.Load() {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
 			http.Error(w, "injected failure", http.StatusInternalServerError)
 			return true
 		}
@@ -422,7 +422,7 @@ func TestFamilyPropagationCaptured(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testMetadataPath) && fail.Load() {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
 			http.Error(w, "injected failure", http.StatusInternalServerError)
 			return true
 		}

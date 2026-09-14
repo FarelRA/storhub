@@ -8,15 +8,9 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// indexV2Config opts into the v2 split index on the REST backend.
-func indexV2Config() Config {
-	cfg := smallTransferTestConfig()
-	cfg.IndexV2 = true
-	return cfg
-}
-
 // seedMeta adds a directory tree with files + chunk records through a
 // metadata transaction (no real asset upload needed to exercise the index).
+// The write lands on the default split layout (version 5).
 func seedMeta(t *testing.T, hub *StorHub, project, dir, file string, chunkID int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -35,6 +29,33 @@ func seedMeta(t *testing.T, hub *StorHub, project, dir, file string, chunkID int
 	}
 	if err := hub.FlushProjectContext(ctx, project); err != nil {
 		t.Fatalf("flush: %v", err)
+	}
+}
+
+// seedLegacyBlob writes a version-4 single-blob metadata.json DIRECTLY to the
+// backend, simulating a project created before the split layout existed, so a
+// later hub write must migrate it to version 5.
+func seedLegacyBlob(t *testing.T, hub *StorHub, project, dir, file string, chunkID int64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, project); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	m := NewRepoMetadata(project)
+	m.EnsureDirectory(dir, 1700000000)
+	m.Chunks[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
+	m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
+	m.EnsureRelease("v1", 1700000000)
+	m.Normalize(project, 1700000000)
+	blob, err := m.ToJSON()
+	if err != nil {
+		t.Fatalf("marshal legacy blob: %v", err)
+	}
+	if !strings.Contains(string(blob), `"v":4`) {
+		t.Fatalf("legacy fixture must be version 4, got %s", blob[:20])
+	}
+	if _, _, err := hub.gh.PutFileContent(ctx, hub.owner, project, metadataFilePath, blob, "", "legacy seed"); err != nil {
+		t.Fatalf("seed legacy blob: %v", err)
 	}
 }
 
@@ -72,59 +93,63 @@ func countObjectFiles(backend *mockGitHub, project string) int {
 	return n
 }
 
-func TestIndexV2EndToEndREST(t *testing.T) {
+func TestSplitIndexEndToEndREST(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 
-	seedMeta(t, hub, "v2proj", "docs", "a.txt", 1)
+	seedMeta(t, hub, "v5proj", "docs", "a.txt", 1)
 
-	if !mockHas(backend, "v2proj", ".storhub/index.json") {
-		t.Fatalf("expected v2 manifest at HEAD, files: %v", mockFilePaths(backend, "v2proj"))
+	if !mockHas(backend, "v5proj", ".storhub/index.json") {
+		t.Fatalf("expected v5 manifest at HEAD, files: %v", mockFilePaths(backend, "v5proj"))
 	}
-	if countObjectFiles(backend, "v2proj") == 0 {
+	if countObjectFiles(backend, "v5proj") == 0 {
 		t.Fatal("expected content-addressed objects written")
 	}
+	// The default write path never touches the legacy blob.
+	if mockHas(backend, "v5proj", ".storhub/metadata.json") {
+		t.Fatal("a new project must not write metadata.json")
+	}
 
-	// A fresh client (cold cache) must read the v2 tree back identically.
-	hub2 := backend.newClient(t, indexV2Config())
-	files, err := hub2.ListFilesContext(ctx, "v2proj")
+	// A fresh client (cold cache) must read the v5 tree back identically.
+	hub2 := backend.newClient(t, smallTransferTestConfig())
+	files, err := hub2.ListFilesContext(ctx, "v5proj")
 	if err != nil {
 		t.Fatalf("cold read: %v", err)
 	}
 	if len(files) != 1 {
-		t.Fatalf("expected 1 file after v2 round-trip, got %d", len(files))
+		t.Fatalf("expected 1 file after v5 round-trip, got %d", len(files))
 	}
 }
 
-func TestIndexV2MigrationFromV1(t *testing.T) {
+func TestSplitIndexMigrationFromLegacy(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 
-	// Phase 1: a v1 project (IndexV2 off) commits the single blob.
+	// Phase 1: a legacy version-4 project (single blob, no manifest).
 	hub1 := backend.newClient(t, smallTransferTestConfig())
-	seedMeta(t, hub1, "mig", "docs", "old.txt", 1)
+	seedLegacyBlob(t, hub1, "mig", "docs", "old.txt", 1)
 	if mockHas(backend, "mig", ".storhub/index.json") {
-		t.Fatal("v1 project must not have a manifest")
+		t.Fatal("legacy project must not have a manifest")
 	}
 	if !mockHas(backend, "mig", ".storhub/metadata.json") {
-		t.Fatal("v1 project must have metadata.json")
+		t.Fatal("legacy project must have metadata.json")
 	}
 
-	// Phase 2: reopen with IndexV2 on; the first write migrates.
-	hub2 := backend.newClient(t, indexV2Config())
+	// Phase 2: the next write migrates it to the split layout.
+	hub2 := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub2, "mig", "photos", "new.txt", 2)
 	if !mockHas(backend, "mig", ".storhub/index.json") {
 		t.Fatal("migration must create the manifest")
 	}
-	// Grace window: the v1 blob is retained so a rollback across the
+	// Grace window: the legacy blob is retained so a rollback across the
 	// boundary still resolves.
 	if !mockHas(backend, "mig", ".storhub/metadata.json") {
 		t.Fatal("migration must keep metadata.json for the grace window")
 	}
 
-	// Phase 3: a cold v2 reader sees BOTH files (old survived migration).
-	hub3 := backend.newClient(t, indexV2Config())
+	// Phase 3: a cold reader sees BOTH files (old survived migration).
+	hub3 := backend.newClient(t, smallTransferTestConfig())
 	files, err := hub3.ListFilesContext(ctx, "mig")
 	if err != nil {
 		t.Fatalf("post-migration read: %v", err)
@@ -134,35 +159,34 @@ func TestIndexV2MigrationFromV1(t *testing.T) {
 	}
 }
 
-func TestIndexV2V1RevisionReadableAfterMigration(t *testing.T) {
+func TestSplitIndexLegacyRevisionReadableAfterMigration(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub1 := backend.newClient(t, smallTransferTestConfig())
-	seedMeta(t, hub1, "migrev", "docs", "old.txt", 1)
+	seedLegacyBlob(t, hub1, "migrev", "docs", "old.txt", 1)
 
-	// Capture the v1-era revision before migration.
 	revs, err := hub1.ListMetadataRevisionsContext(ctx, "migrev")
 	if err != nil || len(revs) == 0 {
-		t.Fatalf("list v1 revisions: %v (%d)", err, len(revs))
+		t.Fatalf("list legacy revisions: %v (%d)", err, len(revs))
 	}
-	v1SHA := revs[0].CommitSHA
+	legacySHA := revs[0].CommitSHA
 
-	hub2 := backend.newClient(t, indexV2Config())
+	hub2 := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub2, "migrev", "photos", "new.txt", 2)
 
-	// The pre-migration (v1) revision must still parse.
-	m, err := hub2.getMetadataRevision(ctx, "migrev", v1SHA)
+	// The pre-migration (version-4) revision must still parse.
+	m, err := hub2.getMetadataRevision(ctx, "migrev", legacySHA)
 	if err != nil {
-		t.Fatalf("read v1 revision across migration boundary: %v", err)
+		t.Fatalf("read legacy revision across migration boundary: %v", err)
 	}
 	if _, ok := m.Files["docs/old.txt"]; !ok {
-		t.Fatalf("v1 revision lost its content: %+v", m.Files)
+		t.Fatalf("legacy revision lost its content: %+v", m.Files)
 	}
 }
 
-func TestIndexV2DedupUnchangedSubtree(t *testing.T) {
+func TestSplitIndexDedupUnchangedSubtree(t *testing.T) {
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 
 	seedMeta(t, hub, "dedup", "alpha", "a.txt", 1)
 	snap1 := objectCommitCounts(backend, "dedup")
@@ -203,9 +227,21 @@ func objectCommitCounts(backend *mockGitHub, project string) map[string]int {
 	return out
 }
 
+// newGitBackedHub builds a hub whose metadata I/O goes through the go-git
+// backend against the local bare repo at url (auth still served by a mock).
+func newGitBackedHub(t *testing.T, url string, cfg Config) *StorHub {
+	t.Helper()
+	backend := newMockGitHub(t)
+	cfg.GitCacheDir = t.TempDir()
+	cfg.DisableGitBackend = false
+	hub := backend.newClient(t, cfg)
+	hub.getGitRepo("demo").remoteBase = url
+	return hub
+}
+
 func TestHistoryWarnOncePerWindow(t *testing.T) {
 	backend := newMockGitHub(t)
-	cfg := indexV2Config()
+	cfg := smallTransferTestConfig()
 	cfg.HistoryWarnObjects = 1 // any commit crosses it
 	logBuf := &syncBuffer{}
 	cfg.LogOutput = logBuf
@@ -227,27 +263,15 @@ func TestHistoryWarnOncePerWindow(t *testing.T) {
 func TestOversizeErrorMessagePointsAtRemediation(t *testing.T) {
 	err := &oversizeError{size: 9 << 20, limit: 8 << 20}
 	msg := err.Error()
-	if !strings.Contains(msg, "storhub prune") || !strings.Contains(msg, "index_v2") {
+	if !strings.Contains(msg, "storhub prune") || !strings.Contains(msg, "subdirectories") {
 		t.Fatalf("oversize error must name both remedies, got: %s", msg)
 	}
 }
 
-// newGitBackedHub builds a hub whose metadata I/O goes through the go-git
-// backend against the local bare repo at url (auth still served by a mock).
-func newGitBackedHub(t *testing.T, url string, cfg Config) *StorHub {
-	t.Helper()
-	backend := newMockGitHub(t)
-	cfg.GitCacheDir = t.TempDir()
-	cfg.DisableGitBackend = false
-	hub := backend.newClient(t, cfg)
-	hub.getGitRepo("demo").remoteBase = url
-	return hub
-}
-
-func TestIndexV2GitPathEndToEnd(t *testing.T) {
+func TestSplitIndexGitPathEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	url := seedBareMetadataRepo(t)
-	hub := newGitBackedHub(t, url, indexV2Config())
+	hub := newGitBackedHub(t, url, smallTransferTestConfig())
 
 	seedMeta(t, hub, "demo", "docs", "g.txt", 1)
 
@@ -260,20 +284,20 @@ func TestIndexV2GitPathEndToEnd(t *testing.T) {
 		t.Fatalf("manifest not committed on git path: %v", err)
 	}
 	// Cold read back.
-	hub2 := newGitBackedHub(t, url, indexV2Config())
+	hub2 := newGitBackedHub(t, url, smallTransferTestConfig())
 	files, err := hub2.ListFilesContext(ctx, "demo")
 	if err != nil {
-		t.Fatalf("git v2 cold read: %v", err)
+		t.Fatalf("git v5 cold read: %v", err)
 	}
 	if len(files) == 0 {
-		t.Fatal("expected files after git v2 round-trip")
+		t.Fatal("expected files after git v5 round-trip")
 	}
 }
 
-func TestIndexV2RoundTripPreservesXAttrsAndCounters(t *testing.T) {
+func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, indexV2Config())
+	hub := backend.newClient(t, smallTransferTestConfig())
 	if err := hub.EnsureRepoContext(ctx, "rt"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
@@ -290,7 +314,7 @@ func TestIndexV2RoundTripPreservesXAttrsAndCounters(t *testing.T) {
 	if err := hub.FlushProjectContext(ctx, "rt"); err != nil {
 		t.Fatal(err)
 	}
-	hub2 := backend.newClient(t, indexV2Config())
+	hub2 := backend.newClient(t, smallTransferTestConfig())
 	m, _, err := hub2.loadRepoMetadataFresh(ctx, "rt")
 	if err != nil {
 		t.Fatalf("reload: %v", err)
@@ -300,7 +324,7 @@ func TestIndexV2RoundTripPreservesXAttrsAndCounters(t *testing.T) {
 		t.Fatal("file lost")
 	}
 	if f.Mode != 0o600 || f.UID != 42 || f.GID != 43 || string(f.XAttrs["user.k"]) != "v" {
-		t.Fatalf("attrs lost across v2 round-trip: %+v", f)
+		t.Fatalf("attrs lost across v5 round-trip: %+v", f)
 	}
 	if m.NextInode < 2 || m.NextChunkID < 2 {
 		t.Fatalf("counters not preserved: ni=%d nc=%d", m.NextInode, m.NextChunkID)

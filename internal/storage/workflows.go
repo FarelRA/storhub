@@ -176,7 +176,7 @@ func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) 
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
 	started := h.config.Now().UTC()
 	logging.Debug(h.projectLogger(project), "load metadata start")
-	data, sha, isV2, found, err := h.readIndexHead(ctx, project)
+	data, sha, split, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
@@ -192,21 +192,21 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		// Brand-new (or wiped) project: start on the configured layout.
 		m := NewRepoMetadata(project)
 		pendingOps := h.journalReplayForLoad(project, m)
-		h.storeRepoMetadataV2(project, *m, "", pendingOps, h.config.IndexV2, 0)
+		h.storeRepoMetadataSplit(project, *m, "", pendingOps, true, 0)
 		logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 		return m, "", nil
 	}
-	m, objectCount, err := h.loadIndexTree(ctx, project, data, isV2)
+	m, objectCount, err := h.loadIndexTree(ctx, project, data, split)
 	if err != nil {
 		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
 	pendingOps := h.journalReplayForLoad(project, m)
 	// NOTE: sha is the CAS token for the blob that was found (manifest blob
-	// sha for v2, metadata blob sha for v1). It must never be consumed as a
+	// sha for split, metadata blob sha for legacy). It must never be consumed as a
 	// git ref: pins capture chunk layouts instead.
-	h.storeRepoMetadataV2(project, *m, sha, pendingOps, isV2, objectCount)
-	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "v2", isV2)
+	h.storeRepoMetadataSplit(project, *m, sha, pendingOps, split, objectCount)
+	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "v2", split)
 	return m, sha, nil
 }
 
@@ -222,58 +222,24 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	if err := metadata.Validate(); err != nil {
 		return "", "", fmt.Errorf("validate metadata: %w", err)
 	}
-	// A v2 project's rollback/cleanup must republish the manifest, not the
-	// v1 blob: re-point the index at this tree's objects (rollback-as-revert,
-	// no force-push). The project's layout is authoritative for the write.
+	// The split index (version 5) is the only write layout: rollback and
+	// cleanup republish the manifest, re-pointing the index at this tree's
+	// objects (rollback-as-revert, no force-push). A legacy project's first
+	// such commit also migrates it to the split layout.
+	var objectCount uint64
 	if pm := h.lookupProjectMeta(project); pm != nil {
 		pm.mu.RLock()
-		isV2 := pm.isV2
-		objectCount := pm.objectCount
+		objectCount = pm.objectCount
 		pm.mu.RUnlock()
-		if isV2 {
-			commitSHA, contentSHA, newCount, err := h.publishIndex(ctx, project, &metadata, previousSHA, message, true, objectCount)
-			if err != nil {
-				logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-				return "", "", err
-			}
-			h.storeRepoMetadataV2(project, metadata, contentSHA, nil, true, newCount)
-			h.clearSizeCapped(project)
-			logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "v2", true)
-			return commitSHA, contentSHA, nil
-		}
 	}
-	payload, err := metadata.ToJSON()
-	if err != nil {
-		return "", "", err
-	}
-	if len(payload) > maxMetadataBytes {
-		// D4: remember the breach so growth mutations fail fast at
-		// admission instead of piling onto a tree that can never commit.
-		h.markSizeCapped(project)
-		return "", "", fmt.Errorf("metadata too large: %d bytes exceeds %d", len(payload), maxMetadataBytes)
-	}
-	if repo := h.getGitRepo(project); repo != nil {
-		// Git path enforces previousSHA exactly like the REST path's
-		// conditional PUT: a stale token aborts with 409 instead of
-		// silently overwriting the concurrent writer (e.g. rollback).
-		commitSHA, contentSHA, err := repo.writeCommitPushCAS(ctx, metadataFilePath, payload, message, previousSHA)
-		if err != nil {
-			logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			return "", "", err
-		}
-		h.storeRepoMetadata(project, metadata, contentSHA)
-		h.clearSizeCapped(project)
-		logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
-		return commitSHA, contentSHA, nil
-	}
-	commitSHA, contentSHA, err := h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, payload, previousSHA, message)
+	commitSHA, contentSHA, newCount, err := h.publishIndex(ctx, project, &metadata, previousSHA, message, objectCount)
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return "", "", err
 	}
-	h.storeRepoMetadata(project, metadata, contentSHA)
+	h.storeRepoMetadataSplit(project, metadata, contentSHA, nil, true, newCount)
 	h.clearSizeCapped(project)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "bytes", len(payload))
+	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "split", true)
 	return commitSHA, contentSHA, nil
 }
 
@@ -313,23 +279,23 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 }
 
 // activeIndexPath returns the repo path carrying the project's current index
-// history: the v2 manifest when the project is (or will be) v2, else the v1
-// metadata blob. Revision listing and history walks must follow the active
-// layout or they see an empty history for a v2 project.
+// history: the split manifest when the project is (or will be) version 5,
+// else the legacy metadata blob. Revision listing and history walks must
+// follow the active layout or they see an empty history for a split project.
 func (h *StorHub) activeIndexPath(ctx context.Context, project string) (string, error) {
 	if pm := h.lookupProjectMeta(project); pm != nil {
 		pm.mu.RLock()
-		isV2 := pm.isV2
+		split := pm.split
 		pm.mu.RUnlock()
-		if isV2 {
+		if split {
 			return indexFilePath, nil
 		}
 	}
-	_, _, isV2, found, err := h.readIndexHead(ctx, project)
+	_, _, split, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		return "", err
 	}
-	if found && isV2 {
+	if found && split {
 		return indexFilePath, nil
 	}
 	return metadataFilePath, nil
@@ -339,14 +305,14 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, err
 	}
-	// Detect the layout AT THIS REVISION: a v2-era commit carries the
-	// manifest, a v1-era commit the metadata blob. Reading the manifest
-	// first makes a v1 revision still readable across the migration
-	// boundary (the grace window) and a v2 revision load its objects.
-	if data, isV2, found, err := h.readIndexRevision(ctx, project, commitSHA); err != nil {
+	// Detect the layout AT THIS REVISION: a split-era commit carries the
+	// manifest, a legacy-era commit the metadata blob. Reading the manifest
+	// first makes a legacy revision still readable across the migration
+	// boundary (the grace window) and a split revision load its objects.
+	if data, split, found, err := h.readIndexRevision(ctx, project, commitSHA); err != nil {
 		return nil, err
 	} else if found {
-		m, _, err := h.loadIndexTreeAtRef(ctx, project, commitSHA, data, isV2)
+		m, _, err := h.loadIndexTreeAtRef(ctx, project, commitSHA, data, split)
 		if err != nil {
 			return nil, fmt.Errorf("parse metadata revision: %w", err)
 		}
@@ -395,10 +361,10 @@ func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA stri
 	return nil, false, false, err
 }
 
-// loadIndexTreeAtRef materializes a revision's tree, fetching v2 objects at
+// loadIndexTreeAtRef materializes a revision's tree, fetching split objects at
 // the same ref so a historical manifest resolves its historical objects.
-func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, data []byte, isV2 bool) (*RepoMetadata, uint64, error) {
-	if !isV2 {
+func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, data []byte, split bool) (*RepoMetadata, uint64, error) {
+	if !split {
 		m := NewRepoMetadata(project)
 		if err := m.FromJSON(data); err != nil {
 			return nil, 0, err
@@ -808,22 +774,13 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 	return &meta, pm.sha, true
 }
 
-func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string) {
-	h.storeRepoMetadataPending(project, meta, sha, nil)
-}
-
-// storeRepoMetadataPending caches remote truth. When pendingOps is
-// non-nil (a crash-recovery journal replayed onto the loaded state), the
-// ops become the project's pending stack: dirty stays set and the journal
-// is kept until the next commit lands them. Otherwise the cache is clean
-// and any stale stack/journal is discarded.
-func (h *StorHub) storeRepoMetadataPending(project string, meta RepoMetadata, sha string, pendingOps []Op) {
-	h.storeRepoMetadataV2(project, meta, sha, pendingOps, false, 0)
-}
-
-// storeRepoMetadataV2 is storeRepoMetadataPending carrying the project's
-// index layout (v1 vs v2) and the running object-count hint.
-func (h *StorHub) storeRepoMetadataV2(project string, meta RepoMetadata, sha string, pendingOps []Op, isV2 bool, objectCount uint64) {
+// storeRepoMetadataSplit caches remote truth for a project, recording its
+// index layout (split vs legacy) and the running object-count hint. When
+// pendingOps is non-nil (a crash-recovery journal replayed onto the loaded
+// state), the ops become the project's pending stack: dirty stays set and the
+// journal is kept until the next commit lands them. Otherwise the cache is
+// clean and any stale stack/journal is discarded.
+func (h *StorHub) storeRepoMetadataSplit(project string, meta RepoMetadata, sha string, pendingOps []Op, split bool, objectCount uint64) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
@@ -832,7 +789,7 @@ func (h *StorHub) storeRepoMetadataV2(project string, meta RepoMetadata, sha str
 	pm.meta = &clone
 	pm.sha = sha
 	pm.hydrated = true
-	pm.isV2 = isV2
+	pm.split = split
 	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
 	pm.basePaths = hashPaths(&clone)
