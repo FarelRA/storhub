@@ -99,7 +99,12 @@ type Config struct {
 	// metadata operations that replays onto freshly loaded remote state
 	// after a crash. Empty disables journaling; embedders and the CLI
 	// opt in explicitly (the CLI defaults it beneath CacheBase).
-	JournalDir        string
+	JournalDir string
+	// StrictConflicts opts out of automatic conflict resolution: a
+	// rebase that would resolve a path conflict (per-path last-writer-
+	// wins by default) fails the commit loudly instead. For callers that
+	// require humans (or higher layers) to arbitrate every clash.
+	StrictConflicts   bool
 	DisableGitBackend bool
 	Now               func() time.Time
 	Sleep             func(context.Context, time.Duration) error

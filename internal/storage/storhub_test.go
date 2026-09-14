@@ -1623,15 +1623,14 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 		t.Fatalf("flush first metadata: %v", err)
 	}
 
-	// Second upload - its async commit will hit a conflict, triggering reload and retry.
+	// Second upload - its async commit will hit an injected conflict,
+	// triggering the rebase: the pending op replays onto upstream and the
+	// retry lands it. The observable contract is one conflict plus a
+	// converged two-file state (the mutation SURVIVES the conflict now).
 	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
 	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
 		t.Fatalf("upload should succeed (commit is async): %v", err)
 	}
-	// Wait (bounded, deterministically) for the background commit loop to
-	// process the conflict AND finish recovery: the observable contract is
-	// one conflict plus a converged single-file state, so poll that end
-	// state instead of racing the recovery window.
 	stateDeadline := time.Now().Add(5 * time.Second)
 	for {
 		conflictsSeen := conflicts.Load() >= 1
@@ -1639,11 +1638,11 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list files: %v", err)
 		}
-		if conflictsSeen && len(files) == 1 {
+		if conflictsSeen && len(files) == 2 {
 			break
 		}
 		if time.Now().After(stateDeadline) {
-			t.Fatalf("conflict recovery did not converge: conflicts=%d files=%d",
+			t.Fatalf("conflict rebase did not converge: conflicts=%d files=%d",
 				conflicts.Load(), len(files))
 		}
 		time.Sleep(10 * time.Millisecond)

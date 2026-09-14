@@ -737,6 +737,8 @@ func (h *StorHub) storeRepoMetadataPending(project string, meta RepoMetadata, sh
 	pm.meta = &clone
 	pm.sha = sha
 	pm.hydrated = true
+	// The rebase baseline moves to the freshly loaded state.
+	pm.basePaths = hashPaths(&clone)
 	if len(pendingOps) > 0 {
 		pm.opStack.clear()
 		for _, op := range pendingOps {

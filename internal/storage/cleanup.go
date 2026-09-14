@@ -84,6 +84,8 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		Type: OpDeleteFile, Paths: []string{cleanName}, Cause: "unlink",
 		Timestamp: now, FreedChunks: len(existing.Chunks),
 	})
+	h.emitFamilySiblingsLocked(project, pm, existing.Inode, cleanName, "unlink-family", now)
+	h.emitParentDirOpLocked(project, pm, cleanName, "unlink-parent", now)
 	pm.mu.Unlock()
 
 	select {

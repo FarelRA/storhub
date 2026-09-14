@@ -337,9 +337,37 @@ func recordResolution(resolutions *[]ConflictResolution, op Op, path, note strin
 	*resolutions = append(*resolutions, ConflictResolution{Seq: op.Seq, Path: path, Note: note})
 }
 
+// cloneOpPayloads copies an op's state payloads so replay-time rewrites
+// (collision remapping) never mutate the caller's stack entry.
+func cloneOpPayloads(op Op) Op {
+	if op.File != nil {
+		f := op.File.Clone()
+		op.File = &f
+	}
+	if op.Dir != nil {
+		d := op.Dir.Clone()
+		op.Dir = &d
+	}
+	if op.Chunks != nil {
+		chunks := make(map[int64]ChunkInfo, len(op.Chunks))
+		for id, info := range op.Chunks {
+			chunks[id] = info
+		}
+		op.Chunks = chunks
+	}
+	return op
+}
+
 func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) error {
 	now := op.Timestamp
 	path := opPath(op)
+	// Work on private payloads: collision remapping rewrites identifiers
+	// in place and must never touch the caller's op (the pending stack
+	// shares these pointers).
+	op = cloneOpPayloads(op)
+	// Divergent-writer protection: identifiers both writers allocated for
+	// different records are remapped before the state assertion applies.
+	remapOpCollisions(meta, &op, resolutions)
 	switch op.Type {
 	case OpPutFile, OpTruncate, OpPatch, OpSetattr, OpXattr:
 		if op.File != nil {

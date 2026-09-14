@@ -151,22 +151,33 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 		t.Fatalf("hubA head: %v", err)
 	}
 	// HubB mutates against a stale SHA without poking its commit loop, so
-	// only FlushMetadata can observe (and recover from) the conflict.
+	// only FlushMetadata can observe the conflict. Phase B contract: the
+	// flush REBASES the pending op onto upstream instead of discarding it,
+	// so the flush succeeds and the mutation survives alongside hubA's.
 	pmB := hubB.getOrCreateProjectMeta(proj)
 	pmB.mu.Lock()
 	pmB.meta.UpsertFile("b.txt", FileMeta{Size: 0, Mode: 0o644}, 1700000000)
+	entry := pmB.meta.FindFile("b.txt").Clone()
+	pmB.opStack.append(Op{Type: OpPutFile, Paths: []string{"b.txt"}, Cause: "test", Timestamp: 1700000000,
+		File: &entry})
 	markProjectDirtyLocked(pmB)
 	pmB.mu.Unlock()
 	flushErr := hubB.FlushMetadata(ctx)
-	if flushErr == nil {
-		t.Fatal("expected conflict error from stale flush")
+	if flushErr != nil {
+		t.Fatalf("expected rebase to converge the stale flush, got %v", flushErr)
 	}
-	_, recoveredSHA, err := hubB.loadRepoMetadata(ctx, proj)
+	meta, recoveredSHA, err := hubB.loadRepoMetadata(ctx, proj)
 	if err != nil {
 		t.Fatalf("hubB reload: %v", err)
 	}
-	if recoveredSHA != headSHA {
-		t.Fatalf("RED: FlushMetadata left stale sha %q, want remote HEAD %q", shortSHA(recoveredSHA), shortSHA(headSHA))
+	if recoveredSHA == headSHA {
+		t.Fatal("expected the rebased flush to advance the remote HEAD")
+	}
+	if meta.FindFile("b.txt") == nil {
+		t.Fatal("expected the rebased mutation to survive")
+	}
+	if meta.FindFile("f2.txt") == nil {
+		t.Fatal("expected hubA's concurrent mutation to survive the rebase")
 	}
 }
 

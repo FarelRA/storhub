@@ -122,9 +122,13 @@ type projectMetadata struct {
 	sizeCapped bool
 	// opStack holds the pending, self-contained metadata operations this
 	// project has accumulated since the last successful commit. It drives
-	// the rich commit message, the crash-recovery journal, and (Phase B)
+	// the rich commit message, the crash-recovery journal, and
 	// rebase-on-conflict. Guarded by mu like every other mutable field.
 	opStack opStack
+	// basePaths fingerprints the namespace of the last committed state the
+	// pending ops were built on; the rebase diffs upstream against it to
+	// detect real conflicts. Guarded by mu.
+	basePaths map[string][16]byte
 }
 
 type releaseCacheEntry struct {
@@ -308,6 +312,50 @@ func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	if len(pm.opStack.ops) > 0 {
 		h.journalAppend(project, pm.opStack.ops[len(pm.opStack.ops)-1])
 	}
+}
+
+// emitFamilySiblingsLocked records full-state ops for every hardlink
+// sibling an inode-family mutation touched (ReplaceInodeFamily propagates
+// identity across the family, TouchInodeFamilyChangedAt bumps them). The
+// primary path's own op is the caller's business. Without sibling capture a
+// mid-commit conflict would replay only the primary path and silently
+// revert the propagation. Caller holds pm.mu.
+func (h *StorHub) emitFamilySiblingsLocked(project string, pm *projectMetadata, inode uint64, primaryPath, cause string, now int64) {
+	if inode == 0 {
+		return
+	}
+	for _, path := range pm.meta.FindFilesByInode(inode) {
+		if path == primaryPath {
+			continue
+		}
+		entry := pm.meta.FindFile(path)
+		if entry == nil {
+			continue
+		}
+		e := entry.Clone()
+		h.appendOpLocked(project, pm, Op{
+			Type: OpSetattr, Paths: []string{path}, Cause: cause,
+			Timestamp: now, File: &e,
+			Chunks: chunkRecordsFor(pm.meta, e.Chunks),
+		})
+	}
+}
+
+// emitParentDirOpLocked records the parent directory's current state after
+// a create/delete touched its mtime. Caller holds pm.mu.
+func (h *StorHub) emitParentDirOpLocked(project string, pm *projectMetadata, path, cause string, now int64) {
+	parent := shfs.ParentPath(path)
+	if parent == "" {
+		root := pm.meta.Root.Clone()
+		h.appendOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{""}, Cause: cause, Timestamp: now, Dir: &root})
+		return
+	}
+	dir := pm.meta.GetDirectory(parent)
+	if dir == nil {
+		return
+	}
+	d := dir.Clone()
+	h.appendOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{parent}, Cause: cause, Timestamp: now, Dir: &d})
 }
 
 // markProjectDirtyLiveLocked marks pm dirty, reviving it first if it was
@@ -577,11 +625,21 @@ func (e *commitError) Unwrap() error { return e.err }
 
 func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	logger := h.projectLogger(project)
+	// Rebase exhaustion retains the pending ops for a later retry: the
+	// commit already tried replaying them onto upstream and kept losing
+	// the race - discarding here would destroy exactly that work.
+	var rex *rebaseExhaustedError
+	if errors.As(err, &rex) {
+		logging.Error(logger, "metadata commit conflicted past rebase budget; retaining pending ops for retry", "err", rex.err, "attempts", rex.attempts)
+		return
+	}
 	// Conflict (stale previous_sha against remote HEAD) means another
 	// writer advanced the metadata: reload and discard local uncommitted
 	// state, matching what actually happened remotely - but only when no
 	// newer mutation landed after the failed snapshot. Any other failure
 	// is transient: retain dirty state so the loop retries with it.
+	// Rebase-capable commits resolve their own conflicts internally, so
+	// this path is a safety net for legacy flows (rollback, cleanup).
 	var apiErr *ghapi.APIError
 	var cerr *commitError
 	isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
@@ -630,6 +688,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// success (mutations landing mid-commit carry higher seqs and stay).
 	ops := pm.opStack.snapshot()
 	opSeq := pm.opStack.maxSeq()
+	base := pm.basePaths
 	pm.mu.Unlock()
 
 	now := h.config.Now().Unix()
@@ -666,18 +725,51 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		return &commitError{err: err, version: version}
 	}
 
-	// Commit metadata
+	// Commit metadata with a bounded commit/rebase cycle: a CAS conflict
+	// (another writer advanced the metadata) rebases the pending ops onto
+	// upstream state instead of discarding them, then retries.
 	message := buildCommitMessage(ops, previousSHA)
 	var commitSHA, contentSHA string
-	if repo := h.getGitRepo(project); repo != nil {
-		commitSHA, contentSHA, err = repo.writeCommitPush(ctx, metadataFilePath, metaBytes, message)
-	} else {
-		commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, metaBytes, previousSHA, message)
-	}
-	if err != nil {
-		err = wrapNoSpace(h.config.GitCacheDir, err)
-		logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-		return &commitError{err: fmt.Errorf("commit metadata: %w", err), version: version}
+	didRebase := false
+	for attempt := 1; ; attempt++ {
+		if repo := h.getGitRepo(project); repo != nil {
+			commitSHA, contentSHA, err = repo.writeCommitPushCAS(ctx, metadataFilePath, metaBytes, message, previousSHA)
+		} else {
+			commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, metadataFilePath, metaBytes, previousSHA, message)
+		}
+		if err == nil {
+			break
+		}
+		var apiErr *ghapi.APIError
+		isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
+		if !isConflict || attempt >= maxCommitAttempts {
+			if isConflict {
+				err = &rebaseExhaustedError{err: err, attempts: attempt}
+			}
+			err = wrapNoSpace(h.config.GitCacheDir, err)
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			return &commitError{err: fmt.Errorf("commit metadata: %w", err), version: version}
+		}
+		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(ops))
+		rebased, upstreamSHA, resolutions, rerr := h.rebaseOntoUpstream(ctx, project, ops, base)
+		didRebase = true
+		if rerr != nil {
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "rebase", "elapsed", h.config.Now().UTC().Sub(started), "err", rerr)
+			return &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: version}
+		}
+		working = *rebased
+		previousSHA = upstreamSHA
+		metaBytes, err = working.ToJSON()
+		if err != nil {
+			return &commitError{err: fmt.Errorf("marshal rebased metadata: %w", err), version: version}
+		}
+		if len(metaBytes) > maxMetadataBytes {
+			pm.mu.Lock()
+			pm.sizeCapped = true
+			pm.mu.Unlock()
+			return &commitError{err: fmt.Errorf("rebased metadata too large: %d bytes (max %d)", len(metaBytes), maxMetadataBytes), version: version}
+		}
+		message = buildCommitMessage(ops, previousSHA) + "\n" + rebaseMessageNote(resolutions, upstreamSHA)
 	}
 
 	pm.mu.Lock()
@@ -692,12 +784,43 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.meta = &working
 		pm.dirty = false
 		pm.lastCommit = h.config.Now()
+		pm.opStack.clearUpTo(opSeq)
+	} else if didRebase {
+		// A mutation landed mid-commit AND the commit rebased: the
+		// committed tree carries upstream changes the live tree lacks, so
+		// adopting the live tree wholesale would make the next commit
+		// overwrite them. Replay the surviving ops onto the committed tree.
+		pm.opStack.clearUpTo(opSeq)
+		surviving := pm.opStack.snapshot()
+		if len(surviving) > 0 {
+			rebased := working
+			if err := applyOps(&rebased, surviving); err != nil {
+				// Defensive only: well-formed ops cannot fail replay.
+				// Converge to the committed truth rather than keep a
+				// stale tree that could clobber it.
+				logging.Error(h.projectLogger(project), "mid-commit mutation replay failed; committed state retained", "err", err)
+				pm.opStack.clear()
+				pm.meta = &working
+			} else {
+				rebased.Normalize(project, h.config.Now().Unix())
+				rebased.RecomputeStats()
+				pm.meta = &rebased
+			}
+		} else {
+			pm.meta = &working
+		}
+		pm.lastCommit = h.config.Now()
+	} else {
+		// Mid-commit mutation, no rebase: the live tree already contains
+		// the committed ops' effects plus the newer mutation. Drop the
+		// committed ops (their state is in the live tree) and keep the
+		// mutation's ops + dirty flag for the next commit.
+		pm.opStack.clearUpTo(opSeq)
 	}
-	// Drop exactly the committed ops: an op coalesced by a mutation that
-	// landed mid-commit carries a seq above the snapshot and survives for
-	// the next commit. The journal is rewritten to the surviving stack.
-	pm.opStack.clearUpTo(opSeq)
+	// The journal is rewritten to the surviving stack.
 	h.journalRewrite(project, pm.opStack.ops)
+	// The rebase baseline moves to the just-committed state.
+	pm.basePaths = hashPaths(&working)
 	// A fitting commit lifts the D4 breach marker (re-armed on breach).
 	pm.sizeCapped = false
 	pm.mu.Unlock()
@@ -1038,6 +1161,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 		File:      &opFile,
 		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
 	})
+	h.emitFamilySiblingsLocked(project, pm, fileMeta.Inode, cleanName, "replace-chunks-family", now)
 	pm.mu.Unlock()
 
 	select {
@@ -1278,6 +1402,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 		File:      &opFile,
 		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
 	})
+	h.emitFamilySiblingsLocked(project, pm, patched.Inode, cleanName, "patch-ranges-family", now)
 	pm.mu.Unlock()
 
 	select {
@@ -1341,6 +1466,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 		File:      &opFile,
 		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
 	})
+	h.emitFamilySiblingsLocked(project, pm, patched.Inode, cleanName, "patch-family", now)
 	pm.mu.Unlock()
 
 	select {
@@ -1397,6 +1523,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 		File:      &opFile,
 		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
 	})
+	h.emitFamilySiblingsLocked(project, pm, rewritten.Inode, cleanName, "rewrite-ranges-family", now)
 	pm.mu.Unlock()
 
 	select {
@@ -1547,13 +1674,16 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if replace {
 		cause = "replace"
 	}
+	now := h.config.Now().Unix()
 	opFile := fileMeta.Clone()
 	h.appendOpLocked(project, pm, Op{
 		Type: OpPutFile, Paths: []string{cleanName}, Cause: cause,
-		Timestamp: h.config.Now().Unix(),
+		Timestamp: now,
 		File:      &opFile,
 		Chunks:    chunkRecordsFor(pm.meta, chunkIDs),
 	})
+	h.emitFamilySiblingsLocked(project, pm, fileMeta.Inode, cleanName, cause+"-family", now)
+	h.emitParentDirOpLocked(project, pm, cleanName, cause+"-parent", now)
 	pm.mu.Unlock()
 
 	select {
