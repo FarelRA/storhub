@@ -506,6 +506,31 @@ func (m *RepoMetadata) FindFile(name string) *FileMeta {
 	return nil
 }
 
+// SetFileAtime updates atime in place. FindFile returns a pointer to a
+// copy (map values are not addressable), so mutating its result silently
+// drops the write — use this setter for mutations.
+func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
+	name = normalizeStoredPath(name)
+	if file, ok := m.Files[name]; ok {
+		file.AccessedAt = atime
+		m.Files[name] = file
+		return true
+	}
+	return false
+}
+
+// SetDirAtime updates atime in place; same copy-pointer footgun as
+// FindFile applies to GetDirectory results.
+func (m *RepoMetadata) SetDirAtime(path string, atime int64) bool {
+	path = normalizeStoredPath(path)
+	if dir, ok := m.Dirs[path]; ok {
+		dir.AccessedAt = atime
+		m.Dirs[path] = dir
+		return true
+	}
+	return false
+}
+
 func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 	m.RebuildIndexes()
 	names := m.filesByInode[inode]
@@ -548,6 +573,14 @@ func (m *RepoMetadata) AllocateChunkID() int64 {
 // owner, timestamps) for a newly created file entry.
 func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	initializeNewFileIdentity(meta, file, now)
+}
+
+// InitializeNewFileIdentityFields applies creation defaults (mode, owner,
+// timestamps) without minting an inode. Callers that later create the node
+// against the authoritative metadata must let InitializeNewFileIdentity
+// allocate there, so the inode counter bumps exactly once.
+func InitializeNewFileIdentityFields(file *FileMeta, now int64) {
+	initializeNewFileIdentityFields(file, now)
 }
 
 // PreserveFileIdentity carries the existing node's stable identity onto an
@@ -695,10 +728,20 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 }
 
 func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
-	uid, gid := defaultOwnerIDs()
 	if file.Inode == 0 {
 		file.Inode = meta.allocateInode()
 	}
+	initializeNewFileIdentityFields(file, now)
+}
+
+// initializeNewFileIdentityFields applies every creation default EXCEPT the
+// inode: mode, owner, and the full timestamp set. Inode minting is reserved
+// for initializeNewFileIdentity because the counter lives on exactly one
+// authoritative RepoMetadata; stamping an inode against a throwaway clone
+// (a readonly snapshot, a working copy) silently skips the counter bump and
+// the next allocation re-issues the same inode.
+func initializeNewFileIdentityFields(file *FileMeta, now int64) {
+	uid, gid := defaultOwnerIDs()
 	if file.Mode == 0 {
 		file.Mode = defaultFileMode(NodeKindFile)
 	}

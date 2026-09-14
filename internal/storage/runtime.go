@@ -55,19 +55,21 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
 			}
 		} else {
-			// Subdirectory
+			// Subdirectory (SetDirAtime: GetDirectory returns a copy)
 			dir := pm.meta.GetDirectory(targetPath)
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
-				dir.AccessedAt = now
-				trigger = h.markProjectDirtyLiveLocked(project, pm)
+				if pm.meta.SetDirAtime(targetPath, now) {
+					trigger = h.markProjectDirtyLiveLocked(project, pm)
+				}
 			}
 		}
 	} else {
-		// File
+		// File (SetFileAtime: FindFile returns a copy)
 		file := pm.meta.FindFile(targetPath)
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
-			file.AccessedAt = now
-			trigger = h.markProjectDirtyLiveLocked(project, pm)
+			if pm.meta.SetFileAtime(targetPath, now) {
+				trigger = h.markProjectDirtyLiveLocked(project, pm)
+			}
 		}
 	}
 	pm.mu.Unlock()
