@@ -214,8 +214,10 @@ func TestUploadHardeningDuplicateRepoMatchesAlreadyExists(t *testing.T) {
 	if _, err := hub.UploadFile("project-hardening-dup", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	resp, err := backend.server.Client().Post(backend.server.URL+"/user/repos", "application/json",
-		strings.NewReader(`{"name":"project-hardening-dup","private":true}`))
+	req, _ := http.NewRequest(http.MethodPost, backend.server.URL+"/user/repos", strings.NewReader(`{"name":"project-hardening-dup","private":true}`))
+	req.Header.Set("Authorization", "Bearer "+backend.authToken())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := backend.server.Client().Do(req)
 	if err != nil {
 		t.Fatalf("duplicate create: %v", err)
 	}
