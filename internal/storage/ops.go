@@ -110,12 +110,12 @@ func (s *opStack) initIndex() {
 
 // indexOp records op's position under its lookup keys.
 func (s *opStack) indexOp(op Op, idx int) {
-	switch {
-	case op.Type == OpRename:
+	switch op.Type {
+	case OpRename:
 		if len(op.Paths) == 2 {
 			s.byTarget[op.Paths[1]] = idx
 		}
-	case op.Type == OpChunkPrune:
+	case OpChunkPrune:
 		s.pruneIdx = idx
 	default:
 		if len(op.Paths) > 0 {
