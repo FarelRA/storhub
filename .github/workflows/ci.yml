@@ -34,6 +34,9 @@ jobs:
       - run: go vet ./...
       - uses: golangci/golangci-lint-action@v9
         with:
+          # Pinned so an action-default bump cannot silently change the
+          # lint gate. Keep in sync with .golangci.yml (config version 2).
+          version: v2.13.2
           args: --timeout=10m
       - name: shellcheck
         run: |
@@ -62,9 +65,28 @@ jobs:
       - name: typecheck
         working-directory: web
         run: bun run typecheck
-      - name: production build
+      - name: production build and embed
+        # build:embed runs `nuxt generate` and copies the bundle into
+        # internal/rest/static/dist (the directory go build ships).
         working-directory: web
-        run: bun run generate
+        run: bun run build:embed
+      - name: verify embed is in sync with web source
+        # Fail if the committed bundle drifted: go build and docker build
+        # ship internal/rest/static/dist, so a web change without build:embed
+        # would silently serve a stale console. Nuxt stamps a random build id
+        # into builds/latest.json, builds/meta/<uuid>.json and the HTML
+        # shells, so those are non-deterministic run-to-run and are excluded.
+        # The _nuxt/*.js and _nuxt/*.css chunks are content-hashed and stable,
+        # so they are the real drift signal: any web source change alters at
+        # least one chunk name, which this diff catches.
+        run: |
+          git add -A internal/rest/static/dist
+          if ! git diff --cached --exit-code --stat -- \
+              'internal/rest/static/dist/_nuxt/*.js' \
+              'internal/rest/static/dist/_nuxt/*.css'; then
+            echo "::error::internal/rest/static/dist chunks are stale: run 'bun run build:embed' in web/ and commit the result"
+            exit 1
+          fi
 
   test-amd64:
     runs-on: ubuntu-24.04

@@ -8,3 +8,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # The Nuxt console: web/bun.lock. Dependabot reads bun lockfiles under
+  # the npm ecosystem.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly

@@ -3,28 +3,28 @@
 [![CI](https://github.com/FarelRA/storhub/actions/workflows/ci.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/ci.yml)
 [![Nightly](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml)
 
-StorHub is a Go library and CLI for storing files in GitHub repositories while exposing a logical filesystem-style view over that content. It stores file data as GitHub release assets and keeps the logical catalog in `.storhub/metadata.json`.
+StorHub is a Go library and CLI for storing files in GitHub repositories while exposing a logical filesystem-style view over that content. It stores file data as GitHub release assets and keeps the logical filesystem index in `.storhub/index.json`: a small version-5 manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/`.
 
 ## Install
 
 Supported platforms: linux (`386`, `amd64`, `armv6`, `armv7`, `arm64`) and macOS (`amd64`, `Apple silicon`).
 
-The repository is private, so downloads need a token. Install the latest nightly or stable release - the script resolves the right asset via the API, verifies its SHA256, and installs it:
+The repository is private, so downloads need a token. Install the latest nightly release (stable releases are upcoming): the script resolves the right asset via the API, verifies its SHA256, and installs it:
 
 ```bash
 export GITHUB_TOKEN=ghp_your_token_here
 curl -fsSL https://raw.githubusercontent.com/FarelRA/storhub/main/scripts/install.sh | bash
 ```
 
-Pin a specific tag with `--version`:
+Pin a specific tag with `--version` (stable tags such as `v0.1.0` are upcoming; today only the `nightly` prerelease exists):
 
 ```bash
 curl -fsSL .../install.sh | bash -s -- --version v0.1.0
 ```
 
-Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases) - every release ships per-platform archives, `checksums.txt`, SBOMs, and build provenance attestations. A rolling `nightly` prerelease is refreshed from `main` every night at 03:00 UTC.
+Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases): every release ships per-platform archives, `checksums.txt`, SBOMs, and build provenance attestations. A rolling `nightly` prerelease is refreshed from `main` on a nightly schedule (03:00 UTC cron; GitHub's scheduler can start it hours later).
 
-Docker images are published to `ghcr.io` for `amd64`, `arm64`, `arm/v7`, and `386`:
+Docker images are published to `ghcr.io` for `amd64`, `arm64`, `arm/v7`, and `386` with the first versioned tag (upcoming; no stable image exists yet):
 
 ```bash
 docker run --rm ghcr.io/farelra/storhub:latest --help
@@ -38,7 +38,7 @@ StorHub is designed for teams that want:
 
 - immutable chunk-backed file storage on top of GitHub
 - a structured logical filesystem view instead of raw release assets
-- revision history and rollback for metadata changes
+- revision history, rollback, and per-path revert for metadata changes
 - optional FUSE mounting for POSIX-like access
 - both a Go API and a CLI
 
@@ -49,11 +49,11 @@ StorHub is not intended to replace a local SSD filesystem or a database storage 
 ## Key Features
 
 - Stores file content in GitHub release assets
-- Uses `.storhub/metadata.json` as the logical source of truth
+- Uses a version-5 split index (`.storhub/index.json` manifest plus content-addressed Merkle objects) as the logical source of truth
 - Supports upload, replace, patch, append, truncate, and download
 - Exposes filesystem-style operations such as create, rename, readdir, stat, and delete
 - Tracks POSIX-like metadata including mode, uid, gid, timestamps, symlinks, hardlinks, and xattrs
-- Supports metadata revision history, rollback, cleanup, and purge operations
+- Supports metadata revision history, rollback, per-path revert, prune, cleanup, and purge operations
 - Provides a public FUSE facade for mounted access
 - Includes a CLI for terminal-first workflows
 
@@ -134,7 +134,9 @@ Common commands:
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
 - inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
-- recovery and cleanup: `rollback`
+- recovery and cleanup: `rollback` (whole index), `purge` (untracked releases and assets), `prune <project> [objects|assets|history|all]` (reclaims garbage under the full-history retention policy; supports `--dry-run` and `--keep`)
+- admin: `delete-project` (removes the project repository outright; `--yes` is mandatory)
+- local cache: `cache prune` (reclaims cache directories left by crashed processes; offline, no token needed)
 - web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
 - mount: `mount`
 - both at once: `serve` (FUSE mount + REST API from one process over one shared hub, so writes through either surface are immediately visible to the other)
@@ -168,7 +170,7 @@ Environment variables: `GITHUB_TOKEN` (authentication),
 ### Rate limiting
 
 The client tracks GitHub's `x-ratelimit-*` headers on every response and
-paces itself to stay under the documented limits - 5,000 core requests
+paces itself to stay under the documented limits: 5,000 core requests
 per hour, 900 secondary points per minute (`GET` costs 1 point, writes
 cost 5), and 80 content-generating requests per minute. Release-asset
 uploads are retried automatically; a rejected upload whose endpoint sends
@@ -178,24 +180,24 @@ One-shot commands fail fast when GitHub's budget is exhausted instead of
 waiting; `mount`, `rest`, and `serve` may pause until the reset (at most 15
 minutes) so long-running sessions survive an exhausted hour. Tune with:
 
-- `STORHUB_RATE_MAX_WAIT` - longest single rate-limit wait; `0s` fails
+- `STORHUB_RATE_MAX_WAIT`: longest single rate-limit wait; `0s` fails
   fast, negative values also fail fast (default: fail fast for one-shot
   commands, `15m` for rest/mount/serve)
-- `STORHUB_RATE_RESERVE` - hourly requests kept unspent as headroom
+- `STORHUB_RATE_RESERVE`: hourly requests kept unspent as headroom
   (default `25`)
-- `STORHUB_RATE_POINTS_PER_MIN` - secondary point budget (default `720`)
-- `STORHUB_RATE_CONTENT_PER_MIN` - content-creation budget per minute
+- `STORHUB_RATE_POINTS_PER_MIN`: secondary point budget (default `720`)
+- `STORHUB_RATE_CONTENT_PER_MIN`: content-creation budget per minute
   (default `60`)
-- `STORHUB_MAX_CONCURRENT` - in-flight API request cap (default `16`)
-- `STORHUB_TRANSFER_THROUGHPUT` - bytes/sec assumed when sizing upload
+- `STORHUB_MAX_CONCURRENT`: in-flight API request cap (default `16`)
+- `STORHUB_TRANSFER_THROUGHPUT`: bytes/sec assumed when sizing upload
   and download deadlines; large transfers get `size / throughput`
   seconds instead of a fixed timeout, so capped links can finish
-  (default `1048576`, i.e. 1 MiB/s - a 1.7 GiB chunk gets ~28 minutes)
+  (default `1048576`, i.e. 1 MiB/s; a 1.7 GiB chunk gets ~28 minutes)
 
 ### Local cache layout
 
 Caches live under `${XDG_CACHE_HOME:-~/.cache}/storhub` (override the
-whole root with `STORHUB_CACHE_DIR`) - deliberately **not** `/tmp`,
+whole root with `STORHUB_CACHE_DIR`), deliberately **not** `/tmp`,
 whose tmpfs sizing turns cache growth into memory exhaustion:
 
 ```
@@ -204,13 +206,13 @@ storhub/
 │   ├── .locks/<project>.lock   ← per-project ownership (pid)
 │   └── <project>/              ← metadata worktree, re-cloned on demand
 └── fuse/
-    └── <project>/              ← overlay temps; recovery/ quarantine kept
+    └── <project>/              ← overlay temps; recovery/quarantine kept
 ```
 
 Lifecycle: project dirs are removed on clean `Shutdown`; directories
 left by crashed processes are reclaimed at next startup, by `mount`,
 and by `storhub cache prune` (offline, no token needed). A directory
-held by a live process is never touched - concurrent mounts fail fast
+held by a live process is never touched: concurrent mounts fail fast
 with the holder's pid instead. Out-of-space failures name the exact
 cache directory and point at `STORHUB_CACHE_DIR`.
 
@@ -232,7 +234,7 @@ GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :
 Open `http://localhost:8080/` for the built-in web console (the REST API stays under `/api/v1`).
 
 The console is a Nuxt 4 + Tailwind CSS v4 SPA in `web/`, compiled ahead of time
-and embedded into the binary - no runtime CDN or external asset fetches. The
+and embedded into the binary; no runtime CDN or external asset fetches. The
 built `internal/rest/static/dist` is committed, so plain `go build` always
 ships a working console. To change the console:
 
@@ -247,8 +249,9 @@ bun run build:embed  # generate + copy bundle into internal/rest/static/dist
 ```
 
 Committing regenerated `dist` output alongside `web/` source changes keeps
-Go-only CI green and binaries reproducible; the nightly/release workflows
-rebuild it from source before goreleaser runs.
+Go-only CI green and binaries reproducible; the `web` CI job rebuilds the
+embed and fails if the committed `dist` drifts from `web/` source, and the
+nightly/release workflows rebuild it from source before goreleaser runs.
 
 ## API Guide
 
@@ -283,14 +286,14 @@ POSIX-style APIs:
 
 Precondition (compare-and-swap) APIs:
 
-- `(*StorHub).RevisionContext` - current remote metadata revision
+- `(*StorHub).RevisionContext`: current remote metadata revision
 - `storhub.WithExpectedRevision(rev)` as a trailing option on `PatchFileContext`,
   `TruncateFileContext`, `AppendFileContext`, `WriteFileAtContext`,
   `DeleteFileContext`, `RmdirContext`, `ReplaceFileContext`, and
   `ReplaceFileFromReaderContext`; the mutation fails with
   `storhub.ErrPreconditionFailed` when remote HEAD moved
 
-Compare-and-swap in action - append only if nobody else changed the
+Compare-and-swap in action: append only if nobody else changed the
 project meanwhile:
 
 ```go
@@ -313,21 +316,24 @@ POSIX conformance notes:
   persists, and nothing ever repairs persisted values;
   `Chtimes` keeps its omit-on-zero contract for library callers;
   `ChtimesExplicitContext(atime, mtime *time.Time)` expresses utimensat
-  trinary semantics exactly (nil omits, non-nil sets - epoch included),
+  trinary semantics exactly (nil omits, non-nil sets, epoch included),
   and FUSE `utimens` routes through it so kernel-explicit zeros survive.
   Filenames are byte-honest: surrounding whitespace is significant
   everywhere (`" docs "` is one specific name), enforced by a
   conformance test pinning both normalizers together. Metadata is
-  schema v4: unambiguous timestamp keys (cr=created, ch=changed),
-  complete authoritative timestamps (zero IS the epoch - no repair
-  passes), no digest fields. The parser accepts ONLY the current
-  schema; older documents are upgraded by a stacked, deterministic,
-  eager migrator (`metadata.Migrate`: pure per-version steps v1->v2->
-  v3->v4, golden-tested, identity on current documents) that runs on
-  every load; upgraded bytes persist on the next commit. There are no
-  data-level or protocol-level fallbacks elsewhere either: share URLs
-  resolve only by short ID (a token in the path is a 404), share TTLs
-  accept seconds only
+  schema v5: the split index (a `.storhub/index.json` manifest plus
+  content-addressed Merkle objects), with unambiguous timestamp keys
+  (cr=created, ch=changed), complete authoritative timestamps (zero IS
+  the epoch, no repair passes), and no digest fields. The parser accepts
+  ONLY the current schema; legacy single-blob documents (v1..v4) are
+  upgraded by a stacked, deterministic, eager migrator
+  (`metadata.Migrate`: pure per-version steps v1->v2->v3->v4,
+  golden-tested, identity on current documents) that runs on every load;
+  the upgraded tree persists in the v5 split layout on the next commit
+  (the v4->v5 boundary is that write-time split, not a byte transform).
+  There are no data-level or protocol-level fallbacks elsewhere either:
+  share redemption resolves only by the signed token (see the share
+  endpoints below), share TTLs accept seconds only
 - FUSE advisory locks are dropped when a file's last open descriptor closes
   (POSIX last-close guarantee); per-fd close semantics depend on go-fuse
   surfacing `FUSE_RELEASE`'s lock owner, which v2.11 does not
@@ -335,12 +341,26 @@ POSIX conformance notes:
 Revision and maintenance APIs:
 
 - `ListMetadataRevisions`
-- `RollbackMetadata`
+- `RollbackMetadata` / `RollbackMetadataContext`: republishes an earlier
+  revision's snapshot as a NEW commit (rollback is a revert; history is
+  never rewritten, and only a commit SHA from the project's own revision
+  history is accepted)
+- `RevertPath` / `RevertPathContext`: restores a single file or directory
+  subtree to its state at a commit SHA, leaving every other path untouched;
+  the result flows through the normal transaction path as a new commit, and
+  the reverted subtree's assets are validated against live releases before
+  and after, so restoring a path whose bytes were purged fails loudly
 - `PurgeUntracked`
+- `Prune` / `PruneContext` / `PruneProject`: granular reclamation under the
+  full-history retention policy; scopes `objects` (index objects referenced
+  by no retained manifest), `assets` (unreferenced release assets),
+  `history` (collapse old manifests into one checkpoint, git backend only),
+  and `all`; `keep` is a compaction threshold, `dryRun` reports without
+  deleting, and prune refuses while uncommitted metadata changes are pending
 - `CleanupProject`
 - `DeleteRelease`
 - `DeleteProject`
-- `FlushMetadata` / `FlushProjectContext` - explicit metadata push; the
+- `FlushMetadata` / `FlushProjectContext`: explicit metadata push; the
   remedy after a failed push, since commits are event-driven (mutation
   triggers and shutdown) with no periodic flush
 
@@ -364,16 +384,16 @@ REST APIs:
 
 REST endpoint groups:
 
-- `GET|DELETE /api/v1/projects/{project}` - project stats; DELETE removes the project (admin only)
-- `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...` - stat or remove files and empty directories
-- `GET|HEAD /api/v1/projects/{project}/children?path=...` - directory listing
-- `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...` - streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
-- `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap - storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
-- `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...` - extended attribute inspection and mutation
-- `POST /api/v1/projects/{project}/ops/...` - mkdir, rmdir, create-file, unlink, rename, link, symlink, chmod, chown, utimes, rollback, purge
-- `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}` - share management for the project
-- `POST /api/v1/projects/{project}/ops/share` answers `201` with a `Location` header pointing at the created share resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry a short opaque identifier (`/shares/{id}`, `/shares/{id}/download`) rather than the signed token, so links leak no credentials; a token placed in the URL path is simply a 404 - tokens authenticate bearers, they are never resource locators. The creation response alone returns the signed JWT for programmatic bearer use; listings never include it
-- `GET /api/v1/projects/{project}/revisions` - metadata revision history
+- `GET|DELETE /api/v1/projects/{project}`: project stats; DELETE removes the project (admin only)
+- `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...`: stat or remove files and empty directories
+- `GET|HEAD /api/v1/projects/{project}/children?path=...`: directory listing
+- `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...`: streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
+- `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap: storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
+- `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...`: extended attribute inspection and mutation
+- `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge, prune
+- `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}`: share management for the project (creator or admin)
+- `POST /api/v1/projects/{project}/shares` answers `201` with a `Location` header pointing at the created share's management resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry the signed JWT itself: the console link is `/?share=<token>` and the file download link is `/api/v1/shares/<id>/download?token=<token>`. Redemption (`GET /api/v1/shares/<token>`, `GET|HEAD /api/v1/shares/<id>/download`, `POST /api/v1/shares/<id>/derive`) verifies the token statelessly and answers from its claims, with no registry lookup, so links survive server restarts; the short ID addresses only the management plane under `/projects/{project}/shares`. The creation response alone returns the signed token; listings never include it or mintable URLs. `DELETE` marks the share revoked in the serving handler's registry, killing the link immediately there (revocation is per-handler by design; permanent revocation is key rotation)
+- `GET /api/v1/projects/{project}/revisions`: metadata revision history
 
 Authenticated REST:
 
@@ -383,7 +403,7 @@ Authenticated REST:
 - authorization uses StorHub owner/group/mode metadata, so REST operations follow UNIX-style checks instead of a separate ACL model
 - directory traversal requires execute/search permission on each ancestor directory
 - create, unlink, rename, and rmdir operations are authorized from parent directory write+execute permission
-- `chown`, rollback, and project deletion are restricted to admin identities
+- `chown`, rollback, revert-path, purge, prune, and project deletion are restricted to admin identities
 
 Minimal authenticated REST setup:
 
@@ -436,16 +456,14 @@ The handler also serves a browser UI at `/` and `/ui`.
 The REST handler uses HTTP preconditions where they help UNIX-like workflows:
 
 - `ETag` is returned on node and content reads; `X-StorHub-Revision` publishes the project's metadata revision
-- `If-Match` guards every mutating endpoint - file and directory deletes, replaces, appends, writes, patches, and truncates alike. A current-revision token strengthens the guard into true compare-and-swap enforced at apply time; tokens may be quoted per RFC 9110
+- `If-Match` guards every mutating endpoint: file and directory deletes, replaces, appends, writes, patches, and truncates alike. A current-revision token strengthens the guard into true compare-and-swap enforced at apply time; tokens may be quoted per RFC 9110
 - `If-None-Match: *` supports create-only full-file uploads
 - `Range: bytes=...` supports partial reads for large files
 
 ## Examples
 
-Every example deletes the GitHub repository it created once it finishes -
-including on failures and Ctrl+C - so demo runs never litter your account.
-
-
+Every example deletes the GitHub repository it created once it finishes,
+including on failures and Ctrl+C, so demo runs never litter your account.
 
 Full showcase:
 
@@ -468,15 +486,15 @@ GITHUB_TOKEN=your_token STORHUB_PROJECT=demo STORHUB_MOUNT_POINT=./mnt go run ./
 
 Example overview:
 
-- `examples/showcase` - broad end-to-end walkthrough across the public API surface
-- `examples/files` - storage upload/replace/patch/download flow
-- `examples/cli` - shell-based CLI workflow
-- `examples/rest` - unauthenticated REST server setup
-- `examples/rest-auth` - authenticated REST server setup with bearer login
-- `examples/filesystem` - filesystem-style API usage
-- `examples/posix` - POSIX-like metadata usage
-- `examples/revisions` - revision history, rollback, purge, and cleanup
-- `examples/fuse-mount` - public FUSE facade and mount lifecycle
+- `examples/showcase`: broad end-to-end walkthrough across the public API surface
+- `examples/files`: storage upload/replace/patch/download flow
+- `examples/cli`: shell-based CLI workflow
+- `examples/rest`: unauthenticated REST server setup
+- `examples/rest-auth`: authenticated REST server setup with bearer login
+- `examples/filesystem`: filesystem-style API usage
+- `examples/posix`: POSIX-like metadata usage
+- `examples/revisions`: revision history, rollback, purge, and cleanup
+- `examples/fuse-mount`: public FUSE facade and mount lifecycle
 
 Each example directory includes its own `README.md` explaining what it teaches, why it exists, and how to run it.
 
@@ -485,40 +503,51 @@ Each example directory includes its own `README.md` explaining what it teaches, 
 At a high level:
 
 1. file content is chunked and stored as GitHub release assets
-2. StorHub updates `.storhub/metadata.json` to describe the logical filesystem state
-3. all path lookups, metadata inspection, links, timestamps, and revisions come from that metadata catalog
-4. mounted FUSE access uses the same logical model underneath
+2. the logical filesystem state lives in the metadata index, schema version 5: a small `.storhub/index.json` manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/<2-hex>/<62-hex>` (sha256). Object kinds are TreeNode (one directory), ChunkBucket (a range of chunk records), and ReleasesObject (the release catalog). The manifest is the only compare-and-swap point; objects are immutable and shared across revisions, so an unchanged subtree dedups to one object and a mutation rewrites only the chain from the changed node to the root
+3. projects created before v5 keep a single `.storhub/metadata.json` blob; the first write splits it into the v5 layout (the v4->v5 boundary is a write-time split, not a byte transform). Legacy revisions stay readable across that boundary (the grace window): a revision load tries the manifest first and falls back to the legacy blob, so history browsing and rollback keep working for migrated projects
+4. all path lookups, metadata inspection, links, timestamps, and revisions come from that index
+5. mounted FUSE access uses the same logical model underneath
 
 This means the logical filesystem view is stable even though the underlying storage is built from immutable GitHub asset objects.
+
+### Path semantics
+
+StorHub separates two operations that are easy to conflate:
+
+1. **Key canonicalization.** A concrete path (no `..`, no symlink components) maps to its canonical storage key. This is pure string cleanup and is what the index uses for identity.
+2. **Access resolution.** A user-supplied path may contain `.`, `..`, and symlink components. Every path-taking operation (CLI, REST, FUSE, library) resolves it against the repository first, with POSIX physical semantics: symlink components are spliced into the walk, and `..` pops the resolved stack, so `a/link/..` with `link -> b/c` addresses `a/b`, not `a`. A `..` that would pop past the project root is rejected ("path escapes root"), as are empty and whitespace-only paths.
+
+The resolved concrete key is what every operation then reads or mutates. Symlink following matches POSIX per verb: open/stat-family verbs (read, write, append, patch, truncate, chmod, chown, chtimes, xattrs, readdir, copy) follow a final symlink; lstat-family verbs (stat, readlink, symlink creation, rename endpoints, unlink, rmdir) do not. Traversal permission checks see the directories the physical walk actually entered, in order, so a symlink cannot smuggle a caller past a directory they may not search.
 
 ## Architecture
 
 Public surface:
 
-- `storhub/` - main library API
-- `fuse/` - public FUSE facade
-- `rest/` - public REST facade
+- `storhub/`: main library API
+- `fuse/`: public FUSE facade
+- `rest/`: public REST facade
 
 Internal layout:
 
-- `internal/logging` - logger construction and token-redaction helpers
-- `internal/config` - config defaults and validation
-- `internal/github` - real GitHub API client, transport, and request handling
-- `internal/metadata` - metadata model, normalization, indexing, and validation
-- `internal/chunking` - chunk planning helpers
-- `internal/storage` - high-level StorHub workflows and orchestration
-- `internal/fs` - filesystem-style operations and path logic
-- `internal/posix` - POSIX-like metadata operations
-- `internal/fusefs` - concrete FUSE implementation
-- `internal/rest` - concrete REST handlers, auth, and UNIX-style authorization
-- `internal/cli` - CLI command parsing and rendering
+- `internal/logging`: logger construction and token-redaction helpers
+- `internal/config`: config defaults and validation
+- `internal/github`: real GitHub API client, transport, and request handling
+- `internal/metadata`: metadata model, normalization, indexing, and validation
+- `internal/chunking`: chunk planning helpers
+- `internal/storage`: high-level StorHub workflows and orchestration
+- `internal/fs`: filesystem-style operations and path logic
+- `internal/posix`: POSIX-like metadata operations
+- `internal/fusefs`: concrete FUSE implementation
+- `internal/rest`: concrete REST handlers, auth, and UNIX-style authorization
+- `internal/cli`: CLI command parsing and rendering
 
 Storage model:
 
 - file data: GitHub release assets
-- logical catalog: `.storhub/metadata.json`
-- history: Git commit history of the metadata file
-- rollback: restore an earlier metadata revision
+- logical index: `.storhub/index.json` manifest plus content-addressed objects under `.storhub/objects/` (v5 split layout); legacy projects keep a `.storhub/metadata.json` blob until their first write splits it
+- history: Git commit history of the index (manifest revisions plus the objects they reference)
+- rollback: republish an earlier revision's snapshot as a new commit (a revert, not a history rewrite); `revert-path` does the same for a single path
+- prune: reclaim what no retained manifest references (orphaned objects, unreferenced assets) and compact history on the git backend
 
 Writeback model:
 
@@ -531,9 +560,9 @@ Writeback model:
 
 The test suite is grouped into three categories:
 
-- `unit` - pure logic and package-local workflows
-- `mock` - fake-backed integration tests without real GitHub traffic
-- `smoke` - gated tests for mounted FUSE and real GitHub behavior
+- `unit`: pure logic and package-local workflows
+- `mock`: fake-backed integration tests without real GitHub traffic
+- `smoke`: gated tests for mounted FUSE and real GitHub behavior
 
 Direct commands:
 
@@ -553,6 +582,14 @@ Environment gates:
 - `STORHUB_RUN_LIVE=1` enables live GitHub smoke tests
 - `STORHUB_RUN_LIVE_LARGE=1` enables large live transfer smoke tests
 - `GITHUB_TOKEN` is required for live GitHub smoke tests
+
+CI runs every gate above except the FUSE and live smoke tests (runners have
+no usable FUSE setup, and live tests create real repositories), plus lint,
+cross-builds, the console job, and an embed/source sync check that fails if
+the committed `internal/rest/static/dist` drifts from `web/` source.
+`govulncheck` runs in the nightly workflow rather than per-push. See
+`.github/CONTRIBUTING.md` for the full local gate list and the one-time
+branch-protection runbook that makes the `ci` jobs required on `main`.
 
 ## Limitations
 

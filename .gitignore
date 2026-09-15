@@ -1,0 +1,15 @@
+# Root gitignore: repo-wide build/test output. web/ has its own
+# web/.gitignore for the console toolchain.
+
+# goreleaser output, anchored to the repo root: an unanchored `dist/`
+# would also match internal/rest/static/dist (the committed console
+# embed) and silently ignore newly generated bundle files.
+/dist/
+
+# Go build/test byproducts
+*.test
+*.out
+coverage.*
+
+# Editor and OS noise
+.DS_Store

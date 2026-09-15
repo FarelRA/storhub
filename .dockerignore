@@ -1,0 +1,15 @@
+# Keep the docker build context small and the layer cache stable.
+# Dockerfile does `COPY . .` into the build stage; without these,
+# web/node_modules (~367MB), the nuxt build dirs, .git, and the
+# goreleaser dist/ output all ride along and churn the cache.
+# Note: internal/rest/static/dist (the committed console embed) must
+# stay IN the context; these patterns never match it.
+.git
+.gitignore
+dist
+web/node_modules
+web/.nuxt
+web/.output
+web/.data
+*.log
+.DS_Store
