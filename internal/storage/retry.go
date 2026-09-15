@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,6 +64,18 @@ func nonNegativeDelay(delay time.Duration) time.Duration {
 // keep the two identical.
 func isRetryableNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// A *url.Error always satisfies net.Error, so the deadline check must
+	// come first: a caller deadline is the caller's decision and must not
+	// burn retries. http.Client's own timeout surfaces as the same wrapped
+	// context.DeadlineExceeded but carries the "Client.Timeout exceeded"
+	// marker - a stalled transfer is exactly what retries exist to absorb.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return strings.Contains(err.Error(), "Client.Timeout exceeded")
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 		return false
 	}
 	var netErr net.Error

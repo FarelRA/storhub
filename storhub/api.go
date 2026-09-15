@@ -85,6 +85,13 @@ const (
 	NodeKindFile = meta.NodeKindFile
 	// NodeKindSymlink marks symlink entries in listings and stats.
 	NodeKindSymlink = meta.NodeKindSymlink
+	// Prune scope values accepted by PruneProject (objects|assets|history|all).
+	// Aliased so callers (e.g. the CLI's argument validation) share one
+	// vocabulary with storage instead of duplicating string literals.
+	PruneObjects = impl.PruneObjects
+	PruneAssets  = impl.PruneAssets
+	PruneHistory = impl.PruneHistory
+	PruneAll     = impl.PruneAll
 )
 
 var (
@@ -95,6 +102,15 @@ var (
 
 // MutateOption customizes a single storage mutation.
 type MutateOption = shfs.MutateOption
+
+// XAttrMode qualifies a SetXAttr request (create-only / replace-only),
+// enforced atomically inside the storage transaction.
+type XAttrMode = shfs.XAttrMode
+
+const (
+	XAttrCreate  = shfs.XAttrCreate
+	XAttrReplace = shfs.XAttrReplace
+)
 
 // WithExpectedRevision upgrades a mutation into true compare-and-swap:
 // storage re-verifies the project's remote metadata revision immediately

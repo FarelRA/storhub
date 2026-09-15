@@ -79,6 +79,11 @@ type opStack struct {
 	byPath   map[string]int // Paths[0] of state/delete/release ops -> index
 	byTarget map[string]int // Paths[1] of rename ops -> index
 	pruneIdx int            // index of the merged chunk-prune op, -1 when none
+	// lastSnapshotSeq is the seq stamped at the most recent commit
+	// snapshot. Ops at or below it may be in flight inside that commit
+	// (its rebase replays the snapshot, not the live stack), so
+	// coalescing must never rewrite them.
+	lastSnapshotSeq uint64
 }
 
 func isStateClass(t OpType) bool {
@@ -149,7 +154,7 @@ func (s *opStack) removeAt(idx int) {
 // append folds op into the stack. Coalescing rules:
 //
 //	state + state (same path)   -> latest state wins, times accumulate
-//	state + delete (same path)  -> state wins (data preservation)
+//	state + delete (same path)  -> delete wins (put-then-delete nets to delete)
 //	delete + state (same path)  -> state wins (recreate)
 //	delete + delete             -> one delete
 //	rename A->B + rename B->C   -> rename A->C (adjacent only)
@@ -202,13 +207,20 @@ func (s *opStack) append(op Op) {
 		s.indexOp(op, len(s.ops)-1)
 	case op.Type == OpRename:
 		from, to := op.Paths[0], op.Paths[1]
-		if idx, ok := s.byTarget[from]; ok && idx == len(s.ops)-1 && s.ops[idx].Type == OpRename {
+		if idx, ok := s.byTarget[from]; ok && idx == len(s.ops)-1 && s.ops[idx].Type == OpRename && s.ops[idx].Seq > s.lastSnapshotSeq {
 			// Adjacent chain: A->B then B->C collapses to A->C carrying
 			// the latest entry state. Non-adjacent chains stay split: an
-			// intervening op on B or C would change the net effect.
+			// intervening op on B or C would change the net effect. A
+			// chain whose predecessor is at or below the last commit
+			// snapshot also stays split: the in-flight commit
+			// publishes A->B, so rewriting it to A->C would leave B as a
+			// phantom once the next rebase replays A->C.
 			existing := s.ops[idx]
 			delete(s.byTarget, existing.Paths[1])
-			existing.Paths[1] = to
+			// Replace the slice, never write through it: snapshot()
+			// shallow-copies the stack, so an in-flight commit may still
+			// be reading this op's Paths backing array.
+			existing.Paths = []string{existing.Paths[0], to}
 			existing.File, existing.Dir = op.File, op.Dir
 			existing.Chunks = op.Chunks
 			existing.Timestamp = op.Timestamp
@@ -246,11 +258,17 @@ func (s *opStack) append(op Op) {
 
 // deleteTransform applies the rename-then-delete collapse for a delete-class
 // op whose target path is a pending adjacent rename target. Returns true
-// when the op was rewritten (caller re-runs its matching).
+// when the op was rewritten (caller re-runs its matching). A rename already
+// inside the in-flight commit snapshot must not be consumed (same
+// boundary as the chain merge): the commit publishes A->B, so the delete has
+// to survive as "delete B" for the next replay, not collapse to "delete A".
 func (s *opStack) deleteTransform(op *Op) bool {
 	path := opPath(*op)
 	idx, ok := s.byTarget[path]
 	if !ok || idx != len(s.ops)-1 || s.ops[idx].Type != OpRename {
+		return false
+	}
+	if s.ops[idx].Seq <= s.lastSnapshotSeq {
 		return false
 	}
 	op.Times += s.ops[idx].Times
@@ -297,7 +315,27 @@ func (s *opStack) snapshot() []Op {
 	}
 	out := make([]Op, len(s.ops))
 	copy(out, s.ops)
+	// Deep-copy the slice-backed fields: the live stack keeps mutating
+	// (rename coalescing, prune merging), and an in-flight commit reads
+	// this snapshot outside pm.mu. Sharing backing arrays is a data race
+	// and can rewrite the committed message/rebase mid-flight.
+	for i := range out {
+		if out[i].Paths != nil {
+			out[i].Paths = append([]string(nil), out[i].Paths...)
+		}
+		if out[i].RemovedChunks != nil {
+			out[i].RemovedChunks = append([]int64(nil), out[i].RemovedChunks...)
+		}
+	}
 	return out
+}
+
+// noteSnapshot records that everything up to seq may now be in flight in a
+// commit; coalescing must not rewrite those ops.
+func (s *opStack) noteSnapshot(seq uint64) {
+	if seq > s.lastSnapshotSeq {
+		s.lastSnapshotSeq = seq
+	}
 }
 
 func (s *opStack) maxSeq() uint64 { return s.seq }
@@ -828,17 +866,13 @@ func buildCommitMessage(ops []Op, previousSHA string) string {
 		fmt.Fprintf(&sb, "storhub: %d ops (%s)", len(ops), counts)
 	}
 	const maxBodyLines = 100
-	lines := make([]string, 0, len(ops))
-	for _, op := range ops {
-		lines = append(lines, opMessageLine(op))
-	}
-	for i, line := range lines {
+	for i, op := range ops {
 		if i == maxBodyLines {
-			fmt.Fprintf(&sb, "\n+ %d more", len(lines)-i)
+			fmt.Fprintf(&sb, "\n+ %d more", len(ops)-i)
 			break
 		}
 		sb.WriteString("\n")
-		sb.WriteString(line)
+		sb.WriteString(opMessageLine(op))
 	}
 	return sb.String()
 }

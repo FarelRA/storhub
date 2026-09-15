@@ -62,6 +62,10 @@ type restAuthenticator struct {
 	edKey    ed25519.PrivateKey
 	tokenTTL time.Duration
 	now      func() time.Time
+	// verify is a seam over verifyPassword so tests can pin the
+	// constant-work property of login (unknown users must still pay a
+	// bcrypt verification).
+	verify func(password, encoded string) bool
 }
 
 type restPrincipal struct {
@@ -153,7 +157,7 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 	}
 	seed := sha256.Sum256(opts.TokenSigningKey)
 	edKey := ed25519.NewKeyFromSeed(seed[:32])
-	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), edKey: edKey, tokenTTL: opts.TokenTTL, now: opts.Now}, nil
+	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), edKey: edKey, tokenTTL: opts.TokenTTL, now: opts.Now, verify: verifyPassword}, nil
 }
 
 func (a *restAuthenticator) login(username, password string) (restPrincipal, string, time.Duration, error) {
@@ -161,10 +165,10 @@ func (a *restAuthenticator) login(username, password string) (restPrincipal, str
 	if !ok {
 		// Verify against a dummy hash anyway: skipping bcrypt for unknown
 		// users makes the response time reveal which usernames exist.
-		verifyPassword(password, dummyPasswordHash())
+		a.verify(password, dummyPasswordHash())
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
-	if user.Disabled || !verifyPassword(password, user.PasswordHash) {
+	if user.Disabled || !a.verify(password, user.PasswordHash) {
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
 	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin}
@@ -219,6 +223,24 @@ func (a *restAuthenticator) parseToken(token string) (*restPrincipal, error) {
 	}, nil
 }
 
+// currentPrincipal re-reads the user record behind an already-verified
+// token. Auth JWTs are otherwise irrevocable: without this check a
+// disabled, demoted, or removed account would keep the access baked into
+// its claims until expiry. The live record wins over the stale claims; ok
+// is false when the account no longer exists or is disabled.
+func (a *restAuthenticator) currentPrincipal(parsed *restPrincipal) (*restPrincipal, bool) {
+	user, ok := a.users[parsed.Username]
+	if !ok || user.Disabled {
+		return nil, false
+	}
+	principal := *parsed
+	principal.UID = user.UID
+	principal.PrimaryGID = user.PrimaryGID
+	principal.Groups = append([]uint32(nil), user.Groups...)
+	principal.Admin = user.Admin
+	return &principal, true
+}
+
 func verifyPassword(password, encoded string) bool {
 	if hash, ok := strings.CutPrefix(encoded, "bcrypt$"); ok {
 		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
@@ -238,6 +260,13 @@ func uniqueGIDs(groups []uint32) []uint32 {
 	}
 	return result
 }
+
+// Compile-time proof that authorizedClient implements the FULL Client
+// interface: a Client method added without a corresponding gate here fails
+// the build instead of silently turning project routes into an
+// unauthenticated pass-through (see clientFor, which fails closed at
+// runtime).
+var _ Client = (*authorizedClient)(nil)
 
 type authorizedClient struct {
 	base      Client
@@ -271,7 +300,7 @@ func (c *authorizedClient) RmdirContext(ctx context.Context, project, dirPath st
 	}
 	return c.base.RmdirContext(ctx, project, dirPath, opts...)
 }
-func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
 	if err := c.requireParentWrite(ctx, project, oldPath); err != nil {
 		return err
 	}
@@ -281,7 +310,7 @@ func (c *authorizedClient) RenameContext(ctx context.Context, project, oldPath, 
 	if err := c.requireTraverse(ctx, project, oldPath); err != nil {
 		return err
 	}
-	return c.base.RenameContext(ctx, project, oldPath, newPath)
+	return c.base.RenameContext(ctx, project, oldPath, newPath, opts...)
 }
 func (c *authorizedClient) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
 	if err := c.requireTraverse(ctx, project, srcPath); err != nil {
@@ -431,11 +460,11 @@ func (c *authorizedClient) ChtimesContext(ctx context.Context, project, targetPa
 	}
 	return c.base.ChtimesContext(ctx, project, targetPath, atime, mtime)
 }
-func (c *authorizedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+func (c *authorizedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error {
 	if err := c.requireNodeWrite(ctx, project, targetPath); err != nil {
 		return err
 	}
-	return c.base.SetXAttrContext(ctx, project, targetPath, attr, data)
+	return c.base.SetXAttrContext(ctx, project, targetPath, attr, data, mode...)
 }
 func (c *authorizedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
 	if err := c.requireNodeRead(ctx, project, targetPath); err != nil {

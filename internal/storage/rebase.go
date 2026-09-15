@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/FarelRA/storhub/internal/logging"
 )
@@ -161,6 +162,16 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 				continue
 			}
 		}
+		if conflictPath != "" && isStateClass(op.Type) && upstreamIsNewer(&working, op) {
+			// True last-writer-wins: "we commit later" is not "we
+			// wrote later". When the upstream entry changed after our op
+			// was recorded, upstream owns the newer write and our stale
+			// state-class assertion is dropped (recorded) instead of
+			// clobbering it.
+			resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
+				Note: fmt.Sprintf("upstream newer for %s (kept upstream, our stale %s dropped)", conflictPath, op.Type)})
+			continue
+		}
 		if err := applyOneOp(&working, op, &resolutions); err != nil {
 			return nil, nil, err
 		}
@@ -175,6 +186,33 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 		return nil, nil, fmt.Errorf("rebased tree failed validation: %w", err)
 	}
 	return &working, resolutions, nil
+}
+
+// upstreamIsNewer reports whether any entry the op asserts over changed
+// upstream after the op was recorded. The comparison uses the entry's
+// change time - ChangedAt for files, the later of ChangedAt/ModifiedAt for
+// directories - against the op's timestamp. An entry upstream deleted after
+// our op is not "newer": recreating it is the data-preserving choice and
+// stays ours.
+func upstreamIsNewer(working *RepoMetadata, op Op) bool {
+	for _, key := range opConflictKeys(op) {
+		switch {
+		case strings.HasPrefix(key, "f:"):
+			if f, ok := working.Files[strings.TrimPrefix(key, "f:")]; ok && f.ChangedAt > op.Timestamp {
+				return true
+			}
+		case key == "d:":
+			if max(working.Root.ChangedAt, working.Root.ModifiedAt) > op.Timestamp {
+				return true
+			}
+		case strings.HasPrefix(key, "d:"):
+			if d, ok := working.Dirs[strings.TrimPrefix(key, "d:")]; ok &&
+				max(d.ChangedAt, d.ModifiedAt) > op.Timestamp {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maxRebaseNoteBytes bounds the resolution detail carried in a commit
@@ -193,7 +231,20 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 	}
 	joined := strings.Join(notes, "; ")
 	if len(joined) > maxRebaseNoteBytes {
-		joined = joined[:maxRebaseNoteBytes] + "..."
+		// Cut on a rune boundary: a raw byte slice can split a UTF-8
+		// sequence and emit invalid bytes into the commit message. Drop
+		// trailing continuation bytes, then a dangling rune start whose
+		// tail was cut.
+		cut := joined[:maxRebaseNoteBytes]
+		for len(cut) > 0 && !utf8.RuneStart(cut[len(cut)-1]) {
+			cut = cut[:len(cut)-1]
+		}
+		if len(cut) > 0 {
+			if r, size := utf8.DecodeRuneInString(cut[len(cut)-1:]); r == utf8.RuneError && size == 1 {
+				cut = cut[:len(cut)-1]
+			}
+		}
+		joined = cut + "..."
 	}
 	return fmt.Sprintf("rebase: rebased onto %s: %d resolved (%s)", shortSHA(upstreamSHA), len(resolutions), joined)
 }

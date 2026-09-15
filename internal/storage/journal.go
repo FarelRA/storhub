@@ -59,6 +59,12 @@ func (h *StorHub) journalAppend(project string, op Op) {
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+		return
+	}
+	// The journal's contract is that acknowledged ops survive a crash, and
+	// an un-fsynced append is the first thing a power loss drops.
+	if err := f.Sync(); err != nil {
+		logging.Warn(h.projectLogger(project), "op journal sync failed", "err", err)
 	}
 }
 
@@ -133,6 +139,13 @@ func (h *StorHub) journalRewrite(project string, ops []Op) {
 		if _, err := f.Write(append(line, '\n')); err != nil {
 			ok = false
 			break
+		}
+	}
+	// Sync before the rename so a crash cannot leave the new name pointing
+	// at un-flushed bytes (same durability contract as append).
+	if ok {
+		if err := f.Sync(); err != nil {
+			ok = false
 		}
 	}
 	closeErr := f.Close()

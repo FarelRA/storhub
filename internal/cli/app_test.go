@@ -5,12 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/FarelRA/storhub/internal/chunking"
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	rest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
@@ -43,13 +47,16 @@ func TestAppRunHelpUnknownAndUsageErrors(t *testing.T) {
 }
 
 func TestHelpersAndRendering(t *testing.T) {
+	oldWarn := warnOutput
+	warnOutput = io.Discard
+	t.Cleanup(func() { warnOutput = oldWarn })
 	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
-	if _, err := newHubFromFlags("", "", 0, false); err == nil {
+	if _, err := newHubFromFlags("", "", 0, false, logSettings{}); err == nil {
 		t.Fatal("expected missing token error")
 	}
-	hub, err := newHubFromFlags("token", "https://example.test/api/", 64, true)
+	hub, err := newHubFromFlags("token", "https://example.test/api/", 64, true, logSettings{})
 	if err != nil || hub == nil {
 		t.Fatalf("newHubFromFlags: %v", err)
 	}
@@ -157,13 +164,13 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	downloadFile := filepath.Join(t.TempDir(), "download.txt")
 	mountDir := t.TempDir()
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
+	newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
@@ -223,7 +230,7 @@ func TestRunDrainsHubOncePerCommand(t *testing.T) {
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	if err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"}); err != nil {
@@ -248,7 +255,7 @@ func TestRunWithoutHubSkipsShutdown(t *testing.T) {
 	app, stdout, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
 	var created int
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		created++
 		return fake, nil
 	}
@@ -271,7 +278,7 @@ func TestDeleteProjectRequiresYes(t *testing.T) {
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, stderr := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	err := app.Run([]string{"delete-project", "demo"})
@@ -308,7 +315,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
@@ -321,8 +328,11 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 		if server.Addr != "127.0.0.1:9090" || server.Handler == nil {
 			return fmt.Errorf("unexpected serve args: addr=%q handler=%v", server.Addr, server.Handler)
 		}
-		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout != 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
-			return fmt.Errorf("expected REST server timeouts (ReadHeader>0 Read=0 Write>0 Idle>0), got ReadHeader=%v Read=%v Write=%v Idle=%v", server.ReadHeaderTimeout, server.ReadTimeout, server.WriteTimeout, server.IdleTimeout)
+		// ReadHeaderTimeout guards slow-loris; Read/WriteTimeout stay 0 so
+		// large uploads and slow multi-gigabyte downloads are never amputated
+		// mid-transfer (size bounds live in the content handlers).
+		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout != 0 || server.WriteTimeout != 0 || server.IdleTimeout <= 0 {
+			return fmt.Errorf("expected REST server timeouts (ReadHeader>0 Read=0 Write=0 Idle>0), got ReadHeader=%v Read=%v Write=%v Idle=%v", server.ReadHeaderTimeout, server.ReadTimeout, server.WriteTimeout, server.IdleTimeout)
 		}
 		return errors.New("stop")
 	}
@@ -339,6 +349,9 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 	if got := normalizeCLIChunkSize(0); got != 0 {
 		t.Fatalf("expected zero chunk size to remain unset, got %d", got)
 	}
+	if got := normalizeCLIChunkSize(-1); got != -1 {
+		t.Fatalf("expected negative chunk size to pass through for usage-error rejection, got %d", got)
+	}
 	if got := normalizeCLIChunkSize(1024); got != minCLIChunkSize {
 		t.Fatalf("expected small chunk size to clamp to %d, got %d", minCLIChunkSize, got)
 	}
@@ -347,11 +360,272 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 	}
 }
 
+// TestNormalizeCLIChunkSizeCeilingClamp pins the ceiling contract: a --chunk-size
+// above the GitHub release-asset ceiling must clamp DOWN, so the chunker's
+// plan and the uploader's windows agree instead of failing mid-upload.
+func TestNormalizeCLIChunkSizeCeilingClamp(t *testing.T) {
+	if got := normalizeCLIChunkSize(9999999999); got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("expected ceiling clamp to %d, got %d", chunking.MaxReleaseAssetSize, got)
+	}
+	if got := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize); got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("ceiling value must pass through, got %d", got)
+	}
+	if got := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize + 1); got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("expected ceiling clamp to %d, got %d", chunking.MaxReleaseAssetSize, got)
+	}
+}
+
+// TestHubConfigClampWarnsThroughSeam pins that the clamp warning goes
+// through the warnOutput seam (capturable), not straight to os.Stderr.
+func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
+	oldWarn := warnOutput
+	var buf bytes.Buffer
+	warnOutput = &buf
+	t.Cleanup(func() { warnOutput = oldWarn })
+	cfg := newHubConfig("", 1024, false, logSettings{}, false)
+	if cfg.ChunkSize != minCLIChunkSize {
+		t.Fatalf("expected floor clamp, got %d", cfg.ChunkSize)
+	}
+	if !strings.Contains(buf.String(), "warning") || !strings.Contains(buf.String(), "--chunk-size") {
+		t.Fatalf("expected clamp warning on warnOutput, got %q", buf.String())
+	}
+	buf.Reset()
+	cfg = newHubConfig("", 9999999999, false, logSettings{}, false)
+	if cfg.ChunkSize != chunking.MaxReleaseAssetSize {
+		t.Fatalf("expected ceiling clamp, got %d", cfg.ChunkSize)
+	}
+	if !strings.Contains(buf.String(), "--chunk-size") {
+		t.Fatalf("expected ceiling clamp warning, got %q", buf.String())
+	}
+}
+
+// TestHubConfigRatePolicyWiring pins the documented contract: one-shot
+// = fail-fast (negative max wait), long-running (mount, rest,
+// serve) = pause up to the reset (positive max wait).
+func TestHubConfigRatePolicyWiring(t *testing.T) {
+	if got := newHubConfig("", 0, false, logSettings{}, false).RateMaxWait; got >= 0 {
+		t.Fatalf("one-shot RateMaxWait = %v, want negative (fail-fast)", got)
+	}
+	if got := newHubConfig("", 0, false, logSettings{}, true).RateMaxWait; got <= 0 {
+		t.Fatalf("long-running RateMaxWait = %v, want positive pause", got)
+	}
+}
+
+// TestRatePolicyCommandRouting pins which commands reach which constructor:
+// download is one-shot (standard hub), mount is long-running (mount hub).
+func TestRatePolicyCommandRouting(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	oldMountFactory := newMountHubFromFlagsFn
+	t.Cleanup(func() {
+		newHubFromFlagsFn = oldFactory
+		newMountHubFromFlagsFn = oldMountFactory
+	})
+	var oneShot, longRunning int
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		oneShot++
+		return &fakeHub{t: t}, nil
+	}
+	newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
+		longRunning++
+		return &fakeHub{t: t}, nil
+	}
+	app, _, _ := newTestApp(t)
+	downloadFile := filepath.Join(t.TempDir(), "out.bin")
+	if err := app.Run([]string{"download", "--token", "x", "demo", "f", downloadFile}); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if oneShot != 1 || longRunning != 0 {
+		t.Fatalf("download must use the one-shot hub (oneShot=%d longRunning=%d)", oneShot, longRunning)
+	}
+	if err := app.Run([]string{"mount", "--token", "x", "demo", t.TempDir()}); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	if oneShot != 1 || longRunning != 1 {
+		t.Fatalf("mount must use the long-running hub (oneShot=%d longRunning=%d)", oneShot, longRunning)
+	}
+}
+
+// TestHubConfigAppliesLogSettingsAndJournal pins that every CLI hub
+// (including the one-shot download path) must carry the --log-* flags and
+// a journal directory beneath the cache base.
+func TestHubConfigAppliesLogSettingsAndJournal(t *testing.T) {
+	log := logSettings{level: "error", format: "text", color: false}
+	for _, longRunning := range []bool{false, true} {
+		cfg := newHubConfig("", 0, false, log, longRunning)
+		if cfg.LogLevel != "error" || cfg.LogFormat != "text" || cfg.LogColor {
+			t.Fatalf("log settings not applied (longRunning=%v): %+v", longRunning, cfg)
+		}
+		want := filepath.Join(storcfg.CacheBase(), "journal")
+		if cfg.JournalDir != want {
+			t.Fatalf("JournalDir = %q, want %q", cfg.JournalDir, want)
+		}
+	}
+}
+
+// TestNegativeChunkSizeIsUsageError pins that --chunk-size -1 must exit as
+// a usage error (class 2), not silently run with defaults.
+func TestNegativeChunkSizeIsUsageError(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	localFile := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(localFile, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	err := app.Run([]string{"upload", "--token", "x", "--chunk-size", "-1", "demo", "f", localFile})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--chunk-size") {
+		t.Fatalf("negative --chunk-size must be a usage error naming the flag, got %v", err)
+	}
+}
+
+// TestPruneScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
+// be rejected by the CLI as usage errors (exit 2) before any hub exists.
+func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	var created int
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		created++
+		return &fakeHub{t: t}, nil
+	}
+	app, _, _ := newTestApp(t)
+	err := app.Run([]string{"prune", "--token", "x", "demo", "bogus"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "prune scope") {
+		t.Fatalf("bad scope must be a usage error, got %v", err)
+	}
+	err = app.Run([]string{"prune", "--token", "x", "demo", "objects", "--keep", "0"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
+		t.Fatalf("--keep 0 must be a usage error, got %v", err)
+	}
+	err = app.Run([]string{"prune", "--token", "x", "demo", "all", "--keep", "-3"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
+		t.Fatalf("negative --keep must be a usage error, got %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("usage errors must not build a hub, created=%d", created)
+	}
+	if err := app.Run([]string{"prune", "--token", "x", "demo", "history", "--keep", "2"}); err != nil {
+		t.Fatalf("valid prune must still run: %v", err)
+	}
+}
+
+// TestWritePatchNegativeArgsAreUsageErrors pins that negative offsets and
+// delete-sizes are command-line mistakes (exit 2), not storage failures.
+func TestWritePatchNegativeArgsAreUsageErrors(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	cases := [][]string{
+		{"write", "--token", "x", "demo", "f", "-1", "data"},
+		{"patch", "--token", "x", "demo", "f", "-1", "0", "data"},
+		{"patch", "--token", "x", "demo", "f", "0", "-5", "data"},
+	}
+	for _, args := range cases {
+		err := app.Run(args)
+		if err == nil || !IsUsageError(err) {
+			t.Fatalf("%v must be a usage error, got %v", args[0], err)
+		}
+	}
+	// Parse failures are usage errors too (exit 2, not 1).
+	err := app.Run([]string{"write", "--token", "x", "demo", "f", "nope", "data"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "invalid offset") {
+		t.Fatalf("unparseable offset must classify as usage error, got %v", err)
+	}
+}
+
+// TestRunPropagatesFlushFailure is the sabotage check: a failed
+// metadata flush is a failed commit point and must surface as an error
+// from Run (main exits non-zero), never as a warning with exit 0.
+func TestRunPropagatesFlushFailure(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	app, _, _ := newTestApp(t)
+	fake := &fakeHub{t: t, shutdownErr: errors.New("flush boom")}
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		return fake, nil
+	}
+	err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"})
+	if err == nil || !strings.Contains(err.Error(), "metadata flush failed") || !strings.Contains(err.Error(), "flush boom") {
+		t.Fatalf("flush failure must propagate as the exit error, got %v", err)
+	}
+	if fake.shutdowns != 1 {
+		t.Fatalf("expected one drain, got %d", fake.shutdowns)
+	}
+	// A command that already failed keeps its own error primary, but the
+	// flush failure must still be visible, not swallowed.
+	fake2 := &fakeHub{t: t, shutdownErr: errors.New("flush boom"), readDirErr: errors.New("ls boom")}
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		return fake2, nil
+	}
+	app2, _, stderr2 := newTestApp(t)
+	err = app2.Run([]string{"ls", "--token", "x", "demo"})
+	if err == nil || !strings.Contains(err.Error(), "ls boom") {
+		t.Fatalf("command error must stay primary, got %v", err)
+	}
+	if !strings.Contains(stderr2(), "flush boom") {
+		t.Fatalf("secondary flush failure must be reported, not swallowed: %q", stderr2())
+	}
+}
+
+// TestFlexDurationRejectsNonFinite pins the NaN/Inf nit: JSON's extended
+// number grammar parses NaN/Infinity cleanly but they are nonsense TTLs.
+func TestFlexDurationRejectsNonFinite(t *testing.T) {
+	for _, raw := range []string{"NaN", "Infinity", "-Infinity", "-30", `"1h"`} {
+		var d flexDuration
+		err := d.UnmarshalJSON([]byte(raw))
+		if raw == `"1h"` {
+			if err != nil || d.Duration() != time.Hour {
+				t.Fatalf("valid duration string rejected: %v %v", err, d)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("%s must be rejected as a TTL, got %v", raw, d)
+		}
+	}
+}
+
+// TestServeRejectsAnonymousWithAuthFile pins the contradictory-flags nit:
+// --allow-anonymous alongside an auth file must fail as a usage error
+// instead of being silently ignored.
+func TestServeRejectsAnonymousWithAuthFile(t *testing.T) {
+	oldFactory := newRESTHubFromFlagsFn
+	t.Cleanup(func() { newRESTHubFromFlagsFn = oldFactory })
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+		return &storhub.StorHub{}, nil
+	}
+	app, _, _ := newTestApp(t)
+	authFile := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authFile, []byte(`{"token_signing_key":"k"}`), 0o600); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+	err := app.Run([]string{"rest", "--token", "x", "--auth-file", authFile, "--allow-anonymous"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--allow-anonymous") {
+		t.Fatalf("contradictory auth flags must be a usage error, got %v", err)
+	}
+}
+
+// TestAuthFileRejectsUnknownFields pins the typo nit: a misspelled key in
+// the auth JSON (e.g. token_ttl) must fail loudly, not silently default.
+func TestAuthFileRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte(`{"token_signing_key":"k","token_ttl":"1h","users_typo":[]}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := loadRESTAuthOptions(path); err == nil || !strings.Contains(err.Error(), "users_typo") {
+		t.Fatalf("unknown field must fail decoding, got %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"token_signing_key":"k","token_ttl":3600}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	auth, err := loadRESTAuthOptions(path)
+	if err != nil || auth.TokenTTL != time.Hour {
+		t.Fatalf("valid numeric TTL must decode to one hour, got %v %v", auth, err)
+	}
+}
+
 func TestListAcceptsAbsolutePath(t *testing.T) {
 	app, _, _ := newTestApp(t)
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return &fakeHub{t: t, assertReadDirPath: "docs/readme.txt"}, nil
 	}
 	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
@@ -407,7 +681,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 			if token != "env-token" {
 				t.Fatalf("expected token env-token, got %q", token)
 			}
@@ -425,7 +699,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 			if token != "override" {
 				t.Fatalf("expected token override, got %q", token)
 			}
@@ -441,7 +715,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, stdout, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 			return &fakeHub{t: t}, nil
 		}
 		if err := app.Run([]string{"ls", "--token", "x", "-l", "demo"}); err != nil {
@@ -489,14 +763,17 @@ type fakeHub struct {
 	t                 *testing.T
 	assertReadDirPath string
 	assertStatPath    string
+	readDirErr        error
 	shutdowns         int
+	shutdownErr       error
 }
 
 // Shutdown records every drain so tests can prove App.Run closed what a
-// command opened - the regression guard for the silent-data-loss bug.
+// command opened - the regression guard for the silent-data-loss bug. A
+// configured shutdownErr simulates a failed commit point.
 func (h *fakeHub) Shutdown(ctx context.Context) error {
 	h.shutdowns++
-	return nil
+	return h.shutdownErr
 }
 
 func (h *fakeHub) DeleteProject(project string) error { return nil }
@@ -511,6 +788,9 @@ func (h *fakeHub) DownloadFile(project, remotePath, localPath string) error {
 	return os.WriteFile(localPath, []byte("downloaded"), 0o644)
 }
 func (h *fakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
+	if h.readDirErr != nil {
+		return nil, h.readDirErr
+	}
 	if h.assertReadDirPath != "" {
 		got, err := shfs.NormalizePath(dir)
 		if err != nil {
@@ -553,11 +833,13 @@ func (h *fakeHub) PatchFile(project, filePath string, offset, deleteSize int64, 
 func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: 1}}, nil
 }
-func (h *fakeHub) RollbackMetadata(project, commitSHA string) error { return nil }
-func (h *fakeHub) PurgeUntracked(project string) (*storhub.PurgeResult, error) {
+func (h *fakeHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+	return nil
+}
+func (h *fakeHub) PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error) {
 	return &storhub.PurgeResult{}, nil
 }
-func (h *fakeHub) PruneProject(project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+func (h *fakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
 	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *fakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
@@ -578,6 +860,11 @@ func newTestApp(t *testing.T) (*App, func() string, func() string) {
 	stderrFile, stderr := tempCaptureFile(t)
 	app.stdout = stdoutFile
 	app.stderr = stderrFile
+	// Route package-level configuration warnings through the same capture
+	// seam so tests can assert on them instead of polluting real stderr.
+	oldWarn := warnOutput
+	warnOutput = stderrFile
+	t.Cleanup(func() { warnOutput = oldWarn })
 	return app, stdout, stderr
 }
 

@@ -1,6 +1,6 @@
 package storage
 
-// Coverage gaps B16-B22: behavior-pinning tests using only public APIs
+// Coverage gaps: behavior-pinning tests using only public APIs
 // (plus same-package test helpers). No assertions on hub internals.
 
 import (
@@ -20,7 +20,7 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// B16: patched-file download must be content-correct without asserting exact
+// Patched-file download must be content-correct without asserting exact
 // Range strings. After the first byte of each asset the client reuses the
 // signed CDN URL, so ranges land on both the API asset path and the CDN
 // path: record both. Every emitted range must stay within its asset (sized
@@ -108,8 +108,8 @@ func TestPatchedFileDownloadContentCorrectness(t *testing.T) {
 }
 
 // cdnAssetSize sizes an asset through the public CDN surface: an
-// unauthenticated full GET, exactly as the B9 test does. It keeps
-// content-correctness tests off mock internals (B15).
+// unauthenticated full GET, exactly as the CDN-redirect test does. It keeps
+// content-correctness tests off mock internals.
 func cdnAssetSize(t *testing.T, backend *mockGitHub, assetID int64) int64 {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, backend.server.URL+"/cdn/"+strconv.FormatInt(assetID, 10), nil)
@@ -128,7 +128,7 @@ func cdnAssetSize(t *testing.T, backend *mockGitHub, assetID int64) int64 {
 	return int64(len(body))
 }
 
-// B17: renaming a file onto an existing file atomically replaces it.
+// Renaming a file onto an existing file atomically replaces it.
 func TestRenameOntoExistingFileReplaces(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -157,7 +157,7 @@ func TestRenameOntoExistingFileReplaces(t *testing.T) {
 	}
 }
 
-// B17: renaming a file onto a directory fails with EISDIR; renaming a
+// Renaming a file onto a directory fails with EISDIR; renaming a
 // directory onto a file fails with ENOTDIR.
 func TestRenameAcrossKindsFails(t *testing.T) {
 	backend := newMockGitHub(t)
@@ -178,7 +178,7 @@ func TestRenameAcrossKindsFails(t *testing.T) {
 	}
 }
 
-// B18: Copy duplicates file content, keeps the source, and copies trees.
+// Copy duplicates file content, keeps the source, and copies trees.
 func TestCopyFileAndDirectory(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -218,7 +218,7 @@ func TestCopyFileAndDirectory(t *testing.T) {
 	}
 }
 
-// B18: Copy error paths — missing source, self-copy, dir onto file.
+// Copy error paths — missing source, self-copy, dir onto file.
 func TestCopyErrors(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -241,7 +241,7 @@ func TestCopyErrors(t *testing.T) {
 	}
 }
 
-// B19: git backend round trip — write through one handle, read through a
+// Git backend round trip — write through one handle, read through a
 // fresh handle and through the hub's git path.
 func TestGitBackendWriteReadRoundTrip(t *testing.T) {
 	url := seedBareMetadataRepo(t)
@@ -291,7 +291,7 @@ func TestGitBackendWriteReadRoundTrip(t *testing.T) {
 	}
 }
 
-// B19: git backend revision history is visible through listFileCommits.
+// Git backend revision history is visible through listFileCommits.
 func TestGitBackendRevisionHistory(t *testing.T) {
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(t.TempDir(), "owner", "demo", "")
@@ -325,7 +325,7 @@ func TestGitBackendRevisionHistory(t *testing.T) {
 	}
 }
 
-// B20: advanced metadata API — update, read back, revision advance,
+// Advanced metadata API — update, read back, revision advance,
 // revision listing, and rollback. File payloads travel the real upload
 // path (valid chunk references); the update itself is a metadata-only
 // marker entry, which validates as an empty file.
@@ -416,7 +416,7 @@ func TestAdvancedMetadataAPI(t *testing.T) {
 	}
 }
 
-// B21: strictatime advances atime on explicit queue and on reads; noatime
+// Strictatime advances atime on explicit queue and on reads; noatime
 // never moves it. Stat reads a readonly snapshot, so every assertion goes
 // through a fresh observer client: only remotely committed atime counts.
 // Each atime change is queued BEFORE the synchronous flush that commits
@@ -498,7 +498,7 @@ func TestAtimePolicies(t *testing.T) {
 	}
 }
 
-// B22: FlushProjectContext persists one project, accepts unknown names,
+// FlushProjectContext persists one project, accepts unknown names,
 // and rejects invalid ones.
 func TestFlushProject(t *testing.T) {
 	backend := newMockGitHub(t)
@@ -537,7 +537,7 @@ func TestFlushProject(t *testing.T) {
 	}
 }
 
-// B15 guard: new tests must not touch hub internals — this compile-time
+// Guard: new tests must not touch hub internals — this compile-time
 // probe fails if the suite ever needs metaCache/pm access. It exercises a
 // full mutation cycle purely through public APIs.
 func TestPublicAPIOnlyMutationCycle(t *testing.T) {

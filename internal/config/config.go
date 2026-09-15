@@ -1,3 +1,7 @@
+// Package config defines StorHub's programmatic configuration surface.
+// Values come from embedder code plus the STORHUB_* environment (the CLI
+// layers env over Default()); there is no config-file loader - nothing
+// here reads a config.yaml, and documentation must not promise one.
 package config
 
 import (
@@ -25,6 +29,14 @@ const (
 	// so a limit change cannot drift between the two spellings.
 	DefaultChunkSize  = chunking.DefaultChunkSize
 	DefaultBufferSize = chunking.DefaultBufferSize
+	// MaxBufferSize bounds the per-operation transfer buffer Validate
+	// accepts. Buffers are allocated per sync.Pool New, so an unbounded
+	// value turns a typo into an instant OOM; 64 MiB is already 64x the
+	// default and far past any sane interactive use.
+	MaxBufferSize = 64 << 20
+	// defaultHistoryWarnObjects is the advisory commit-time threshold
+	// Default() ships with; an explicit zero disables the warning.
+	defaultHistoryWarnObjects = 5000
 )
 
 type AtimePolicy string
@@ -109,12 +121,13 @@ type Config struct {
 	// ObjectCacheMaxEntries bounds the per-project content-addressed object
 	// cache (LRU). Eviction only costs a later refetch, never correctness.
 	ObjectCacheMaxEntries int
-	// HistoryWarnObjects and HistoryWarnBytes are the advisory thresholds
-	// at which a commit logs a once-per-window warning pointing at
-	// `storhub prune`: full history is retained by design, so object
-	// accumulation is surfaced rather than silently pruned.
+	// HistoryWarnObjects is the advisory object-count threshold at which a
+	// commit logs a once-per-window warning pointing at `storhub prune`:
+	// full history is retained by design, so object accumulation is
+	// surfaced rather than silently pruned. Zero disables the warning
+	// (Default() enables it; WithDefaults preserves an explicit zero
+	// instead of overwriting the disable).
 	HistoryWarnObjects uint64
-	HistoryWarnBytes   uint64
 	Now                func() time.Time
 	Sleep              func(context.Context, time.Duration) error
 }
@@ -148,8 +161,7 @@ func Default() Config {
 		MaxTrackedProjects:    64,
 		GitCacheDir:           defaultGitCacheDir(),
 		ObjectCacheMaxEntries: 8192,
-		HistoryWarnObjects:    5000,
-		HistoryWarnBytes:      64 << 20,
+		HistoryWarnObjects:    defaultHistoryWarnObjects,
 		Now:                   time.Now,
 		Sleep:                 SleepWithContext,
 	}
@@ -158,6 +170,11 @@ func Default() Config {
 // WithDefaults fills every unset field from Default(). There is no
 // zero-config fast path: field-by-field filling is cheap and a shortcut
 // that forgets a field silently discards user configuration.
+//
+// "Unset" means exactly zero, never "zero or negative": silently replacing
+// nonsense like ChunkSize: -1 with a default hides embedder typos before
+// Validate ever sees them. Negative values pass through untouched so
+// Validate rejects them loudly.
 func (c Config) WithDefaults() Config {
 	defaults := Default()
 	if c.APIBaseURL == "" {
@@ -169,19 +186,19 @@ func (c Config) WithDefaults() Config {
 	if c.HTTPClient == nil {
 		c.HTTPClient = defaults.HTTPClient
 	}
-	if c.ChunkSize <= 0 {
+	if c.ChunkSize == 0 {
 		c.ChunkSize = defaults.ChunkSize
 	}
-	if c.BufferSize <= 0 {
+	if c.BufferSize == 0 {
 		c.BufferSize = defaults.BufferSize
 	}
 	if c.RepoDescription == "" {
 		c.RepoDescription = defaults.RepoDescription
 	}
-	if c.BaseRetryDelay <= 0 {
+	if c.BaseRetryDelay == 0 {
 		c.BaseRetryDelay = defaults.BaseRetryDelay
 	}
-	if c.MaxRetryDelay <= 0 {
+	if c.MaxRetryDelay == 0 {
 		c.MaxRetryDelay = defaults.MaxRetryDelay
 	}
 	if c.LogOutput == nil {
@@ -203,21 +220,19 @@ func (c Config) WithDefaults() Config {
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
 	}
-	if c.MaxTrackedProjects <= 0 {
+	if c.MaxTrackedProjects == 0 {
 		c.MaxTrackedProjects = defaults.MaxTrackedProjects
 	}
 	if c.GitCacheDir == "" {
 		c.GitCacheDir = defaults.GitCacheDir
 	}
-	if c.ObjectCacheMaxEntries <= 0 {
+	if c.ObjectCacheMaxEntries == 0 {
 		c.ObjectCacheMaxEntries = defaults.ObjectCacheMaxEntries
 	}
-	if c.HistoryWarnObjects == 0 {
-		c.HistoryWarnObjects = defaults.HistoryWarnObjects
-	}
-	if c.HistoryWarnBytes == 0 {
-		c.HistoryWarnBytes = defaults.HistoryWarnBytes
-	}
+	// HistoryWarnObjects is deliberately NOT zero-filled: zero is the
+	// documented "disabled" value (the storage consumer checks it), so
+	// overwriting it would make the disable path unreachable. Default()
+	// still enables the warning for callers that start from it.
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
@@ -246,14 +261,12 @@ func (c Config) resolveLogger() Config {
 	return c
 }
 
-// defaultGitCacheDir returns a per-process cache directory. A shared
-// /tmp/storhub would let concurrent processes (or other users on multi-user
-// machines) collide on the same git workspaces.
 // CacheBase returns the root directory for storhub's local caches:
 // $STORHUB_CACHE_DIR when set, otherwise the platform user cache dir
 // (~/.cache/storhub on Linux per XDG), falling back to a temp
 // directory when no home is available. Component caches live beneath
-// it: git/ for backend working repos, fuse/<project>/ for overlays.
+// it: git/ for backend working repos, journal/ for the write-ahead
+// op journal, fuse/<project>/ for overlays.
 func CacheBase() string {
 	if custom := strings.TrimSpace(os.Getenv("STORHUB_CACHE_DIR")); custom != "" {
 		return custom
@@ -264,6 +277,9 @@ func CacheBase() string {
 	return filepath.Join(os.TempDir(), "storhub")
 }
 
+// defaultGitCacheDir returns the git backend's cache root beneath
+// CacheBase. A shared /tmp/storhub would let concurrent processes (or
+// other users on multi-user machines) collide on the same git workspaces.
 func defaultGitCacheDir() string {
 	return filepath.Join(CacheBase(), "git")
 }
@@ -271,12 +287,20 @@ func defaultGitCacheDir() string {
 // DefaultGitCacheBase exposes the git cache base for callers that create
 // per-process roots beneath it.
 func DefaultGitCacheBase() string {
-	return filepath.Join(CacheBase(), "git")
+	return defaultGitCacheDir()
 }
 
 // ObjectCacheDir returns the root directory for content-addressed index
 // object caches (CacheBase()/objects). Per-project caches live beneath it.
 func (c Config) ObjectCacheDir() string {
+	return DefaultObjectCacheBase()
+}
+
+// DefaultObjectCacheBase exposes the object-cache root for callers that sweep
+// or create per-project caches beneath it without holding a Config value (the
+// orphan reaper). It is the single source of the layout so the reaper and the
+// storage layer can never disagree on where a project's cache lives.
+func DefaultObjectCacheBase() string {
 	return filepath.Join(CacheBase(), "objects")
 }
 
@@ -349,11 +373,29 @@ func (c Config) Validate() error {
 	if c.MaxTrackedProjects < 0 {
 		return fmt.Errorf("MaxTrackedProjects must be >= 0, got %d", c.MaxTrackedProjects)
 	}
+	if c.ObjectCacheMaxEntries < 0 {
+		return fmt.Errorf("ObjectCacheMaxEntries must be >= 0, got %d", c.ObjectCacheMaxEntries)
+	}
+	if c.BaseRetryDelay < 0 {
+		return fmt.Errorf("BaseRetryDelay must be >= 0, got %v", c.BaseRetryDelay)
+	}
+	if c.MaxRetryDelay < 0 {
+		return fmt.Errorf("MaxRetryDelay must be >= 0, got %v", c.MaxRetryDelay)
+	}
+	// Chunk windows must fit in one release asset: a value above the
+	// ceiling would make the chunker's plan and the uploader's windows
+	// disagree, failing mid-upload.
 	if c.ChunkSize < 0 {
 		return fmt.Errorf("ChunkSize must be >= 0, got %d", c.ChunkSize)
 	}
+	if c.ChunkSize > chunking.MaxReleaseAssetSize {
+		return fmt.Errorf("ChunkSize %d exceeds the GitHub release-asset ceiling %d", c.ChunkSize, chunking.MaxReleaseAssetSize)
+	}
 	if c.BufferSize < 0 {
 		return fmt.Errorf("BufferSize must be >= 0, got %d", c.BufferSize)
+	}
+	if c.BufferSize > MaxBufferSize {
+		return fmt.Errorf("BufferSize %d exceeds the per-operation buffer cap %d", c.BufferSize, MaxBufferSize)
 	}
 	return nil
 }

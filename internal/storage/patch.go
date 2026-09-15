@@ -43,7 +43,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 
 	assembled := spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks)
 	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	// B3: report the release that actually holds the new chunks. A
+	// Report the release that actually holds the new chunks. A
 	// release-full rotation inside the sink moves later chunks; the
 	// initial tag may no longer hold them.
 	return assembled, actualTag, nil
@@ -150,7 +150,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	defer func() { _ = snapshot.Close() }()
 	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
 	var uploadedAll []ChunkInfo
-	// B3: track where the bytes actually land; a rotation mid-rewrite
+	// Track where the bytes actually land; a rotation mid-rewrite
 	// moves the sink and the reported tag must follow it.
 	curTag, curURL := releaseTag, uploadURL
 	for offset := int64(0); offset < finalSize; offset += chunkSize {
@@ -290,7 +290,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))
 			return nil, "", err
 		}
-		// B3: a rotation inside this edit moves the sink; later edits
+		// A rotation inside this edit moves the sink; later edits
 		// must upload to where the bytes actually land.
 		curTag, curURL = landedTag, landedURL
 		uploadedAll = append(uploadedAll, inserted...)

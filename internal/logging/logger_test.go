@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestNormalizeLevelAndFormat(t *testing.T) {
+func TestNormalizeLevel(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", LevelInfo},
 		{"DEBUG", LevelDebug},
@@ -21,16 +21,16 @@ func TestNormalizeLevelAndFormat(t *testing.T) {
 			t.Fatalf("NormalizeLevel(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	for _, tc := range []struct{ in, want string }{{"", FormatPretty}, {"text", FormatText}, {"PRETTY", FormatPretty}, {"nope", FormatPretty}} {
-		if got := NormalizeFormat(tc.in); got != tc.want {
-			t.Fatalf("NormalizeFormat(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
 }
 
 func TestValidLevelAndFormat(t *testing.T) {
 	if !ValidLevel("") || !ValidLevel("debug") || ValidLevel("loud") {
 		t.Fatal("level validation broken")
+	}
+	// The validator must accept exactly what NormalizeLevel maps: the
+	// "warning" alias included, so the two vocabularies cannot drift.
+	if !ValidLevel("warning") || !ValidLevel(" WARNING ") || !ValidLevel("warn") {
+		t.Fatal("warning alias must validate (NormalizeLevel maps it)")
 	}
 	if !ValidFormat("") || !ValidFormat("text") || ValidFormat("json") {
 		t.Fatal("format validation broken")

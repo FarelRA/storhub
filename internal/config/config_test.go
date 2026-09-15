@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FarelRA/storhub/internal/chunking"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -84,6 +85,70 @@ func TestWithDefaultsHandlesZeroAndNegativeValues(t *testing.T) {
 	zero := (Config{}).WithDefaults()
 	if zero.APIBaseURL != Default().APIBaseURL || zero.BufferSize != Default().BufferSize {
 		t.Fatalf("expected full zero-config defaults, got %+v", zero)
+	}
+}
+
+// TestWithDefaultsPreservesNegativesForValidate pins the contract: only
+// exact zero counts as "unset". A negative must survive WithDefaults so
+// Validate can reject it loudly instead of a typo silently uploading with
+// default-sized chunks.
+func TestWithDefaultsPreservesNegativesForValidate(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"ChunkSize":             func(c *Config) { c.ChunkSize = -1 },
+		"BufferSize":            func(c *Config) { c.BufferSize = -1 },
+		"MaxTrackedProjects":    func(c *Config) { c.MaxTrackedProjects = -1 },
+		"ObjectCacheMaxEntries": func(c *Config) { c.ObjectCacheMaxEntries = -1 },
+		"BaseRetryDelay":        func(c *Config) { c.BaseRetryDelay = -time.Second },
+		"MaxRetryDelay":         func(c *Config) { c.MaxRetryDelay = -time.Second },
+	} {
+		cfg := Config{}
+		mutate(&cfg)
+		got := cfg.WithDefaults()
+		if err := got.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("negative %s must survive WithDefaults and fail Validate naming it, got %v (cfg %+v)", name, err, got)
+		}
+	}
+}
+
+// TestValidateRejectsChunkSizeAboveAssetCeiling pins the ceiling guard: a chunk
+// larger than one release asset would make the chunker's plan and the
+// uploader's windows disagree, so it must fail validation, not storage.
+func TestValidateRejectsChunkSizeAboveAssetCeiling(t *testing.T) {
+	cfg := Default()
+	cfg.ChunkSize = chunking.MaxReleaseAssetSize + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("chunk size above the asset ceiling must fail validation, got %v", err)
+	}
+	cfg.ChunkSize = chunking.MaxReleaseAssetSize
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("chunk size at the ceiling must validate, got %v", err)
+	}
+}
+
+// TestValidateCapsBufferSize pins the buffer guard: buffers are allocated per
+// pooled operation, so an unbounded value is an instant OOM waiting to
+// happen and must be rejected up front.
+func TestValidateCapsBufferSize(t *testing.T) {
+	cfg := Default()
+	cfg.BufferSize = MaxBufferSize + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "BufferSize") {
+		t.Fatalf("BufferSize above the cap must fail validation, got %v", err)
+	}
+	cfg.BufferSize = MaxBufferSize
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("BufferSize at the cap must validate, got %v", err)
+	}
+}
+
+// TestHistoryWarnObjectsZeroDisablesWarning pins the zero semantics: zero is
+// the documented disable value (the storage consumer honors it), so
+// WithDefaults must not overwrite it with the default threshold.
+func TestHistoryWarnObjectsZeroDisablesWarning(t *testing.T) {
+	if got := (Config{HistoryWarnObjects: 0}).WithDefaults(); got.HistoryWarnObjects != 0 {
+		t.Fatalf("explicit zero must survive as the disable value, got %d", got.HistoryWarnObjects)
+	}
+	if got := Default(); got.HistoryWarnObjects == 0 {
+		t.Fatal("Default() must still enable the warning")
 	}
 }
 

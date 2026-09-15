@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,20 +32,31 @@ func objectRepoPath(sha string) string {
 // unchanged subtrees are already cached (and never re-uploaded).
 //
 // It is LRU-bounded so a long-lived mount cannot grow without limit; eviction
-// only costs a later refetch, never correctness.
+// only costs a later refetch, never correctness. The bound is two-fold: an
+// entry count AND a byte budget. Entries alone are not a disk bound — an
+// index object can be up to the contents-API size limit, so a count-only cap
+// still allows max × 8 MiB of cache per project.
+//
+// defaultObjectCacheMaxBytes is the per-project disk budget. Index objects
+// are small JSON nodes; a gigabyte of them cached is already far past any
+// realistic working set, and exceeding it must cost refetches, not disk.
+const defaultObjectCacheMaxBytes = 1 << 30
+
 type objectCache struct {
-	dir   string
-	max   int
-	mu    sync.Mutex
-	order []string       // shas, least-recently-used first
-	sizes map[string]int // sha -> byte size (for accounting)
+	dir      string
+	max      int
+	maxBytes int64
+	mu       sync.Mutex
+	order    []string       // shas, least-recently-used first
+	sizes    map[string]int // sha -> byte size (for accounting)
+	total    int64          // sum of sizes (guarded by mu)
 }
 
 func newObjectCache(dir string, max int) *objectCache {
 	if max <= 0 {
 		max = 4096
 	}
-	return &objectCache{dir: dir, max: max, sizes: make(map[string]int)}
+	return &objectCache{dir: dir, max: max, maxBytes: defaultObjectCacheMaxBytes, sizes: make(map[string]int)}
 }
 
 func (c *objectCache) path(sha string) string {
@@ -123,6 +135,7 @@ func (c *objectCache) touchLocked(sha string, size int) {
 		c.removeLocked(sha)
 	}
 	c.sizes[sha] = size
+	c.total += int64(size)
 	c.order = append(c.order, sha)
 }
 
@@ -133,27 +146,36 @@ func (c *objectCache) removeLocked(sha string) {
 			break
 		}
 	}
+	if size, ok := c.sizes[sha]; ok {
+		c.total -= int64(size)
+	}
 	delete(c.sizes, sha)
 }
 
 func (c *objectCache) evictLocked() {
-	for len(c.order) > c.max {
+	for len(c.order) > 0 && (len(c.order) > c.max || c.total > c.maxBytes) {
 		oldest := c.order[0]
 		c.order = c.order[1:]
+		if size, ok := c.sizes[oldest]; ok {
+			c.total -= int64(size)
+		}
 		delete(c.sizes, oldest)
 		_ = os.Remove(c.path(oldest))
 	}
 }
 
 // objectCacheFor returns the per-project object cache, creating it lazily.
-// Caches live beneath CacheBase()/objects/<project>.
+// Caches live beneath CacheBase()/objects/<key>, where <key> is the same
+// owner-qualified identity the git worktree and its lock use (gitCacheKey), so
+// the orphan reaper can correlate an object cache to a live git-backed mount
+// and spare it. The in-memory map is keyed by project (one owner per hub).
 func (h *StorHub) objectCacheFor(project string) *objectCache {
 	h.objCacheMu.Lock()
 	defer h.objCacheMu.Unlock()
 	if c, ok := h.objCaches[project]; ok {
 		return c
 	}
-	dir := filepath.Join(h.config.ObjectCacheDir(), project)
+	dir := filepath.Join(h.config.ObjectCacheDir(), gitCacheKey(h.owner, project))
 	c := newObjectCache(dir, h.config.ObjectCacheMaxEntries)
 	h.objCaches[project] = c
 	return c
@@ -191,7 +213,8 @@ func (h *StorHub) fetchObject(ctx context.Context, project, sha string) ([]byte,
 // (cache membership means the bytes are already upstream, since objects are
 // only cached after a successful fetch or write). Content-addressed writes
 // are idempotent: same sha, same bytes, no conflict. Returns the number of
-// objects actually uploaded.
+// objects actually uploaded. REST path only: the git backend commits objects
+// together with the manifest in one multi-file commit (see publishIndex).
 func (h *StorHub) writeObjects(ctx context.Context, project string, objects map[string][]byte) (int, error) {
 	if len(objects) == 0 {
 		return 0, nil
@@ -208,19 +231,32 @@ func (h *StorHub) writeObjects(ctx context.Context, project string, objects map[
 			continue
 		}
 		data := objects[sha]
-		if repo := h.getGitRepo(project); repo != nil {
-			// Git objects are committed together with the manifest in one
-			// multi-file commit by the caller; here we only need them in the
-			// cache so the manifest CAS sees them as present.
-			cache.put(sha, data)
-			written++
-			continue
-		}
 		if _, _, err := h.gh.PutFileContent(ctx, h.owner, project, objectRepoPath(sha), data, "", "storhub: index object"); err != nil {
 			var apiErr *ghapi.APIError
 			// A concurrent writer may have uploaded the identical object
-			// first; that is success for a content-addressed write.
-			if errors.As(err, &apiErr) && apiErr.StatusCode == 409 {
+			// first; that is success for a content-addressed write. GitHub
+			// reports a create collision two ways: 409 when a sha was
+			// supplied and mismatched, and 422 ("SHA wasn't supplied" /
+			// already exists) for a sha-less create onto an existing path —
+			// exactly what an upstream-but-uncached object hits. Either
+			// status is benign only when the upstream bytes verify against
+			// the claimed address.
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusUnprocessableEntity) {
+				upstream, _, gerr := h.gh.GetFileContent(ctx, h.owner, project, objectRepoPath(sha), "")
+				var getErr *ghapi.APIError
+				if gerr != nil && errors.As(gerr, &getErr) && getErr.NotFound() {
+					// The path is empty upstream: this collision was NOT
+					// "your object already exists". Propagate the ORIGINAL
+					// status unchanged so the commit loop's conflict-rebase
+					// path still recognizes it; never cache unverified bytes.
+					return written, err
+				}
+				if gerr != nil {
+					return written, fmt.Errorf("write object %s: collision (%d) and the upstream check failed: %w", shortSHA(sha), apiErr.StatusCode, gerr)
+				}
+				if meta.ObjectSHA(upstream) != sha {
+					return written, fmt.Errorf("write object %s: collision (%d) but upstream bytes hash to %s", shortSHA(sha), apiErr.StatusCode, shortSHA(meta.ObjectSHA(upstream)))
+				}
 				cache.put(sha, data)
 				written++
 				continue

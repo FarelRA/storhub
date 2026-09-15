@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/FarelRA/storhub/internal/chunking"
 )
 
 func TestReadDataArgReadsStdinDash(t *testing.T) {
@@ -46,6 +48,9 @@ func TestChunkSizeClampWarns(t *testing.T) {
 	if got := normalizeCLIChunkSize(minCLIChunkSize * 2); got != minCLIChunkSize*2 {
 		t.Fatalf("valid size must pass through: %d", got)
 	}
+	if got := normalizeCLIChunkSize(9999999999); got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("ceiling clamp broken: %d", got)
+	}
 }
 
 type runtimeErr struct{}
@@ -57,7 +62,7 @@ func errRuntimeShape() error { return runtimeErr{} }
 func TestJSONOutputContracts(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	// stat --json: stable object with the documented keys.

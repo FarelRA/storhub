@@ -55,7 +55,7 @@ func stubServeSeams(t *testing.T) *recordingMount {
 		newRESTHandlerFn = oldHandler
 		restListenAndServeFn = oldListen
 	})
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	mount := newRecordingMount()

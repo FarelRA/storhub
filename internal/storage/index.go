@@ -28,14 +28,14 @@ func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byt
 		return nil, "", false, err
 	}
 	if repo := h.getGitRepo(project); repo != nil {
-		if d, rerr := repo.readFileHead(ctx, indexFilePath); rerr == nil {
-			return d, repo.headCommitSHA(), true, nil
+		if d, s, rerr := readIndexHeadGit(ctx, repo, indexFilePath); rerr == nil {
+			return d, s, true, nil
 		} else if !isMetadataNotFound(rerr) {
 			return nil, "", false, rerr
 		}
-		d, rerr := repo.readFileHead(ctx, metadataFilePath)
+		d, s, rerr := readIndexHeadGit(ctx, repo, metadataFilePath)
 		if rerr == nil {
-			return d, repo.headCommitSHA(), true, nil
+			return d, s, true, nil
 		}
 		if isMetadataNotFound(rerr) {
 			return nil, "", false, nil
@@ -59,6 +59,32 @@ func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byt
 		return nil, "", false, nil
 	}
 	return nil, "", false, rerr
+}
+
+// readIndexHeadGit reads one index document from the git mirror, pairing the
+// content with the HEAD commit atomically. readFileHead syncs and reads
+// under r.mu, but a concurrent fetchObject sync can advance HEAD before a
+// separate headCommitSHA call, pairing content at commit N with token N+1 -
+// the next CAS would then pass its pre-check while the tree was built from
+// N, silently overwriting N+1. Re-reading the file AT the returned sha makes
+// (data, sha) a consistent pair: readFileRef resolves the sha under r.mu, so
+// the bytes are always the bytes of the commit the token names. If HEAD
+// moved between the reads, the pinned read simply returns the newer commit's
+// content; if the path cannot be resolved at that sha, fall back to the
+// original pairing (best effort, matching the pre-fix behavior).
+func readIndexHeadGit(ctx context.Context, repo *gitRepo, path string) ([]byte, string, error) {
+	d, err := repo.readFileHead(ctx, path)
+	if err != nil {
+		return nil, "", err
+	}
+	sha := repo.headCommitSHA()
+	if sha == "" {
+		return d, "", nil
+	}
+	if pinned, perr := repo.readFileRef(ctx, sha, path); perr == nil {
+		return pinned, sha, nil
+	}
+	return d, sha, nil
 }
 
 // loadIndexTree materializes a flat RepoMetadata from an index document,
@@ -147,8 +173,25 @@ func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.R
 	if merr != nil {
 		return "", "", prevObjectCount, merr
 	}
+	// The manifest itself is a contents-API document too: a
+	// pathological bucket list can push it past the limit even when every
+	// object fits. Surfacing that as an oversizeError arms the size-ceiling marker
+	// instead of livelocking the retry loop on a bare 422.
+	if err := checkManifestSize(mb); err != nil {
+		return "", "", objectCount, err
+	}
 	commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, indexFilePath, mb, prevSHA, message)
 	return commitSHA, contentSHA, objectCount, err
+}
+
+// checkManifestSize bounds the serialized manifest against the contents-API
+// limit. Kept separate so the ceiling is testable without building a
+// pathologically large bucket list.
+func checkManifestSize(mb []byte) error {
+	if len(mb) > maxMetadataBytes {
+		return &oversizeError{size: len(mb), limit: maxMetadataBytes}
+	}
+	return nil
 }
 
 func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, res *meta.TreeResult, objectCount uint64) *meta.Manifest {
@@ -185,7 +228,7 @@ func (h *StorHub) cacheObjects(project string, objects map[string][]byte) {
 }
 
 // oversizeError marks a commit whose single index object breached the
-// contents-API limit so the commit loop can arm the D4 admission marker
+// contents-API limit so the commit loop can arm the size-ceiling admission marker
 // without string matching.
 type oversizeError struct {
 	size  int

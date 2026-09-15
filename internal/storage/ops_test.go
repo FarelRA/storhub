@@ -100,6 +100,104 @@ func TestOpStackRenameChain(t *testing.T) {
 	}
 }
 
+// TestOpStackSnapshotNotAliasedByRenameCoalesce pins the snapshot-aliasing contract: snapshot() hands an
+// in-flight commit a copy that must never observe later coalescing. The
+// rename-chain merge used to write Paths[1] through the shared backing array,
+// so a commit mid-flight would publish A->C after having announced A->B (and
+// rebase onto the wrong target).
+func TestOpStackSnapshotNotAliasedByRenameCoalesce(t *testing.T) {
+	stack := &opStack{}
+	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
+	stack.append(Op{
+		Type: OpRename, Paths: []string{"a.txt", "b.txt"}, Cause: "mv",
+		Timestamp: 100, File: &file, Chunks: map[int64]ChunkInfo{},
+	})
+	snap := stack.snapshot()
+	if len(snap) != 1 || snap[0].Paths[1] != "b.txt" {
+		t.Fatalf("snapshot precondition broken: %+v", snap)
+	}
+	// Coalesce B->C into the (still in-flight) A->B.
+	stack.append(Op{
+		Type: OpRename, Paths: []string{"b.txt", "c.txt"}, Cause: "mv",
+		Timestamp: 200, File: &file, Chunks: map[int64]ChunkInfo{},
+	})
+	if len(stack.ops) != 1 || stack.ops[0].Paths[1] != "c.txt" {
+		t.Fatalf("expected live stack to coalesce to a.txt->c.txt, got %+v", stack.ops)
+	}
+	if snap[0].Paths[1] != "b.txt" {
+		t.Fatalf("snapshot aliased: in-flight commit now reads %v, want [a.txt b.txt]", snap[0].Paths)
+	}
+}
+
+// TestOpStackRenameChainAcrossSnapshotStaysSplit pins the snapshot-boundary rule: a rename whose
+// predecessor is inside the in-flight commit snapshot must NOT collapse into
+// it. The commit publishes A->B; a merged A->C in the surviving stack would
+// replay as "remove A (absent), write C" and leave B as a phantom duplicate.
+func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
+	stack := &opStack{}
+	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
+	stack.append(Op{
+		Type: OpRename, Paths: []string{"a.txt", "b.txt"}, Cause: "mv",
+		Timestamp: 100, File: &file, Chunks: map[int64]ChunkInfo{},
+	})
+	stack.noteSnapshot(stack.maxSeq()) // commit snapshots [A->B] and publishes it
+
+	stack.append(Op{
+		Type: OpRename, Paths: []string{"b.txt", "c.txt"}, Cause: "mv",
+		Timestamp: 200, File: &file, Chunks: map[int64]ChunkInfo{},
+	})
+	if len(stack.ops) != 2 {
+		t.Fatalf("expected the chain to stay split across the snapshot boundary, got %+v", stack.ops)
+	}
+	if stack.ops[0].Paths[1] != "b.txt" || stack.ops[1].Paths[0] != "b.txt" || stack.ops[1].Paths[1] != "c.txt" {
+		t.Fatalf("expected [a->b, b->c], got %+v", stack.ops)
+	}
+
+	// Replay onto the committed tree (file at B) must end at C with no B.
+	meta := newTestMeta("p")
+	meta.UpsertFile("b.txt", file, 100)
+	if err := applyOps(meta, stack.ops); err != nil {
+		t.Fatalf("applyOps: %v", err)
+	}
+	if meta.FindFile("b.txt") != nil {
+		t.Fatal("phantom intermediate path b.txt survived replay")
+	}
+	if meta.FindFile("c.txt") == nil {
+		t.Fatal("expected final path c.txt after replay")
+	}
+}
+
+// TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit pins the snapshot boundary
+// for the rename-then-delete collapse: with A->B in flight, deleting B must
+// survive as "delete B" (the next replay removes the committed B), not
+// collapse to "delete A" (a no-op that strands B).
+func TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit(t *testing.T) {
+	stack := &opStack{}
+	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
+	stack.append(Op{
+		Type: OpRename, Paths: []string{"a.txt", "b.txt"}, Cause: "mv",
+		Timestamp: 100, File: &file, Chunks: map[int64]ChunkInfo{},
+	})
+	stack.noteSnapshot(stack.maxSeq())
+
+	stack.append(Op{Type: OpDeleteFile, Paths: []string{"b.txt"}, Cause: "unlink", Timestamp: 200})
+	if len(stack.ops) != 2 {
+		t.Fatalf("expected delete to stay separate across the snapshot boundary, got %+v", stack.ops)
+	}
+	if stack.ops[1].Type != OpDeleteFile || stack.ops[1].Paths[0] != "b.txt" {
+		t.Fatalf("expected del b.txt, got %+v", stack.ops[1])
+	}
+
+	meta := newTestMeta("p")
+	meta.UpsertFile("b.txt", file, 100)
+	if err := applyOps(meta, stack.ops); err != nil {
+		t.Fatalf("applyOps: %v", err)
+	}
+	if meta.FindFile("b.txt") != nil {
+		t.Fatal("expected committed b.txt to be deleted by the surviving op")
+	}
+}
+
 func TestOpStackRenameThenDeleteTarget(t *testing.T) {
 	stack := &opStack{}
 

@@ -1,7 +1,9 @@
 package fusefs
 
-// Regression tests for FUSE leftovers C3, C4, C7, C8, C9, C10, C11.
-// C2 (commit-on-deleted returns 0) is pinned POSIX behavior and untouched.
+// Regression tests for FUSE recovery behaviors: flush writeback, commit
+// crash ordering, O_TRUNC and read serialization, cache invalidation,
+// errno mapping, and crash-safe quarantine.
+// Commit-on-deleted returning 0 is pinned POSIX behavior and untouched.
 
 import (
 	"context"
@@ -19,7 +21,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// C3: Flush must push dirty overlay data (writeback cache is enabled), not
+// Flush must push dirty overlay data (writeback cache is enabled), not
 // return success while dropping bytes on the floor.
 func TestRecoveryFlushCommitsDirtyOverlay(t *testing.T) {
 	var replaceCalls int
@@ -70,7 +72,7 @@ func TestRecoveryFlushCommitsDirtyOverlay(t *testing.T) {
 	}
 }
 
-// C3: Flush must surface backend failures instead of swallowing them.
+// Flush must surface backend failures instead of swallowing them.
 func TestRecoveryFlushReportsCommitFailure(t *testing.T) {
 	hub := &stubHub{
 		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
@@ -95,7 +97,7 @@ func TestRecoveryFlushReportsCommitFailure(t *testing.T) {
 	_ = h.Release(context.Background())
 }
 
-// C4: a commit is not complete until the size is reconciled. If the
+// A commit is not complete until the size is reconciled. If the
 // post-patch truncate fails, the dirty ranges must stay dirty so the retry
 // replays patch+truncate instead of declaring victory on half-applied state.
 func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
@@ -173,7 +175,7 @@ func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
 	}
 }
 
-// C4: data operations must land before the metadata patch in every commit
+// Data operations must land before the metadata patch in every commit
 // path, so a crash can never leave metadata pointing at data that never
 // arrived.
 func TestRecoveryCommitOrdersDataBeforeMetadata(t *testing.T) {
@@ -232,7 +234,7 @@ func TestRecoveryCommitOrdersDataBeforeMetadata(t *testing.T) {
 	}
 }
 
-// C7: O_TRUNC must serialize on the inode operation lock, not slip in
+// O_TRUNC must serialize on the inode operation lock, not slip in
 // beside an in-flight commit that already captured its plan.
 func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
@@ -277,7 +279,7 @@ func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
 	}
 }
 
-// C8: reads against a committing inode must serialize on the operation
+// Reads against a committing inode must serialize on the operation
 // lock; otherwise a read straddling the commit's unlocked network window
 // observes half-old, half-new state.
 func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
@@ -322,7 +324,7 @@ func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
 	}
 }
 
-// C9: every mutation must invalidate the kernel's entry/attr caches,
+// Every mutation must invalidate the kernel's entry/attr caches,
 // otherwise the 60s timeouts serve stale metadata for a full minute.
 func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
 	now := int64(77)
@@ -404,9 +406,11 @@ func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
 	}
 }
 
-// C10: errno mapping must not leak raw ECANCELED to the kernel, must
+// Errno mapping must not leak raw ECANCELED to the kernel, must
 // recognize cancellations that lost their error chain, and must report
-// structural corruption as EUCLEAN.
+// structural corruption as EUCLEAN (via the build-tagged
+// errCorruptedErrno constant, so this file also compiles under
+// GOOS=darwin where syscall.EUCLEAN does not exist).
 func TestRecoveryErrnoMappingGaps(t *testing.T) {
 	cases := []struct {
 		name string
@@ -419,8 +423,8 @@ func TestRecoveryErrnoMappingGaps(t *testing.T) {
 		{"ecanceled-raw", syscall.ECANCELED, syscall.EINTR},
 		{"canceled-unwrapped", errors.New("download: context canceled"), syscall.EINTR},
 		{"deadline-unwrapped", errors.New("rpc: deadline exceeded"), syscall.ETIMEDOUT},
-		{"corrupted", shfs.Corrupted("repo/meta"), syscall.EUCLEAN},
-		{"corrupted-wrapped", errors.Join(errors.New("load"), shfs.Corrupted("x")), syscall.EUCLEAN},
+		{"corrupted", shfs.Corrupted("repo/meta"), errCorruptedErrno},
+		{"corrupted-wrapped", errors.Join(errors.New("load"), shfs.Corrupted("x")), errCorruptedErrno},
 		{"notfound", shfs.NotFound("a"), syscall.ENOENT},
 		{"unknown", errors.New("boom"), syscall.EIO},
 	}
@@ -431,7 +435,7 @@ func TestRecoveryErrnoMappingGaps(t *testing.T) {
 	}
 }
 
-// C11: quarantine must be crash-safe (fsync + manifest) and the next mount
+// Quarantine must be crash-safe (fsync + manifest) and the next mount
 // must replay the inventory instead of hiding it.
 func TestRecoveryQuarantineWritesManifestAndSurvivesRestart(t *testing.T) {
 	cacheDir := t.TempDir()
@@ -513,7 +517,7 @@ func TestRecoveryQuarantineWritesManifestAndSurvivesRestart(t *testing.T) {
 	}
 }
 
-// C11: stale overlay temps from a crashed mount are quarantined with
+// Stale overlay temps from a crashed mount are quarantined with
 // manifests so nothing is silently lost or untraceable.
 func TestRecoveryStartupSweepWritesManifests(t *testing.T) {
 	cacheDir := t.TempDir()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	gitclient "github.com/go-git/go-git/v6/plumbing/client"
+	gitindex "github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage"
@@ -27,6 +27,7 @@ const defaultBranch = "main"
 type gitRepo struct {
 	dir     string
 	base    string
+	key     string // cache-dir and lock identity (owner-qualified, see gitCacheKey)
 	owner   string
 	project string
 	token   string
@@ -39,15 +40,31 @@ type gitRepo struct {
 }
 
 func newGitRepo(cacheDir, owner, project, token string) *gitRepo {
+	key := gitCacheKey(owner, project)
 	return &gitRepo{
 		// cacheDir is the shared base (~/.cache/storhub/git); each
 		// project gets one lock-protected directory beneath it.
-		dir:     filepath.Join(cacheDir, project),
+		dir:     filepath.Join(cacheDir, key),
 		base:    cacheDir,
+		key:     key,
 		owner:   owner,
 		project: project,
 		token:   token,
 	}
+}
+
+// gitCacheKey is the cache-directory and lock identity for a project.
+// Owner-qualifying it keeps same-named projects from different owners
+// (several tokens sharing one GitCacheDir) from colliding in a single
+// worktree. An unresolved owner (the lazy /user lookup has not run yet)
+// falls back to the bare project name; the gitRepo instance is created
+// once per process and keeps its key, so the two spellings never mix
+// within one mount.
+func gitCacheKey(owner, project string) string {
+	if owner == "" {
+		return project
+	}
+	return owner + "__" + project
 }
 
 // ensure opens or creates the local worktree. Caller must hold r.mu.
@@ -58,21 +75,22 @@ func (r *gitRepo) ensure(ctx context.Context) error {
 	if r.repo != nil {
 		return nil
 	}
-	if _, err := os.Stat(r.dir); err == nil {
-		if pid := projectLockPid(r.base, r.project); pid != 0 && pid != os.Getpid() && pidAlive(pid) {
-			return fmt.Errorf("cache dir %s is held by live process %d", r.dir, pid)
-		}
-		if projectLockPid(r.base, r.project) != os.Getpid() {
-			if err := os.RemoveAll(r.dir); err != nil {
-				return fmt.Errorf("reclaim stale cache dir %s: %w", r.dir, err)
-			}
+	// Claim BEFORE touching the directory. The old check-then-claim let
+	// two processes both pass the pidAlive check and both reclaim the same
+	// cache dir; a live foreign holder now refuses us up front and only
+	// the claimant may wipe or reuse the tree. (claimProjectLock itself
+	// still needs O_EXCL to close the remaining window - owned elsewhere.)
+	heldByUs := projectLockPid(r.base, r.key) == os.Getpid()
+	if err := claimProjectLock(r.base, r.key); err != nil {
+		return err
+	}
+	if _, err := os.Stat(r.dir); err == nil && !heldByUs {
+		if err := os.RemoveAll(r.dir); err != nil {
+			return fmt.Errorf("reclaim stale cache dir %s: %w", r.dir, err)
 		}
 	}
 	if err := os.MkdirAll(r.dir, 0o755); err != nil {
 		return wrapNoSpace(filepath.Dir(r.dir), fmt.Errorf("mkdir %s: %w", r.dir, err))
-	}
-	if err := claimProjectLock(r.base, r.project); err != nil {
-		return err
 	}
 	repo, err := git.PlainOpen(r.dir)
 	if err == nil {
@@ -115,13 +133,13 @@ func (r *gitRepo) release(remove bool) error {
 	r.repo = nil
 	if remove {
 		if err := os.RemoveAll(r.dir); err != nil {
-			releaseProjectLock(r.base, r.project)
+			releaseProjectLock(r.base, r.key)
 			return fmt.Errorf("remove git cache dir %s: %w", r.dir, err)
 		}
-		releaseProjectLock(r.base, r.project)
+		releaseProjectLock(r.base, r.key)
 		return nil
 	}
-	releaseProjectLock(r.base, r.project)
+	releaseProjectLock(r.base, r.key)
 	return nil
 }
 
@@ -160,6 +178,12 @@ func (r *gitRepo) readFileRef(ctx context.Context, ref, path string) ([]byte, er
 	if err := r.ensure(ctx); err != nil {
 		return nil, err
 	}
+	// Sync first: without a fetch, a commit created by another client
+	// after our last sync is unresolvable here while the REST path would
+	// serve it - the backends must agree on what a ref resolves to.
+	if err := r.sync(ctx); err != nil {
+		return nil, err
+	}
 	hash, err := r.resolveRevision(ref)
 	if err != nil {
 		return nil, err
@@ -183,7 +207,12 @@ func (r *gitRepo) readFileRef(ctx context.Context, ref, path string) ([]byte, er
 	return []byte(content), nil
 }
 
-// readFileHead reads the file from the latest HEAD, syncing first.
+// readFileHead reads the file from the latest HEAD, syncing first. The read
+// goes through the HEAD TREE, not the worktree filesystem: go-git's
+// HardReset never deletes untracked files, so a file left behind by a
+// write that was canceled between os.WriteFile and Commit would otherwise
+// be served as HEAD truth - the hub would operate on state that was never
+// pushed.
 func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -193,20 +222,7 @@ func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error)
 	if err := r.sync(ctx); err != nil {
 		return nil, err
 	}
-	w, err := r.repo.Worktree()
-	if err != nil {
-		return nil, fmt.Errorf("worktree: %w", err)
-	}
-	content, err := w.Filesystem().Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer func() { _ = content.Close() }()
-	data, err := io.ReadAll(content)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	return data, nil
+	return r.readFileContentsNoLock(ctx, path)
 }
 
 // writeCommitPush writes a file, commits, and pushes. Returns (commitSHA, contentSHA, error).
@@ -221,6 +237,14 @@ func (r *gitRepo) writeCommitPush(ctx context.Context, path string, content []by
 // Regardless of the pre-check, the push carries a force-with-lease on the
 // post-sync HEAD so a writer racing the sync→push window is rejected rather
 // than silently won or lost against.
+//
+// Token-type note: both commit functions return the HEAD COMMIT
+// sha as the content token, not the blob sha the REST contents path
+// returns. That is deliberate: the git-path CAS pre-check compares
+// expectedOld against HEAD, so only a commit-pairing token is
+// self-consistent for this backend. A backend toggle surfaces the foreign
+// token type as a 409 and the commit loop's rebase re-reads the correct
+// type - noisy, never silent.
 func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content []byte, message, expectedOld string) (string, string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -432,9 +456,11 @@ func (r *gitRepo) deleteCommitPushCAS(ctx context.Context, paths []string, messa
 			return "", fmt.Errorf("remove %s: %w", path, err)
 		}
 		if _, err := w.Remove(path); err != nil {
-			// go-git reports an untracked removal as "not found"; that is
-			// benign here (the file was already absent from the index).
-			if !strings.Contains(err.Error(), "not found") {
+			// go-git reports an untracked removal with the index's
+			// ErrEntryNotFound sentinel; that is benign here (the path was
+			// already absent from the index). Match the sentinel, never
+			// error prose - "not found" also appears in unrelated failures.
+			if !errors.Is(err, gitindex.ErrEntryNotFound) {
 				return "", fmt.Errorf("git rm %s: %w", path, err)
 			}
 		}
@@ -471,13 +497,19 @@ func (r *gitRepo) headHashNoLock() (plumbing.Hash, error) {
 
 // casConflict maps a rejected lease/non-fast-forward push to a 409 conflict
 // so git-path CAS failures surface exactly like the REST path's stale-SHA
-// rejection; any other push error passes through untouched.
+// rejection; any other push error passes through untouched. The match set
+// is go-git's actual lease-failure vocabulary ("non-fast-forward update:
+// <ref>" from the lease check, "stale info" from server-side rejection):
+// the bare "lease" substring used to live here too and matched "release"
+// in remote-hook prose and transport errors quoting releases/ URLs,
+// misclassifying hard failures as conflicts the commit loop then rebased
+// forever instead of surfacing.
 func casConflict(err error, base plumbing.Hash) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "stale info") || strings.Contains(msg, "lease") {
+	if strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "stale info") {
 		return &ghapi.APIError{
 			StatusCode: http.StatusConflict,
 			Message:    fmt.Sprintf("concurrent metadata write (HEAD moved past %s): %s", shortSHA(base.String()), msg),
@@ -510,11 +542,13 @@ func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataR
 	defer iter.Close()
 	var revisions []MetadataRevision
 	if err := iter.ForEach(func(c *object.Commit) error {
-		tree, err := c.Tree()
+		touched, err := commitTouchesPath(c, path)
 		if err != nil {
-			return nil
+			// A corrupt commit/tree object must fail the listing loudly,
+			// not silently omit a revision (no silent error swallowing).
+			return err
 		}
-		if _, err := tree.File(path); err != nil {
+		if !touched {
 			return nil
 		}
 		revisions = append(revisions, MetadataRevision{
@@ -527,6 +561,40 @@ func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataR
 		return nil, fmt.Errorf("iterate commits: %w", err)
 	}
 	return revisions, nil
+}
+
+// commitTouchesPath reports whether c changed path relative to its parents.
+// REST's commits?path= lists only commits that TOUCH the path; a
+// tree-containment test would also count every later commit that merely
+// still carries it, so revision lists diverged by backend.
+// A root commit touches every path it carries; a commit is untouched when
+// any parent's tree holds the same blob (git's TREESAME rule).
+func commitTouchesPath(c *object.Commit, path string) (bool, error) {
+	tree, err := c.Tree()
+	if err != nil {
+		return false, err
+	}
+	entry, err := tree.FindEntry(path)
+	if err != nil {
+		return false, nil // path absent at c: it cannot have touched it
+	}
+	touched := true
+	parents := c.Parents()
+	defer parents.Close()
+	if err := parents.ForEach(func(p *object.Commit) error {
+		ptree, err := p.Tree()
+		if err != nil {
+			return nil // unreadable parent: treat as differing
+		}
+		pentry, err := ptree.FindEntry(path)
+		if err == nil && pentry.Hash == entry.Hash {
+			touched = false // TREESAME to this parent
+		}
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return touched, nil
 }
 
 // squashHistory creates a single orphan commit with the current metadata content and force pushes it.
@@ -763,8 +831,14 @@ func (r *gitRepo) resolveRevision(ref string) (plumbing.Hash, error) {
 	return plumbing.ZeroHash, fmt.Errorf("cannot resolve %q", ref)
 }
 
-// headCommitSHA returns the SHA of the HEAD commit, or empty string if not available.
+// headCommitSHA returns the SHA of the HEAD commit, or empty string if not
+// available. It takes r.mu: every caller (index/prune/commit loops) runs
+// off-lock while writeCommitPushCAS, squashTreeCAS and release mutate
+// r.repo and its refs under the lock - an unlocked read raced release(true)
+// into a nil-deref and could pair a CAS token with a mid-commit HEAD.
 func (r *gitRepo) headCommitSHA() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.repo == nil {
 		return ""
 	}
@@ -783,6 +857,13 @@ func storeBlob(s storage.Storer, data []byte) (plumbing.Hash, error) {
 		return plumbing.ZeroHash, err
 	}
 	if _, err := w.Write(data); err != nil {
+		_ = w.Close()
+		return plumbing.ZeroHash, err
+	}
+	// The writer must be closed before the object is stored: some storers
+	// only flush (and some only compute size) on Close, so skipping it
+	// works with the memory storer and breaks on others.
+	if err := w.Close(); err != nil {
 		return plumbing.ZeroHash, err
 	}
 	return s.SetEncodedObject(o)

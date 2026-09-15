@@ -23,7 +23,7 @@ type showcaseHub interface {
 	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
-	RenameContext(ctx context.Context, project, oldPath, newPath string) error
+	RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...storhub.MutateOption) error
 	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error)
 	ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
@@ -39,7 +39,7 @@ type showcaseHub interface {
 	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
 	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
 	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
-	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error
+	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...storhub.XAttrMode) error
 	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
 	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)
 	RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error
@@ -143,7 +143,7 @@ func runShowcase(ctx context.Context, hub showcaseHub, workspace, project string
 	seedV1 := strings.Join([]string{
 		"StorHub guide",
 		"- immutable chunked storage",
-		"- metadata catalog in .storhub/metadata.json",
+		"- split v5 index in .storhub/index.json",
 		"- optional FUSE mounting",
 	}, "\n") + "\n"
 	seedV2 := strings.Replace(seedV1, "optional FUSE mounting", "adaptive FUSE writeback", 1)

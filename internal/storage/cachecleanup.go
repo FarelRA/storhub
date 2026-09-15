@@ -55,17 +55,57 @@ func projectLockPid(base, project string) int {
 }
 
 // claimProjectLock records this process as the owner of a project cache
-// directory. A directory held by a live foreign process refuses claims,
-// which keeps concurrent mounts from corrupting each other's worktree.
+// directory. The create itself is the mutual-exclusion point (O_EXCL), so two
+// processes racing to claim the same directory can never both win: the loser
+// sees EEXIST and then honors whoever holds the lock. A directory held by a
+// live foreign process refuses claims, which keeps concurrent mounts from
+// corrupting each other's worktree; only a dead or stale lock may be
+// reclaimed, and the reclaim is re-contested with O_EXCL so a racing
+// reclaimer loses cleanly.
 func claimProjectLock(base, project string) error {
 	lockPath := projectLockPath(base, project)
-	if existing := projectLockPid(base, project); existing != 0 && existing != os.Getpid() && pidAlive(existing) {
-		return fmt.Errorf("cache dir for %s is held by live process %d", project, existing)
-	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return fmt.Errorf("create locks dir: %w", err)
 	}
-	return os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())), 0o644)
+	pid := os.Getpid()
+	if err := writeLockExclusive(lockPath, pid); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	existing := projectLockPid(base, project)
+	if existing == pid {
+		// We already hold it (e.g. a re-entrant ensure on the same mount):
+		// refresh the marker and succeed without disturbing the worktree.
+		return os.WriteFile(lockPath, []byte(strconv.Itoa(pid)), 0o644)
+	}
+	if existing != 0 && pidAlive(existing) {
+		return fmt.Errorf("cache dir for %s is held by live process %d", project, existing)
+	}
+	// Dead or unreadable lock: reclaim, re-contested so a concurrent
+	// reclaimer cannot both proceed.
+	_ = os.Remove(lockPath)
+	if err := writeLockExclusive(lockPath, pid); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			if holder := projectLockPid(base, project); holder != 0 && holder != pid && pidAlive(holder) {
+				return fmt.Errorf("cache dir for %s is held by live process %d", project, holder)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// writeLockExclusive creates the lock file with O_CREATE|O_EXCL and writes the
+// pid, returning os.ErrExist when another process already holds it.
+func writeLockExclusive(path string, pid int) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.WriteString(strconv.Itoa(pid))
+	return err
 }
 
 // releaseProjectLock drops ownership without deleting anything.
@@ -132,10 +172,48 @@ func reapOrphaned(logger *slog.Logger, bases ...string) int {
 }
 
 // ReapOrphanedCaches reclaims storhub cache leftovers in the standard
-// locations: the git base and the legacy temp-directory pattern. Used by
-// hub startup and by `storhub cache prune`.
+// locations: the git base, the object cache base, and the legacy
+// temp-directory pattern. Used by hub startup and by `storhub cache prune`.
 func ReapOrphanedCaches(logger *slog.Logger) int {
-	return reapOrphaned(logger, storcfg.DefaultGitCacheBase(), os.TempDir())
+	gitBase := storcfg.DefaultGitCacheBase()
+	reaped := reapOrphaned(logger, gitBase, os.TempDir())
+	reaped += reapOrphanedObjectCaches(logger, storcfg.DefaultObjectCacheBase(), gitBase)
+	return reaped
+}
+
+// reapOrphanedObjectCaches sweeps CacheBase()/objects/<project> for projects
+// deleted (or never mounted again) while their cache dir lingered. Object
+// caches carry no lock of their own, so liveness is judged by the git
+// worktree lock in lockBase: a git-backed mount is spared outright. A
+// REST-only mount has no lock and may lose its cached bytes here — that is
+// a performance event, never a correctness one: the cache is verify-on-read
+// and self-healing, and every miss simply refetches from the repo.
+func reapOrphanedObjectCaches(logger *slog.Logger, objectsBase, lockBase string) int {
+	entries, err := os.ReadDir(objectsBase)
+	if err != nil {
+		return 0
+	}
+	reaped := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == locksDirName {
+			continue
+		}
+		dir := filepath.Join(objectsBase, entry.Name())
+		if !projectDirIsOrphan(lockBase, entry.Name()) {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			if logger != nil {
+				logger.Warn("cache reaper could not remove orphaned object cache", "dir", dir, "err", err)
+			}
+			continue
+		}
+		reaped++
+		if logger != nil {
+			logger.Info("reaped orphaned object cache", "dir", dir)
+		}
+	}
+	return reaped
 }
 
 // noSpaceError reports an out-of-space failure with the directory that

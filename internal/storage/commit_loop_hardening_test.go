@@ -9,13 +9,13 @@ import (
 	ghapi "github.com/FarelRA/storhub/internal/github"
 )
 
-// Commit-loop hardening regressions (D4-D9, B3, B7, B8).
+// Commit-loop hardening regressions.
 //
-// Each test below fails on the pre-fix code (RED) and passes after the fix
-// (GREEN), except TestHardeningShutdownCommitsDirtyWithoutFlush which locks
-// in pre-existing drain behavior that D5's fix must preserve.
+// Each test below fails on the pre-fix code and passes after the fix, except
+// TestHardeningShutdownCommitsDirtyWithoutFlush which locks in pre-existing
+// drain behavior that the shutdown fix must preserve.
 
-// D6: a rollback snapshot that references a chunk ID absent from the chunk
+// A rollback snapshot that references a chunk ID absent from the chunk
 // catalog must be rejected, not silently skipped.
 func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 	ctx := context.Background()
@@ -36,13 +36,13 @@ func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 		Chunks: []int64{424242},
 	}
 	if err := hub.validateMetadataSnapshot(ctx, "project-snap-missing", meta); err == nil {
-		t.Fatal("RED: snapshot referencing missing chunk 424242 was accepted")
+		t.Fatal("a snapshot referencing a missing chunk must be rejected")
 	} else if !strings.Contains(err.Error(), "424242") {
 		t.Fatalf("unexpected error (want missing-chunk detail): %v", err)
 	}
 }
 
-// D6 TOCTOU: an asset deleted between validation and commit must fail the
+// TOCTOU: an asset deleted between validation and commit must fail the
 // rollback. The intercept deletes the asset inside the commit PUT itself,
 // i.e. after validateMetadataSnapshot already passed.
 func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
@@ -77,15 +77,15 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	})
 	err = hub.RollbackMetadataContext(ctx, "project-snap-toctou", revisions[0].CommitSHA)
 	if err == nil {
-		t.Fatal("RED: rollback committed after its asset was deleted mid-commit")
+		t.Fatal("rollback must fail after its asset is deleted mid-commit")
 	}
 	if !strings.Contains(err.Error(), "missing asset") {
 		t.Fatalf("unexpected error (want missing-asset recheck): %v", err)
 	}
 }
 
-// D7: a failed commit must not mutate shared state. The oversize payload is
-// staged by direct (test-only) surgery to bypass D4 admission; LastMod is
+// A failed commit must not mutate shared state. The oversize payload is
+// staged by direct (test-only) surgery to bypass admission; LastMod is
 // the canary: pre-fix Normalize/LastMod/RecomputeStats run in place before
 // the size check. 65000 chunked files serialize to ~8.7MB, safely past the
 // 8MB ceiling (60000 only reaches ~8.0MB and never trips it).
@@ -114,14 +114,14 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	dirty := pm.dirty
 	pm.mu.RUnlock()
 	if lastMod != 12345 {
-		t.Fatalf("RED: failed commit mutated shared LastMod: got %d, want 12345", lastMod)
+		t.Fatalf("failed commit must not mutate shared LastMod: got %d, want 12345", lastMod)
 	}
 	if !dirty {
 		t.Fatal("failed commit must retain dirty state for retry")
 	}
 }
 
-// D8: FlushMetadata must run commitLoop-style conflict recovery: after a
+// FlushMetadata must run commitLoop-style conflict recovery: after a
 // 409 the local cache must converge on remote HEAD instead of staying stale.
 func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 	ctx := context.Background()
@@ -151,7 +151,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 		t.Fatalf("hubA head: %v", err)
 	}
 	// HubB mutates against a stale SHA without poking its commit loop, so
-	// only FlushMetadata can observe the conflict. Phase B contract: the
+	// only FlushMetadata can observe the conflict. The contract is that the
 	// flush REBASES the pending op onto upstream instead of discarding it,
 	// so the flush succeeds and the mutation survives alongside hubA's.
 	pmB := hubB.getOrCreateProjectMeta(proj)
@@ -181,7 +181,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 	}
 }
 
-// D9: branch names are not revisions. 'main' must be rejected even though
+// Branch names are not revisions. 'main' must be rejected even though
 // the contents API would otherwise resolve it to HEAD content.
 func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 	ctx := context.Background()
@@ -200,7 +200,7 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 	}
 	err = hub.RollbackMetadataContext(ctx, "project-rollback-rev", "main")
 	if err == nil {
-		t.Fatal("RED: rollback accepted branch name 'main' as a revision")
+		t.Fatal("rollback must reject a branch name as a revision")
 	}
 	if !strings.Contains(err.Error(), "main") {
 		t.Fatalf("error should name the rejected revision: %v", err)
@@ -211,8 +211,8 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 	}
 }
 
-// D5 lock-in: Shutdown drains dirty metadata without an explicit flush.
-// Must keep passing after the D5 sweep lands.
+// Shutdown drains dirty metadata without an explicit flush.
+// Must keep passing after the shutdown sweep lands.
 func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
@@ -235,7 +235,7 @@ func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 	}
 }
 
-// D5 gap: a mutation that lands after its commit loop already exited (its
+// A mutation that lands after its commit loop already exited (its
 // trigger poke has no listener) must still converge on a later Shutdown.
 func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 	ctx := context.Background()
@@ -268,11 +268,11 @@ func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 		t.Fatalf("fresh load: %v", err)
 	}
 	if fresh.FindFile("d/stranded.txt") == nil {
-		t.Fatal("RED: mutation stranded after its commit loop exited was lost by Shutdown")
+		t.Fatal("Shutdown must commit a mutation stranded after its commit loop exited")
 	}
 }
 
-// B3: patch builders must return the release that actually holds the new
+// Patch builders must return the release that actually holds the new
 // chunks, not the (now full) release they started from.
 func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	ctx := context.Background()
@@ -300,9 +300,9 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 		t.Fatalf("buildPatchedChunks: %v", err)
 	}
 	if actualTag == initialTag {
-		t.Fatalf("RED: builder returned stale initial tag %q after rotation", initialTag)
+		t.Fatalf("builder must not return the stale initial tag %q after rotation", initialTag)
 	}
-	// B3 contract: the tag must be where the NEW bytes landed, and the
+	// The tag must be where the NEW bytes landed, and the
 	// inserted chunk (offset 0, 1 byte) must carry it. Spliced views of
 	// the old chunks legitimately keep their original release - retagging
 	// them would lie about which asset holds their bytes.
@@ -310,7 +310,7 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	for _, c := range newChunks {
 		if c.Offset == 0 && c.Size == 1 {
 			if c.Release != actualTag {
-				t.Fatalf("RED: inserted chunk landed on %q, builder reported %q", c.Release, actualTag)
+				t.Fatalf("inserted chunk landed on %q but builder reported %q", c.Release, actualTag)
 			}
 			inserted++
 		}
@@ -320,7 +320,7 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	}
 }
 
-// B7: the release cache must deep-copy: mutating a fetched slice must not
+// The release cache must deep-copy: mutating a fetched slice must not
 // corrupt the cache.
 func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
 	ctx := context.Background()
@@ -342,11 +342,11 @@ func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
 		t.Fatalf("expected cached release on refetch, got %+v %v", again, ok)
 	}
 	if again[0].Assets[0].ID != wantID {
-		t.Fatalf("RED: release cache aliased caller-mutated assets (got %d, want %d)", again[0].Assets[0].ID, wantID)
+		t.Fatalf("release cache must not alias caller-mutable assets (got %d, want %d)", again[0].Assets[0].ID, wantID)
 	}
 }
 
-// B8: -1 placeholder bumps must not skew picker math: once placeholders are
+// -1 placeholder bumps must not skew picker math: once placeholders are
 // present the true count has to be resolved from the server.
 func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	ctx := context.Background()
@@ -386,11 +386,11 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 		t.Fatalf("getOrCreate: %v", err)
 	}
 	if tag == fullRelease {
-		t.Fatalf("RED: picker trusted placeholder-skewed embedded count and reused server-full %s", fullRelease)
+		t.Fatalf("picker must not trust a placeholder-skewed embedded count or reuse server-full %s", fullRelease)
 	}
 }
 
-// D4 (8MB CEILING — fail fast, never accept-then-never-commit): an
+// 8MB ceiling — fail fast, never accept-then-never-commit. An
 // UpdateRepoMetadataContext mutation whose result exceeds maxMetadataBytes
 // must be rejected at admission with a clear error, leaving shared state
 // untouched and the project still usable. 70000 plain files serialize to
@@ -406,7 +406,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 		return nil
 	}, "bulk fill past ceiling")
 	if err == nil || !strings.Contains(err.Error(), "metadata too large") {
-		t.Fatalf("RED: oversize mutation admitted (want fail-fast 'metadata too large', got %v)", err)
+		t.Fatalf("oversize mutation must be rejected at admission (want fail-fast 'metadata too large', got %v)", err)
 	}
 	if !strings.Contains(err.Error(), "PurgeUntracked") {
 		t.Fatalf("rejection must point at remediation (PurgeUntracked): %v", err)

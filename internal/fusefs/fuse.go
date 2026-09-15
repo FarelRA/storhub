@@ -90,7 +90,7 @@ type Filesystem struct {
 	closing   bool
 	unmounted bool
 	// invalCount counts kernel-cache invalidation requests issued by
-	// mutation paths (C9). Production mounts observe them as Notify
+	// mutation paths. Production mounts observe them as Notify
 	// calls; tests read them via Invalidations.
 	invalCount atomic.Uint64
 }
@@ -173,6 +173,14 @@ type storhubHandle struct {
 	id    uint64
 	flags uint32
 
+	// openerUID/openerGID record the kernel caller identity captured at
+	// open time (only when the context carried one). Overlay metadata
+	// operations re-validate it so a handle can never be driven by a
+	// different uid than the one that opened it.
+	openerUID uint32
+	openerGID uint32
+	hasOpener bool
+
 	// pinned holds the content identity captured at open time: the file
 	// entry plus the chunk descriptors it referenced. The lazy read
 	// fallback resolves bytes against it, so renames or unlinks after
@@ -202,15 +210,27 @@ type inodeWriteState struct {
 	fs    *Filesystem
 	inode uint64
 
-	opMu              sync.Mutex
-	mu                sync.Mutex
-	temp              *os.File
-	tempPath          string
-	baseTemp          *os.File
-	baseTempPath      string
-	path              string
-	closed            bool
-	deleted           bool
+	opMu         sync.Mutex
+	mu           sync.Mutex
+	temp         *os.File
+	tempPath     string
+	baseTemp     *os.File
+	baseTempPath string
+	path         string
+	closed       bool
+	deleted      bool
+	// openerUID/hasOpener record the identity that first created this
+	// overlay, so a handleless Setattr can tell the single writer's own
+	// truncate from a stranger's: the writer's path-based ftruncate
+	// must still reach the overlay, a non-owner's must fall through to the
+	// DAC-enforcing hub verbs.
+	openerUID uint32
+	hasOpener bool
+	// poisoned marks a quarantined overlay whose bytes were moved to the
+	// recovery directory: the temp no longer holds the data the dirty
+	// ranges claim, so every further write/read/commit must fail EIO
+	// instead of uploading zeros over remote content.
+	poisoned          bool
 	refs              int
 	baseSize          int64
 	logicalSize       int64
@@ -248,7 +268,7 @@ func DefaultOptions() Options {
 		NegativeTimeout:   10 * time.Second,
 		OverlayBufferSize: defaultOverlayBufferSize,
 		ExtraMountOpts:    []string{"noatime"},
-		Debug:             true,
+		Debug:             false,
 	}
 }
 
@@ -295,7 +315,7 @@ type Hub interface {
 	ReadlinkContext(context.Context, string, string) (string, error)
 	LinkContext(context.Context, string, string, string) (*metadata.FileMeta, error)
 	GetXAttrContext(context.Context, string, string, string) ([]byte, error)
-	SetXAttrContext(context.Context, string, string, string, []byte) error
+	SetXAttrContext(context.Context, string, string, string, []byte, ...shfs.XAttrMode) error
 	ListXAttrContext(context.Context, string, string) ([]string, error)
 	RemoveXAttrContext(context.Context, string, string, string) error
 	ApplyMetadataPatchContext(context.Context, string, string, shfs.MetadataPatch) error
@@ -308,7 +328,7 @@ type Hub interface {
 	ReadPinnedFileContext(context.Context, string, *metadata.FileMeta, map[int64]metadata.ChunkInfo, int64, int64) ([]byte, error)
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
-	RenameContext(context.Context, string, string, string) error
+	RenameContext(context.Context, string, string, string, ...shfs.MutateOption) error
 	Now() int64
 	ChunkSize() int64
 }
@@ -388,7 +408,10 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if strings.TrimSpace(cacheDir) == "" {
 		cacheDir = path.Join(storcfg.CacheBase(), "fuse", project)
 	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	// 0700: the overlay temps are 0600, but their names and timestamps in
+	// a world-readable directory would still leak activity; match the
+	// recovery directory's mode.
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create fuse cache dir: %w", err)
 	}
 	// Claim the directory before touching its contents. The sweep below
@@ -408,7 +431,11 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	// preserved by design.
 	// Construction past this point cannot fail, so no failed New leaves a
 	// claim behind; Close releases it.
-	if entries, err := os.ReadDir(cacheDir); err == nil {
+	if entries, err := os.ReadDir(cacheDir); err != nil {
+		// A sweep that could not run must be loud: leftover dirty temps
+		// from a crashed mount stay unreported otherwise.
+		logging.Error(opts.Logger, "startup sweep skipped; cache dir unreadable", "dir", cacheDir, "err", err)
+	} else {
 		for _, entry := range entries {
 			name := entry.Name()
 			if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
@@ -515,7 +542,10 @@ func (s *Filesystem) Close() error {
 	}
 	s.closing = true
 	s.mu.Unlock()
-	_ = s.Unmount()
+	// A failed Unmount must not be swallowed - the mount may still
+	// be live, which is exactly the state the quarantine-on-close path
+	// defends. Data preservation still runs first; the error surfaces afterwards.
+	unmountErr := s.Unmount()
 	s.mu.Lock()
 	handles := make([]*storhubHandle, 0, len(s.handles))
 	for _, handle := range s.handles {
@@ -527,11 +557,15 @@ func (s *Filesystem) Close() error {
 	}
 	s.mu.Unlock()
 	// Preserve uncommitted overlay data before tearing down; deleting it
-	// would silently discard acknowledged writes.
+	// would silently discard acknowledged writes. opMu is taken per state
+	// so a quarantine cannot slip into the network window of an
+	// in-flight commit and nil out its temp mid-flight.
 	for _, writeState := range writeStates {
+		writeState.opMu.Lock()
 		if writeState.hasUncommittedChanges() {
 			writeState.quarantineTempsReason(quarantineReasonClose)
 		}
+		writeState.opMu.Unlock()
 	}
 	for _, handle := range handles {
 		handle.closeTemp()
@@ -546,6 +580,10 @@ func (s *Filesystem) Close() error {
 		s.lockFile = nil
 	}
 	s.debugf("close complete project=%s", s.project)
+	if unmountErr != nil {
+		s.errorf("close: unmount failed project=%s err=%v", s.project, unmountErr)
+		return unmountErr
+	}
 	return nil
 }
 
@@ -821,6 +859,19 @@ func (s *Filesystem) pathForInode(inode uint64) string {
 	return ""
 }
 
+// safePath resolves the node's current path for hub operations. A
+// pathless node is normally the root (inode 1); any other pathless node
+// has been deleted or renamed away, and "" would make every hub call
+// below silently address the root directory. Such nodes report
+// ESTALE instead.
+func (n *storhubNode) safePath() (string, syscall.Errno) {
+	targetPath := n.currentPath()
+	if targetPath == "" && n.inode != 1 {
+		return "", syscall.ESTALE
+	}
+	return targetPath, 0
+}
+
 func (s *Filesystem) writeStateForInode(inode uint64) *inodeWriteState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -903,20 +954,34 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 	for _, handle := range handles {
 		handle.mu.Lock()
 		if handle.path == oldPath {
-			// The path now belongs to a different inode. Detach like an
-			// unlinked-but-open file: reads keep serving the handle's
-			// own snapshot instead of silently switching to the
-			// replacement's content.
-			handle.path = ""
-			handle.deleted = true
+			if newPath != "" {
+				// The inode still has a registered path (a hardlink
+				// survived the unlink, or the rename target's inode kept
+				// another link): follow it instead of detaching, so
+				// writes through open fds land in the surviving name
+				// (POSIX).
+				handle.path = newPath
+			} else {
+				// The path now belongs to a different inode and nothing
+				// references this one anymore. Detach like an
+				// unlinked-but-open file: reads keep serving the handle's
+				// own snapshot instead of silently switching to the
+				// replacement's content.
+				handle.path = ""
+				handle.deleted = true
+			}
 		}
 		handle.mu.Unlock()
 	}
 	if writeState != nil {
 		writeState.mu.Lock()
 		if writeState.path == oldPath {
-			writeState.path = ""
-			writeState.deleted = true
+			if newPath != "" {
+				writeState.path = newPath
+			} else {
+				writeState.path = ""
+				writeState.deleted = true
+			}
 		}
 		writeState.mu.Unlock()
 	}
@@ -1064,21 +1129,34 @@ func (n *storhubNode) currentPath() string {
 	return n.fs.pathForInode(n.inode)
 }
 
+// defaultCallerUmask is applied to creation modes because the FUSE
+// protocol does not transmit the caller's umask. Without it,
+// ApplyCreateMode would be a no-op and `touch` would create 0666
+// (world-writable) files.
+const defaultCallerUmask = 0o022
+
 func (s *Filesystem) callerContext(ctx context.Context) context.Context {
 	ctx = shfs.WithSuppressedAtime(ctx)
 	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
-		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Admin: caller.Uid == 0})
+		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Umask: defaultCallerUmask, Admin: caller.Uid == 0})
 	}
 	return ctx
 }
 
 func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	childPath := path.Join(n.currentPath(), name)
-	n.fs.debugf("lookup path=%s child=%s", n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	childPath := path.Join(parentPath, name)
+	n.fs.debugf("lookup path=%s child=%s", parentPath, name)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		if out != nil {
+		// Only a genuine ENOENT deserves the negative-entry cache:
+		// pinning EACCES/EIO as a cached "does not exist" would hide a
+		// permission or backend problem for the whole timeout window.
+		if out != nil && errnoFromError(err) == syscall.ENOENT {
 			out.SetEntryTimeout(n.fs.opts.NegativeTimeout)
 		}
 		return nil, errnoFromError(err)
@@ -1111,8 +1189,12 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 
 func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	n.fs.debugf("readdir path=%s", n.currentPath())
-	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, n.currentPath())
+	dirPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	n.fs.debugf("readdir path=%s", dirPath)
+	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, dirPath)
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
@@ -1139,8 +1221,12 @@ func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.
 
 func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	n.fs.debugf("getattr path=%s inode=%d", n.currentPath(), n.inode)
-	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	n.fs.debugf("getattr path=%s inode=%d", targetPath, n.inode)
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)
 	}
@@ -1157,10 +1243,15 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 		return errnoFromError(err)
 	}
 	out.Files = uint64(stats.Inodes)
-	out.Bfree = uint64(1 << 30)
-	out.Bavail = out.Bfree
-	out.Blocks = uint64(maxInt64(stats.Bytes/4096+1, 1))
+	// Report a quota-style view where total = used + free, so df
+	// never shows free space exceeding the filesystem size (the old
+	// Bfree = 1<<30 with Blocks = used+1 produced negative usage).
+	usedBlocks := uint64(maxInt64(stats.Bytes/4096, 0))
+	freeBlocks := uint64(1 << 30)
 	out.Bsize = 4096
+	out.Blocks = usedBlocks + freeBlocks
+	out.Bfree = freeBlocks
+	out.Bavail = freeBlocks
 	out.NameLen = 255
 	out.Frsize = 4096
 	return 0
@@ -1168,9 +1259,12 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 
 func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	targetPath := n.currentPath()
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, 0, stale
+	}
 	n.fs.debugf("open start path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
-	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return nil, 0, errnoFromError(err)
 	}
@@ -1194,6 +1288,18 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if file == nil {
 		return nil, 0, syscall.ENOENT
 	}
+	// The mount runs with NullPermissions, so the kernel enforces no
+	// DAC at all - this server is the only gate. A write-open must carry
+	// write permission on the file, or any user could overwrite any file
+	// through the overlay commit path. Requests without a kernel caller
+	// identity are direct library use (the local process on its own
+	// repository) and are not multi-user surfaces.
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 && shfs.IdentityPresent(ctx) {
+		if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
+			n.fs.debugf("open denied path=%s step=dac err=%v", targetPath, err)
+			return nil, 0, errnoFromError(err)
+		}
+	}
 	pin := &pinnedContent{
 		file:   file.Clone(),
 		chunks: make(map[int64]metadata.ChunkInfo, len(file.Chunks)),
@@ -1208,17 +1314,18 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	h.pinned = pin
-	if err != nil {
-		return nil, 0, errnoFromError(err)
-	}
 	n.fs.debugf("open path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
 	return h, 0, 0
 }
 
 func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	n.fs.debugf("access path=%s inode=%d mask=%#x", n.currentPath(), n.inode, mask)
-	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, n.currentPath())
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	n.fs.debugf("access path=%s inode=%d mask=%#x", targetPath, n.inode, mask)
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)
 	}
@@ -1244,14 +1351,18 @@ func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 
 func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, gofusefs.FileHandle, uint32, syscall.Errno) {
 	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
-	childPath := path.Join(n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, nil, 0, stale
+	}
+	childPath := path.Join(parentPath, name)
 	n.fs.debugf("create start path=%s flags=%#x mode=%#o", childPath, flags, mode)
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
 		return nil, nil, 0, errnoFromError(err)
 	}
-	nlink := n.fs.nlinkForEntry(childPath)
+	nlink := n.fs.nlinkForEntry(ctx, childPath)
 	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
@@ -1259,11 +1370,18 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
+		// The empty file is already committed remotely; leaving it
+		// behind would orphan an entry the application was told was never
+		// created. Roll it back before reporting the failure.
+		if unlinkErr := n.fs.hub.UnlinkContext(ctx, n.fs.project, childPath); unlinkErr != nil {
+			n.fs.errorf("create rollback failed path=%s err=%v (original: %v)", childPath, unlinkErr, err)
+		}
+		n.fs.notifyEntryForPath(parentPath, name)
 		return nil, nil, 0, errnoFromError(err)
 	}
 	// The kernel may hold a negative entry for this name (NegativeTimeout);
 	// the create must evict it or the file stays invisible until expiry.
-	n.fs.notifyEntryForPath(n.currentPath(), name)
+	n.fs.notifyEntryForPath(parentPath, name)
 	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
 	return ino, h, 0, 0
 }
@@ -1283,7 +1401,11 @@ func (n *storhubNode) Mknod(ctx context.Context, name string, mode uint32, dev u
 
 func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
-	childPath := path.Join(n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	childPath := path.Join(parentPath, name)
 	if err := n.fs.hub.MkdirContext(ctx, n.fs.project, childPath); err != nil {
 		return nil, errnoFromError(err)
 	}
@@ -1294,14 +1416,18 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(n.currentPath(), name)
+	n.fs.notifyEntryForPath(parentPath, name)
 	n.fs.debugf("mkdir path=%s mode=%#o", childPath, mode)
 	return ino, 0
 }
 
 func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	childPath := path.Join(n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	childPath := path.Join(parentPath, name)
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if entry != nil {
 		if err := n.fs.materializeHandlesForPath(ctx, entry.Inode, childPath); err != nil {
@@ -1324,7 +1450,11 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	childPath := path.Join(n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	childPath := path.Join(parentPath, name)
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err := n.fs.hub.RmdirContext(ctx, n.fs.project, childPath); err != nil {
 		return errnoFromError(err)
@@ -1341,21 +1471,35 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusefs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	oldPath := path.Join(n.currentPath(), name)
+	oldDirPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
 	parentNode, ok := newParent.(*storhubNode)
 	if !ok {
 		return syscall.EINVAL
 	}
-	newPath := path.Join(parentNode.currentPath(), newName)
+	newDirPath, stale := parentNode.safePath()
+	if stale != 0 {
+		return stale
+	}
+	oldPath := path.Join(oldDirPath, name)
+	newPath := path.Join(newDirPath, newName)
 	if flags&renameExchange != 0 || flags&renameWhiteout != 0 {
 		return syscall.EINVAL
 	}
 	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
 	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
-	// Rename semantics (including POSIX replacement) live in exactly one
-	// place: the fs service behind the hub.
-	if flags&renameNoReplace != 0 && newEntry != nil {
-		return syscall.EEXIST
+	// The pre-stat is only a fast path; the authoritative no-replace
+	// decision is enforced inside RenameContext's transaction via
+	// shfs.WithNoReplace, so a target created between this stat and the
+	// transaction still fails with EEXIST instead of being clobbered.
+	var renameOpts []shfs.MutateOption
+	if flags&renameNoReplace != 0 {
+		if newEntry != nil {
+			return syscall.EEXIST
+		}
+		renameOpts = append(renameOpts, shfs.WithNoReplace())
 	}
 	// A handle open on the replaced target must keep serving its own
 	// snapshot: materialize before the metadata swap removes the path.
@@ -1364,7 +1508,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 			return errnoFromError(err)
 		}
 	}
-	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath); err != nil {
+	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath, renameOpts...); err != nil {
 		return errnoFromError(err)
 	}
 	if oldEntry != nil {
@@ -1377,6 +1521,15 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
 	if err == nil {
 		n.fs.rememberPath(entry.Inode, newPath)
+	} else {
+		// The mapping for newPath was just dropped above; if the
+		// re-stat fails the renamed node has no path left. Swallowing the
+		// error silently loses the mapping - report it,
+		// and re-register from the entry we already know when possible.
+		n.fs.errorf("rename post-stat failed path=%s err=%v", newPath, err)
+		if oldEntry != nil {
+			n.fs.rememberPath(oldEntry.Inode, newPath)
+		}
 	}
 	// Both parents cached the old namespace; evict both or lookups serve
 	// the pre-rename tree until EntryTimeout expires.
@@ -1390,19 +1543,83 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	return 0
 }
 
+// checkOverlayCaller verifies that the current caller may drive overlay
+// mutations through this handle: the kernel routes an fh only to the
+// process that opened it, but the server is the only DAC gate under
+// NullPermissions, so re-validate the opener identity.
+func (h *storhubHandle) checkOverlayCaller(ctx context.Context) syscall.Errno {
+	if !shfs.IdentityPresent(ctx) {
+		return 0
+	}
+	id := shfs.IdentityFromContext(ctx)
+	if id.Admin {
+		return 0
+	}
+	if h.hasOpener && id.UID != h.openerUID {
+		return syscall.EPERM
+	}
+	return 0
+}
+
+// callerMayDriveOverlay reports whether the current caller may mutate an
+// existing write state through a handleless path-based operation. It is the
+// state-level counterpart of checkOverlayCaller: the overlay is the single
+// writer's buffer, so only that writer (or an admin, or a request with no
+// server-side identity, i.e. the trusted local process) may drive it. A
+// poisoned or deleted state is never driven here; the caller falls through to
+// the hub verbs, which enforce DAC independently.
+func (s *Filesystem) callerMayDriveOverlay(ctx context.Context, state *inodeWriteState) bool {
+	state.mu.Lock()
+	poisoned, deleted := state.poisoned, state.deleted
+	hasOpener, openerUID := state.hasOpener, state.openerUID
+	state.mu.Unlock()
+	if poisoned || deleted {
+		return false
+	}
+	if !shfs.IdentityPresent(ctx) {
+		return true
+	}
+	id := shfs.IdentityFromContext(ctx)
+	if id.Admin {
+		return true
+	}
+	return !hasOpener || id.UID == openerUID
+}
+
 func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	targetPath := n.currentPath()
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
 	usedLocalSize := false
 	localSize := int64(0)
-	state := n.fs.writeStateForInode(n.inode)
+	// The overlay is honored only for a caller who may drive it. A
+	// handle attached to the write state is the common case; a path-based
+	// setattr (no fh) still reaches the overlay when the caller is the
+	// single writer who owns that inode's active state (a legitimate
+	// ftruncate on an open file arrives handleless from some clients). A
+	// non-owner's handleless truncate falls through to the hub verbs, which
+	// enforce DAC against the *requesting* caller, so a stranger's
+	// truncate/chmod is never deferred into the owner's next commit.
+	var state *inodeWriteState
 	if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
 		state = handle.writeState
+		if errno := handle.checkOverlayCaller(ctx); errno != 0 {
+			return errno
+		}
+	} else if st := n.fs.writeStateForInode(n.inode); st != nil && n.fs.callerMayDriveOverlay(ctx, st) {
+		state = st
 	}
 	if size, ok := in.GetSize(); ok && !n.isDir {
 		if state != nil {
 			state.opMu.Lock()
 			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
 			err := state.setSizeLocked(int64(size))
 			if err == nil {
 				usedLocalSize = true
@@ -1421,8 +1638,24 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	}
 	if mode, ok := in.GetMode(); ok {
 		if state != nil && !n.isDir {
+			entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
+			if err != nil {
+				return errnoFromError(err)
+			}
+			// fchmod still needs the ownership DAC at call
+			// time, not just at open.
+			if shfs.IdentityPresent(ctx) {
+				if err := shfs.CanChmod(ctx, entry); err != nil {
+					return errnoFromError(err)
+				}
+			}
 			state.opMu.Lock()
 			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
 			state.pending.HasMode = true
 			state.pending.Mode = mode & 0o7777
 			state.mu.Unlock()
@@ -1441,8 +1674,21 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 			return errnoFromError(err)
 		}
 		if state != nil && !n.isDir {
+			// Chown via the overlay must satisfy the hub's chown
+			// DAC now, under the caller's identity - not silently at the
+			// state owner's next flush.
+			if shfs.IdentityPresent(ctx) {
+				if err := shfs.CanChown(ctx, entry, uid, gid); err != nil {
+					return errnoFromError(err)
+				}
+			}
 			state.opMu.Lock()
 			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
 			state.overlayEntryLocked(entry)
 			if !uidOK {
 				uid = entry.UID
@@ -1481,8 +1727,18 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 			mtime = time.Unix(entry.ModifiedAt, 0)
 		}
 		if state != nil && !n.isDir {
+			if shfs.IdentityPresent(ctx) {
+				if err := shfs.CanSetTimes(ctx, entry); err != nil {
+					return errnoFromError(err)
+				}
+			}
 			state.opMu.Lock()
 			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
 			state.overlayEntryLocked(entry)
 			if !atimeOK {
 				atime = time.Unix(entry.AccessedAt, 0)
@@ -1533,29 +1789,36 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	// copies (other nodes, readdir-plus) expire only via invalidation.
 	n.fs.notifyKernelContentChanged(n.inode)
 	n.fs.debugf("setattr path=%s valid=%#x", targetPath, in.Valid)
-	_ = f
 	return 0
 }
 
 func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	childPath := path.Join(n.currentPath(), name)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	childPath := path.Join(parentPath, name)
 	file, err := n.fs.hub.SymlinkContext(ctx, n.fs.project, target, childPath)
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	nlink := n.fs.nlinkForEntry(childPath)
+	nlink := n.fs.nlinkForEntry(ctx, childPath)
 	entry := entryInfoFromFile(file, childPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(n.currentPath(), name)
+	n.fs.notifyEntryForPath(parentPath, name)
 	return ino, 0
 }
 
 func (n *storhubNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	target, err := n.fs.hub.ReadlinkContext(ctx, n.fs.project, n.currentPath())
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	target, err := n.fs.hub.ReadlinkContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
@@ -1568,23 +1831,40 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	if !ok {
 		return nil, syscall.EINVAL
 	}
-	linked, err := n.fs.hub.LinkContext(ctx, n.fs.project, targetNode.currentPath(), path.Join(n.currentPath(), name))
+	sourcePath, stale := targetNode.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	linkPath := path.Join(parentPath, name)
+	linked, err := n.fs.hub.LinkContext(ctx, n.fs.project, sourcePath, linkPath)
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	linkPath := path.Join(n.currentPath(), name)
-	nlink := n.fs.nlinkForEntry(linkPath)
+	if linked == nil {
+		// A hub that reports success without an entry (e.g. a
+		// directory source) must not be dereferenced by entryInfoFromFile.
+		return nil, syscall.EPERM
+	}
+	nlink := n.fs.nlinkForEntry(ctx, linkPath)
 	entry := entryInfoFromFile(linked, linkPath, nlink)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(n.currentPath(), name)
+	n.fs.notifyEntryForPath(parentPath, name)
 	return ino, 0
 }
 
 func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	data, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, n.currentPath(), attr)
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return 0, stale
+	}
+	data, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, targetPath, attr)
 	if err != nil {
 		return 0, errnoFromError(err)
 	}
@@ -1600,20 +1880,27 @@ func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (u
 
 func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	if flags != 0 {
-		_, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, n.currentPath(), attr)
-		exists := err == nil
-		if err != nil && errnoFromError(err) != syscall.ENODATA {
-			return errnoFromError(err)
-		}
-		if flags&xattrCreate != 0 && exists {
-			return syscall.EEXIST
-		}
-		if flags&xattrReplace != 0 && !exists {
-			return syscall.ENODATA
-		}
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
 	}
-	if err := n.fs.hub.SetXAttrContext(ctx, n.fs.project, n.currentPath(), attr, data); err != nil {
+	// Enforce the xattr resource caps at the FUSE boundary too
+	// (defense in depth; posix.Service.SetXAttrContext is the authority).
+	if len(attr) > shfs.XAttrNameMax || len(data) > shfs.XAttrSizeMax {
+		return syscall.ERANGE
+	}
+	// XATTR_CREATE/XATTR_REPLACE are enforced atomically inside
+	// posix.Service.SetXAttrContext's transaction (via shfs.XAttrMode), so
+	// there is no separate Get-then-set TOCTOU window. errnoFromError maps
+	// the transaction's EEXIST / XAttrNotFound back to the FUSE errno.
+	var mode shfs.XAttrMode
+	if flags&xattrCreate != 0 {
+		mode |= shfs.XAttrCreate
+	}
+	if flags&xattrReplace != 0 {
+		mode |= shfs.XAttrReplace
+	}
+	if err := n.fs.hub.SetXAttrContext(ctx, n.fs.project, targetPath, attr, data, mode); err != nil {
 		return errnoFromError(err)
 	}
 	return 0
@@ -1621,7 +1908,11 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 
 func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
-	attrs, err := n.fs.hub.ListXAttrContext(ctx, n.fs.project, n.currentPath())
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return 0, stale
+	}
+	attrs, err := n.fs.hub.ListXAttrContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return 0, errnoFromError(err)
 	}
@@ -1641,17 +1932,25 @@ func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, sysca
 
 func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	ctx = n.fs.callerContext(ctx)
-	if err := n.fs.hub.RemoveXAttrContext(ctx, n.fs.project, n.currentPath(), attr); err != nil {
+	targetPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	if err := n.fs.hub.RemoveXAttrContext(ctx, n.fs.project, targetPath, attr); err != nil {
 		return errnoFromError(err)
 	}
 	return 0
 }
 
 func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath string, flags uint32, bootstrap *writeBootstrap) (*storhubHandle, error) {
-	if strings.TrimSpace(targetPath) == "" {
+	if targetPath == "" {
 		targetPath = s.pathForInode(inode)
 	}
 	h := &storhubHandle{fs: s, inode: inode, flags: flags, id: s.nextHandle.Add(1), path: targetPath, owners: make(map[uint64]struct{})}
+	if shfs.IdentityPresent(ctx) {
+		id := shfs.IdentityFromContext(ctx)
+		h.openerUID, h.openerGID, h.hasOpener = id.UID, id.GID, true
+	}
 	s.mu.Lock()
 	s.handles[h.id] = h
 	s.mu.Unlock()
@@ -1758,6 +2057,10 @@ func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, target
 		return existing, nil
 	}
 	state := &inodeWriteState{fs: s, inode: inode, path: targetPath, refs: 1}
+	if shfs.IdentityPresent(ctx) {
+		id := shfs.IdentityFromContext(ctx)
+		state.openerUID, state.hasOpener = id.UID, true
+	}
 	s.writeStates[inode] = state
 	s.mu.Unlock()
 	var err error
@@ -2014,6 +2317,9 @@ func (w *inodeWriteState) coversRangeLocked(start, end int64) bool {
 func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL
+	}
+	if w.poisoned {
+		return syscall.EIO
 	}
 	if w.temp == nil {
 		if err := w.ensureTempLocked(); err != nil {
@@ -2391,7 +2697,7 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 		}
 		return "", err
 	}
-	// C4 crash ordering: the snapshot is the commit's input. Sync it
+	// Crash ordering: the snapshot is the commit's input. Sync it
 	// after the content lands and before any remote mutation reads it,
 	// so a local crash in between cannot rewrite the backend from a
 	// torn local file.
@@ -2473,7 +2779,7 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 			offset += int64(n)
 		}
 	}
-	// C4 crash ordering: same durability contract as the full commit
+	// Crash ordering: same durability contract as the full commit
 	// snapshot - the chunk rewrite must read complete local bytes.
 	if err := temp.Sync(); err != nil {
 		if closeErr := temp.Close(); closeErr != nil {
@@ -2539,6 +2845,13 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 		return
 	}
 	w.closed = true
+	// The overlay bytes just moved to recovery/, so the temp no
+	// longer exists. Clearing the dirty set and poisoning the state
+	// guarantees a late Write/commit fails EIO instead of re-materializing
+	// an empty temp and uploading zeros over the remote file.
+	w.dirtyRanges = nil
+	w.baseSize = w.logicalSize
+	w.poisoned = true
 	temp := w.temp
 	tempPath := w.tempPath
 	baseTemp := w.baseTemp
@@ -2549,6 +2862,13 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 	w.baseTemp = nil
 	w.baseTempPath = ""
 	w.mu.Unlock()
+	// Unregister so no later lookup can route new operations here; the
+	// handles' own refs keep the struct alive until Release.
+	w.fs.mu.Lock()
+	if current := w.fs.writeStates[w.inode]; current == w {
+		delete(w.fs.writeStates, w.inode)
+	}
+	w.fs.mu.Unlock()
 	if baseTemp != nil {
 		_ = baseTemp.Close()
 	}
@@ -2581,6 +2901,11 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		defer writeState.opMu.Unlock()
 		writeState.mu.Lock()
 		defer writeState.mu.Unlock()
+		// Reading a poisoned overlay would serve zeros for ranges
+		// whose bytes are in recovery/ - fail instead of lying.
+		if writeState.poisoned {
+			return nil, syscall.EIO
+		}
 		buf := make([]byte, len(dest))
 		n, err := writeState.readIntoLocked(ctx, buf, off)
 		if err != nil {
@@ -2603,6 +2928,11 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 	}
 	data, err := h.readFromPinned(ctx, off, int64(len(dest)))
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			// A past-EOF read is an empty read, not an error;
+			// errnoFromError would otherwise map io.EOF to EIO.
+			return fuse.ReadResultData(nil), 0
+		}
 		// A failed read is an operational event users experience as EIO
 		// with no other trace; without this line the backend cause was
 		// invisible unless the mount ran at debug level.
@@ -2645,6 +2975,12 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
 	defer h.writeState.mu.Unlock()
+	// A quarantined (poisoned) overlay no longer holds the bytes its
+	// dirty ranges claimed. Accepting new writes would resurrect an empty
+	// temp and commit zeros over remote data.
+	if h.writeState.poisoned {
+		return 0, syscall.EIO
+	}
 	if h.flags&syscall.O_APPEND != 0 {
 		off = h.writeState.logicalSize
 	}
@@ -2722,6 +3058,9 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
 	defer h.writeState.mu.Unlock()
+	if h.writeState.poisoned {
+		return syscall.EIO
+	}
 	if err := h.writeState.ensureTempLocked(); err != nil {
 		return errnoFromError(err)
 	}
@@ -2764,9 +3103,10 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	h.releaseTrackedLocks()
 	if errno != 0 {
 		// The commit failed; the overlay temps hold the only copy of data
-		// the application already wrote (Flush returns 0 by design, so the
-		// application considers these writes acknowledged). Preserve them
-		// for manual recovery instead of deleting them.
+		// the application already wrote (Flush commits and propagates the
+		// errno, but a successful close(2) may still have been reported
+		// for earlier fsync-less writes). Preserve the overlay for manual
+		// recovery instead of deleting it.
 		h.quarantineTemps()
 		if h.writeState != nil && h.fs.soleWriteStateRef(h.writeState) {
 			h.writeState.quarantineTemps()
@@ -2824,23 +3164,54 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		// Read-only or detached handle: provably nothing to commit.
 		return 0
 	}
+	// Flush/Fsync/Release arrive with the kernel caller's context; bind
+	// it to an fs identity so the commit-time DAC re-check below sees the
+	// real uid.
+	ctx = h.fs.callerContext(ctx)
 	h.mu.Lock()
 	handlePath := h.path
 	h.mu.Unlock()
 	h.writeState.opMu.Lock()
 	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
+	if h.writeState.poisoned {
+		h.writeState.mu.Unlock()
+		// The overlay was quarantined; committing would upload zeros.
+		return syscall.EIO
+	}
 	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() {
 		h.writeState.mu.Unlock()
 		return 0
 	}
-	if h.writeState.deleted || strings.TrimSpace(handlePath) == "" {
+	if h.writeState.deleted || handlePath == "" {
 		h.writeState.mu.Unlock()
 		// POSIX unlinked-open-handle semantics: writes via an open fd
 		// succeed and reads are served from the temp overlay; the data
 		// is discarded at Release (link count zero). Pinned by
 		// TestFUSEHandleRenameAndUnlinkSemantics — do NOT return an
-		// error here.
+		// error here. Note: the emptiness test is exact, not
+		// TrimSpace-based: a file legitimately named " " must still
+		// commit its writes.
+		return 0
+	}
+	// Re-check write DAC at commit time under the *flushing*
+	// caller's identity. The bytes only reach the remote at this point,
+	// and the identity here may differ from the one that opened the
+	// handle (Flush/Fsync/Release carry their own kernel caller). opMu
+	// stays held across the metadata load; only mu is released.
+	h.writeState.mu.Unlock()
+	errno := h.checkCommitWriteAccess(ctx, handlePath)
+	h.writeState.mu.Lock()
+	if errno != 0 {
+		h.writeState.mu.Unlock()
+		return errno
+	}
+	// Re-validate under the lock: the DAC check released it.
+	if h.writeState.deleted || h.writeState.poisoned {
+		h.writeState.mu.Unlock()
+		if h.writeState.poisoned {
+			return syscall.EIO
+		}
 		return 0
 	}
 	targetPath := handlePath
@@ -2850,10 +3221,33 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
 }
 
+// checkCommitWriteAccess enforces the file-level write DAC against the
+// live readonly metadata view before any commit verb dispatches.
+// Requests without a kernel caller identity are direct library use and
+// are governed by the storage layer's own checks; a file that is no
+// longer in the view is left to the backend's not-found handling.
+func (h *storhubHandle) checkCommitWriteAccess(ctx context.Context, targetPath string) syscall.Errno {
+	if !shfs.IdentityPresent(ctx) {
+		return 0
+	}
+	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
+	if err != nil {
+		return errnoFromError(err)
+	}
+	if repoMeta.FindFile(targetPath) == nil {
+		return 0
+	}
+	if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
+		h.fs.debugf("commit denied path=%s inode=%d step=dac err=%v", targetPath, h.inode, err)
+		return errnoFromError(err)
+	}
+	return 0
+}
+
 // commitTemp handles all temp-based commit paths (truncate, chunk-rewrite, replace, patch).
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu as needed.
 //
-// C4 crash-ordering contract (and its limit): within one commit, data lands
+// Crash-ordering contract (and its limit): within one commit, data lands
 // before the size reconcile, and the size reconcile lands before the
 // metadata patch, so a crash can never leave metadata pointing at data
 // that never arrived. Ranges stay dirty until the whole pair succeeds, so
@@ -3023,7 +3417,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		h.fs.debugf("commit failed path=%s inode=%d step=patch-batch err=%v", targetPath, h.inode, err)
 		return errnoFromError(err)
 	}
-	// C4 crash ordering: the commit is not done until the size is
+	// Crash ordering: the commit is not done until the size is
 	// reconciled. Consume the dirty ranges only after the post-patch
 	// truncate succeeds, so a truncate failure leaves the full patch
 	// replayable instead of half-applied. Replayed edits are idempotent
@@ -3040,6 +3434,15 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	// Mark all applied ranges consumed so a retry resumes instead of
 	// re-applying committed edits (which would duplicate bytes).
 	h.writeState.mu.Lock()
+	// The network window above released mu; a concurrent quarantine
+	// (Close teardown) may have taken the temp with it. Fail the commit
+	// keeping the ranges dirty instead of dereferencing a nil *os.File -
+	// the remote patch already landed, and the replay is idempotent.
+	if h.writeState.temp == nil || h.writeState.poisoned {
+		h.writeState.mu.Unlock()
+		h.fs.errorf("commit interrupted by quarantine path=%s inode=%d step=post-patch-local", targetPath, h.inode)
+		return syscall.EIO
+	}
 	for _, dirty := range planned {
 		h.writeState.removeDirtyRangeLocked(dirty.Start, dirty.End)
 	}
@@ -3152,11 +3555,21 @@ func (h *storhubHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileL
 	// remaining bits stays deferred until go-fuse round-trips them (see
 	// Getlk/Setlk, same discard).
 	_ = flags
-	if ctx != nil && ctx.Done() != nil {
-		// Wake the waiter promptly on cancellation.
-		context.AfterFunc(ctx, h.fs.lockCond.Broadcast)
-	}
 	s := h.fs
+	if ctx != nil && ctx.Done() != nil {
+		// The cancellation broadcast must take the cond's locker.
+		// A bare Broadcast can fire in the window between our ctx.Err()
+		// check and Wait() - the wake-up would be lost and the waiter
+		// would sleep until an unrelated lock event. Holding s.mu in the
+		// handler serializes it against the check-then-Wait sequence
+		// (Wait atomically releases s.mu, so the handler only runs while
+		// we are either checking or already queued).
+		context.AfterFunc(ctx, func() {
+			s.lockCond.L.Lock()
+			s.lockCond.Broadcast()
+			s.lockCond.L.Unlock()
+		})
+	}
 	s.lockCond.L.Lock()
 	for {
 		errno := s.setLockLocked(h.inode, owner, *lk)
@@ -3259,6 +3672,10 @@ func (h *storhubHandle) releaseTrackedLocks() {
 	}
 }
 
+// locksOverlap treats FileLock.End as EXCLUSIVE, matching what the kernel
+// sends over FUSE (end = start + len): adjacent ranges [0,10) and [10,20)
+// do not overlap. An End of 0 is the unlock-whole-file convention
+// and is treated as infinity.
 func locksOverlap(a, b fuse.FileLock) bool {
 	aEnd := a.End
 	bEnd := b.End
@@ -3268,7 +3685,7 @@ func locksOverlap(a, b fuse.FileLock) bool {
 	if bEnd == 0 {
 		bEnd = ^uint64(0)
 	}
-	return a.Start <= bEnd && b.Start <= aEnd
+	return a.Start < bEnd && b.Start < aEnd
 }
 
 func subtractLock(existing, cut fuse.FileLock) []fuse.FileLock {
@@ -3286,12 +3703,15 @@ func subtractLock(existing, cut fuse.FileLock) []fuse.FileLock {
 	segments := make([]fuse.FileLock, 0, 2)
 	if cut.Start > existing.Start {
 		left := existing
-		left.End = cut.Start - 1
+		// Exclusive end: the retained left segment stops at the cut's
+		// first byte, not one before it (the old inclusive math
+		// dropped a byte from the retained lock on partial unlock).
+		left.End = cut.Start
 		segments = append(segments, left)
 	}
 	if cutEnd < existingEnd {
 		right := existing
-		right.Start = cutEnd + 1
+		right.Start = cutEnd
 		if existing.End == 0 {
 			right.End = 0
 		} else {
@@ -3386,8 +3806,11 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 // nlinkForEntry reports the hard-link count for a freshly created entry.
 // A metadata load failure is logged and reported as 1 rather than silently
 // fabricated as 0; getattr refreshes the value on the next lookup anyway.
-func (s *Filesystem) nlinkForEntry(entryPath string) int {
-	repo, _, err := s.hub.LoadRepoMetadataReadonlyContext(context.Background(), s.project)
+// The caller's context is propagated: a background context would
+// fall back to the process identity on a surface that must carry the
+// kernel caller.
+func (s *Filesystem) nlinkForEntry(ctx context.Context, entryPath string) int {
+	repo, _, err := s.hub.LoadRepoMetadataReadonlyContext(ctx, s.project)
 	if err != nil {
 		s.errorf("nlink lookup failed path=%s err=%v", entryPath, err)
 		return 1

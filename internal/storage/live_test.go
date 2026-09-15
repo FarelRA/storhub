@@ -576,13 +576,16 @@ type zeroGitHub struct {
 	mu     sync.Mutex
 	owner  string
 	repos  map[string]*zeroRepo
+	// nextAssetID mints GLOBALLY unique asset IDs like mockGitHub and
+	// real GitHub do (per-repo counters make repo-agnostic CDN lookups
+	// ambiguous the moment such a route exists).
+	nextAssetID atomic.Int64
 }
 
 type zeroRepo struct {
 	name          string
 	private       bool
 	nextReleaseID int64
-	nextAssetID   int64
 	nextBlobID    int64
 	nextCommitID  int64
 	releasesByTag map[string]*zeroRelease
@@ -675,7 +678,7 @@ func (z *zeroGitHub) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		z.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "repository already exists"})
 		return
 	}
-	z.repos[payload.Name] = &zeroRepo{name: payload.Name, private: payload.Private, nextReleaseID: 1, nextAssetID: 1, nextBlobID: 1, nextCommitID: 1, releasesByTag: make(map[string]*zeroRelease), releasesByID: make(map[int64]*zeroRelease), assets: make(map[int64]*zeroAsset), files: make(map[string]*zeroFile), commitsByPath: make(map[string][]zeroCommit)}
+	z.repos[payload.Name] = &zeroRepo{name: payload.Name, private: payload.Private, nextReleaseID: 1, nextBlobID: 1, nextCommitID: 1, releasesByTag: make(map[string]*zeroRelease), releasesByID: make(map[int64]*zeroRelease), assets: make(map[int64]*zeroAsset), files: make(map[string]*zeroFile), commitsByPath: make(map[string][]zeroCommit)}
 	z.writeJSON(w, http.StatusCreated, map[string]any{"name": payload.Name})
 }
 
@@ -732,12 +735,21 @@ func (z *zeroGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	ref := r.URL.Query().Get("ref")
-	if ref != "" {
-		for _, commit := range repo.commitsByPath[filePath] {
-			if commit.sha == ref {
-				z.writeJSON(w, http.StatusOK, map[string]any{"name": filepath.Base(filePath), "path": filePath, "sha": fmt.Sprintf("blob-%s", commit.sha), "encoding": "base64", "type": "file", "content": base64.StdEncoding.EncodeToString(commit.data)})
-				return
-			}
+	if ref != "" && ref != "HEAD" && ref != defaultBranch {
+		// Mirror GitHub: an unknown/stale ref 404s; it never silently
+		// serves HEAD. A known ref resolves to the bytes the
+		// path carried at that commit.
+		data, known, present := z.contentAtRefLocked(repo, filePath, ref)
+		switch {
+		case !known:
+			z.writeJSON(w, http.StatusNotFound, map[string]any{"message": fmt.Sprintf("No commit found for SHA: %s", ref)})
+			return
+		case present:
+			z.writeJSON(w, http.StatusOK, map[string]any{"name": filepath.Base(filePath), "path": filePath, "sha": computeGitBlobSHA(data), "encoding": "base64", "type": "file", "content": base64.StdEncoding.EncodeToString(data)})
+			return
+		default:
+			z.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+			return
 		}
 	}
 	file := repo.files[filePath]
@@ -746,6 +758,40 @@ func (z *zeroGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	z.writeJSON(w, http.StatusOK, map[string]any{"name": filepath.Base(filePath), "path": filePath, "sha": file.sha, "encoding": "base64", "type": "file", "content": base64.StdEncoding.EncodeToString(file.data)})
+}
+
+// contentAtRefLocked mirrors mockGitHub.contentAtRefLocked for the
+// zero-payload mock: (known=false) unknown ref, (present=false) the path
+// did not exist at that commit.
+func (z *zeroGitHub) contentAtRefLocked(repo *zeroRepo, filePath, ref string) (data []byte, known, present bool) {
+	var refWhen time.Time
+	for _, commits := range repo.commitsByPath {
+		for _, c := range commits {
+			if c.sha == ref {
+				refWhen, known = c.when, true
+				break
+			}
+		}
+		if known {
+			break
+		}
+	}
+	if !known {
+		return nil, false, false
+	}
+	commits := repo.commitsByPath[filePath]
+	if len(commits) == 0 {
+		if f := repo.files[filePath]; f != nil {
+			return f.data, true, true
+		}
+		return nil, true, false
+	}
+	for _, c := range commits {
+		if !c.when.After(refWhen) {
+			return c.data, true, true
+		}
+	}
+	return nil, true, false
 }
 
 func (z *zeroGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, repo *zeroRepo, filePath string) {
@@ -758,26 +804,46 @@ func (z *zeroGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, re
 		z.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
 		return
 	}
+	if payload.Message == "" {
+		z.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"message\" wasn't supplied."})
+		return
+	}
 	data, err := base64.StdEncoding.DecodeString(payload.Content)
 	if err != nil {
-		z.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
+		z.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"content\" is not valid base64-encoded data."})
 		return
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	current := repo.files[filePath]
+	// Mirror GitHub: a sha-less PUT onto an existing path is a
+	// create collision - 422, never a silent overwrite.
+	if current != nil && payload.SHA == "" {
+		z.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"sha\" wasn't supplied."})
+		return
+	}
 	if current != nil && payload.SHA != "" && payload.SHA != current.sha {
 		z.writeJSON(w, http.StatusConflict, map[string]any{"message": "sha does not match"})
 		return
 	}
-	blobSHA := fmt.Sprintf("blob-%d", repo.nextBlobID)
-	repo.nextBlobID++
+	if current == nil && payload.SHA != "" {
+		z.writeJSON(w, http.StatusConflict, map[string]any{"message": "file does not exist"})
+		return
+	}
+	// Real git blob shas, like mockGitHub and the live API store:
+	// the client computes CAS tokens from raw bytes, so counter shas
+	// would 409 preconditions that pass upstream.
+	blobSHA := computeGitBlobSHA(data)
 	repo.files[filePath] = &zeroFile{path: filePath, sha: blobSHA, data: append([]byte(nil), data...)}
 	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
 	repo.nextCommitID++
 	commit := zeroCommit{sha: commitSHA, message: payload.Message, path: filePath, data: append([]byte(nil), data...), when: time.Unix(1700000000+repo.nextCommitID, 0).UTC()}
 	repo.commitsByPath[filePath] = append([]zeroCommit{commit}, repo.commitsByPath[filePath]...)
-	z.writeJSON(w, http.StatusOK, map[string]any{"content": map[string]any{"name": filepath.Base(filePath), "path": filePath, "sha": blobSHA}, "commit": map[string]any{"sha": commitSHA}})
+	status := http.StatusOK
+	if current == nil {
+		status = http.StatusCreated
+	}
+	z.writeJSON(w, status, map[string]any{"content": map[string]any{"name": filepath.Base(filePath), "path": filePath, "sha": blobSHA}, "commit": map[string]any{"sha": commitSHA}})
 }
 
 func (z *zeroGitHub) handleListCommits(w http.ResponseWriter, r *http.Request, repo *zeroRepo) {
@@ -883,8 +949,7 @@ func (z *zeroGitHub) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
-	asset := &zeroAsset{id: repo.nextAssetID, name: name, releaseTag: parts[2], size: size}
-	repo.nextAssetID++
+	asset := &zeroAsset{id: z.nextAssetID.Add(1), name: name, releaseTag: parts[2], size: size}
 	repo.assets[asset.id] = asset
 	z.writeJSON(w, http.StatusCreated, map[string]any{"id": asset.id, "name": asset.name})
 }
@@ -935,6 +1000,11 @@ func (z *zeroGitHub) handleDeleteAsset(w http.ResponseWriter, repo *zeroRepo, ra
 func (z *zeroGitHub) handleDeleteRepo(w http.ResponseWriter, name string) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	// Mirror GitHub: unknown repo 404s.
+	if _, ok := z.repos[name]; !ok {
+		z.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		return
+	}
 	delete(z.repos, name)
 	w.WriteHeader(http.StatusNoContent)
 }

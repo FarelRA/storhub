@@ -28,7 +28,12 @@ import (
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
+	ghapi "github.com/FarelRA/storhub/internal/github"
 	meta "github.com/FarelRA/storhub/internal/metadata"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -840,7 +845,6 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 		name:          "existing-project",
 		private:       true,
 		nextReleaseID: 1,
-		nextAssetID:   1,
 		nextBlobID:    1,
 		nextCommitID:  1,
 		releasesByTag: make(map[string]*mockRelease),
@@ -1913,29 +1917,30 @@ func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 	if aliasInfo.NLink != 1 {
 		t.Fatalf("expected remaining hardlink count 1, got %+v", aliasInfo)
 	}
-	symlink, err := hub.SymlinkContext(ctx, "project-posix", "docs/alias.txt", "docs/alias-link")
+	symlink, err := hub.SymlinkContext(ctx, "project-posix", "alias.txt", "docs/alias-link")
 	if err != nil {
 		t.Fatalf("create symlink: %v", err)
 	}
-	if symlink.Symlink != "docs/alias.txt" {
+	if symlink.Symlink != "alias.txt" {
 		t.Fatalf("unexpected symlink metadata: %+v", symlink)
 	}
 	target, err := hub.ReadlinkContext(ctx, "project-posix", "docs/alias-link")
 	if err != nil {
 		t.Fatalf("readlink: %v", err)
 	}
-	if target != "docs/alias.txt" {
+	if target != "alias.txt" {
 		t.Fatalf("unexpected symlink target: %q", target)
 	}
 	linkInfo, err := hub.StatPathContext(ctx, "project-posix", "docs/alias-link")
 	if err != nil {
 		t.Fatalf("stat symlink: %v", err)
 	}
-	if !linkInfo.IsSymlink || linkInfo.SymlinkTarget != "docs/alias.txt" {
+	if !linkInfo.IsSymlink || linkInfo.SymlinkTarget != "alias.txt" {
 		t.Fatalf("unexpected symlink stat: %+v", linkInfo)
 	}
-	if _, err := hub.ReadFileAtContext(ctx, "project-posix", "docs/alias-link", 0, 4); err == nil {
-		t.Fatal("expected reading symlink as file to fail")
+	// Read has open() semantics and follows the final symlink.
+	if data, err := hub.ReadFileAtContext(ctx, "project-posix", "docs/alias-link", 0, 4); err != nil || string(data) != "hell" {
+		t.Fatalf("read through symlink must return the target bytes, got %q err=%v", data, err)
 	}
 	if err := hub.SetXAttrContext(ctx, "project-posix", "", "user.root", []byte("rooted")); err != nil {
 		t.Fatalf("set root xattr: %v", err)
@@ -2025,7 +2030,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if errno := handle.Flush(ctx); errno != 0 {
 		t.Fatalf("flush failed: %v", errno)
 	}
-	// C3: with writeback caching, close(2)-time Flush may be the only
+	// With writeback caching, close(2)-time Flush may be the only
 	// durability signal the kernel sends, so Flush commits the dirty
 	// overlay. The remote file is therefore already updated here; Fsync
 	// below is an idempotent second commit.
@@ -2240,14 +2245,13 @@ func TestFUSEOptionalMountLifecycle(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("unexpected mounted mode: %o", info.Mode().Perm())
 	}
-	if value := []byte("warm"); syscall.Setxattr(renamedPath, "user.mount", value, 0) == nil {
-		buf := make([]byte, 16)
-		n, err := syscall.Getxattr(renamedPath, "user.mount", buf)
+	if err := testSetUserXattr(renamedPath, "user.mount", []byte("warm")); err == nil {
+		got, err := testGetUserXattr(renamedPath, "user.mount")
 		if err != nil {
 			t.Fatalf("get mounted xattr: %v", err)
 		}
-		if string(buf[:n]) != string(value) {
-			t.Fatalf("unexpected mounted xattr: %q", buf[:n])
+		if string(got) != "warm" {
+			t.Fatalf("unexpected mounted xattr: %q", got)
 		}
 	}
 	if err := fsys.Unmount(); err != nil {
@@ -3052,13 +3056,18 @@ type mockGitHub struct {
 	// signed CDN URLs (/cdn/<id>) carry no repo, so a per-repo counter
 	// would make CDN lookups ambiguous across repos sharing ID space.
 	nextAssetID atomic.Int64
+	// cdnTTL (nanoseconds) makes signed CDN URLs expire: when > 0, the
+	// octet-stream redirect carries an exp deadline and the CDN 403s
+	// expired fetches, exercising the client's SAS-rejection and
+	// re-resolution path (real GitHub: Azure SAS URLs are short-lived).
+	// Zero (default) keeps URLs immortal so unrelated tests never trip.
+	cdnTTL atomic.Int64
 }
 
 type mockRepo struct {
 	name          string
 	private       bool
 	nextReleaseID int64
-	nextAssetID   int64
 	nextBlobID    int64
 	nextCommitID  int64
 	releasesByTag map[string]*mockRelease
@@ -3094,6 +3103,10 @@ type mockCommit struct {
 	path    string
 	data    []byte
 	when    time.Time
+	// deleted marks a contents-DELETE commit: the path existed in every
+	// earlier commit and is gone from this one onward (GitHub records the
+	// delete and 404s file reads at that ref).
+	deleted bool
 }
 
 func newMockGitHub(t *testing.T) *mockGitHub {
@@ -3136,18 +3149,20 @@ func (m *mockGitHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if fn, ok := m.intercept.Load().(func(http.ResponseWriter, *http.Request) bool); ok && fn(w, r) {
 		return
 	}
-	// Opt-in rate-limit fault for retry tests (B11). One 429 with
-	// Retry-After, then normal service resumes.
-	if m.rateLimitOnce.CompareAndSwap(true, false) {
-		m.rateLimitServed.Add(1)
-		w.Header().Set("Retry-After", "1")
-		m.writeJSON(w, http.StatusTooManyRequests, map[string]any{"message": "API rate limit exceeded for user ID"})
-		return
-	}
 	// Mirror GitHub: every API route requires a bearer token. The CDN
 	// host is exempt: signed-URL fetches carry no Authorization header.
 	if !strings.HasPrefix(r.URL.Path, "/cdn/") && r.Header.Get("Authorization") != "Bearer "+m.authToken() {
 		m.writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "Requires authentication"})
+		return
+	}
+	// Opt-in rate-limit fault for retry tests. One 429 with
+	// Retry-After, then normal service resumes. Scoped to authenticated
+	// API routes: a CDN fetch or an unauthenticated probe must never
+	// spend the fault armed for the next API call.
+	if !strings.HasPrefix(r.URL.Path, "/cdn/") && m.rateLimitOnce.CompareAndSwap(true, false) {
+		m.rateLimitServed.Add(1)
+		w.Header().Set("Retry-After", "1")
+		m.writeJSON(w, http.StatusTooManyRequests, map[string]any{"message": "API rate limit exceeded for user ID"})
 		return
 	}
 	switch {
@@ -3192,7 +3207,6 @@ func (m *mockGitHub) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		name:          payload.Name,
 		private:       payload.Private,
 		nextReleaseID: 1,
-		nextAssetID:   1,
 		nextBlobID:    1,
 		nextCommitID:  1,
 		releasesByTag: make(map[string]*mockRelease),
@@ -3269,6 +3283,16 @@ func (m *mockGitHub) handleDeleteContent(w http.ResponseWriter, r *http.Request,
 		m.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
 		return
 	}
+	// Mirror GitHub: contents DELETE requires both a commit message and
+	// the current blob sha; either missing is a 422, never a silent delete.
+	if payload.Message == "" {
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"message\" wasn't supplied."})
+		return
+	}
+	if payload.SHA == "" {
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"sha\" wasn't supplied."})
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := repo.files[filePath]
@@ -3276,13 +3300,23 @@ func (m *mockGitHub) handleDeleteContent(w http.ResponseWriter, r *http.Request,
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
 		return
 	}
-	if payload.SHA != "" && payload.SHA != current.sha {
+	if payload.SHA != current.sha {
 		m.writeJSON(w, http.StatusConflict, map[string]any{"message": "sha does not match"})
 		return
 	}
 	delete(repo.files, filePath)
 	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
 	repo.nextCommitID++
+	// Mirror GitHub: the delete is itself a commit on the path's history
+	// (revision lists after a delete must show it), and the path is gone
+	// from that commit onward.
+	repo.commitsByPath[filePath] = append([]mockCommit{{
+		sha:     commitSHA,
+		message: payload.Message,
+		path:    filePath,
+		when:    time.Unix(1700000000+repo.nextCommitID, 0).UTC(),
+		deleted: true,
+	}}, repo.commitsByPath[filePath]...)
 	m.writeJSON(w, http.StatusOK, map[string]any{"commit": map[string]any{"sha": commitSHA}})
 }
 
@@ -3294,54 +3328,113 @@ func (m *mockGitHub) handleGetContent(w http.ResponseWriter, r *http.Request, re
 	// Check if client wants raw content
 	acceptRaw := r.Header.Get("Accept") == "application/vnd.github.raw"
 
-	if ref != "" {
-		for _, commit := range repo.commitsByPath[filePath] {
-			if commit.sha == ref {
-				if acceptRaw {
-					w.Header().Set("Content-Type", "application/octet-stream")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write(commit.data)
-				} else {
-					m.writeJSON(w, http.StatusOK, map[string]any{
-						"name":     filepath.Base(filePath),
-						"path":     filePath,
-						"sha":      fmt.Sprintf("blob-%s", commit.sha),
-						"encoding": "base64",
-						"type":     "file",
-						"content":  base64.StdEncoding.EncodeToString(commit.data),
-					})
-				}
-				return
-			}
+	if ref != "" && ref != "HEAD" && ref != defaultBranch {
+		// Real GitHub resolves ?ref= against the commit graph and 404s a
+		// ref it does not know; it never silently serves HEAD bytes for an
+		// unknown/stale SHA. "HEAD" and the default branch name
+		// are valid refs and resolve to current state below.
+		data, known, present := m.contentAtRefLocked(repo, filePath, ref)
+		switch {
+		case !known:
+			m.writeJSON(w, http.StatusNotFound, map[string]any{"message": fmt.Sprintf("No commit found for SHA: %s", ref)})
+			return
+		case present:
+			m.serveFileContentLocked(w, filePath, data, acceptRaw)
+			return
+		case repo.files[filePath] != nil:
+			// A file now (or again) at HEAD that did not exist at ref:
+			// GitHub 404s the historical read.
+			m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+			return
+			// Otherwise the path may be a directory prefix: fall through
+			// to the HEAD listing (the mock keeps no per-commit trees).
 		}
 	}
 	file := repo.files[filePath]
 	if file == nil {
 		// Not an exact file: it may be a directory prefix. GitHub's contents
 		// API returns an array of entries for a directory. Prune's object
-		// enumeration relies on this, so mirror it.
+		// enumeration relies on this, so mirror it - including GitHub's
+		// hard 1000-entry ceiling, past which the API 403s "too large"
+		// rather than truncating.
 		if entries, ok := m.dirEntriesLocked(repo, filePath); ok {
+			if len(entries) > contentsListingCap {
+				m.writeJSON(w, http.StatusForbidden, map[string]any{"message": "too large"})
+				return
+			}
 			m.writeJSON(w, http.StatusOK, entries)
 			return
 		}
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
 		return
 	}
+	m.serveFileContentLocked(w, filePath, file.data, acceptRaw)
+}
 
+// serveFileContentLocked answers a contents GET (raw or JSON envelope)
+// with the given bytes. Caller holds m.mu.
+func (m *mockGitHub) serveFileContentLocked(w http.ResponseWriter, filePath string, data []byte, acceptRaw bool) {
 	if acceptRaw {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(file.data)
-	} else {
-		m.writeJSON(w, http.StatusOK, map[string]any{
-			"name":     filepath.Base(filePath),
-			"path":     filePath,
-			"sha":      file.sha,
-			"encoding": "base64",
-			"type":     "file",
-			"content":  base64.StdEncoding.EncodeToString(file.data),
-		})
+		_, _ = w.Write(data)
+		return
 	}
+	m.writeJSON(w, http.StatusOK, map[string]any{
+		"name":     filepath.Base(filePath),
+		"path":     filePath,
+		"sha":      computeGitBlobSHA(data),
+		"encoding": "base64",
+		"type":     "file",
+		"content":  base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// contentAtRefLocked resolves filePath at commit ref the way GitHub does:
+// the bytes the path carried in that commit's tree. known=false means ref
+// is not a commit the mock knows at all (GitHub: 404 "No commit found for
+// SHA" - the ref is resolved across EVERY path's history, since GitHub
+// accepts any valid SHA, not just commits that touched this file).
+// known=true, present=false means the path did not exist (or was deleted)
+// at that commit (GitHub: 404 "Not Found").
+func (m *mockGitHub) contentAtRefLocked(repo *mockRepo, filePath, ref string) (data []byte, known, present bool) {
+	var refWhen time.Time
+	for _, commits := range repo.commitsByPath {
+		for _, c := range commits {
+			if c.sha == ref {
+				refWhen, known = c.when, true
+				break
+			}
+		}
+		if known {
+			break
+		}
+	}
+	if !known {
+		return nil, false, false
+	}
+	commits := repo.commitsByPath[filePath]
+	if len(commits) == 0 {
+		// No recorded history for this path: it predates every commit the
+		// mock knows (seeded state), so HEAD bytes are its content at any
+		// valid ref.
+		if f := repo.files[filePath]; f != nil {
+			return f.data, true, true
+		}
+		return nil, true, false
+	}
+	// commitsByPath is newest-first; the content at ref is the newest
+	// entry at or before ref's timestamp.
+	for _, c := range commits {
+		if !c.when.After(refWhen) {
+			if c.deleted {
+				return nil, true, false
+			}
+			return c.data, true, true
+		}
+	}
+	// Every change to this path postdates ref: it did not exist then.
+	return nil, true, false
 }
 
 // dirEntriesLocked returns the immediate children of a directory prefix
@@ -3384,14 +3477,29 @@ func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, re
 		m.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
 		return
 	}
+	// Mirror GitHub's request validation: a contents PUT
+	// without a commit message 422s, and invalid base64 is a 422 - not
+	// the 400/200 the old mock answered with.
+	if payload.Message == "" {
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"message\" wasn't supplied."})
+		return
+	}
 	data, err := base64.StdEncoding.DecodeString(payload.Content)
 	if err != nil {
-		m.writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"content\" is not valid base64-encoded data."})
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := repo.files[filePath]
+	// Mirror GitHub: a sha-less PUT onto an EXISTING path is not a silent
+	// overwrite, it is a create collision - 422 with the "sha wasn't
+	// supplied" request-validation body. The old 200 made the
+	// production benign-concurrent-create branch unreachable in tests.
+	if current != nil && payload.SHA == "" {
+		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Invalid request.\n\n\"sha\" wasn't supplied."})
+		return
+	}
 	if current != nil && payload.SHA != "" && payload.SHA != current.sha {
 		m.writeJSON(w, http.StatusConflict, map[string]any{"message": "sha does not match"})
 		return
@@ -3407,7 +3515,12 @@ func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, re
 	repo.nextCommitID++
 	commit := mockCommit{sha: commitSHA, message: payload.Message, path: filePath, data: append([]byte(nil), data...), when: time.Unix(1700000000+repo.nextCommitID, 0).UTC()}
 	repo.commitsByPath[filePath] = append([]mockCommit{commit}, repo.commitsByPath[filePath]...)
-	m.writeJSON(w, http.StatusOK, map[string]any{
+	// Mirror GitHub: creating a new file answers 201, updating 200.
+	status := http.StatusOK
+	if current == nil {
+		status = http.StatusCreated
+	}
+	m.writeJSON(w, status, map[string]any{
 		"content": map[string]any{
 			"name": filepath.Base(filePath),
 			"path": filePath,
@@ -3499,7 +3612,10 @@ func (m *mockGitHub) handleListReleases(w http.ResponseWriter, r *http.Request, 
 	for _, release := range repo.releasesByTag {
 		releases = append(releases, release)
 	}
-	sort.Slice(releases, func(i, j int) bool { return releases[i].tag < releases[j].tag })
+	// Mirror GitHub: the releases list is ordered by created_at DESC, not
+	// by tag. IDs are minted in creation order, so descending
+	// ID is the same sequence; tag-string order ("v10" < "v9") is not.
+	sort.Slice(releases, func(i, j int) bool { return releases[i].id > releases[j].id })
 	m.writePaginationLinks(w, r, len(releases))
 	pageReleases := paginateSlice(releases, r.URL.Query())
 	response := make([]map[string]any, 0, len(pageReleases))
@@ -3557,7 +3673,7 @@ func (m *mockGitHub) releaseAssetsLocked(repo *mockRepo, tag string) []map[strin
 			rows = append(rows, assetRow{id: asset.id, name: asset.name, size: len(asset.data)})
 		}
 	}
-	// Deterministic embed order (B14): GitHub lists assets by ascending
+	// Deterministic embed order: GitHub lists assets by ascending
 	// ID; Go map iteration is random.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].id < rows[j].id })
 	assets := make([]map[string]any, 0, len(rows))
@@ -3692,39 +3808,44 @@ func (m *mockGitHub) handleDownloadAsset(w http.ResponseWriter, r *http.Request,
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
 		return
 	}
-	data := append([]byte(nil), asset.data...)
+	name, size := asset.name, len(asset.data)
 	m.mu.Unlock()
-	// Mirror GitHub: an octet-stream GET is a redirect to a short-lived
-	// signed CDN URL. Range fetches then hit the CDN directly without
-	// auth headers; anything else streams inline (legacy mock shape).
-	if r.Header.Get("Accept") == "application/octet-stream" {
-		w.Header().Set("Location", fmt.Sprintf("%s/cdn/%d", m.server.URL, assetID))
-		w.WriteHeader(http.StatusFound)
+	// Mirror GitHub: only the octet-stream GET is a redirect to a
+	// short-lived signed CDN URL (range fetches then hit the CDN directly
+	// without auth headers). Any other Accept answers with the asset's
+	// metadata JSON - never the bytes.
+	if r.Header.Get("Accept") != "application/octet-stream" {
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"id":                   assetID,
+			"name":                 name,
+			"size":                 size,
+			"content_type":         "application/octet-stream",
+			"browser_download_url": fmt.Sprintf("%s/cdn/%d", m.server.URL, assetID),
+		})
 		return
 	}
-	start, end, partial, err := resolveByteRange(r.Header.Get("Range"), int64(len(data)))
-	if err != nil {
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return
+	location := fmt.Sprintf("%s/cdn/%d", m.server.URL, assetID)
+	if ttl := m.cdnTTL.Load(); ttl > 0 {
+		location = fmt.Sprintf("%s/cdn/%d?exp=%d", m.server.URL, assetID, time.Now().Add(time.Duration(ttl)).UnixNano())
 	}
-	body := data
-	status := http.StatusOK
-	if partial {
-		body = data[start : end+1]
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
-		status = http.StatusPartialContent
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(status)
-	_, _ = w.Write(body)
+	w.Header().Set("Location", location)
+	w.WriteHeader(http.StatusFound)
 }
 
 // handleCDN serves signed-URL range fetches: no auth required (the URL is
-// the bearer credential), Range honored, Accept-Ranges advertised.
+// the bearer credential), Range honored, Accept-Ranges advertised. When
+// the URL carries an exp deadline (cdnTTL armed) an expired fetch 403s
+// like GitHub's expired Azure SAS does, forcing the client to re-resolve
+// through the API.
 func (m *mockGitHub) handleCDN(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "" {
 		m.cdnSawAuth.Store(true)
+	}
+	if exp := r.URL.Query().Get("exp"); exp != "" {
+		if when, err := strconv.ParseInt(exp, 10, 64); err == nil && time.Now().UnixNano() > when {
+			m.writeJSON(w, http.StatusForbidden, map[string]any{"message": "Signature is not valid on this request"})
+			return
+		}
 	}
 	assetID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/cdn/"), 10, 64)
 	if err != nil {
@@ -3782,6 +3903,13 @@ func (m *mockGitHub) handleDeleteAsset(w http.ResponseWriter, repo *mockRepo, ra
 func (m *mockGitHub) handleDeleteRepo(w http.ResponseWriter, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Mirror GitHub: deleting an unknown repo 404s. The client
+	// treats 404 on delete as success; the old unconditional 204 hid the
+	// lost-response-retry divergence.
+	if _, ok := m.repos[name]; !ok {
+		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		return
+	}
 	delete(m.repos, name)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -3880,8 +4008,11 @@ func (m *mockGitHub) setMetadata(t *testing.T, project string, md RepoMetadata) 
 		repo.files[metadataFilePath] = file
 	}
 	file.data = append([]byte(nil), payload...)
-	file.sha = fmt.Sprintf("blob-%d", repo.nextBlobID)
-	repo.nextBlobID++
+	// Mirror GitHub's stored blob sha: the client computes its
+	// CAS token locally from raw bytes, so a fake counter sha would make
+	// a read-modify-write of seeded legacy state 409 on a precondition
+	// that passes against the real API.
+	file.sha = computeGitBlobSHA(payload)
 }
 
 func (m *mockGitHub) assertRepoStats(t *testing.T, project string, files int, size int64) {
@@ -4382,5 +4513,506 @@ func TestColdCacheMutationDoesNotClobberRemote(t *testing.T) {
 	}
 	if _, err := observer.StatPathContext(ctx, project, "latecomer"); err != nil {
 		t.Fatalf("cold mutation did not land: %v", err)
+	}
+}
+
+// --- mock fidelity pins ------------------------------------------------
+//
+// These tests pin the MOCK to real GitHub behavior: the
+// divergences it must mirror (422 create-collision, 404 unknown ref,
+// 403 oversized dir, 422 sha-less delete, 404 unknown-repo delete, real
+// blob shas, delete commits, newest-first releases, scoped rate fault,
+// expiring CDN URLs, JSON-accept asset metadata) must not silently regress.
+
+func mockRaw(t *testing.T, backend *mockGitHub, method, path string, body any) *http.Response {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal raw body: %v", err)
+		}
+		rdr = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, backend.server.URL+path, rdr)
+	if err != nil {
+		t.Fatalf("build raw request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer token")
+	resp, err := backend.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("raw %s %s: %v", method, path, err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+func putRawStatus(t *testing.T, backend *mockGitHub, project, path string, body map[string]any) int {
+	t.Helper()
+	resp := mockRaw(t, backend, http.MethodPut, "/repos/"+backend.owner+"/"+project+"/contents/"+path, body)
+	return resp.StatusCode
+}
+
+// A sha-less PUT onto an existing path is a create collision and
+// must 422 with GitHub's "sha wasn't supplied" validation body - never a
+// silent 200 overwrite. Creates answer 201, updates 200, missing message
+// and invalid base64 answer 422.
+func TestMockContentsPutCreateCollisionIs422(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "put422"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString([]byte("v1"))
+	if got := putRawStatus(t, backend, "put422", "f.txt", map[string]any{"message": "create", "content": b64}); got != http.StatusCreated {
+		t.Fatalf("create must 201, got %d", got)
+	}
+	resp := mockRaw(t, backend, http.MethodPut, "/repos/"+backend.owner+"/put422/contents/f.txt", map[string]any{"message": "collision", "content": b64})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("sha-less create onto existing path must 422, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "sha") || !strings.Contains(string(body), "Invalid request") {
+		t.Fatalf("422 body must carry GitHub's sha-validation prose, got %q", body)
+	}
+	// A stale sha still 409s (update precondition), the current sha updates (200).
+	if got := putRawStatus(t, backend, "put422", "f.txt", map[string]any{"message": "stale", "content": b64, "sha": "deadbeef"}); got != http.StatusConflict {
+		t.Fatalf("stale sha must 409, got %d", got)
+	}
+	current := computeGitBlobSHA([]byte("v1"))
+	if got := putRawStatus(t, backend, "put422", "f.txt", map[string]any{"message": "ok", "content": base64.StdEncoding.EncodeToString([]byte("v2")), "sha": current}); got != http.StatusOK {
+		t.Fatalf("matching sha must update with 200, got %d", got)
+	}
+	if got := putRawStatus(t, backend, "put422", "g.txt", map[string]any{"content": b64}); got != http.StatusUnprocessableEntity {
+		t.Fatalf("missing message must 422, got %d", got)
+	}
+	if got := putRawStatus(t, backend, "put422", "h.txt", map[string]any{"message": "bad b64", "content": "!!!not-base64!!!"}); got != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid base64 must 422, got %d", got)
+	}
+}
+
+// ?ref= must resolve like GitHub - exact commit, any valid commit
+// (content at-or-before), 404 for unknown refs, 404 for a path deleted at
+// that ref, and HEAD/branch names resolving to current state.
+func TestMockUnknownRefIs404(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "ref404"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	get := func(path, ref string) int {
+		p := "/repos/" + backend.owner + "/ref404/contents/" + path
+		if ref != "" {
+			p += "?ref=" + url.QueryEscape(ref)
+		}
+		return mockRaw(t, backend, http.MethodGet, p, nil).StatusCode
+	}
+	putRawStatus(t, backend, "ref404", "a.txt", map[string]any{"message": "a1", "content": base64.StdEncoding.EncodeToString([]byte("a1"))})
+	// commit-1 created a.txt. An unknown SHA must 404, not serve HEAD.
+	if got := get("a.txt", "0123456789abcdef"); got != http.StatusNotFound {
+		t.Fatalf("unknown ref must 404, got %d", got)
+	}
+	// A commit that touched a DIFFERENT path still resolves: b.txt's
+	// create commit sees a.txt at its commit-1 content.
+	putRawStatus(t, backend, "ref404", "b.txt", map[string]any{"message": "b1", "content": base64.StdEncoding.EncodeToString([]byte("b1"))})
+	resp := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/ref404/contents/a.txt?ref=commit-2", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid cross-path ref must resolve, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), base64.StdEncoding.EncodeToString([]byte("a1"))) {
+		t.Fatalf("ref read must serve the at-or-before content, got %q", body)
+	}
+	// b.txt did not exist at commit-1: 404 Not Found (not HEAD!).
+	if got := get("b.txt", "commit-1"); got != http.StatusNotFound {
+		t.Fatalf("path created after ref must 404, got %d", got)
+	}
+	// HEAD and the default branch resolve to current state.
+	if got := get("a.txt", "HEAD"); got != http.StatusOK {
+		t.Fatalf("HEAD ref must resolve, got %d", got)
+	}
+	if got := get("a.txt", defaultBranch); got != http.StatusOK {
+		t.Fatalf("branch ref must resolve, got %d", got)
+	}
+	// Deleting a.txt records a delete commit; reading the path AT that
+	// commit 404s while the commit appears in the path's history.
+	del := mockRaw(t, backend, http.MethodDelete, "/repos/"+backend.owner+"/ref404/contents/a.txt", map[string]any{"message": "bye", "sha": computeGitBlobSHA([]byte("a1"))})
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("delete with matching sha must 200, got %d", del.StatusCode)
+	}
+	delBody, _ := io.ReadAll(del.Body)
+	var parsed struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(delBody, &parsed); err != nil || parsed.Commit.SHA == "" {
+		t.Fatalf("delete must report its commit: %v %s", err, delBody)
+	}
+	if got := get("a.txt", parsed.Commit.SHA); got != http.StatusNotFound {
+		t.Fatalf("read at the delete commit must 404, got %d", got)
+	}
+	revs, err := hub.gh.ListFileCommits(ctx, hub.Owner(), "ref404", "a.txt")
+	if err != nil {
+		t.Fatalf("list commits: %v", err)
+	}
+	if len(revs) != 2 || revs[0].SHA != parsed.Commit.SHA {
+		t.Fatalf("delete commit must head the path history, got %+v", revs)
+	}
+}
+
+// A directory listing over GitHub's 1000-entry cap must 403 "too
+// large", exactly like the live API, so prune's oversized-repo fallback
+// branch is reachable in tests.
+func TestMockDirListingOverCapIs403(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "cap403"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	repo := backend.repo("cap403")
+	backend.mu.Lock()
+	for i := 0; i <= contentsListingCap; i++ {
+		name := fmt.Sprintf("big/f%05d", i)
+		repo.files[name] = &mockFile{path: name, sha: computeGitBlobSHA([]byte(name)), data: []byte(name)}
+	}
+	backend.mu.Unlock()
+	resp := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/cap403/contents/big", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("dir over the cap must 403, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "too large") {
+		t.Fatalf("403 body must carry GitHub's too-large message, got %q", body)
+	}
+	// At the cap the listing still answers.
+	backend.mu.Lock()
+	delete(repo.files, "big/f00000")
+	backend.mu.Unlock()
+	if got := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/cap403/contents/big", nil).StatusCode; got != http.StatusOK {
+		t.Fatalf("listing at the cap must 200, got %d", got)
+	}
+}
+
+// Contents DELETE without a sha must 422 (GitHub requires the blob
+// sha), never delete silently.
+func TestMockDeleteRequiresSHA(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "del422"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	putRawStatus(t, backend, "del422", "k.txt", map[string]any{"message": "keep", "content": base64.StdEncoding.EncodeToString([]byte("k"))})
+	resp := mockRaw(t, backend, http.MethodDelete, "/repos/"+backend.owner+"/del422/contents/k.txt", map[string]any{"message": "wipe"})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("sha-less delete must 422, got %d", resp.StatusCode)
+	}
+	if backend.repo("del422").files["k.txt"] == nil {
+		t.Fatal("refused delete must not remove the file")
+	}
+}
+
+// DELETE on an unknown repo 404s (the router already refuses unknown
+// repos; pin it so the client's 404-is-success tolerance stays exercised).
+func TestMockDeleteUnknownRepoIs404(t *testing.T) {
+	backend := newMockGitHub(t)
+	if got := mockRaw(t, backend, http.MethodDelete, "/repos/"+backend.owner+"/never-existed", nil).StatusCode; got != http.StatusNotFound {
+		t.Fatalf("unknown repo delete must 404, got %d", got)
+	}
+}
+
+// Legacy setMetadata must store the REAL git blob sha, so a hub that
+// reads the seeded file and CAS-writes it back (token computed locally
+// from bytes) is not 409ed by a precondition GitHub would pass.
+func TestMockLegacySetMetadataStoresRealBlobSHA(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "legacy6"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	md := NewRepoMetadata("legacy6")
+	md.EnsureDirectory("docs", 1700000000)
+	backend.setMetadata(t, "legacy6", *md)
+	repo := backend.repo("legacy6")
+	backend.mu.Lock()
+	file := repo.files[metadataFilePath]
+	want := computeGitBlobSHA(file.data)
+	backend.mu.Unlock()
+	if file.sha != want {
+		t.Fatalf("legacy seed must store the real blob sha, got %s want %s", file.sha, want)
+	}
+	// The read-modify-write the client performs must pass the mock's CAS.
+	_, sha, err := hub.gh.GetFileContent(ctx, hub.Owner(), "legacy6", metadataFilePath, "")
+	if err != nil {
+		t.Fatalf("read legacy: %v", err)
+	}
+	if _, _, err := hub.gh.PutFileContent(ctx, hub.Owner(), "legacy6", metadataFilePath, file.data, sha, "rewrite"); err != nil {
+		t.Fatalf("CAS rewrite of seeded legacy file must succeed: %v", err)
+	}
+}
+
+// The releases list must be ordered newest-created first, like GitHub
+// (created_at desc), not by tag string.
+func TestMockReleasesListedNewestFirst(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "relorder"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	for _, tag := range []string{"v9", "v10", "v2"} {
+		backend.addRelease(t, "relorder", tag)
+	}
+	releases, err := hub.gh.ListReleases(ctx, hub.Owner(), "relorder")
+	if err != nil {
+		t.Fatalf("list releases: %v", err)
+	}
+	if len(releases) != 3 || releases[0].TagName != "v2" || releases[1].TagName != "v10" || releases[2].TagName != "v9" {
+		t.Fatalf("releases must come back created-desc (v2, v10, v9), got %+v", releases)
+	}
+}
+
+// The opt-in rate fault may only be spent on an authenticated API
+// route - never on a CDN fetch.
+func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
+	backend := newMockGitHub(t)
+	backend.rateLimitOnce.Store(true)
+	req, _ := http.NewRequest(http.MethodGet, backend.server.URL+"/cdn/404110", nil)
+	resp, err := backend.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("cdn probe: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		t.Fatal("CDN fetch must not consume the rate fault")
+	}
+	if got := mockRaw(t, backend, http.MethodGet, "/user", nil).StatusCode; got != http.StatusTooManyRequests {
+		t.Fatalf("API route must take the armed fault, got %d", got)
+	}
+	if backend.rateLimitServed.Load() != 1 {
+		t.Fatalf("fault must fire exactly once, served=%d", backend.rateLimitServed.Load())
+	}
+}
+
+// With cdnTTL armed, signed CDN URLs expire (403) and the client's
+// SAS-rejection path re-resolves through the API instead of failing.
+func TestMockCDNExpiryForcesReResolution(t *testing.T) {
+	backend := newMockGitHub(t)
+	backend.cdnTTL.Store(int64(50 * time.Millisecond))
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	payload := []byte("expiring cdn payload")
+	input := writeTempFile(t, t.TempDir(), "exp.txt", payload)
+	if _, err := hub.UploadFileContext(ctx, "cdnexp", "exp.txt", input); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	var apiAssetHits atomic.Int32
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
+			apiAssetHits.Add(1)
+		}
+		return false
+	})
+	out := filepath.Join(t.TempDir(), "exp.out")
+	if err := hub.DownloadFileContext(ctx, "cdnexp", "exp.txt", out); err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	if err := hub.DownloadFileContext(ctx, "cdnexp", "exp.txt", out); err != nil {
+		t.Fatalf("download with expired cached URL must re-resolve, got: %v", err)
+	}
+	assertFileContent(t, out, payload)
+	if apiAssetHits.Load() < 2 {
+		t.Fatalf("expired URL must force at least two API resolutions, got %d", apiAssetHits.Load())
+	}
+}
+
+// An asset GET with a JSON Accept answers with the asset's metadata,
+// never the bytes.
+func TestMockAssetJSONAcceptReturnsMetadata(t *testing.T) {
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	if err := hub.EnsureRepoContext(ctx, "assetjson"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	backend.addRelease(t, "assetjson", "v1")
+	id := backend.addAssetToRelease(t, "assetjson", "v1", "data.bin", []byte("raw bytes should not stream here"))
+	resp := mockRaw(t, backend, http.MethodGet, fmt.Sprintf("/repos/%s/assetjson/releases/assets/%d", backend.owner, id), nil)
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("JSON-accept asset GET must answer metadata JSON, got content-type %q", ct)
+	}
+	var meta map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		t.Fatalf("decode asset metadata: %v", err)
+	}
+	if meta["name"] != "data.bin" || meta["id"] != float64(id) {
+		t.Fatalf("unexpected asset metadata: %+v", meta)
+	}
+}
+
+// --- git_repo sabotage checks ------------------------------------------
+
+// casConflict must classify go-git's real lease failures as 409 and
+// must NOT misread "release" prose (hooks, URLs) as a conflict - the old
+// bare "lease" substring did.
+func TestCasConflictWordBoundary(t *testing.T) {
+	base := plumbing.ZeroHash
+	if err := casConflict(errors.New("remote: hook declined push for releases/v9"), base); err != nil {
+		var apiErr *ghapi.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			t.Fatal("error text containing 'release' must not be misread as a lease conflict")
+		}
+	}
+	conflict := casConflict(errors.New("non-fast-forward update: refs/heads/main"), base)
+	var apiErr *ghapi.APIError
+	if !errors.As(conflict, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("non-fast-forward must map to 409, got %v", conflict)
+	}
+	conflict = casConflict(errors.New("! [rejected] main -> main (stale info)"), base)
+	if !errors.As(conflict, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("stale info must map to 409, got %v", conflict)
+	}
+}
+
+// listFileCommits must count only commits that CHANGE the path
+// (REST commits?path= semantics), not every commit whose tree contains it.
+func TestListFileCommitsOnlyTouchingCommits(t *testing.T) {
+	bareDir := filepath.Join(t.TempDir(), "touch.git")
+	bare, err := git.PlainInit(bareDir, true)
+	if err != nil {
+		t.Fatalf("init bare: %v", err)
+	}
+	if err := bare.Storer.SetReference(plumbNewHead()); err != nil {
+		t.Fatalf("set HEAD: %v", err)
+	}
+	work := filepath.Join(t.TempDir(), "touchwork")
+	repo, err := git.PlainInit(work, false)
+	if err != nil {
+		t.Fatalf("init work: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbNewHead()); err != nil {
+		t.Fatalf("set work HEAD: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+	commit := func(name, content, msg string) {
+		t.Helper()
+		p := filepath.Join(work, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Add(name); err != nil {
+			t.Fatal(err)
+		}
+		sig := &object.Signature{Name: "test", Email: "t@e.st", When: time.Now()}
+		if _, err := wt.Commit(msg, &git.CommitOptions{Author: sig, Committer: sig}); err != nil {
+			t.Fatalf("commit %q: %v", msg, err)
+		}
+	}
+	commit(metadataFilePath, "one", "index: first")
+	commit("other.txt", "x", "other only") // must NOT count for metadataFilePath
+	commit(metadataFilePath, "two", "index: second")
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{"file://" + bareDir}}); err != nil {
+		t.Fatalf("remote: %v", err)
+	}
+	if err := repo.PushContext(context.Background(), &git.PushOptions{RemoteName: "origin", RefSpecs: pushMainRefSpecs()}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	r := newGitRepo(t.TempDir(), "owner", "touch", "")
+	r.remoteBase = "file://" + bareDir
+	revs, err := r.listFileCommits(context.Background(), metadataFilePath)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("only commits that change the path may count: got %d (%+v)", len(revs), revs)
+	}
+	if revs[0].Message != "index: second" || revs[1].Message != "index: first" {
+		t.Fatalf("unexpected revision list %+v", revs)
+	}
+}
+
+// readFileHead must answer from the HEAD tree. A file left untracked
+// by a write canceled before Commit survives every HardReset; serving the
+// worktree filesystem would present that ghost as HEAD truth.
+func TestReadFileHeadIgnoresUntrackedGhost(t *testing.T) {
+	url := seedBareMetadataRepo(t)
+	r := newGitRepo(t.TempDir(), "owner", "ghost", "")
+	r.remoteBase = url
+	ctx := context.Background()
+	if err := r.ensure(ctx); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := r.sync(ctx); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	ghost := filepath.Join(r.dir, ".storhub", "ghost.txt")
+	if err := os.WriteFile(ghost, []byte("never committed"), 0o644); err != nil {
+		t.Fatalf("plant ghost: %v", err)
+	}
+	if _, err := r.readFileHead(ctx, ".storhub/ghost.txt"); err == nil {
+		t.Fatal("readFileHead must not serve an untracked worktree ghost as HEAD truth")
+	}
+	// Tracked reads still work.
+	if data, err := r.readFileHead(ctx, metadataFilePath); err != nil || len(data) == 0 {
+		t.Fatalf("tracked HEAD read broken: %v", err)
+	}
+}
+
+// headCommitSHA runs off-lock against a repo that release() nils. The
+// race detector must see no unsynchronized access while it is called
+// concurrently with mutations.
+func TestHeadCommitSHALockedAgainstRelease(t *testing.T) {
+	url := seedBareMetadataRepo(t)
+	r := newGitRepo(t.TempDir(), "owner", "race", "")
+	r.remoteBase = url
+	ctx := context.Background()
+	if err := r.ensure(ctx); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = r.headCommitSHA()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		if _, _, err := r.writeCommitPush(ctx, metadataFilePath, []byte(fmt.Sprintf(`{"v":4,"p":"race","i":%d}`, i)), fmt.Sprintf("cycle %d", i)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if err := r.release(true); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	for i := 0; i < 100; i++ {
+		if got := r.headCommitSHA(); got != "" {
+			t.Fatalf("headCommitSHA after release must report empty, got %q", got)
+		}
 	}
 }

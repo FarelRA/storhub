@@ -112,7 +112,7 @@ func (f *fakeShowcaseHub) AppendFileContext(ctx context.Context, project, filePa
 func (f *fakeShowcaseHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	return []byte("alpha\nbeta\n"), nil
 }
-func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
 	return nil
 }
 func (f *fakeShowcaseHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
@@ -151,7 +151,7 @@ func (f *fakeShowcaseHub) ChownContext(ctx context.Context, project, targetPath 
 func (f *fakeShowcaseHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	return nil
 }
-func (f *fakeShowcaseHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+func (f *fakeShowcaseHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
 	return nil
 }
 func (f *fakeShowcaseHub) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {

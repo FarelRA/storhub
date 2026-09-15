@@ -2,11 +2,16 @@ package storage
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	ghapi "github.com/FarelRA/storhub/internal/github"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -111,5 +116,173 @@ func TestObjectCacheGetRefreshesRecency(t *testing.T) {
 	}
 	if _, ok := c.get(sb); ok {
 		t.Fatal("least-recently-used object survived eviction")
+	}
+}
+
+// The entry count alone is not a disk bound (an object can be up to the
+// contents-API size limit), so eviction must also honor a byte budget,
+// evicting least-recently-used first and keeping the accounting consistent.
+func TestObjectCacheByteBudgetEviction(t *testing.T) {
+	dir := t.TempDir()
+	c := newObjectCache(dir, 1000) // count cap irrelevant; bytes must bind
+	c.maxBytes = 100
+	var shas []string
+	total := 0
+	for i := 0; total <= 100; i++ {
+		data := objBytes(strings.Repeat("x", 10) + fmt.Sprintf("%d", i))
+		sha := meta.ObjectSHA(data)
+		c.put(sha, data)
+		shas = append(shas, sha)
+		total += len(data)
+	}
+	c.mu.Lock()
+	gotTotal, gotCount := c.total, len(c.order)
+	c.mu.Unlock()
+	if gotTotal > c.maxBytes {
+		t.Fatalf("byte budget exceeded after eviction: total=%d max=%d", gotTotal, c.maxBytes)
+	}
+	if gotCount == 0 {
+		t.Fatal("byte eviction removed everything")
+	}
+	// The oldest entries are the ones gone, and gone from disk too.
+	if _, ok := c.get(shas[0]); ok {
+		t.Fatal("oldest object survived byte eviction")
+	}
+	if _, err := os.Stat(filepath.Join(dir, meta.ObjectPath(shas[0]))); !os.IsNotExist(err) {
+		t.Fatal("byte-evicted object still on disk")
+	}
+}
+
+// A single object larger than the whole budget must be evicted immediately,
+// not wedge the eviction loop.
+func TestObjectCacheOversizedSinglePut(t *testing.T) {
+	c := newObjectCache(t.TempDir(), 100)
+	c.maxBytes = 10
+	data := objBytes(strings.Repeat("y", 50))
+	sha := meta.ObjectSHA(data)
+	if !c.put(sha, data) {
+		t.Fatal("put rejected valid object")
+	}
+	if _, ok := c.get(sha); ok {
+		t.Fatal("object above the byte budget survived")
+	}
+	c.mu.Lock()
+	total := c.total
+	c.mu.Unlock()
+	if total != 0 {
+		t.Fatalf("byte accounting drifted on eviction: total=%d", total)
+	}
+}
+
+// GitHub answers a sha-less create onto an existing path with 422 (and
+// 409 when a supplied sha mismatched). Both are benign for a content-
+// addressed write exactly when the upstream bytes carry the claimed address:
+// the object is already there, so the write counts as success.
+func TestWriteObjectsTreatsVerifiedCollisionAsSuccess(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusUnprocessableEntity} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Setenv("STORHUB_CACHE_DIR", t.TempDir())
+			ctx := context.Background()
+			backend := newMockGitHub(t)
+			hub := backend.newClient(t, smallTransferTestConfig())
+			if err := hub.EnsureRepoContext(ctx, "collision-ok"); err != nil {
+				t.Fatalf("ensure repo: %v", err)
+			}
+			data := objBytes(`{"m":{"i":7},"f":{}}`)
+			sha := meta.ObjectSHA(data)
+			// The object is already upstream (LRU evicted it from our cache,
+			// or a crash-retry regenerated it): the sha-less create collides.
+			if _, _, err := hub.gh.PutFileContent(ctx, hub.owner, "collision-ok", objectRepoPath(sha), data, "", "pre-place"); err != nil {
+				t.Fatalf("pre-place: %v", err)
+			}
+			backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+				if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/objects/") {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"Content","code":"already_exists","field":"content","message":"SHA wasn't supplied"}]}`))
+					return true
+				}
+				return false
+			})
+			written, err := hub.writeObjects(ctx, "collision-ok", map[string][]byte{sha: data})
+			if err != nil {
+				t.Fatalf("collision onto matching upstream bytes must be benign at %d: %v", status, err)
+			}
+			if written != 1 {
+				t.Fatalf("benign collision must count as written, got %d", written)
+			}
+			if !hub.objectCacheFor("collision-ok").contains(sha) {
+				t.Fatal("benign collision must populate the cache")
+			}
+		})
+	}
+}
+
+// Conversely, a collision whose upstream bytes do NOT hash to the
+// claimed address is not our object and must fail loudly, never be swallowed.
+func TestWriteObjectsCollisionWithForeignContentFails(t *testing.T) {
+	t.Setenv("STORHUB_CACHE_DIR", t.TempDir())
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	if err := hub.EnsureRepoContext(ctx, "collision-mismatch"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	data := objBytes(`{"m":{"i":8},"f":{}}`)
+	sha := meta.ObjectSHA(data)
+	// Upstream holds DIFFERENT bytes at the object path.
+	if _, _, err := hub.gh.PutFileContent(ctx, hub.owner, "collision-mismatch", objectRepoPath(sha), objBytes("foreign bytes"), "", "foreign"); err != nil {
+		t.Fatalf("foreign pre-place: %v", err)
+	}
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/objects/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"Content","code":"already_exists","field":"content"}]}`))
+			return true
+		}
+		return false
+	})
+	if _, err := hub.writeObjects(ctx, "collision-mismatch", map[string][]byte{sha: data}); err == nil {
+		t.Fatal("collision onto foreign bytes must fail")
+	}
+	if hub.objectCacheFor("collision-mismatch").contains(sha) {
+		t.Fatal("failed write must not cache the object")
+	}
+}
+
+// A collision status on a path that is EMPTY upstream is not "your object
+// already exists": the original error must propagate unchanged (a 409 stays
+// a 409 so the commit loop's conflict-rebase path still recognizes it) and
+// the unverified bytes must never be cached.
+func TestWriteObjectsCollisionOnAbsentPathPropagatesOriginal(t *testing.T) {
+	t.Setenv("STORHUB_CACHE_DIR", t.TempDir())
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	if err := hub.EnsureRepoContext(ctx, "collision-absent"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	data := objBytes(`{"m":{"i":9},"f":{}}`)
+	sha := meta.ObjectSHA(data)
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/.storhub/objects/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
+			return true
+		}
+		return false
+	})
+	_, err := hub.writeObjects(ctx, "collision-absent", map[string][]byte{sha: data})
+	if err == nil {
+		t.Fatal("collision onto an absent path must fail")
+	}
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("original 409 must propagate for the commit loop's rebase path, got %v", err)
+	}
+	if hub.objectCacheFor("collision-absent").contains(sha) {
+		t.Fatal("unverified bytes must not be cached")
 	}
 }

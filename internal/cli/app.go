@@ -1,19 +1,23 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shlog "github.com/FarelRA/storhub/internal/logging"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -25,12 +29,30 @@ import (
 // version is injected at build time via -ldflags "-X ...version=x.y.z".
 var version = "dev"
 
+// logSettings carries the --log-* flags from one App instance into the hub
+// constructors. Per-App state, not package globals: two Apps in one process
+// (tests, embedders driving the CLI) must not race on shared flag targets.
+type logSettings struct {
+	level  string
+	format string
+	color  bool
+}
+
+func defaultLogSettings() logSettings {
+	return logSettings{
+		level:  envOrDefault("STORHUB_LOG_LEVEL", "info"),
+		format: envOrDefault("STORHUB_LOG_FORMAT", "pretty"),
+		color:  parseEnvBool("STORHUB_LOG_COLOR", true),
+	}
+}
+
 type App struct {
 	stdin   io.Reader
 	stdout  *os.File
 	stderr  *os.File
 	rootCmd *cobra.Command
 	hub     hubClient
+	log     logSettings
 }
 
 type fuseMount interface {
@@ -55,9 +77,12 @@ type hubClient interface {
 	WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error)
 	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
 	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
-	RollbackMetadata(project, commitSHA string) error
-	PurgeUntracked(project string) (*storhub.PurgeResult, error)
-	PruneProject(project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
+	// The long one-shot maintenance operations take a context so a
+	// Ctrl+C cancels them between units of work instead of killing the
+	// process mid-delete-loop.
+	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
+	PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error)
+	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
 	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 
@@ -71,27 +96,45 @@ type storhubClient struct {
 	*storhub.StorHub
 }
 
-var (
-	cliLogLevel  = envOrDefault("STORHUB_LOG_LEVEL", "info")
-	cliLogFormat = envOrDefault("STORHUB_LOG_FORMAT", "pretty")
-	cliLogColor  = parseEnvBool("STORHUB_LOG_COLOR", true)
-)
+// warnOutput receives configuration warnings emitted from package-level
+// constructors that have no App handle to borrow a.stderr from. Tests
+// swap it to capture the warnings.
+var warnOutput io.Writer = os.Stderr
+
+// warnf prints a storhub-prefixed warning to warnOutput.
+func warnf(format string, args ...any) {
+	_, _ = fmt.Fprintf(warnOutput, "%s storhub: warning: "+format+"\n",
+		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
+}
 
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return c.StorHub.NewFUSE(project, opts)
 }
 
-var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
-	hub, err := newHubFromFlags(token, apiBase, chunkSize, public)
+var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	hub, err := newHubFromFlags(token, apiBase, chunkSize, public, log)
 	if err != nil {
 		return nil, err
 	}
 	return storhubClient{StorHub: hub}, nil
 }
 
-var newRESTHubFromFlagsFn = newHubFromFlags
-var newMountHubFromFlagsFn = func(token, apiBase string) (hubClient, error) {
-	hub, err := newMountHubFromFlags(token, apiBase)
+// newRESTHubFromFlags builds the hub for rest/serve: long-running
+// surfaces, so it gets the pause-to-reset rate policy (see applyRateEnv).
+func newRESTHubFromFlags(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+	token = resolveToken(token)
+	if token == "" {
+		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
+	}
+	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, chunkSize, public, log, true))
+}
+
+var newRESTHubFromFlagsFn = newRESTHubFromFlags
+
+// newMountHubFromFlagsFn builds the hub for mount: a long-running
+// interactive surface, so it gets the pause-to-reset rate policy.
+var newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
+	hub, err := newMountHubFromFlags(token, apiBase, log)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +152,13 @@ var restListenAndServeFn = func(server *http.Server) error {
 
 const minCLIChunkSize int64 = 32 * 1024 * 1024
 
+// normalizeCLIChunkSize maps a --chunk-size flag value to the size actually
+// used. Non-positive values pass through untouched (0 means "unset"; the
+// command layer rejects negatives as usage errors before they get here).
+// Values below the 32 MiB floor clamp up, and values above the GitHub
+// release-asset ceiling clamp down through chunking.NormalizedSize - the
+// single owner of the ceiling - so the chunker's plan and the uploader's
+// windows can never disagree mid-upload.
 func normalizeCLIChunkSize(size int64) int64 {
 	if size <= 0 {
 		return size
@@ -116,11 +166,11 @@ func normalizeCLIChunkSize(size int64) int64 {
 	if size < minCLIChunkSize {
 		return minCLIChunkSize
 	}
-	return size
+	return chunking.NormalizedSize(size)
 }
 
 func New() *App {
-	a := &App{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
+	a := &App{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, log: defaultLogSettings()}
 	a.buildRootCmd()
 	return a
 }
@@ -156,9 +206,9 @@ Examples:
 
 	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
 	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
-	rootCmd.PersistentFlags().StringVar(&cliLogLevel, "log-level", cliLogLevel, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
-	rootCmd.PersistentFlags().StringVar(&cliLogFormat, "log-format", cliLogFormat, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
-	rootCmd.PersistentFlags().BoolVar(&cliLogColor, "log-color", cliLogColor, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
+	rootCmd.PersistentFlags().StringVar(&a.log.level, "log-level", a.log.level, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
+	rootCmd.PersistentFlags().StringVar(&a.log.format, "log-format", a.log.format, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
+	rootCmd.PersistentFlags().BoolVar(&a.log.color, "log-color", a.log.color, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
 
 	rootCmd.AddCommand(a.newUploadCmd())
 	rootCmd.AddCommand(a.newReplaceCmd())
@@ -211,7 +261,7 @@ func (a *App) newUploadCmd() *cobra.Command {
 		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
-	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
+	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	return cmd
 }
@@ -223,7 +273,7 @@ func (a *App) newReplaceCmd() *cobra.Command {
 		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
-	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes")
+	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	return cmd
 }
@@ -381,19 +431,42 @@ Use --dry-run to see what would be reclaimed without deleting anything.
 	return cmd
 }
 
+// validPruneScope mirrors the scopes Prune accepts, via the shared
+// storhub aliases rather than duplicated literals. The CLI checks before
+// building a hub so a typo is a usage error (exit 2), not a runtime
+// failure (exit 1) discovered deep inside storage.
+func validPruneScope(scope string) bool {
+	switch storhub.PruneScope(scope) {
+	case storhub.PruneObjects, storhub.PruneAssets, storhub.PruneHistory, storhub.PruneAll:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) runPrune(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
-	if err != nil {
-		return err
-	}
 	scope := "all"
 	if len(args) >= 2 {
 		scope = args[1]
 	}
+	if !validPruneScope(scope) {
+		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, all)", scope)}
+	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	keep, _ := cmd.Flags().GetInt("keep")
-	result, err := hub.PruneProject(args[0], scope, keep, dryRun)
+	if keep < 1 {
+		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}
+	}
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	if err != nil {
+		return err
+	}
+	// Pruning can run for minutes; a Ctrl+C must cancel it between delete
+	// units instead of killing the process mid-loop.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, err := hub.PruneContext(ctx, args[0], scope, keep, dryRun)
 	if err != nil {
 		return err
 	}
@@ -527,7 +600,18 @@ func (a *App) Run(args []string) error {
 	a.rootCmd.SetOut(a.stdout)
 	a.rootCmd.SetErr(a.stderr)
 	_, err := a.rootCmd.ExecuteC()
-	a.shutdownHub()
+	if flushErr := a.shutdownHub(); flushErr != nil {
+		if err == nil {
+			// The command succeeded but its commit point failed: exiting 0
+			// here would be silent data loss (the `upload && rm ./local`
+			// trap), so the flush error becomes the exit status.
+			err = flushErr
+		} else if a.stderr != nil {
+			// The command already failed; keep its error primary but never
+			// swallow the flush failure alongside it.
+			_, _ = fmt.Fprintf(a.stderr, "warning: %v\n", flushErr)
+		}
+	}
 	return err
 }
 
@@ -538,29 +622,35 @@ func (a *App) Run(args []string) error {
 // the hubClient contract, so nothing reachable here can lack it. The
 // writer is asynchronous, meaning a CLI mutation that exits without this
 // loses data; that is precisely what the released-binary smoke test caught.
-func (a *App) shutdownHub() {
+// A failed drain is returned, not printed-and-forgotten: a failed commit
+// point must change the exit code.
+func (a *App) shutdownHub() error {
 	if a.hub == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hubShutdownTimeout)
 	defer cancel()
-	if err := a.hub.Shutdown(ctx); err != nil && a.stderr != nil {
-		_, _ = fmt.Fprintf(a.stderr, "warning: metadata flush failed: %v\n", err)
+	if err := a.hub.Shutdown(ctx); err != nil {
+		return fmt.Errorf("metadata flush failed: %w", err)
 	}
+	return nil
 }
 
 // Hub constructors record the client so Run can always flush it on exit.
 
 func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
-	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public)
+	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public, a.log)
 	if err == nil {
 		a.hub = hub
 	}
 	return hub, err
 }
 
+// newCmdMountHub builds the hub for long-running interactive surfaces
+// (mount): it records the client for Run's flush and uses the
+// pause-to-reset rate policy.
 func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
-	hub, err := newMountHubFromFlagsFn(token, apiBase)
+	hub, err := newMountHubFromFlagsFn(token, apiBase, a.log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -568,7 +658,7 @@ func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
 }
 
 func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
-	hub, err := newRESTHubFromFlagsFn(token, apiBase, chunkSize, public)
+	hub, err := newRESTHubFromFlagsFn(token, apiBase, chunkSize, public, a.log)
 	if err == nil {
 		// rest/serve need the raw *StorHub for shrest.New; track the
 		// wrapped form so Run can still flush pending metadata.
@@ -643,12 +733,24 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("token_ttl: %w", err)
 		}
+		if parsed < 0 {
+			return fmt.Errorf("token_ttl must not be negative, got %s", raw)
+		}
 		*d = flexDuration(parsed)
 		return nil
 	}
 	seconds, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return fmt.Errorf("token_ttl must be a duration string or seconds: %w", err)
+	}
+	// JSON numbers reach here as floats: NaN/Inf parse cleanly but convert
+	// to garbage durations, and negatives are nonsense for a TTL. Reject
+	// all three loudly instead of storing them.
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return fmt.Errorf("token_ttl must be finite, got %s", raw)
+	}
+	if seconds < 0 {
+		return fmt.Errorf("token_ttl must not be negative, got %s", raw)
 	}
 	*d = flexDuration(time.Duration(seconds * float64(time.Second)))
 	return nil
@@ -660,6 +762,9 @@ func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
+	if chunkSize < 0 {
+		return &usageError{fmt.Errorf("--chunk-size must be positive, got %d", chunkSize)}
+	}
 	public, _ := cmd.Flags().GetBool("public")
 
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, chunkSize, public)
@@ -688,7 +793,10 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 
 func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
+	// download is a one-shot command: it must get the fail-fast rate
+	// policy (a script wants a quick "rate limited", not a 15-minute
+	// pause), i.e. the standard command hub, not the long-running one.
+	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -861,7 +969,10 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid offset %q: %w", args[2], err)
+		return &usageError{fmt.Errorf("invalid offset %q: %w", args[2], err)}
+	}
+	if offset < 0 {
+		return &usageError{fmt.Errorf("offset must be >= 0, got %d", offset)}
 	}
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
@@ -883,11 +994,17 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid offset %q: %w", args[2], err)
+		return &usageError{fmt.Errorf("invalid offset %q: %w", args[2], err)}
+	}
+	if offset < 0 {
+		return &usageError{fmt.Errorf("offset must be >= 0, got %d", offset)}
 	}
 	deleteSize, err := strconv.ParseInt(args[3], 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid delete-size %q: %w", args[3], err)
+		return &usageError{fmt.Errorf("invalid delete-size %q: %w", args[3], err)}
+	}
+	if deleteSize < 0 {
+		return &usageError{fmt.Errorf("delete-size must be >= 0, got %d", deleteSize)}
 	}
 	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
 	if err != nil {
@@ -931,7 +1048,9 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := hub.RollbackMetadata(args[0], args[1]); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := hub.RollbackMetadataContext(ctx, args[0], args[1]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
@@ -944,7 +1063,11 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := hub.PurgeUntracked(args[0])
+	// Purging walks delete loops that can outlive a patient terminal:
+	// Ctrl+C must cancel between deletions instead of killing the process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, err := hub.PurgeUntrackedContext(ctx, args[0])
 	if err != nil {
 		return err
 	}
@@ -958,7 +1081,9 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	// mount is a long-running interactive surface: it must get the
+	// pause-to-reset rate policy, not the one-shot fail-fast default.
+	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
 	if err != nil {
 		return err
 	}
@@ -1062,7 +1187,7 @@ func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
 	}
 	server := newRESTServer(listen, handler)
 	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
-	return a.serveRESTUntilSignal(server, hub)
+	return a.serveRESTUntilSignal(server)
 }
 
 // serveAuthOptions resolves the shared REST serving policy: base path and
@@ -1078,6 +1203,11 @@ func serveAuthOptions(cmd *cobra.Command) (shrest.Options, error) {
 		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
 	}
 	if strings.TrimSpace(authFile) != "" {
+		if noAuth, _ := cmd.Flags().GetBool("allow-anonymous"); noAuth {
+			// --allow-anonymous would be silently ignored here; contradictory
+			// auth intent is a command-line mistake, not a runtime failure.
+			return opts, &usageError{errors.New("--allow-anonymous has no effect when an auth file is supplied; drop one of them")}
+		}
 		auth, err := loadRESTAuthOptions(authFile)
 		if err != nil {
 			return opts, err
@@ -1131,8 +1261,13 @@ func newRESTServer(listen string, handler http.Handler) *http.Server {
 		// at 30 s with "context canceled" cascading into GitHub). Slow-loris
 		// protection lives in ReadHeaderTimeout; body abuse is bounded by
 		// explicit size enforcement in the content handlers instead.
-		ReadTimeout:  0,
-		WriteTimeout: restWriteBudget,
+		ReadTimeout: 0,
+		// Same argument applies to WriteTimeout: it bounds the whole
+		// response body, so any fixed value kills a large or slow download
+		// mid-transfer (a 5 GB file at 15 MB/s needs ~6 min; 400 MB at a
+		// tenth that dies at 5 m). Response size and duration are bounded
+		// by the content handlers, not by amputating the write deadline.
+		WriteTimeout: 0,
 		IdleTimeout:  restIdleBudget,
 	}
 }
@@ -1328,13 +1463,11 @@ func fsWait(fsys fuseMount) <-chan struct{} {
 	return done
 }
 
-// unmountWithRetry retries the unmount until it succeeds or its retry budget
-
 // serveRESTUntilSignal runs the REST server and drains it cleanly on
 // SIGINT/SIGTERM: in-flight requests finish within a bounded shutdown
 // window, then pending metadata is flushed before exit. A clean stop is not
 // reported as an error.
-func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) error {
+func (a *App) serveRESTUntilSignal(server *http.Server) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)
@@ -1352,32 +1485,37 @@ func (a *App) serveRESTUntilSignal(server *http.Server, hub *storhub.StorHub) er
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_, _ = fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
 	}
-	// Metadata draining is NOT done here: Run's flushHub is the single
+	// Metadata draining is NOT done here: Run's shutdownHub is the single
 	// owner of hub.Shutdown for every command. Draining after the HTTP
 	// server stops is exactly the right order - in-flight requests can
-	// still mutate metadata, and flushHub commits all of it.
+	// still mutate metadata, and shutdownHub commits all of it.
 	return nil
 }
 
 // httpLogsEnabled reports whether the configured level wants per-request
 // HTTP lines; at error level they are pure noise.
-func httpLogsEnabled() bool {
-	level := shlog.NormalizeLevel(cliLogLevel)
+func (a *App) httpLogsEnabled() bool {
+	level := shlog.NormalizeLevel(a.log.level)
 	return level == shlog.LevelDebug || level == shlog.LevelInfo || level == shlog.LevelWarn
 }
 
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	if next == nil {
-		return nil
+		// A nil inner handler must never degrade into http.Server's
+		// DefaultServeMux fallback: answer every request with a loud 500
+		// instead of silently serving the wrong thing.
+		next = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "rest handler unavailable", http.StatusInternalServerError)
+		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		if httpLogsEnabled() {
+		if a.httpLogsEnabled() {
 			a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
 		}
 		next.ServeHTTP(wrapped, r)
-		if httpLogsEnabled() {
+		if a.httpLogsEnabled() {
 			a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.status, time.Since(start).Round(time.Millisecond))
 		}
 	})
@@ -1393,13 +1531,28 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
+// Flush forwards flushing to the wrapped writer when it supports it, so
+// wrapping never silently disables streaming (SSE, chunked downloads).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
 	var file restAuthFile
-	if err := json.Unmarshal(data, &file); err != nil {
+	// Unknown fields are typos in security-relevant config (a misspelled
+	// token_ttl silently keeps the default TTL), so reject them loudly.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&file); err != nil {
 		return nil, fmt.Errorf("decode rest auth file: %w", err)
 	}
 	key := []byte(strings.TrimSpace(file.TokenSigningKey))
@@ -1414,42 +1567,55 @@ func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 	}, nil
 }
 
-func newHubFromFlags(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
-	token = resolveToken(token)
-	if token == "" {
-		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
-	}
+// newHubConfig builds the hub configuration every CLI constructor shares.
+// longRunning selects the rate-limit policy documented on applyRateEnv:
+// interactive/daemon surfaces (mount, rest, serve) pause up to the reset,
+// one-shot commands fail fast. Log knobs, the journal location, and the
+// chunk-size clamps are applied for ALL commands - a surface that silently
+// ignores --log-level is a bug waiting to be filed.
+func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings, longRunning bool) storcfg.Config {
 	cfg := storhub.DefaultConfig()
 	if strings.TrimSpace(apiBase) != "" {
 		cfg.APIBaseURL = apiBase
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
 		if normalized != chunkSize {
-			fmt.Fprintf(os.Stderr, "%s storhub: warning: --chunk-size %d below floor %d; using %d\n",
-				time.Now().UTC().Format(time.RFC3339), chunkSize, minCLIChunkSize, normalized)
+			warnf("--chunk-size %d outside [%d, %d]; using %d",
+				chunkSize, minCLIChunkSize, chunking.MaxReleaseAssetSize, normalized)
 		}
 		cfg.ChunkSize = normalized
 	}
 	cfg.CreatePublicRepo = public
-	cfg.LogLevel = cliLogLevel
-	cfg.LogFormat = cliLogFormat
-	cfg.LogColor = cliLogColor
-	applyRateEnv(&cfg, false)
-	return storhub.NewStorHubWithConfig(token, cfg)
+	cfg.LogLevel = log.level
+	cfg.LogFormat = log.format
+	cfg.LogColor = log.color
+	// The write-ahead journal lives beneath the cache base: crash-safe
+	// replay is exactly what the mutating CLI surfaces need, so the CLI
+	// opts in by default (config.go documents this defaulting).
+	cfg.JournalDir = filepath.Join(storcfg.CacheBase(), "journal")
+	applyRateEnv(&cfg, longRunning)
+	return cfg
 }
 
-func newMountHubFromFlags(token, apiBase string) (*storhub.StorHub, error) {
+// newHubFromFlags builds the hub for one-shot commands: fail-fast rate
+// policy, chunk-size and public-repo flags honored.
+func newHubFromFlags(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 	token = resolveToken(token)
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	cfg := storhub.DefaultConfig()
-	if strings.TrimSpace(apiBase) != "" {
-		cfg.APIBaseURL = apiBase
+	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, chunkSize, public, log, false))
+}
+
+// newMountHubFromFlags builds the hub for the long-running mount surface:
+// pause-to-reset rate policy so an interactive session rides out a
+// secondary rate limit instead of dying instantly.
+func newMountHubFromFlags(token, apiBase string, log logSettings) (*storhub.StorHub, error) {
+	token = resolveToken(token)
+	if token == "" {
+		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	cfg.AtimePolicy = storcfg.AtimeNo
-	applyRateEnv(&cfg, true)
-	return storhub.NewStorHubWithConfig(token, cfg)
+	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, 0, false, log, true))
 }
 
 // applyRateEnv layers the rate-governor environment variables onto a hub
@@ -1463,10 +1629,25 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 	}
 	cfg.RateReserve = parseEnvInt64("STORHUB_RATE_RESERVE", cfg.RateReserve)
 	cfg.RateMaxWait = parseEnvDuration("STORHUB_RATE_MAX_WAIT", defaultMaxWait)
+	if _, set := os.LookupEnv("STORHUB_RATE_MAX_WAIT"); set && cfg.RateMaxWait == 0 {
+		warnf("STORHUB_RATE_MAX_WAIT=0 means \"not configured\": the library default (15m) applies; use a negative duration such as -1s for fail-fast")
+	}
 	cfg.RatePointsPerMin = parseEnvInt64("STORHUB_RATE_POINTS_PER_MIN", cfg.RatePointsPerMin)
 	cfg.RateContentPerMin = parseEnvInt64("STORHUB_RATE_CONTENT_PER_MIN", cfg.RateContentPerMin)
 	cfg.MaxConcurrentRequests = parseEnvInt64("STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests)
 	cfg.TransferThroughput = parseEnvInt64("STORHUB_TRANSFER_THROUGHPUT", cfg.TransferThroughput)
+	for _, neg := range []struct {
+		key   string
+		value int64
+	}{
+		{"STORHUB_RATE_POINTS_PER_MIN", cfg.RatePointsPerMin},
+		{"STORHUB_RATE_CONTENT_PER_MIN", cfg.RateContentPerMin},
+		{"STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests},
+	} {
+		if neg.value < 0 {
+			warnf("%s=%d is negative; the rate governor silently replaces it with the library default", neg.key, neg.value)
+		}
+	}
 }
 
 func parseEnvInt64(key string, fallback int64) int64 {
@@ -1529,8 +1710,7 @@ func parseEnvBool(key string, fallback bool) bool {
 // default. The fallback preserves behavior; the warning makes the
 // misconfiguration visible instead of silent.
 func warnEnvParse(key, value string, err error) {
-	_, _ = fmt.Fprintf(os.Stderr, "%s storhub: warning: invalid %s=%q (%v); using default\n",
-		time.Now().UTC().Format(time.RFC3339), key, value, err)
+	warnf("invalid %s=%q (%v); using default", key, value, err)
 }
 
 // cmdAuth extracts the auth flags every command shares: explicit --token
@@ -1546,7 +1726,6 @@ const (
 	hubShutdownTimeout   = 30 * time.Second
 	restShutdownTimeout  = 10 * time.Second
 	restReadHeaderBudget = 5 * time.Second
-	restWriteBudget      = 5 * time.Minute
 	restIdleBudget       = 2 * time.Minute
 	unmountBackoffCap    = 8 * time.Second
 	mountDirPerm         = 0o755

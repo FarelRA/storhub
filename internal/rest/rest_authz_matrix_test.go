@@ -96,6 +96,15 @@ func TestAuthorizationMatrix(t *testing.T) {
 	revertPath := func(c *authorizedClient) error {
 		return c.RevertPathContext(context.Background(), "demo", "team/plan.txt", "deadbeef")
 	}
+	rollback := func(c *authorizedClient) error {
+		// Use a revision the fake actually knows so the admin case passes
+		// the backend check and only the GATE differentiates the outcomes.
+		revs, err := f.client.ListMetadataRevisionsContext(context.Background(), "demo")
+		if err != nil || len(revs) == 0 {
+			return err
+		}
+		return c.RollbackMetadataContext(context.Background(), "demo", revs[0].CommitSHA)
+	}
 	prune := func(c *authorizedClient) error {
 		_, err := c.PruneContext(context.Background(), "demo", "objects", 1, true)
 		return err
@@ -135,6 +144,8 @@ func TestAuthorizationMatrix(t *testing.T) {
 		{name: "non-admin denied purge", principal: outsider, op: purge, allowed: false},
 		{name: "admin reverts a path", principal: admin, op: revertPath, allowed: true},
 		{name: "non-admin denied path revert", principal: owner, op: revertPath, allowed: false},
+		{name: "admin rolls back", principal: admin, op: rollback, allowed: true},
+		{name: "non-admin denied rollback", principal: owner, op: rollback, allowed: false},
 		{name: "admin prunes", principal: admin, op: prune, allowed: true},
 		{name: "non-admin denied prune", principal: owner, op: prune, allowed: false},
 		{name: "admin deletes project", principal: admin, op: deleteProject, allowed: true},

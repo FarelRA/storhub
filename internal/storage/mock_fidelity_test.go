@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// B9: asset downloads must redirect to a signed CDN URL; range fetches then
+// Asset downloads must redirect to a signed CDN URL; range fetches then
 // hit the CDN without an Authorization header.
 func TestMockAssetDownloadRedirectsToCDN(t *testing.T) {
 	backend := newMockGitHub(t)
@@ -118,7 +118,7 @@ func TestMockAssetDownloadRedirectsToCDN(t *testing.T) {
 	}
 }
 
-// B10: release listing must emit RFC 5988 Link headers and the client must
+// Release listing must emit RFC 5988 Link headers and the client must
 // page through them.
 func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
 	backend := newMockGitHub(t)
@@ -153,7 +153,7 @@ func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
 	}
 }
 
-// B10 edge: when the total is an exact multiple of the page size the client
+// Edge case: when the total is an exact multiple of the page size the client
 // must still fetch the terminating empty page instead of stopping early.
 func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 	backend := newMockGitHub(t)
@@ -188,7 +188,7 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 	}
 }
 
-// B11: opt-in rate-limit fault — one 429 with Retry-After, then success.
+// Opt-in rate-limit fault — one 429 with Retry-After, then success.
 // The fault is armed after the upload warms the owner/repo caches, so the
 // next API call (the flush PUT) deterministically takes the 429 and the
 // retry succeeds: served==1 proves the fault fired, puts>=2 proves the
@@ -251,7 +251,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 	}
 }
 
-// B12: API routes require a bearer token; wrong or missing auth 401s.
+// API routes require a bearer token; wrong or missing auth 401s.
 func TestMockRequiresAuthorization(t *testing.T) {
 	backend := newMockGitHub(t)
 	get := func(auth string) int {
@@ -297,7 +297,7 @@ func TestMockRequiresAuthorization(t *testing.T) {
 	}
 }
 
-// B14: embedded asset arrays must be deterministic (sorted by asset ID),
+// Embedded asset arrays must be deterministic (sorted by asset ID),
 // not Go map-iteration order.
 func TestMockEmbeddedAssetsDeterministicOrder(t *testing.T) {
 	backend := newMockGitHub(t)

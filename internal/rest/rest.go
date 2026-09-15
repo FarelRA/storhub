@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -88,7 +89,7 @@ type Client interface {
 	MkdirContext(ctx context.Context, project, dirPath string) error
 	DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error
 	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
-	RenameContext(ctx context.Context, project, oldPath, newPath string) error
+	RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error
 	CopyContext(ctx context.Context, project, srcPath, dstPath string) error
 	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
@@ -104,7 +105,7 @@ type Client interface {
 	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
 	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
 	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
-	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error
+	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error
 	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
 	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)
 	RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error
@@ -132,8 +133,18 @@ type contextKey string
 
 const clientCtxKey contextKey = "rest-client"
 
+// clientFor resolves the per-request Client placed in the context by the
+// auth middleware. A foreign value under clientCtxKey is a middleware bug:
+// fail CLOSED (panic -> recoverPanics -> logged 500) rather than silently
+// falling back to the raw unrestricted client, which would turn every
+// project route into an unauthenticated pass-through.
 func (h *restHandler) clientFor(r *http.Request) Client {
-	if client, ok := r.Context().Value(clientCtxKey).(Client); ok {
+	if value := r.Context().Value(clientCtxKey); value != nil {
+		client, ok := value.(Client)
+		if !ok {
+			logging.Error(h.logger, "rest: context value under clientCtxKey does not implement Client; failing closed", "type", fmt.Sprintf("%T", value))
+			panic("rest: context client does not implement Client")
+		}
 		return client
 	}
 	return h.client
@@ -162,18 +173,30 @@ func (w *statusWriter) Write(p []byte) (int, error) {
 type shareRegistry struct {
 	mu    sync.RWMutex
 	items map[string]*shareRecord
+	// revoked maps deleted share IDs to the deleted record's expiry so
+	// stateless redemption stops honoring them immediately. Entries are
+	// dropped once the underlying JWT would have expired on its own, so
+	// the map cannot grow without bound. Per-registry (per handler) by
+	// design: no package-level state shared across hubs or tests.
+	revoked map[string]time.Time
 }
 
 type shareRecord struct {
-	// ID is the short opaque URL identifier (never a credential); Token
-	// holds the signed JWT for bearer authentication of scoped reads.
-	ID        string
-	Token     string
-	Project   string
-	Path      string
-	IsDir     bool
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	// ID is the short opaque registry identifier. It is never a credential;
+	// the redemption routes (GET /shares/{token}...) take the signed JWT
+	// itself as the path segment, while the management routes
+	// (/projects/{p}/shares/{id}) use this ID. Token holds the signed JWT
+	// for bearer authentication of scoped reads and is returned ONLY on
+	// creation.
+	ID           string
+	Token        string
+	Project      string
+	Path         string
+	IsDir        bool
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+	CreatorUID   uint32
+	CreatorAdmin bool
 }
 
 // restrictedClient wraps a Client and restricts access to a specific project and path
@@ -203,7 +226,7 @@ func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string, 
 	return errReadOnly()
 }
 
-func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
@@ -251,7 +274,7 @@ func (readOnlyShare) ChtimesContext(ctx context.Context, project, targetPath str
 	return errReadOnly()
 }
 
-func (readOnlyShare) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+func (readOnlyShare) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
 	return errReadOnly()
 }
 
@@ -278,6 +301,16 @@ func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, ke
 func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) error {
 	return errReadOnly()
 }
+
+// Compile-time proof that the auth wrappers implement the FULL Client
+// interface: a Client method added without a corresponding gate in either
+// wrapper fails the build here instead of silently falling through to the
+// raw client at runtime (clientFor fails closed, but a missing method on a
+// wrapper that still satisfies Client via embedding would delegate by
+// accident).
+var (
+	_ Client = (*restrictedClient)(nil)
+)
 
 // restrictedClient wraps a Client and restricts access to a specific project
 // and path. Read methods enforce the shared-prefix check then delegate;
@@ -500,14 +533,34 @@ type shareClaims struct {
 	IsDir   bool   `json:"dir"`
 }
 
-// revokedShares marks deleted share IDs so stateless redemption stops
-// honoring them immediately (per-process; see serveShareInfo).
-var revokedShares sync.Map // map[string]struct{}
+// revokeShare records a deleted share ID (with the record's expiry) so
+// stateless redemption stops honoring it immediately. Revocation lives in
+// the handler's own registry - never in package-level state - and entries
+// self-expire with the token they shadow (see isRevoked/sweepExpiredShares).
+func (h *restHandler) revokeShare(id string, expiresAt time.Time) {
+	h.shares.mu.Lock()
+	if h.shares.revoked == nil {
+		h.shares.revoked = map[string]time.Time{}
+	}
+	h.shares.revoked[id] = expiresAt
+	h.shares.mu.Unlock()
+}
 
-func revokeShare(id string) { revokedShares.Store(id, struct{}{}) }
 func (h *restHandler) isRevoked(id string) bool {
-	_, bad := revokedShares.Load(id)
-	return bad
+	now := time.Now()
+	h.shares.mu.Lock()
+	defer h.shares.mu.Unlock()
+	expiresAt, revoked := h.shares.revoked[id]
+	if !revoked {
+		return false
+	}
+	if !expiresAt.After(now) {
+		// The JWT would fail its own exp check by now: drop the entry and
+		// let verification reject it on its merits.
+		delete(h.shares.revoked, id)
+		return false
+	}
+	return true
 }
 
 type sharesResponse struct {
@@ -559,7 +612,7 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 			return nil, errors.New("security constraint: share signing key is a known weak/default key")
 		}
 	}
-	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}}, logger: logger}
+	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}, revoked: map[string]time.Time{}}, logger: logger}
 	if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
 		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
 		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
@@ -631,6 +684,11 @@ func (o Options) withDefaults() Options {
 		o.BasePath = defaultRESTBasePath
 	}
 	o.BasePath = "/" + strings.Trim(strings.TrimSpace(o.BasePath), "/")
+	// "/" normalizes to an empty route pattern, which panics chi at
+	// construction; treat it as "not set" and fall back to the default.
+	if o.BasePath == "/" {
+		o.BasePath = defaultRESTBasePath
+	}
 	if o.StreamChunkSize <= 0 {
 		o.StreamChunkSize = defaultRESTStreamChunk
 	}
@@ -732,8 +790,10 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := requestBearerToken(r)
+			fromQuery := false
 			if token == "" {
 				token = strings.TrimSpace(r.URL.Query().Get("token"))
+				fromQuery = true
 			}
 			if token == "" {
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
@@ -742,7 +802,25 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 			}
 
 			principal, err := auth.parseToken(token)
+			if err == nil && fromQuery {
+				// Auth JWTs must travel in the Authorization header: query
+				// strings land in intermediaries, browser history and
+				// Referer headers. Query-token acceptance is reserved for
+				// share capabilities (handled below), not the whole
+				// authenticated surface.
+				principal, err = nil, errors.New("auth tokens are not accepted via query")
+			}
 			if err == nil {
+				// Re-read the user record behind the token: auth JWTs are
+				// otherwise irrevocable, so a disabled, demoted, or removed
+				// account must not keep full access until expiry.
+				fresh, live := auth.currentPrincipal(principal)
+				if !live {
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
+					h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
+					return
+				}
+				principal = fresh
 				// Attach the caller's identity for the storage layers below:
 				// downstream permission checks must see the authenticated
 				// principal, never the server process's own credentials.
@@ -789,7 +867,8 @@ func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
 		"project":     h.opts.DefaultProject,
 	})
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		logging.Error(h.logger, "config serialization failed", "err", err)
+		h.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
@@ -809,10 +888,13 @@ func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 
 // Share redemption follows ONE pathway: the signed JWT is the credential
 // and the source of truth. GET /shares/{token} verifies it statelessly and
-// answers from claims - no registry lookup, so links survive restarts.
-// Revocation: DELETE marks the share ID revoked (checked by the auth
-// middleware), killing the link immediately for this process; revocation is
-// per-process by design - permanent revocation is key rotation.
+// answers from claims - no registry lookup, so links survive restarts (the
+// {id} segment here IS the token; the short registry ID only addresses the
+// management plane under /projects/{p}/shares). Revocation: DELETE marks
+// the share ID revoked in the handler's own registry (checked by the auth
+// middleware and the redemption routes), killing the link immediately for
+// this handler; revocation is per-handler by design - permanent revocation
+// is key rotation.
 func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
 	segment := chi.URLParam(r, "id")
 	claims, err := h.parseShareToken(segment)
@@ -899,7 +981,12 @@ func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if entry.IsDir {
-			if r.URL.Query().Get("recursive") == "true" {
+			recursive, ok := parseQueryBool(r.URL.Query().Get("recursive"))
+			if !ok {
+				h.writeError(w, http.StatusBadRequest, "invalid_request", "recursive must be a boolean (true/false)")
+				return
+			}
+			if recursive {
 				h.writeError(w, http.StatusNotImplemented, "recursive_delete_unsupported", "recursive directory deletion is not supported")
 				return
 			}
@@ -933,6 +1020,9 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
+	// User-stored bytes share the API origin with the console: never let a
+	// browser sniff an uploaded file into an executable representation.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -1013,6 +1103,10 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
+	if err := requireNonEmptyPath("path", filePath); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	entry, exists, err := h.lookupOptional(r, project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -1095,6 +1189,10 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
+	if err := requireNonEmptyPath("path", filePath); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	ifMatch := r.Header.Get("If-Match")
 	if strings.TrimSpace(ifMatch) != "" {
 		// Fail fast on a stale token before reading the body. Flavor is
@@ -1123,7 +1221,11 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	}
 	if err != nil {
 		h.writeMappedError(w, err)
+		return
 	}
+	// Same contract as every other mutation: answer with the fresh node so
+	// clients can chain If-Match tokens without a separate stat.
+	h.respondWithNode(w, r, project, filePath, http.StatusOK)
 }
 
 // patchOpAppend applies one atomic append from the request body.
@@ -1137,6 +1239,9 @@ func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) er
 	if err != nil {
 		return err
 	}
+	if err := requireNonNegative("offset", offset); err != nil {
+		return err
+	}
 	return h.streamWriteBody(r, project, filePath, r.Body, offset)
 }
 
@@ -1146,8 +1251,14 @@ func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) er
 	if err != nil {
 		return err
 	}
+	if err := requireNonNegative("offset", offset); err != nil {
+		return err
+	}
 	deleteSize, err := parseRequiredInt64(r.URL.Query().Get("delete_size"), "delete_size")
 	if err != nil {
+		return err
+	}
+	if err := requireNonNegative("delete_size", deleteSize); err != nil {
 		return err
 	}
 	edit, err := h.readSizedBody(r.Body, "patch payload exceeds the configured limit")
@@ -1166,6 +1277,9 @@ func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) er
 func (h *restHandler) patchOpTruncate(r *http.Request, project, filePath string) error {
 	size, err := parseRequiredInt64(r.URL.Query().Get("size"), "size")
 	if err != nil {
+		return err
+	}
+	if err := requireNonNegative("size", size); err != nil {
 		return err
 	}
 	revOpts, err := h.mutationPrecondition(r, project, filePath)
@@ -1318,6 +1432,10 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1329,6 +1447,10 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req pathRequest
 	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1346,6 +1468,10 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if err := h.clientFor(r).RmdirContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1360,6 +1486,10 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if err := h.clientFor(r).DeleteFileContext(r.Context(), project, req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1371,6 +1501,14 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req renameRequest
 	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("old_path", req.OldPath); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("new_path", req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1414,6 +1552,14 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("existing_path", req.ExistingPath); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("new_path", req.NewPath); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if _, err := h.clientFor(r).LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1425,6 +1571,14 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req symlinkRequest
 	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("target", req.Target); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("link_path", req.LinkPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1442,6 +1596,10 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if err := h.clientFor(r).ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1453,6 +1611,10 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req chownRequest
 	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1470,6 +1632,16 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	// A zero time.Time would silently forward Unix() = -62135596800 to
+	// storage; require both stamps to be present.
+	if req.Atime.IsZero() || req.Mtime.IsZero() {
+		h.writeMappedError(w, errBadRequest("atime and mtime are required"))
+		return
+	}
 	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1481,6 +1653,10 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req rollbackRequest
 	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireCommitSHA(req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -1524,6 +1700,14 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireCommitSHA(req.CommitSHA); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	if err := h.clientFor(r).RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1547,13 +1731,23 @@ type pruneResponse struct {
 func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req pruneRequest
-	if err := h.decodeJSON(r, &req); err != nil {
+	// Like purge, prune accepts a bodyless POST: an empty body means the
+	// defaults (scope=all, keep=0, dry_run=false).
+	if err := h.decodeJSONOptional(r, &req); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	scope := req.Scope
+	scope := strings.TrimSpace(req.Scope)
 	if scope == "" {
 		scope = "all"
+	}
+	if !validPruneScope(scope) {
+		h.writeMappedError(w, errBadRequest(`prune scope must be one of "objects", "assets", "history", "all"`))
+		return
+	}
+	if req.Keep < 0 {
+		h.writeMappedError(w, errBadRequest("keep must be non-negative"))
+		return
 	}
 	result, err := h.clientFor(r).PruneContext(r.Context(), project, scope, req.Keep, req.DryRun)
 	if err != nil {
@@ -1625,7 +1819,12 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
 		expiresIn = max
 	}
-	record, err := h.newShareRecord(project, sharePath, entry.IsDir, expiresIn)
+	// Ownership gate: remember who minted the share so
+	// list/get/delete can be restricted to creator ∪ admin. The identity is
+	// the one attached by the auth middleware (process identity under
+	// AllowAnonymous, where every caller is the operator anyway).
+	creator := shfs.IdentityFromContext(r.Context())
+	record, err := h.newShareRecord(project, sharePath, entry.IsDir, expiresIn, creator.UID, creator.Admin)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1644,8 +1843,15 @@ func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, 
 		h.writeMappedError(w, err)
 		return
 	}
-	shares := h.projectShareResponses(project)
+	creator := shfs.IdentityFromContext(r.Context())
+	shares := h.projectShareResponses(project, creator.UID, creator.Admin)
 	h.writeJSON(w, http.StatusOK, sharesResponse{Project: project, Shares: shares})
+}
+
+// canManageShare is the ownership gate for the share management plane:
+// only the creator of a share (or an admin) may list, read, or revoke it.
+func canManageShare(record *shareRecord, callerUID uint32, callerAdmin bool) bool {
+	return callerAdmin || callerUID == record.CreatorUID
 }
 
 func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
@@ -1658,6 +1864,15 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 		h.writeMappedError(w, err)
 		return
 	}
+	caller := shfs.IdentityFromContext(r.Context())
+	if !canManageShare(record, caller.UID, caller.Admin) {
+		// 404, not 403: do not leak which share IDs exist in this project.
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	// The single-get endpoint is a read surface: like the listing, it must
+	// never re-expose the signed token (or mint credential-bearing URLs).
+	record.Token = ""
 	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
 }
 
@@ -1671,10 +1886,27 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, err)
 		return
 	}
+	caller := shfs.IdentityFromContext(r.Context())
+	if !canManageShare(record, caller.UID, caller.Admin) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
 	h.removeShare(record.ID)
-	revokeShare(record.ID) // stateless redemption stops immediately
+	h.revokeShare(record.ID, record.ExpiresAt) // stateless redemption stops immediately
+	h.sweepExpiredShares()
 	// 204 like every other successful delete in this API (nodes, projects).
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// shareRedemptionContext mirrors what authMiddleware does for a share token
+// used as a Bearer credential: the redemption routes run as the
+// unauthenticated "nobody" visitor, scoped to the shared path. Without this
+// the fs layer falls back to the SERVER PROCESS identity (and UID 0
+// normalizes to admin), so a share would grant more than "what path
+// permissions grant" - the exact drift this policy exists to prevent.
+func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaims) context.Context {
+	identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
+	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
 }
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
@@ -1690,6 +1922,7 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 		h.writeMappedError(w, err)
 		return
 	}
+	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
 }
 
@@ -1710,6 +1943,9 @@ func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, "forbidden", "share id mismatch")
 		return
 	}
+	// Derivation reads through the same nobody-identity, path-scoped client
+	// as redemption: the visitor's DAC, not the server's.
+	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	var req shareRequest
 	if err := h.decodeJSON(r, &req); err != nil {
 		h.writeMappedError(w, err)
@@ -1738,13 +1974,21 @@ func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
 	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
 		expiresIn = max
 	}
-	// Stat to learn IsDir for new record.
-	entry, err := h.client.StatPathContext(r.Context(), claims.Project, sharePath)
+	// Stat to learn IsDir for new record (scoped + nobody identity, above).
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), claims.Project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	record, err := h.newShareRecord(claims.Project, sharePath, entry.IsDir, expiresIn)
+	// A derived share is a sub-capability of its parent: ownership follows
+	// the parent record when it is still in the registry, so the original
+	// sharer keeps management rights. Unknown parents (e.g. after a
+	// restart) belong to the redeeming visitor - the nobody identity.
+	creatorUID, creatorAdmin := nobodyUID, false
+	if parent, known := h.lookupShare(claims.ID); known {
+		creatorUID, creatorAdmin = parent.CreatorUID, parent.CreatorAdmin
+	}
+	record, err := h.newShareRecord(claims.Project, sharePath, entry.IsDir, expiresIn, creatorUID, creatorAdmin)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -1781,6 +2025,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if entry.IsSymlink {
 		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, targetPath)
 		if readErr != nil {
@@ -1859,14 +2104,22 @@ func hasPathPrefix(targetPath, allowedPath string) bool {
 	return targetPath == allowedPath || strings.HasPrefix(targetPath, allowedPath+"/")
 }
 
+// canonicalSharePath cleans a user-supplied share path relative to the
+// project root. A path that escapes the root ("../x", "a/../../b") is
+// REJECTED, not silently resolved project-relative: the old leading-slash
+// clean made the escape branch below dead code and quietly re-anchored
+// traversal attempts inside the project.
 func canonicalSharePath(raw string) (string, error) {
-	clean := path.Clean("/" + strings.TrimSpace(raw))
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" {
+		if rel := path.Clean(trimmed); rel == ".." || strings.HasPrefix(rel, "../") {
+			return "", errBadRequest("path traversal is not allowed")
+		}
+	}
+	clean := path.Clean("/" + trimmed)
 	clean = strings.TrimPrefix(clean, "/")
 	if clean == "." {
 		return "", nil
-	}
-	if strings.HasPrefix(clean, "../") || clean == ".." {
-		return "", errBadRequest("path traversal is not allowed")
 	}
 	return clean, nil
 }
@@ -1894,7 +2147,7 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	}, nil
 }
 
-func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration) (*shareRecord, error) {
+func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration, creatorUID uint32, creatorAdmin bool) (*shareRecord, error) {
 	if h.shareSignKey == nil {
 		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
 	}
@@ -1923,7 +2176,7 @@ func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expi
 	if err != nil {
 		return nil, err
 	}
-	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt}
+	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt, CreatorUID: creatorUID, CreatorAdmin: creatorAdmin}
 	h.shares.mu.Lock()
 	h.shares.items[id] = record
 	h.shares.mu.Unlock()
@@ -1949,19 +2202,27 @@ func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
 // sweepExpiredShares bounds registry memory: expired records are dropped
 // whenever live-plus-expired entries exceed the threshold, so a burst of
 // short-lived shares cannot accumulate without limit even if nobody ever
-// looks them up again.
+// looks them up again. Revocation entries self-expire the same way: once
+// the shadowed JWT would fail its own exp check, remembering the ID adds
+// nothing.
 const shareSweepThreshold = 128
 
 func (h *restHandler) sweepExpiredShares() {
 	now := time.Now()
 	h.shares.mu.Lock()
 	defer h.shares.mu.Unlock()
-	if len(h.shares.items) < shareSweepThreshold {
-		return
+	if len(h.shares.items) >= shareSweepThreshold {
+		for shareID, record := range h.shares.items {
+			if !record.ExpiresAt.After(now) {
+				delete(h.shares.items, shareID)
+			}
+		}
 	}
-	for shareID, record := range h.shares.items {
-		if !record.ExpiresAt.After(now) {
-			delete(h.shares.items, shareID)
+	if len(h.shares.revoked) >= shareSweepThreshold {
+		for shareID, expiresAt := range h.shares.revoked {
+			if !expiresAt.After(now) {
+				delete(h.shares.revoked, shareID)
+			}
 		}
 	}
 }
@@ -1972,7 +2233,10 @@ func (h *restHandler) removeShare(shareID string) {
 	h.shares.mu.Unlock()
 }
 
-func (h *restHandler) projectShareResponses(project string) []shareResponse {
+// projectShareResponses lists a project's live shares, restricted to the
+// caller's management scope (creator ∪ admin). The signed token is stripped
+// before rendering: listings never carry the credential (or its URLs).
+func (h *restHandler) projectShareResponses(project string, callerUID uint32, callerAdmin bool) []shareResponse {
 	now := time.Now()
 	h.shares.mu.Lock()
 	defer h.shares.mu.Unlock()
@@ -1983,6 +2247,9 @@ func (h *restHandler) projectShareResponses(project string) []shareResponse {
 			continue
 		}
 		if record.Project != project {
+			continue
+		}
+		if !callerAdmin && callerUID != record.CreatorUID {
 			continue
 		}
 		copy := *record
@@ -2023,6 +2290,28 @@ func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
 	if err != nil {
 		return errBadRequest("unable to read request body")
 	}
+	return decodeJSONPayload(payload, dst)
+}
+
+// decodeJSONOptional behaves like decodeJSON but treats an empty (or
+// whitespace-only) body as "no fields supplied", leaving dst at its zero
+// value. Endpoints whose whole body is optional (prune) use it so a
+// bodyless POST is not a 400 EOF, matching purge.
+func (h *restHandler) decodeJSONOptional(r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyMemory+1))
+	if err != nil {
+		return errBadRequest("unable to read request body")
+	}
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return nil
+	}
+	return decodeJSONPayload(payload, dst)
+}
+
+func decodeJSONPayload(payload []byte, dst any) error {
 	if int64(len(payload)) > maxRequestBodyMemory {
 		return errPayloadTooLarge(fmt.Sprintf("request body exceeds %d bytes", maxRequestBodyMemory))
 	}
@@ -2197,6 +2486,13 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 		} else {
 			message = "upstream GitHub request failed"
 		}
+	} else if status >= http.StatusInternalServerError {
+		// 5xx-class failures are this server's (or its backends') fault and
+		// their raw text can carry paths, hostnames, or internal wording,
+		// which must never be echoed to clients. Log the detail, answer
+		// generically - the same pattern purge/prune already use.
+		logging.Error(h.logger, "internal failure mapped to client error", "status", status, "code", code, "err", err)
+		message = "internal server error"
 	}
 	h.writeError(w, status, code, message)
 }
@@ -2291,13 +2587,36 @@ func restEntryETag(entry *shfs.EntryInfo) string {
 	return fmt.Sprintf("\"%s\"", hex.EncodeToString(hash.Sum(nil)))
 }
 
+// detectContentType maps a file extension to an INLINE-SAFE media type.
+// The API shares its origin with the console SPA, so a stored upload must
+// never be rendered as active content: anything outside the allowlist
+// (HTML, script, XML, and even SVG, which can carry scripts) is served as
+// opaque bytes. Combined with X-Content-Type-Options: nosniff this removes
+// the stored-XSS surface on /content.
 func detectContentType(filePath string) string {
 	if ext := path.Ext(filePath); ext != "" {
-		if typ := mime.TypeByExtension(ext); typ != "" {
+		if typ := mime.TypeByExtension(ext); typ != "" && inlineSafeContentType(typ) {
 			return typ
 		}
 	}
 	return "application/octet-stream"
+}
+
+func inlineSafeContentType(contentType string) bool {
+	base, _, _ := strings.Cut(contentType, ";")
+	base = strings.ToLower(strings.TrimSpace(base))
+	switch {
+	case base == "text/plain" || base == "application/pdf":
+		return true
+	case base == "image/svg+xml":
+		return false // scripts live here
+	case strings.HasPrefix(base, "image/"),
+		strings.HasPrefix(base, "audio/"),
+		strings.HasPrefix(base, "video/"):
+		return true
+	default:
+		return false
+	}
 }
 
 func parseByteRange(header string, size int64) (start, end int64, partial bool, err error) {
@@ -2360,6 +2679,62 @@ func parseRequiredInt64(raw, field string) (int64, error) {
 		return 0, errBadRequest(field + " must be a valid integer")
 	}
 	return value, nil
+}
+
+// parseQueryBool interprets a query-string boolean. Absent means false;
+// recognized truthy/falsey spellings resolve; anything else reports ok=false
+// so the caller answers 400 instead of silently taking the other branch.
+func parseQueryBool(raw string) (value bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false", "0", "no":
+		return false, true
+	case "true", "1", "yes":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// REST-layer input validation: reject malformed client input
+// with 400 HERE instead of forwarding it to storage, whose generic errors
+// would surface as 500s echoing internal wording.
+
+func requireNonEmptyPath(field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errBadRequest(field + " is required")
+	}
+	return nil
+}
+
+func requireNonNegative(field string, value int64) error {
+	if value < 0 {
+		return errBadRequest(field + " must be non-negative")
+	}
+	return nil
+}
+
+// commitSHAPattern matches git object ids: lowercase hex, 7 (shortest
+// unambiguous abbreviation) through 64 characters.
+var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+
+func requireCommitSHA(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errBadRequest("commit_sha is required")
+	}
+	if !commitSHAPattern.MatchString(value) {
+		return errBadRequest("commit_sha must be a 7-64 character hexadecimal commit SHA")
+	}
+	return nil
+}
+
+func validPruneScope(scope string) bool {
+	switch scope {
+	case "objects", "assets", "history", "all":
+		return true
+	default:
+		return false
+	}
 }
 
 type restStatusError struct {

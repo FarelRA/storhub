@@ -65,11 +65,17 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
 				if pm.meta.SetDirAtime(targetPath, now) {
 					trigger = h.markProjectDirtyLiveLocked(project, pm)
-					updated := pm.meta.GetDirectory(targetPath).Clone()
-					h.appendOpLocked(project, pm, Op{
-						Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
-						Timestamp: now, Dir: &updated,
-					})
+					// markProjectDirtyLiveLocked drops pm.mu during
+					// eviction revival; a concurrent delete can remove
+					// the entry in that window. Re-check and skip
+					// the op when the target is gone.
+					if updated := pm.meta.GetDirectory(targetPath); updated != nil {
+						u := updated.Clone()
+						h.appendOpLocked(project, pm, Op{
+							Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
+							Timestamp: now, Dir: &u,
+						})
+					}
 				}
 			}
 		}
@@ -79,11 +85,16 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
 			if pm.meta.SetFileAtime(targetPath, now) {
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
-				updated := pm.meta.FindFile(targetPath).Clone()
-				h.appendOpLocked(project, pm, Op{
-					Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
-					Timestamp: now, File: &updated,
-				})
+				// Same revival-window re-check as the directory branch
+				// above: a nil here means the entry was deleted
+				// while pm.mu was dropped.
+				if updated := pm.meta.FindFile(targetPath); updated != nil {
+					u := updated.Clone()
+					h.appendOpLocked(project, pm, Op{
+						Type: OpSetattr, Paths: []string{targetPath}, Cause: "atime",
+						Timestamp: now, File: &u,
+					})
+				}
 			}
 		}
 	}

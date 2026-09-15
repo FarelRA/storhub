@@ -30,16 +30,19 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	if strings.TrimSpace(fileName) == "" {
-		return errors.New("file name is required")
-	}
-	cleanName, err := shfs.NormalizePath(fileName)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
 		return err
 	}
 	// Load remote metadata first: on a cold cache the in-memory view is
 	// empty and deleting an existing file would wrongly report NotFound.
-	if _, _, err := h.loadRepoMetadataReadonly(ctx, project); err != nil {
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return err
+	}
+	// unlink(2) removes the final component itself: a symlink is unlinked,
+	// never followed to its target, so followFinal is false.
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, false)
+	if err != nil {
 		return err
 	}
 
@@ -47,6 +50,10 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
+	if err := shfs.CheckTraversal(ctx, pm.meta, traversed); err != nil {
+		pm.mu.Unlock()
+		return err
+	}
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		pm.mu.Unlock()
 		return err

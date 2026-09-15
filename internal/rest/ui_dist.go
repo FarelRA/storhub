@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -24,9 +25,17 @@ func distFS() fs.FS {
 	return sub
 }
 
+// safeDistName validates a decoded URL path against the embedded dist root.
+// A path.Clean equality check rejects every traversal form ("..", ".",
+// empty segments, and their %2e%2e encodings once net/http has decoded
+// them) WITHOUT rejecting legitimate hashed names that merely contain the
+// two-character sequence ".." (e.g. "chunk..2.js").
 func safeDistName(urlPath string) string {
 	name := strings.TrimPrefix(urlPath, "/")
-	if name == "" || strings.Contains(name, "..") || strings.Contains(name, "\\") {
+	if name == "" || strings.Contains(name, "\\") {
+		return ""
+	}
+	if path.Clean("/"+name) != "/"+name {
 		return ""
 	}
 	return name
@@ -47,9 +56,10 @@ func (h *restHandler) serveUIRoot(w http.ResponseWriter, _ *http.Request) {
 
 // serveUIAssets serves hashed Vite bundles. The URL prefix /_nuxt/ mirrors the
 // real directory inside the dist FS, so the mapping is identity - only the
-// traversal guard matters.
+// traversal guard matters. Directories are never served: http.FileServerFS
+// would render a listing of the bundle folder.
 func (h *restHandler) serveUIAssets(w http.ResponseWriter, r *http.Request) {
-	if safeDistName(r.URL.Path) == "" {
+	if !isDistFile(r.URL.Path) {
 		h.writeError(w, http.StatusNotFound, "not_found", "no such asset")
 		return
 	}
@@ -57,15 +67,23 @@ func (h *restHandler) serveUIAssets(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveUIPublic serves non-hashed public files that sit at the dist root
-// (favicon.svg today).
+// (favicon.svg today), regular files only.
 func (h *restHandler) serveUIPublic(w http.ResponseWriter, r *http.Request) {
-	if safeDistName(r.URL.Path) == "" {
-		http.NotFound(w, r)
-		return
-	}
-	if _, err := fs.Stat(distFS(), safeDistName(r.URL.Path)); err != nil {
+	if !isDistFile(r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
 	http.FileServerFS(distFS()).ServeHTTP(w, r)
+}
+
+// isDistFile reports whether the URL path names an existing REGULAR file
+// inside the embedded dist: the traversal guard must pass and the target
+// must not be a directory (FileServerFS renders directory listings).
+func isDistFile(urlPath string) bool {
+	name := safeDistName(urlPath)
+	if name == "" {
+		return false
+	}
+	info, err := fs.Stat(distFS(), name)
+	return err == nil && info.Mode().IsRegular()
 }

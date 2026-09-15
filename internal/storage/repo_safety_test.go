@@ -160,7 +160,6 @@ func TestRollbackGitPathHappyPath(t *testing.T) {
 	backend.repos["demo"] = &mockRepo{
 		name:          "demo",
 		nextReleaseID: 1,
-		nextAssetID:   1,
 		nextBlobID:    1,
 		nextCommitID:  1,
 		releasesByTag: make(map[string]*mockRelease),

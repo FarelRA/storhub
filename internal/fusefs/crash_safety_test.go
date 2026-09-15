@@ -114,9 +114,8 @@ func TestReadOnlyOpenDoesNotAttachWriteState(t *testing.T) {
 		t.Fatalf("new reader handle: %v", err)
 	}
 	if r.writeState != nil {
-		t.Fatal("read-only handle attached another writer's writeState")
 		_, _ = r.Release(context.Background()), w.Release(context.Background())
-		return
+		t.Fatal("read-only handle attached another writer's writeState")
 	}
 	// Committing the reader must be a no-op success that leaves the
 	// writer's dirty state untouched.

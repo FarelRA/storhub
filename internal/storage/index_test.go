@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -329,5 +330,20 @@ func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
 	}
 	if m.NextInode < 2 || m.NextChunkID < 2 {
 		t.Fatalf("counters not preserved: ni=%d nc=%d", m.NextInode, m.NextChunkID)
+	}
+}
+
+// TestCheckManifestSizeBoundsTheManifest pins the manifest-size contract: publishIndex must surface
+// an over-ceiling index.json as an oversizeError (arming the size-ceiling marker)
+// instead of letting the contents API answer with a bare 422 that livelocks
+// the retry loop.
+func TestCheckManifestSizeBoundsTheManifest(t *testing.T) {
+	if err := checkManifestSize(make([]byte, maxMetadataBytes)); err != nil {
+		t.Fatalf("manifest at the ceiling must pass, got %v", err)
+	}
+	err := checkManifestSize(make([]byte, maxMetadataBytes+1))
+	var over *oversizeError
+	if !errors.As(err, &over) {
+		t.Fatalf("expected oversizeError past the ceiling, got %v", err)
 	}
 }

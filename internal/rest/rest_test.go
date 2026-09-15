@@ -3,6 +3,8 @@ package rest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -396,9 +398,25 @@ type fakeRESTClient struct {
 	rollbacks             []string
 	revertPaths           []string
 	readCalls             []readCall
+	seenIdentities        []shfs.Identity
 	failReplaceFromReader error
 	revision              string
 	optErr                error
+}
+
+// recordIdentityLocked captures the caller identity the storage layer would
+// see for this request (tests assert share redemption runs as nobody).
+// Callers must hold c.mu.
+func (c *fakeRESTClient) recordIdentityLocked(ctx context.Context) {
+	c.seenIdentities = append(c.seenIdentities, shfs.IdentityFromContext(ctx))
+}
+
+func (c *fakeRESTClient) takeSeenIdentities() []shfs.Identity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := append([]shfs.Identity(nil), c.seenIdentities...)
+	c.seenIdentities = nil
+	return ids
 }
 
 // SetRevision seeds the fake's metadata revision (used by precondition
@@ -597,7 +615,7 @@ func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath stri
 	return nil
 }
 
-func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -923,6 +941,7 @@ func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath
 
 func (c *fakeRESTClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	c.mu.Lock()
+	c.recordIdentityLocked(ctx)
 	defer c.mu.Unlock()
 	c.readCalls = append(c.readCalls, readCall{path: filePath, offset: offset, length: length})
 	node, _, err := c.requireReadableFile(project, filePath)
@@ -949,6 +968,7 @@ func (c *fakeRESTClient) takeReadCalls() []readCall {
 
 func (c *fakeRESTClient) StatPathContext(ctx context.Context, project, targetPath string) (*EntryInfo, error) {
 	c.mu.Lock()
+	c.recordIdentityLocked(ctx)
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
 	if err != nil {
@@ -1128,7 +1148,7 @@ func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath
 	return nil
 }
 
-func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
+func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1227,6 +1247,13 @@ func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string
 	defer c.mu.Unlock()
 	if _, err := c.getExistingProject(project); err != nil {
 		return nil, err
+	}
+	// Mirror the storage layer's scope contract so tests cannot mask a
+	// missing REST-layer validation with an over-permissive fake.
+	switch scope {
+	case "objects", "assets", "history", "all":
+	default:
+		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|all)", scope)
 	}
 	return &storage.PruneResult{Scope: storage.PruneScope(scope), DryRun: dryRun}, nil
 }
@@ -1361,7 +1388,10 @@ func (c *fakeRESTClient) touchDataLocked(p *fakeRESTProject, data *fakeRESTData,
 }
 
 func (c *fakeRESTClient) recordRevisionLocked(p *fakeRESTProject, message string) {
-	p.revisions = append([]MetadataRevision{{CommitSHA: message + "-sha", Message: message, CommittedAt: c.now}}, p.revisions...)
+	// Git-shaped object ids: the REST layer validates commit SHAs as hex,
+	// so the fake must not hand out values its own client would reject.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", message, len(p.revisions))))
+	p.revisions = append([]MetadataRevision{{CommitSHA: hex.EncodeToString(sum[:20]), Message: message, CommittedAt: c.now}}, p.revisions...)
 }
 
 func (c *fakeRESTClient) allocInode() uint64 {

@@ -83,7 +83,7 @@ type StorHub struct {
 	// Shutdown coordination
 	shutdownOnce sync.Once
 	// gitCleanupOnce guards the per-project git mirror removal so
-	// repeated Shutdown calls still drain (D5) without releasing twice.
+	// repeated Shutdown calls still drain without releasing twice.
 	gitCleanupOnce sync.Once
 	shutdownCh     chan struct{}
 	shutdownWg     sync.WaitGroup
@@ -119,7 +119,7 @@ type projectMetadata struct {
 	// commit loop; markProjectDirtyLive revives the instance instead.
 	stopped bool
 	// sizeCapped is set when a commit observes the serialized metadata
-	// above maxMetadataBytes (D4). Growth mutations are then rejected fast
+	// above maxMetadataBytes. Growth mutations are then rejected fast
 	// at admission instead of accepted into a tree that can never commit;
 	// shrink paths (delete, UpdateRepoMetadataContext folding under the
 	// ceiling, purge) stay open, and the next fitting commit clears it.
@@ -165,7 +165,7 @@ func (h *StorHub) setCachedReleases(project string, releases []ghapi.Release) {
 
 // cloneReleases deep-copies releases including their embedded asset slices.
 // A shallow struct copy would alias the Assets backing arrays, letting any
-// caller that mutates a fetched Release corrupt the cache (B7).
+// caller that mutates a fetched Release corrupt the cache.
 func cloneReleases(in []ghapi.Release) []ghapi.Release {
 	if in == nil {
 		return nil
@@ -237,7 +237,7 @@ func (h *StorHub) bumpCachedReleaseAssetCount(project, tag string, assetID int64
 		if entry.releases[i].TagName == tag {
 			// Record the real asset ID, not a -1 placeholder: the picker
 			// counts embedded assets for capacity, and a fake ID both
-			// skews that math and can never match server truth (B8).
+			// skews that math and can never match server truth.
 			entry.releases[i].Assets = append(entry.releases[i].Assets, ghapi.Asset{ID: assetID})
 			h.releaseCache[project] = entry
 			return
@@ -298,7 +298,24 @@ func (h *StorHub) ensureHydratedLocked(ctx context.Context, project string, pm *
 	case errors.Is(loadErr, shfs.ErrNotFound):
 		pm.hydrated = true
 	default:
-		return fmt.Errorf("hydrate metadata before atime update: %w", loadErr)
+		return fmt.Errorf("hydrate metadata before mutation: %w", loadErr)
+	}
+	return nil
+}
+
+// ensureMutableLocked is the shared pre-flight for direct mutation sites
+// (the paths that bypass UpdateRepoMetadataContext): the cold-cache
+// hydration guard (mutating an unhydrated empty tree commits it over
+// remote state) and the size-capped growth gate (a tree already
+// over the per-object ceiling can never commit growth; rejecting fast
+// avoids the uncommittable-dirty livelock). Caller holds pm.mu; on error
+// the caller unlocks and aborts.
+func (h *StorHub) ensureMutableLocked(ctx context.Context, project string, pm *projectMetadata) error {
+	if err := h.ensureHydratedLocked(ctx, project, pm); err != nil {
+		return err
+	}
+	if pm.sizeCapped {
+		return fmt.Errorf("metadata over size ceiling: growth is rejected until the tree fits again; delete entries or run `storhub prune`")
 	}
 	return nil
 }
@@ -385,19 +402,34 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 		markProjectDirtyLocked(pm)
 		return pm.triggerCh
 	}
+	// Capture the old loop's completion channel under pm.mu: the revival
+	// below swaps pm.stoppedCh, and reading the field after releasing the
+	// lock would race that swap.
+	stoppedCh := pm.stoppedCh
 	pm.mu.Unlock()
 	// Wait for the evicted commit loop to fully exit before replacing its
 	// channels: the loop reads stopCh/triggerCh unsynchronized, and the
 	// eviction close(stopCh) only requests exit - stoppedCh closes when it
 	// has actually returned.
 	select {
-	case <-pm.stoppedCh:
+	case <-stoppedCh:
 	case <-time.After(5 * time.Second):
-		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; skipping metadata revival", "project", project)
+		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
+		// The mutation is already acknowledged. Re-insert the entry
+		// (the old loop is still alive and will exit on its closed
+		// stopCh; the shutdown drain and later revivals cover the
+		// rest) and mark dirty, so the work is never silently stranded.
+		h.metaMu.Lock()
+		if current, exists := h.metaCache[project]; !exists || current == pm {
+			h.metaCache[project] = pm
+		}
+		h.metaMu.Unlock()
 		pm.mu.Lock()
+		markProjectDirtyLocked(pm)
 		return pm.triggerCh
 	}
 	h.metaMu.Lock()
+	pm.mu.Lock()
 	current, exists := h.metaCache[project]
 	revived := false
 	live := false
@@ -416,6 +448,9 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 		live = true
 	default:
 		// Revive: fresh channels for a new commit loop, then re-insert.
+		// The swap runs under pm.mu (metaMu is held too, preserving the
+		// metaMu→pm.mu order): mutators read stopped/triggerCh under
+		// pm.mu only, so an unsynchronized swap is a data race.
 		pm.reviving = true
 		pm.stopCh = make(chan struct{})
 		pm.stoppedCh = make(chan struct{})
@@ -426,6 +461,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 		}
 		revived = true
 	}
+	pm.mu.Unlock()
 	h.metaMu.Unlock()
 	if revived {
 		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
@@ -640,12 +676,12 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 		return
 	}
 	// Conflict (stale previous_sha against remote HEAD) means another
-	// writer advanced the metadata: reload and discard local uncommitted
-	// state, matching what actually happened remotely - but only when no
-	// newer mutation landed after the failed snapshot. Any other failure
-	// is transient: retain dirty state so the loop retries with it.
-	// Rebase-capable commits resolve their own conflicts internally, so
-	// this path is a safety net for legacy flows (rollback, cleanup).
+	// writer advanced the metadata. Rebase-capable commits resolve their
+	// own conflicts internally (exhaustion returns above), so a conflict
+	// reaching here still has its ops pending: reloading remote truth and
+	// discarding them (the old behavior) destroyed acknowledged work on a
+	// path that could not even be reached from commitProjectMetadata.
+	// Retain instead - the next trigger rebases the stack onto upstream.
 	var apiErr *ghapi.APIError
 	var cerr *commitError
 	isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
@@ -663,12 +699,7 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 			return
 		}
 	}
-	logging.Error(logger, "metadata commit conflicted, reloading from github", "err", err)
-	if _, _, loadErr := h.loadRepoMetadataFresh(context.Background(), project); loadErr != nil {
-		logging.Error(logger, "failed to reload metadata after conflict; preserving dirty metadata for retry", "err", loadErr)
-		return
-	}
-	logging.Info(logger, "metadata reloaded from github, in-memory changes discarded")
+	logging.Error(logger, "metadata commit conflicted; retaining pending ops for the next rebase", "err", err)
 }
 
 // commitProjectMetadata commits dirty metadata without holding pm.mu during GitHub I/O.
@@ -682,7 +713,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.mu.Unlock()
 		return nil
 	}
-	// D7: normalize a clone, never the shared tree. A failed commit
+	// Normalize a clone, never the shared tree. A failed commit
 	// (validation, size ceiling, push error) must leave pm.meta exactly as
 	// the mutations left it; the normalized working copy is applied back
 	// only on success below.
@@ -692,8 +723,11 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// Snapshot the op stack with the working copy: the commit message
 	// describes exactly these ops, and only they may be dropped on
 	// success (mutations landing mid-commit carry higher seqs and stay).
+	// Recording the snapshot seq lets coalescing refuse to rewrite ops
+	// that are in flight inside this commit.
 	ops := pm.opStack.snapshot()
 	opSeq := pm.opStack.maxSeq()
+	pm.opStack.noteSnapshot(opSeq)
 	base := pm.basePaths
 	objectCount := pm.objectCount
 	pm.mu.Unlock()
@@ -723,14 +757,25 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	}
 
 	// A legacy->split migration CASes the manifest, not the legacy blob:
-	// resolve the manifest's own token (empty when absent) so the migration
-	// commit is compare-and-swap safe against a concurrent migrator.
-	if !headSplit && h.getGitRepo(project) == nil {
+	// resolve the manifest's own token. Two clobber windows exist:
+	//   - the manifest is absent: the PUT carries no token, so the
+	//     contents API does no conflict detection; a concurrent migrator
+	//     landing before our read-back is caught by verifying HEAD after
+	//     the publish.
+	//   - the manifest exists but our tree was built on the legacy blob:
+	//     a rival migrated after our load. CASing with the rival's token
+	//     would "succeed" while publishing a tree that lacks the rival's
+	//     changes, so this is treated as a conflict up front and rebased.
+	migrationUnconditional := false
+	migratedUnderneath := false
+	if !headSplit && h.config.DisableGitBackend {
 		if data, s, found, lerr := h.readIndexHead(ctx, project); lerr == nil {
 			if found && metadata.IsManifest(data) {
 				previousSHA = s
+				migratedUnderneath = true
 			} else {
 				previousSHA = ""
+				migrationUnconditional = true
 			}
 		}
 	}
@@ -744,14 +789,33 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	didRebase := false
 	for attempt := 1; ; attempt++ {
 		var err error
-		commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, &working, previousSHA, message, objectCount)
+		if attempt == 1 && migratedUnderneath {
+			// The manifest appeared after our legacy base was loaded.
+			// Publishing with the rival's token would pass CAS while
+			// dropping the rival's changes - enter the conflict path
+			// directly so the first attempt rebases.
+			err = &ghapi.APIError{StatusCode: http.StatusConflict, Message: "project migrated to the split layout after our base was loaded"}
+		} else {
+			commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, &working, previousSHA, message, objectCount)
+			if err == nil && migrationUnconditional && previousSHA == "" {
+				// The manifest PUT carried no CAS token, so success does
+				// not prove our bytes are HEAD. Read back and compare the
+				// content SHA; a mismatch means a concurrent migrator won.
+				if _, s, found, lerr := h.readIndexHead(ctx, project); lerr == nil && found && s != "" && s != contentSHA {
+					err = &ghapi.APIError{
+						StatusCode: http.StatusConflict,
+						Message:    fmt.Sprintf("migration publish clobbered by a concurrent migrator (HEAD %s, ours %s)", shortSHA(s), shortSHA(contentSHA)),
+					}
+				}
+			}
+		}
 		if err == nil {
 			break
 		}
 		var over *oversizeError
 		if errors.As(err, &over) {
 			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			// D4: fail-fast admission from here on: growth mutations are
+			// Fail-fast admission from here on: growth mutations are
 			// rejected until a shrink folds the tree back under the ceiling.
 			pm.mu.Lock()
 			pm.sizeCapped = true
@@ -785,7 +849,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	pm.sha = contentSHA
 	pm.objectCount = newObjectCount
 	if pm.version == version {
-		// D7 apply-back: the normalized working copy becomes the shared
+		// Apply-back: the normalized working copy becomes the shared
 		// truth on success. Without this the cache keeps the raw mutation
 		// state (stale stats, unrepaired inode counter) and every later
 		// Validate of cached state - rollback, drain, explicit checks -
@@ -831,7 +895,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	h.journalRewrite(project, pm.opStack.ops)
 	// The rebase baseline moves to the just-committed state.
 	pm.basePaths = hashPaths(&working)
-	// A fitting commit lifts the D4 breach marker (re-armed on breach).
+	// A fitting commit lifts the size-ceiling breach marker (re-armed on breach).
 	pm.sizeCapped = false
 	pm.mu.Unlock()
 
@@ -905,8 +969,8 @@ func (h *StorHub) evictForCapacityLocked() {
 // Shutdown gracefully shuts down the StorHub, committing any dirty metadata.
 // It is safe to call on a client that was never fully started (or twice);
 // uninitialized machinery is simply skipped. Only the stop broadcast is
-// once-guarded: every call waits for loops and sweeps stranded dirty state
-// (D5), so a mutation that landed after its loop exited still converges.
+// once-guarded: every call waits for loops and sweeps stranded dirty state,
+// so a mutation that landed after its loop exited still converges.
 func (h *StorHub) Shutdown(ctx context.Context) error {
 	h.shutdownOnce.Do(func() {
 		logging.Info(h.logger, "shutdown initiated")
@@ -946,7 +1010,7 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 		h.gitMu.Unlock()
 	})
 
-	// D5 sweep: a trigger poke to a loop that already exited wakes
+	// Sweep: a trigger poke to a loop that already exited wakes
 	// nobody, and a post-shutdown mutation never had a live loop at
 	// all. Commit any still-dirty projects synchronously so Shutdown
 	// converges instead of dropping them.
@@ -1000,7 +1064,7 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 	var errs []error
 	for _, p := range projects {
 		if err := h.commitProjectMetadata(ctx, p.name, p.meta); err != nil {
-			// D8: FlushMetadata gets the same conflict recovery as the
+			// FlushMetadata gets the same conflict recovery as the
 			// commit loop: a 409 reloads remote HEAD into the cache so a
 			// stale flush converges instead of staying stale. The error
 			// is still reported to the caller.
@@ -1051,15 +1115,21 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	if err := validateProject(project); err != nil {
 		return "", "", err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
+		return "", "", err
+	}
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return "", "", err
+	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
 	if err != nil {
 		return "", "", err
 	}
 	if cleanName == "" {
 		return "", "", errors.New("file name is required")
 	}
-	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
-	if err != nil {
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return "", "", err
 	}
 	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
@@ -1106,15 +1176,21 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
+		return nil, err
+	}
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
 	if err != nil {
 		return nil, err
 	}
 	if cleanName == "" {
 		return nil, errors.New("file name is required")
 	}
-	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
-	if err != nil {
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	current := repoMeta.FindFile(cleanName)
@@ -1132,6 +1208,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, chunks)
+		return nil, err
+	}
 
 	// Register the release holding the new chunks so PurgeUntracked cannot
 	// delete live data. PrepareReplaceContext EnsureReleases only on a local
@@ -1150,7 +1231,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	fileMeta.Size = size
 	latest := pm.meta.FindFile(cleanName)
 	if latest == nil {
-		// N2: the file vanished between the readonly pre-check and this
+		// The file vanished between the readonly pre-check and this
 		// locked re-check (concurrent delete). The chunks are already
 		// uploaded and their IDs already allocated into the catalog:
 		// roll both back or the assets leak until PurgeUntracked and the
@@ -1225,7 +1306,7 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, totalChunks, prepare)
 	var uploaded int64
 	for uploaded < size {
-		windowSize := min64(h.ChunkSize(), size-uploaded)
+		windowSize := min64(chunkSize, size-uploaded)
 
 		win, cleanup, werr := newWindowReader(body, windowSize)
 		if werr != nil {
@@ -1245,10 +1326,6 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	return h.FinalizeReplaceChunksContext(ctx, project, filePath, sink.releaseTag, uploaded, sink.results)
 }
 
-func (h *StorHub) FillChunkRangeContext(ctx context.Context, project string, chunk metadata.ChunkInfo, dst []byte) error {
-	return h.fillAssetRange(ctx, project, chunk, dst)
-}
-
 func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
 	return h.PatchFileContext(context.Background(), project, fileName, offset, deleteSize, edit)
 }
@@ -1264,12 +1341,22 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
+		return nil, err
+	}
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
 	if err != nil {
 		return nil, err
 	}
 	if cleanName == "" {
 		return nil, errors.New("file name is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+		return nil, err
 	}
 	if offset < 0 {
 		return nil, errors.New("patch offset must be non-negative")
@@ -1280,17 +1367,9 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	if deleteSize == 0 && len(edit) == 0 {
 		return nil, errors.New("patch edit or delete size is required")
 	}
-
-	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
-	if err != nil {
-		return nil, err
-	}
 	fileMeta := repoMeta.FindFile(cleanName)
 	if fileMeta == nil {
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
-	}
-	if fileMeta.Symlink != "" {
-		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
 	}
 	patchEnd := offset + deleteSize
 	if offset > fileMeta.Size || patchEnd > fileMeta.Size {
@@ -1325,12 +1404,8 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
 		return nil, err
-	}
-	if cleanName == "" {
-		return nil, errors.New("file name is required")
 	}
 	if len(edits) == 0 {
 		return nil, errors.New("patch batch is empty")
@@ -1351,12 +1426,19 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	if err != nil {
 		return nil, err
 	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	if err != nil {
+		return nil, err
+	}
+	if cleanName == "" {
+		return nil, errors.New("file name is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+		return nil, err
+	}
 	fileMeta := repoMeta.FindFile(cleanName)
 	if fileMeta == nil {
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
-	}
-	if fileMeta.Symlink != "" {
-		return nil, fmt.Errorf("cannot patch symlink: %s", cleanName)
 	}
 	for i, edit := range edits {
 		if edit.End() > fileMeta.Size {
@@ -1373,6 +1455,11 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, newChunks)
+		return nil, err
+	}
 	pm.meta.EnsureRelease(releaseTag, now)
 	ensureChunkReleases(pm.meta, newChunks, now)
 	chunkIDs := make([]int64, len(newChunks))
@@ -1435,6 +1522,11 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, newChunks)
+		return nil, err
+	}
 
 	// Register the release holding the new chunks so PurgeUntracked cannot
 	// delete live data. buildPatchedChunks EnsureReleases only on a local
@@ -1499,6 +1591,11 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, newChunks)
+		return nil, err
+	}
 
 	// Register the release holding the new chunks so PurgeUntracked cannot
 	// delete live data. buildRewrittenChunks EnsureReleases only on a local
@@ -1555,12 +1652,8 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
 		return nil, err
-	}
-	if cleanName == "" {
-		return nil, errors.New("file name is required")
 	}
 
 	fileInfo, err := os.Stat(inputPath)
@@ -1579,11 +1672,26 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if err != nil {
 		return nil, err
 	}
+	// put has open(O_CREAT|O_TRUNC) semantics: a final symlink is followed
+	// to its target, so followFinal is true.
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	if err != nil {
+		return nil, err
+	}
+	if cleanName == "" {
+		return nil, errors.New("file name is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+		return nil, err
+	}
 	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
 		return nil, err
 	}
 	if err := shfs.CheckParentWrite(ctx, repoMeta, cleanName); err != nil {
 		return nil, err
+	}
+	if repoMeta.HasDirectory(cleanName) {
+		return nil, shfs.IsDirectory(cleanName)
 	}
 	existing := repoMeta.FindFile(cleanName)
 	if !replace && existing != nil {
@@ -1638,10 +1746,22 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
+		return nil, err
+	}
 
+	if err := shfs.CheckTraversal(ctx, pm.meta, traversed); err != nil {
+		pm.mu.Unlock()
+		// The chunks are already uploaded by now; a late permission
+		// failure must not leak them as orphans.
+		h.compensateDeleteAssets(ctx, project, results)
+		return nil, err
+	}
 	if err := shfs.CheckParentWrite(ctx, pm.meta, cleanName); err != nil {
 		pm.mu.Unlock()
-		// N1: the chunks are already uploaded by now; a late permission
+		// The chunks are already uploaded by now; a late permission
 		// failure must not leak them as orphans.
 		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
@@ -1650,6 +1770,11 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
+	}
+	if pm.meta.HasDirectory(cleanName) {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
+		return nil, shfs.IsDirectory(cleanName)
 	}
 	if !replace && pm.meta.FindFile(cleanName) != nil {
 		pm.mu.Unlock()
@@ -1716,16 +1841,22 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	cleanName, err := shfs.NormalizePath(fileName)
+	if err := shfs.ValidateAccessPathShape(fileName); err != nil {
+		return err
+	}
+
+	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
+	if err != nil {
+		return err
+	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
 	if err != nil {
 		return err
 	}
 	if cleanName == "" {
 		return errors.New("file name is required")
 	}
-
-	repoMeta, _, err := h.loadRepoMetadataReadonly(ctx, project)
-	if err != nil {
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return err
 	}
 	fileMeta := repoMeta.FindFile(cleanName)
@@ -1840,7 +1971,7 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if strings.TrimSpace(commitSHA) == "" {
 		return errors.New("commit sha is required")
 	}
-	// D9: a branch name is not a revision. The contents API resolves
+	// A branch name is not a revision. The contents API resolves
 	// unknown refs to HEAD content, so passing 'main' would silently
 	// roll back to HEAD (a no-op that reports success). Only a commit
 	// SHA from this file's own revision history is accepted.
@@ -1866,16 +1997,17 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	// Git-path CAS pin: cached/fresh loads carry "" as the version token,
 	// which would make the write-time compare vacuous and let this rollback
 	// silently overwrite a concurrent writer. Re-sync and pin the real HEAD
-	// commit, so commitRepoMetadata aborts with 409 when HEAD moved.
-	if repo := h.getGitRepo(project); repo != nil {
-		if fresh, _, freshErr := h.loadRepoMetadataFresh(ctx, project); freshErr == nil {
+	// commit, so commitRepoMetadata aborts with 409 when HEAD moved. The
+	// fresh load returns the HEAD token paired atomically with the index
+	// content it read; re-reading headCommitSHA separately could pair
+	// content at commit N with token N+1.
+	if !h.config.DisableGitBackend {
+		if fresh, freshSHA, freshErr := h.loadRepoMetadataFresh(ctx, project); freshErr == nil && freshSHA != "" {
 			currentMeta = fresh
 			if err := currentMeta.Validate(); err != nil {
 				return err
 			}
-			if head := repo.headCommitSHA(); head != "" {
-				currentSHA = head
-			}
+			currentSHA = freshSHA
 		}
 	}
 	rollbackMeta, err := h.getMetadataRevision(ctx, project, commitSHA)
@@ -1885,7 +2017,7 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
 		return err
 	}
-	// D6: the snapshot was validated against a listing taken moments ago;
+	// The snapshot was validated against a listing taken moments ago;
 	// assets can be deleted between that check and this commit. Re-check
 	// immediately before committing to narrow the race window.
 	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
@@ -1895,7 +2027,7 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if err != nil {
 		return err
 	}
-	// D6: the delete can also land mid-commit (after the re-check above).
+	// The delete can also land mid-commit (after the re-check above).
 	// Verify the committed snapshot against fresh server state and fail
 	// loudly instead of blessing bytes that can no longer be downloaded.
 	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
@@ -1924,17 +2056,13 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	cleanPath, err := shfs.NormalizePath(path)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(path); err != nil {
 		return err
-	}
-	if cleanPath == "" {
-		return errors.New("revert requires a non-root path")
 	}
 	if strings.TrimSpace(commitSHA) == "" {
 		return errors.New("commit sha is required")
 	}
-	// D9: a branch name is not a revision (the contents API resolves unknown
+	// A branch name is not a revision (the contents API resolves unknown
 	// refs to HEAD, which would silently "revert" to current).
 	if strings.ContainsAny(commitSHA, "/ \t\n") {
 		return fmt.Errorf("invalid metadata revision %q: not a commit SHA", commitSHA)
@@ -1957,6 +2085,16 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 	if err != nil {
 		return err
 	}
+	// A revert addresses the node the path names, so the final symlink is
+	// followed; the historical tree is keyed by concrete paths, hence the
+	// resolved key (not the raw spelling) is what RevertSubtree replays.
+	cleanPath, _, err := shfs.ResolveAccessPath(current, path, true)
+	if err != nil {
+		return err
+	}
+	if cleanPath == "" {
+		return errors.New("revert requires a non-root path")
+	}
 	preview := current.Clone()
 	if err := metadata.RevertSubtree(&preview, historical, cleanPath, h.config.Now().Unix()); err != nil {
 		return err
@@ -1976,7 +2114,7 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 	if err := h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project)); err != nil {
 		return err
 	}
-	// D6: assets can be deleted between the pre-check and the commit; re-check
+	// Assets can be deleted between the pre-check and the commit; re-check
 	// the committed state against fresh server truth.
 	committed, _, err := h.loadRepoMetadataFresh(ctx, project)
 	if err != nil {
@@ -2193,7 +2331,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		}
 	}
 
-	// D4 (8MB CEILING — fail fast, never accept-then-never-commit): apply
+	// 8MB ceiling — fail fast, never accept-then-never-commit. Apply
 	// the mutation to a throwaway clone and measure the serialized result
 	// before touching shared state. An oversize growth is rejected at
 	// admission with a remediation pointer; shared state, dirty, and
@@ -2212,18 +2350,15 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
-	// Op synthesis: diff the pre-transaction tree against the candidate so
-	// every transaction-level mutation (fs/posix ops, prune, release
-	// catalog changes) lands in the op stack - rich commit messages, the
-	// crash-recovery journal, and rebase all read from it.
+	// Op synthesis is deferred until after admission passes: appending
+	// ops before a rejection would leave the rejected mutation's ops in the
+	// shared stack and the journal, where a later rebase or crash replay
+	// resurrects work that was never acknowledged.
 	cause := causeFromMessage(message)
-	for _, op := range synthesizeOpsFromDiff(pm.meta, &candidate, cause, h.config.Now().Unix()) {
-		h.appendOpLocked(project, pm, op)
-	}
 	admitNow := h.config.Now().Unix()
 	candidate.Normalize(project, admitNow)
 	candidate.RecomputeStats()
-	// D4 admission, expressed for the split layout (version 5). The whole
+	// Admission, expressed for the split layout (version 5). The whole
 	// blob size is a cheap upper bound: if the entire tree serializes under
 	// the contents-API limit, every object (a strict subset) does too, so
 	// the mutation is admitted without building the tree. Only when the
@@ -2243,6 +2378,16 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		shrinking := false
 		if before, beforeErr := pm.meta.ToJSON(); beforeErr == nil && len(after) < len(before) {
 			shrinking = true
+		}
+		// Fail-fast: once the ceiling is armed, a growth mutation
+		// can never commit - reject it here instead of paying the full
+		// BuildTree + publish cycle on every trigger. Shrinks stay open so
+		// the project can always fold back under the ceiling.
+		if pm.sizeCapped && !shrinking {
+			pm.mu.Unlock()
+			h.debugf("metadata update rejected project=%s step=admission-capped bytes=%d elapsed=%s", project, len(after), h.config.Now().UTC().Sub(started))
+			logging.Error(h.projectLogger(project), "metadata update rejected: project is over the size ceiling; growth mutations fail fast", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", len(after), "max", maxMetadataBytes)
+			return nil, fmt.Errorf("metadata over size ceiling (%d bytes, max %d): growth is rejected until the tree fits again; delete entries or run `storhub prune`", len(after), maxMetadataBytes)
 		}
 		oversizeObject := false
 		if !shrinking {
@@ -2267,6 +2412,15 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		pm.sizeCapped = false
 	} else {
 		pm.sizeCapped = false
+	}
+	// Op synthesis: diff the pre-transaction tree against the (normalized,
+	// admitted) candidate so every transaction-level mutation (fs/posix
+	// ops, prune, release catalog changes) lands in the op stack - rich
+	// commit messages, the crash-recovery journal, and rebase all read
+	// from it. Runs only after admission: a rejected mutation leaves the
+	// shared stack and journal untouched.
+	for _, op := range synthesizeOpsFromDiff(pm.meta, &candidate, cause, h.config.Now().Unix()) {
+		h.appendOpLocked(project, pm, op)
 	}
 	pm.meta = &candidate
 
@@ -2387,8 +2541,8 @@ func (h *StorHub) Rename(project, oldPath, newPath string) error {
 	return h.RenameContext(context.Background(), project, oldPath, newPath)
 }
 
-func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
-	return h.fsService().RenameContext(ctx, project, oldPath, newPath)
+func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
+	return h.fsService().RenameContext(ctx, project, oldPath, newPath, opts...)
 }
 
 func (h *StorHub) Copy(project, srcPath, dstPath string) error {
@@ -2455,12 +2609,8 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if err := validateProject(project); err != nil {
 		return 0, err
 	}
-	cleanPath, err := shfs.NormalizePath(filePath)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(filePath); err != nil {
 		return 0, err
-	}
-	if cleanPath == "" {
-		return 0, errors.New("file name is required")
 	}
 	if offset < 0 {
 		return 0, errors.New("read offset and length must be non-negative")
@@ -2469,15 +2619,22 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if err != nil {
 		return 0, err
 	}
+	cleanPath, traversed, err := shfs.ResolveAccessPath(repo, filePath, true)
+	if err != nil {
+		return 0, err
+	}
+	if cleanPath == "" {
+		return 0, errors.New("file name is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
+		return 0, err
+	}
 	file := repo.FindFile(cleanPath)
 	if file == nil {
 		return 0, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanPath)
 	}
 	if err := shfs.CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return 0, err
-	}
-	if file.Symlink != "" {
-		return 0, shfs.InvalidSymlink(cleanPath)
 	}
 	if offset > file.Size {
 		return 0, io.EOF
@@ -2655,8 +2812,8 @@ func (h *StorHub) SetXAttr(project, targetPath, attr string, data []byte) error 
 	return h.SetXAttrContext(context.Background(), project, targetPath, attr, data)
 }
 
-func (h *StorHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) error {
-	return h.posixService().SetXAttrContext(ctx, project, targetPath, attr, data)
+func (h *StorHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error {
+	return h.posixService().SetXAttrContext(ctx, project, targetPath, attr, data, mode...)
 }
 
 func (h *StorHub) GetXAttr(project, targetPath, attr string) ([]byte, error) {

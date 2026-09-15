@@ -413,11 +413,21 @@ func TestLockAndErrorHelpers(t *testing.T) {
 	if errno := fsys.setLock(1, 11, fuse.FileLock{Start: 5, End: 12, Typ: syscall.F_RDLCK}); errno != syscall.EAGAIN {
 		t.Fatalf("expected conflict, got %v", errno)
 	}
-	if !locksOverlap(lock, fuse.FileLock{Start: 9, End: 20}) {
-		t.Fatal("expected lock overlap")
+	// FUSE sends End as exclusive (start+len), so adjacent ranges
+	// [0,9) and [9,20) must NOT conflict or overlap.
+	if locksOverlap(lock, fuse.FileLock{Start: 9, End: 20}) {
+		t.Fatal("adjacent exclusive lock ranges must not overlap")
+	}
+	if !locksOverlap(lock, fuse.FileLock{Start: 8, End: 20}) {
+		t.Fatal("overlapping exclusive lock ranges must overlap")
 	}
 	if segments := subtractLock(lock, fuse.FileLock{Start: 3, End: 5}); len(segments) != 2 {
 		t.Fatalf("expected split lock segments, got %+v", segments)
+	}
+	// Partial unlock must retain both neighbors byte-exact (the old
+	// inclusive math dropped one byte from the retained left segment).
+	if segments := subtractLock(fuse.FileLock{Start: 0, End: 10, Typ: syscall.F_WRLCK}, fuse.FileLock{Start: 5, End: 6, Typ: syscall.F_UNLCK}); len(segments) != 2 || segments[0].End != 5 || segments[1].Start != 6 {
+		t.Fatalf("partial unlock must split [0,10) into [0,5)+[6,10), got %+v", segments)
 	}
 	if errno := fsys.setLock(1, 10, fuse.FileLock{Start: 0, End: 0, Typ: syscall.F_UNLCK}); errno != 0 {
 		t.Fatalf("unlock lock: %v", errno)
@@ -1030,7 +1040,9 @@ func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
 	}
 }
 
-func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
+// The overlay is honored only for a handle attached to the write
+// state. A truncate through the open handle stays local until commit.
+func TestSetattrWithAttachedHandleUsesActiveWriteState(t *testing.T) {
 	now := int64(40)
 	var truncates int
 	var replaced []byte
@@ -1089,11 +1101,11 @@ func TestSetattrWithoutHandleUsesActiveWriteState(t *testing.T) {
 	attr.Valid = fuse.FATTR_SIZE
 	attr.Size = 0
 	var out fuse.AttrOut
-	if errno := node.Setattr(context.Background(), nil, &attr, &out); errno != 0 {
-		t.Fatalf("setattr without handle: %v", errno)
+	if errno := node.Setattr(context.Background(), h, &attr, &out); errno != 0 {
+		t.Fatalf("setattr with attached handle: %v", errno)
 	}
 	if truncates != 0 {
-		t.Fatalf("expected setattr to avoid backend truncate, got %d calls", truncates)
+		t.Fatalf("expected attached-handle setattr to avoid backend truncate, got %d calls", truncates)
 	}
 	if out.Size != 0 {
 		t.Fatalf("expected local setattr size 0, got %d", out.Size)
@@ -1224,7 +1236,27 @@ func (s *stubHub) GetXAttrContext(ctx context.Context, project, target, attr str
 	}
 	return nil, nil
 }
-func (s *stubHub) SetXAttrContext(ctx context.Context, project, target, attr string, data []byte) error {
+func (s *stubHub) SetXAttrContext(ctx context.Context, project, target, attr string, data []byte, mode ...shfs.XAttrMode) error {
+	// Mirror posix.Service.SetXAttrContext: create/replace are enforced
+	// atomically against current state. This is what lets the fuse test
+	// prove the mode actually reaches the hub.
+	var m shfs.XAttrMode
+	for _, x := range mode {
+		m |= x
+	}
+	if m != 0 {
+		_, err := s.GetXAttrContext(ctx, project, target, attr)
+		exists := err == nil
+		if err != nil && !errors.Is(err, shfs.ErrXAttrNotFound) {
+			return err
+		}
+		if m&shfs.XAttrCreate != 0 && exists {
+			return syscall.EEXIST
+		}
+		if m&shfs.XAttrReplace != 0 && !exists {
+			return shfs.ErrXAttrNotFound
+		}
+	}
 	if s.setXAttr != nil {
 		return s.setXAttr(ctx, project, target, attr, data)
 	}
@@ -1787,7 +1819,7 @@ func TestMountLockTakesOverStaleClaim(t *testing.T) {
 	}
 }
 
-func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath string) error {
+func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
 	if s.renameFn != nil {
 		return s.renameFn(ctx, project, oldPath, newPath)
 	}

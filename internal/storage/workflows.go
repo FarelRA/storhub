@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -414,7 +415,7 @@ func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string
 }
 
 func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
-	// D6: structural validation first - chunk/file size consistency
+	// Structural validation first - chunk/file size consistency
 	// (chunks beyond EOF, negative geometry, dangling references,
 	// totals) is verified here, not assumed from elsewhere.
 	if err := metadata.Validate(); err != nil {
@@ -436,14 +437,14 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 	}
 	for path, file := range metadata.Files {
 		for _, chunkName := range file.Chunks {
-			// D6: a dangling chunk reference must fail validation outright.
+			// A dangling chunk reference must fail validation outright.
 			// Skipping it here would bless a snapshot whose bytes cannot be
 			// downloaded after commit.
 			chunk, ok := metadata.Chunks[chunkName]
 			if !ok {
 				return fmt.Errorf("rollback metadata references missing chunk %d (file %s)", chunkName, path)
 			}
-			// D6: structural size/offset sanity beyond Validate(): negative
+			// Structural size/offset sanity beyond Validate(): negative
 			// geometry can never address real bytes.
 			if chunk.Size < 0 || chunk.Offset < 0 {
 				return fmt.Errorf("rollback metadata chunk %d has invalid geometry (offset %d, size %d)", chunkName, chunk.Offset, chunk.Size)
@@ -549,7 +550,7 @@ const embeddedAssetTrustLimit = 900
 // decisions: the embedded count when safely below the ceiling, the true
 // paginated count inside the danger band.
 func (h *StorHub) releaseAssetCount(ctx context.Context, project string, r ghapi.Release) (int, error) {
-	// B8: a cached entry carrying upload placeholders (legacy ID -1 bumps)
+	// A cached entry carrying upload placeholders (legacy ID -1 bumps)
 	// cannot be trusted for picker math: the embedded list may be a
 	// truncated view with local guesses appended, arbitrarily far from
 	// server truth. Resolve the real count instead.
@@ -772,6 +773,12 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 	}
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+	// An unhydrated entry carries an EMPTY tree that is not remote truth;
+	// serving it lets a cold-cache mutation commit over real remote state.
+	// Miss instead: the caller falls through to a fresh load.
+	if !pm.hydrated {
+		return nil, "", false
+	}
 	meta := pm.meta.Clone()
 	return &meta, pm.sha, true
 }
@@ -780,31 +787,54 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 // records its layout (split vs legacy) and objectCount carries the running
 // hint. When pendingOps is non-nil (a crash-recovery journal replayed onto the
 // loaded state), the ops become the project's pending stack: dirty stays set
-// and the journal is kept until the next commit lands them. Otherwise the
-// cache is clean and any stale stack/journal is discarded.
+// and the journal is kept until the next commit lands them.
+//
+// The apply-back is version-guarded: when the entry still carries local
+// work (dirty, or a non-empty op stack), remote truth must NOT clobber it -
+// discarding acknowledged mutations, the pending stack, and the crash journal
+// here is data loss. The loader still receives the freshly read values; the
+// local tree keeps its stale CAS token, so the next commit conflicts and
+// rebases onto the remote state instead of silently overwriting it. Shared
+// state that is replaced bumps pm.version so an in-flight transaction's
+// version guard observes the swap.
 func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string, pendingOps []Op, objectCount uint64) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
+	if len(pendingOps) > 0 {
+		pm.meta = &clone
+		pm.sha = sha
+		pm.hydrated = true
+		pm.objectCount = objectCount
+		// The rebase baseline moves to the freshly loaded state.
+		pm.basePaths = hashPaths(&clone)
+		pm.opStack.clear()
+		for _, op := range pendingOps {
+			pm.opStack.append(op)
+		}
+		pm.dirty = true
+		pm.version++
+		pm.mu.Unlock()
+		return
+	}
+	if pm.dirty || len(pm.opStack.ops) > 0 {
+		// Pending local work outranks the remote snapshot: keep the tree,
+		// the stack, the dirty flag, and the journal exactly as they are.
+		pm.hydrated = true
+		pm.mu.Unlock()
+		return
+	}
 	pm.meta = &clone
 	pm.sha = sha
 	pm.hydrated = true
 	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
 	pm.basePaths = hashPaths(&clone)
-	if len(pendingOps) > 0 {
-		pm.opStack.clear()
-		for _, op := range pendingOps {
-			pm.opStack.append(op)
-		}
-		pm.dirty = true
-		pm.mu.Unlock()
-		return
-	}
 	pm.dirty = false // Just stored, so not dirty
 	pm.opStack.clear()
+	pm.version++
 	pm.mu.Unlock()
 	h.journalRewrite(project, nil)
 }
@@ -830,6 +860,10 @@ func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op 
 	if len(ops) == 0 {
 		return nil
 	}
+	ops = dropSupersededOps(project, h.projectLogger(project), meta, ops)
+	if len(ops) == 0 {
+		return nil
+	}
 	if err := applyOps(meta, ops); err != nil {
 		logging.Error(h.projectLogger(project), "op journal replay failed; pending ops discarded", "err", err)
 		h.journalRewrite(project, nil)
@@ -839,6 +873,42 @@ func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op 
 	meta.RecomputeStats()
 	logging.Info(h.projectLogger(project), "op journal replayed onto remote state", "ops", len(ops))
 	return ops
+}
+
+// dropSupersededOps removes journal ops that a full-state assertion must not
+// re-apply over newer remote state: a journal rewrite that failed after
+// a commit leaves committed ops in the file, and a cold replay would then
+// assert them over entries the world has since moved past. An op whose
+// timestamp predates the change time of the entry it targets is stale and is
+// dropped; ops without a resolvable single target (renames, catalog ops) are
+// kept - replay applies them defensively.
+func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, ops []Op) []Op {
+	kept := make([]Op, 0, len(ops))
+	for _, op := range ops {
+		path := opPath(op)
+		var changedAt int64
+		var exists bool
+		switch {
+		case op.Type == OpMkdir || (op.Type == OpSetattr && op.File == nil && op.Dir != nil):
+			if d, ok := meta.Dirs[path]; ok {
+				changedAt, exists = max(d.ChangedAt, d.ModifiedAt), true
+			}
+		case isStateClass(op.Type) || isDeleteClass(op.Type):
+			if f, ok := meta.Files[path]; ok {
+				changedAt, exists = f.ChangedAt, true
+			}
+		default:
+			kept = append(kept, op)
+			continue
+		}
+		if exists && changedAt > op.Timestamp {
+			logging.Warn(logger, "op journal entry superseded by newer remote state; skipped",
+				"project", project, "op", op.Type, "path", path, "op_ts", op.Timestamp, "remote_ts", changedAt)
+			continue
+		}
+		kept = append(kept, op)
+	}
+	return kept
 }
 
 func (h *StorHub) invalidateRepoMetadata(project string) {

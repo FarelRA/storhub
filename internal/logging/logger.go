@@ -82,6 +82,10 @@ func Error(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Error(msg, args...)
 }
 
+// NormalizeLevel maps a user-supplied level string to one of the canonical
+// levels. "warning" is accepted as an alias of "warn" (matching
+// slog.ParseLevel's vocabulary); unknown values fall back to info, which is
+// why config.Validate - not this function - is the loud gate for typos.
 func NormalizeLevel(level string) string {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "", LevelInfo:
@@ -95,10 +99,6 @@ func NormalizeLevel(level string) string {
 	default:
 		return LevelInfo
 	}
-}
-
-func NormalizeFormat(format string) string {
-	return normalizeFormat(format)
 }
 
 func parseLevel(level string) charmlog.Level {
@@ -149,9 +149,12 @@ func KnownFormats() []string {
 }
 
 // ValidLevel reports whether level is a recognized log level (or unset).
+// It accepts exactly the vocabulary NormalizeLevel maps - including the
+// "warning" alias of "warn" - so a level the logger understands can never
+// fail validation (and vice versa).
 func ValidLevel(level string) bool {
 	level = strings.ToLower(strings.TrimSpace(level))
-	if level == "" {
+	if level == "" || level == "warning" {
 		return true
 	}
 	for _, known := range KnownLevels() {
