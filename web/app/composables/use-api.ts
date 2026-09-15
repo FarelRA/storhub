@@ -5,6 +5,8 @@ import { joinApiPath } from '~/utils/url'
 export interface ApiResult<T = unknown> {
   status: number
   payload: T
+  /** ETag response header ('' when absent), for If-Match CAS on writes. */
+  etag: string
 }
 
 /**
@@ -34,6 +36,10 @@ export function useApi() {
     let payload: unknown
     if (binary) {
       payload = await response.arrayBuffer()
+    } else if (rawBody) {
+      // File content must survive the round trip untouched: never let a
+      // JSON content-type trigger a parse-and-reformat of raw bytes.
+      payload = await response.text()
     } else {
       const contentType = response.headers.get('content-type') ?? ''
       payload = contentType.includes('application/json')
@@ -49,7 +55,7 @@ export function useApi() {
             : response.statusText
       throw new ApiError(response.status, message || `HTTP ${response.status}`, payload)
     }
-    return { status: response.status, payload: payload as T }
+    return { status: response.status, payload: payload as T, etag: response.headers.get('etag') ?? '' }
   }
 
   function url(path: string, params: Record<string, string | undefined> = {}): string {
@@ -75,9 +81,5 @@ export function useApi() {
     ).payload
   }
 
-  async function sendText<T>(method: string, path: string, body?: string): Promise<ApiResult<T>> {
-    return request<T>(path, { method, body })
-  }
-
-  return { config, token, url, request, getJSON, postJSON, sendText }
+  return { config, token, url, request, getJSON, postJSON }
 }

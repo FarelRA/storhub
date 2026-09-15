@@ -14,6 +14,9 @@ let resolver: ((ok: boolean) => void) | null = null
  */
 export function useConfirm() {
   async function ask(options: ConfirmOptions): Promise<boolean> {
+    // A second ask() replaces the dialog's content; the abandoned first
+    // caller must not hang forever, so cancel it explicitly.
+    resolver?.(false)
     pending.value = options
     return new Promise<boolean>((resolve) => {
       resolver = resolve

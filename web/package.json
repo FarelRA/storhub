@@ -12,7 +12,7 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "nuxt typecheck",
     "test": "vitest run",
-    "build:embed": "nuxt generate && node scripts/copy-dist.mjs"
+    "build:embed": "nuxt generate && bun scripts/copy-dist.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

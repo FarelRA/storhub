@@ -85,12 +85,14 @@ async function runPrune() {
   if (!dry) {
     const ok = await ask({
       title: `Prune ${scope}`,
-      body: 'Reclaim storage now? Orphaned index objects and untracked assets are deleted; history compaction is git-backend only. This cannot be undone.',
+      body: 'Reclaim storage now? Orphaned index objects and untracked assets are deleted. History compaction is git-backend only and collapses every older manifest into a single checkpoint revision (keep is fixed at 1; the server rejects larger values). This cannot be undone.',
       confirmLabel: 'Prune',
       danger: true,
     })
     if (!ok) return
   }
+  // keep=1 is the only value the backend accepts: history compaction keeps
+  // exactly one checkpoint, and keep is ignored by the objects/assets scopes.
   const result = await console_.prune(scope, 1, dry)
   if (!result) return
   const parts = [
@@ -391,7 +393,7 @@ async function onDrop(event: DragEvent) {
               v-if="!entries.length"
               icon="🗂"
               title="Nothing here"
-              :hint="project ? 'This directory is empty - drop files to upload.' : 'Load a project to start browsing.'"
+              :hint="project ? 'This directory is empty. Drop files to upload.' : 'Load a project to start browsing.'"
             />
             <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
               <EntryList :entries="entries" :selected-path="selectedPath" @select="onSelect" @open="onOpen" />

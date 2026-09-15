@@ -16,7 +16,9 @@ const rows = computed(() => {
     { key: 'path', value: entry.path || '/' },
     { key: 'kind', value: entry.is_dir ? 'directory' : entry.is_symlink ? 'symlink' : 'file' },
     { key: 'mode', value: formatMode(entry.mode) },
-    { key: 'uid / gid', value: `${entry.uid ?? '-'} / ${entry.gid ?? '-'}` },
+    // Go omits zero uid/gid (omitempty), so a missing field means root (0),
+    // not "unknown": render 0 instead of a dash that hides real ownership.
+    { key: 'uid / gid', value: `${entry.uid ?? 0} / ${entry.gid ?? 0}` },
     { key: 'size', value: entry.is_dir ? '-' : formatBytes(entry.size) },
     { key: 'inode', value: String(entry.inode ?? '-') },
     { key: 'links', value: String(entry.nlink ?? '-') },

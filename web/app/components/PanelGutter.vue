@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { PanelKey } from '~/composables/use-panel-widths'
+import { panelLimits, type PanelKey } from '~/composables/use-panel-widths'
 
 const props = defineProps<{ panel: PanelKey }>()
 
 const { panels, setWidth, resetPanel, persist } = usePanelWidths()
+const limits = computed(() => panelLimits(props.panel))
 
 const dragging = ref(false)
 let startX = 0
@@ -56,6 +57,8 @@ function onKeydown(event: KeyboardEvent) {
     :aria-orientation="'vertical'"
     :aria-label="`Resize ${panel} panel`"
     :aria-valuenow="panels[panel]"
+    :aria-valuemin="limits.min"
+    :aria-valuemax="limits.max"
     tabindex="0"
     class="group relative z-10 hidden w-1 shrink-0 cursor-col-resize bg-transparent
            transition-colors motion-reduce:transition-none

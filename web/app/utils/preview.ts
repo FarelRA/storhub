@@ -7,7 +7,7 @@
 export const PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 export const SNIFF_BYTES = 64 * 1024
 
-export type PreviewKind = 'text' | 'binary' | 'image' | 'video' | 'audio' | 'pdf' | 'too-large'
+export type PreviewKind = 'text' | 'binary' | 'image' | 'video' | 'audio' | 'pdf' | 'too-large' | 'error'
 
 export function extOf(path: string): string {
   const name = path.split('/').pop() ?? ''

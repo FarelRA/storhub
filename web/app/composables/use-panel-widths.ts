@@ -21,6 +21,11 @@ function clampFor(key: PanelKey, px: number): number {
   return Math.min(Math.max(Math.round(px), min), Math.max(effectiveMax, min))
 }
 
+/** Declared bounds for a panel, for aria-valuemin/valuemax on the gutter. */
+export function panelLimits(key: PanelKey): { min: number; max: number; def: number } {
+  return LIMITS[key]
+}
+
 function load(): Record<PanelKey, number> {
   const fallback = {
     sidebar: LIMITS.sidebar.def,

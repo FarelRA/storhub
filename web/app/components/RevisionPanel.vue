@@ -1,5 +1,8 @@
 <script setup lang="ts">
-const { revisions, canWrite, rollbackRevision, revertPath, selectedPath } = useConsole()
+// Rollback and per-path revert are admin-only endpoints on the server
+// (rest_auth.go denies non-admins), so the UI gates them with isAdmin,
+// not the broader canWrite.
+const { revisions, canWrite, isAdmin, rollbackRevision, revertPath, selectedPath } = useConsole()
 const { ask } = useConfirm()
 
 async function rollback(sha: string) {
@@ -47,7 +50,7 @@ async function revertSelectedPath(sha: string) {
       >
         <div class="flex items-center justify-between gap-2">
           <code class="font-mono text-xs text-ember">{{ revision.commit_sha.slice(0, 10) }}</code>
-          <div class="flex items-center gap-1.5">
+          <div v-if="isAdmin" class="flex items-center gap-1.5">
             <button
               type="button"
               class="btn btn-sm"
@@ -69,7 +72,7 @@ async function revertSelectedPath(sha: string) {
           </div>
         </div>
         <p v-if="revision.message" class="mt-1 line-clamp-2 text-xs break-words text-mist">{{ revision.message }}</p>
-        <p v-if="revision.committed_at" class="mt-0.5 text-xs text-mist/70" :title="String(revision.committed_at)">
+        <p v-if="revision.committed_at" class="mt-0.5 text-xs text-mist/70" :title="formatDateTime(revision.committed_at)">
           {{ relativeTime(revision.committed_at) }}
         </p>
       </li>

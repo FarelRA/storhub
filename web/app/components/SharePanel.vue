@@ -8,14 +8,17 @@ const toasts = useToasts()
 const { ask } = useConfirm()
 
 const singlePath = computed(() => {
-  if (console_.selectedPaths.value.size === 1) return [...console_.selectedPaths.value][0]!
+  if (console_.selectedPaths.value.size === 1) {
+    const [only] = [...console_.selectedPaths.value]
+    return only ?? null
+  }
   if (console_.selectedPaths.value.size === 0 && console_.selectedPath.value) return console_.selectedPath.value
   return null
 })
 const singleEntry = computed(() => {
   if (console_.selectedPaths.value.size === 1) {
-    const p = [...console_.selectedPaths.value][0]!
-    return console_.entries.value.find((e) => e.path === p) ?? console_.selectedEntry.value
+    const [only] = [...console_.selectedPaths.value]
+    return console_.entries.value.find((e) => e.path === only) ?? console_.selectedEntry.value
   }
   return console_.selectedEntry.value
 })
@@ -25,7 +28,8 @@ async function copy(label: string, value: string) {
   toasts.success(`${label} copied`)
 }
 
-// A. Shares Panel - User: both 7 days, one copies ?share, one copies download
+// Shares panel: both buttons create 7-day shares; one copies the ?share
+// link, the other the direct download link.
 async function createShare() {
   const p = singlePath.value
   if (!p) return
@@ -85,7 +89,9 @@ async function remove(share: { id: string; path: string }) {
           <span class="chip" :title="share.expires_at">expires {{ relativeTime(share.expires_at) }}</span>
         </div>
         <div class="flex flex-wrap gap-1.5">
-          <button v-if="share.token" class="btn btn-sm" @click="copy('Share link', shareLink(share))">Link</button>
+          <!-- No "copy share link" button here: GET /shares never carries the
+               signed token (only create/derive responses do), so a link could
+               not be rebuilt from list rows. -->
           <button v-if="share.download_url" class="btn btn-sm" @click="copy('Direct link', directLink(share))">
             Direct
           </button>

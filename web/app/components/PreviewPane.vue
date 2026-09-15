@@ -23,21 +23,21 @@ const stateCard = computed<{ icon: string; title: string; hint: string } | null>
     return {
       icon: '📄',
       title: 'No file selected',
-      hint: 'Pick an entry from the directory pane - its preview will appear here.',
+      hint: 'Pick an entry from the directory pane. Its preview will appear here.',
     }
   }
   if (entry.is_dir) {
     return {
       icon: '🗂',
       title: 'Directory selected',
-      hint: 'Directories have no content to preview - browse or open the files inside via the ⋮ menu.',
+      hint: 'Directories have no content to preview. Browse or open the files inside via the ⋮ menu.',
     }
   }
   if (entry.is_symlink) {
     return {
       icon: '↪',
       title: 'Symlink selected',
-      hint: `Points to ${entry.symlink_target ?? 'an unknown target'} - preview the target file itself.`,
+      hint: `Points to ${entry.symlink_target ?? 'an unknown target'}. Preview the target file itself.`,
     }
   }
   return null
@@ -114,6 +114,18 @@ const stateCard = computed<{ icon: string; title: string; hint: string } | null>
       title="PDF preview"
       class="mx-auto aspect-[8.5/11] w-full max-w-xl self-start overflow-hidden rounded-lg border border-hair bg-white"
     />
+
+    <!-- Preview fetch failed (not "too large": say what happened) -->
+    <div
+      v-else-if="!previewLoading && previewKind === 'error'"
+      class="flex w-full flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center"
+    >
+      <span aria-hidden="true" class="text-3xl opacity-60">⚠️</span>
+      <p class="text-sm font-medium">Preview failed</p>
+      <p class="max-w-xs text-xs leading-relaxed text-mist">
+        The file could not be fetched for preview. See the error notification for details.
+      </p>
+    </div>
 
     <!-- Too large -->
     <div

@@ -13,6 +13,23 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Wire mirror of `shfs.DirEntry` (internal/fs/types.go): the row shape
+ * returned by GET /children. It carries NO uid/gid/timestamps/symlink_target;
+ * those exist only on EntryInfo (GET /nodes).
+ */
+export interface DirEntry {
+  name: string
+  path: string
+  kind?: string
+  is_dir: boolean
+  is_symlink?: boolean
+  size: number
+  inode?: number
+  mode?: number
+  nlink?: number
+}
+
 export interface EntryInfo {
   path: string
   kind?: string
@@ -31,14 +48,17 @@ export interface EntryInfo {
   symlink_target?: string
 }
 
+/** Anything the list rows or the stat pane hand to the action helpers. */
+export type AnyEntry = DirEntry | EntryInfo
+
+/** Wire mirror of `shfs.FSStats` (internal/fs/types.go). */
 export interface ProjectStats {
   files?: number
   directories?: number
+  inodes?: number
   bytes?: number
   releases?: number
-  last_modified?: string
-  created_at?: string
-  modified_at?: string
+  assets?: number
 }
 
 export interface Share {
@@ -55,7 +75,8 @@ export interface Share {
 export interface Revision {
   commit_sha: string
   message?: string
-  committed_at?: string
+  /** Unix seconds (`metadata.MetadataRevision.CommittedAt` is int64). */
+  committed_at?: number
 }
 
 export interface PruneResult {

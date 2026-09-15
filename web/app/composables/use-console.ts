@@ -1,5 +1,15 @@
 import { ApiError } from '~/utils/api-types'
-import type { EntryInfo, ProjectStats, Principal, Revision, Share, XattrEntry, PruneResult } from '~/utils/api-types'
+import type {
+  AnyEntry,
+  DirEntry,
+  EntryInfo,
+  Principal,
+  ProjectStats,
+  Revision,
+  Share,
+  XattrEntry,
+  PruneResult,
+} from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
 import {
   PREVIEW_MAX_BYTES,
@@ -34,8 +44,9 @@ export interface ModalForm {
   newPath: string
   target: string
   mode: string
-  uid: number
-  gid: number
+  /** `v-model.number` yields '' when the input is cleared. */
+  uid: number | ''
+  gid: number | ''
   atime: string
   mtime: string
   name: string
@@ -71,13 +82,17 @@ const selectedPath = ref('')
 const selectedEntry = ref<EntryInfo | null>(null)
 const selectedPaths = ref<Set<string>>(new Set())
 const lastSelected = ref<string | null>(null)
-const entries = ref<EntryInfo[]>([])
+const entries = ref<DirEntry[]>([])
 const stats = ref<ProjectStats>({})
 const shares = ref<Share[]>([])
 const revisions = ref<Revision[]>([])
 const xattrs = ref<XattrEntry[]>([])
 const editorContent = ref('')
 const editorDirty = ref(false)
+// ETag of the exact bytes currently in the editor: sent as If-Match on save
+// so a concurrent server-side change fails with 412 instead of being
+// silently overwritten (lost update).
+const editorETag = ref('')
 // Preview pipeline: what the editor pane is currently showing and whether
 // its content may be PUT back (only genuine text reads are saveable).
 const previewKind = ref<PreviewKind>('text')
@@ -87,16 +102,27 @@ const previewMeta = ref({ shown: 0, total: 0 })
 const editorIsText = ref(true)
 const previewLoading = ref(false)
 const busy = ref(false)
+// Reference count of in-flight run() calls: busy must stay true until the
+// LAST sibling request settles, not the first.
+let inflight = 0
 
-const token = useState<string>('auth-token', () => '')
-const principal = useState<Principal | null>('auth-principal', () => null)
+// useState needs a Nuxt context, so it is resolved lazily inside
+// useConsole() (useState itself memoizes per key, keeping singleton semantics).
+let authState: { token: Ref<string>; principal: Ref<Principal | null> } | null = null
+function authRefs(): { token: Ref<string>; principal: Ref<Principal | null> } {
+  if (!authState) {
+    authState = {
+      token: useState<string>('auth-token', () => ''),
+      principal: useState<Principal | null>('auth-principal', () => null),
+    }
+  }
+  return authState
+}
 
 const shareRequested = ref(false)
 const shareToken = ref('')
 const shareRootPath = ref('')
 const shareId = ref('')
-const shareExpiresAt = ref('')
-const shareDownloadAllowed = ref(true)
 
 const modalOpen = ref(false)
 const modalKind = ref<ModalKind>('mkdir')
@@ -152,6 +178,7 @@ function enc(value: string): string {
 export function useConsole() {
   const { config, url, getJSON, postJSON, request } = useApi()
   const toasts = useToasts()
+  const { token, principal } = authRefs()
 
   const authEnabled = computed(() => config.authEnabled !== false)
   const sharedMode = computed(() => !!shareToken.value)
@@ -168,6 +195,7 @@ export function useConsole() {
 
   async function run<T>(label: string, fn: () => Promise<T>, quiet = false): Promise<T | null> {
     busy.value = true
+    inflight += 1
     try {
       return await fn()
     } catch (error) {
@@ -181,14 +209,15 @@ export function useConsole() {
         }
         if (token.value) {
           logout()
-          toasts.error('Session expired - please sign in again')
+          toasts.error('Session expired. Please sign in again.')
           return null
         }
       }
       if (!quiet) toasts.error(`${label}: ${message}`)
       return null
     } finally {
-      busy.value = false
+      inflight = Math.max(0, inflight - 1)
+      busy.value = inflight > 0
     }
   }
 
@@ -199,15 +228,22 @@ export function useConsole() {
 
   // ---- Loading -------------------------------------------------------------
 
-  async function loadDirectory(path: string): Promise<void> {
+  async function loadDirectory(path: string): Promise<boolean> {
     let nextPath = normalizePath(path)
     if (sharedMode.value && shareRootPath.value && !withinShareRoot(nextPath)) nextPath = shareRootPath.value
+    // Keep the current selection when merely re-listing the same directory
+    // (refresh after a mutation); navigating elsewhere resets the panes.
+    if (nextPath !== currentPath.value) clearSelection()
     currentPath.value = nextPath
-    clearSelection()
-    await run('Directory', async () => {
-      const payload = await getJSON<{ entries?: EntryInfo[] }>(url(projectURL('/children'), { path: nextPath }))
-      entries.value = payload.entries ?? []
-    })
+    // Never leave the previous directory's rows under the new path: a failed
+    // fetch must show an empty pane, not stale entries the user could act on.
+    entries.value = []
+    return (
+      (await run('Directory', async () => {
+        const payload = await getJSON<{ entries?: DirEntry[] }>(url(projectURL('/children'), { path: nextPath }))
+        entries.value = payload.entries ?? []
+      })) !== null
+    )
   }
 
   async function loadXattrs(): Promise<void> {
@@ -216,9 +252,10 @@ export function useConsole() {
       return
     }
     const target = selectedPath.value
+    xattrs.value = []
     await run('XAttrs', async () => {
       const payload = await getJSON<{ names?: string[] }>(url(projectURL('/xattrs'), { path: target }))
-      xattrs.value = await Promise.all(
+      const resolved = await Promise.all(
         (payload.names ?? []).map(async (name) => {
           try {
             const result = await request<string>(
@@ -230,36 +267,38 @@ export function useConsole() {
           }
         }),
       )
+      // Drop the result if the selection moved on while these requests ran.
+      if (selectedPath.value === target) xattrs.value = resolved
     }, true)
   }
 
+  // Generation guard: a slow response for an older selection must never
+  // overwrite a newer one.
+  let inspectSeq = 0
+
   async function inspectPath(path: string): Promise<void> {
-    await run('Stat', async () => {
+    const seq = ++inspectSeq
+    const ok = await run('Stat', async () => {
       const payload = await getJSON<{ entry?: EntryInfo }>(url(projectURL('/nodes'), { path }))
-      selectedEntry.value = payload.entry ?? null
-      selectedPath.value = path
-      editorDirty.value = false
+      return payload.entry ?? null
     })
+    if (seq !== inspectSeq) return
+    if (ok === null) return
+    selectedEntry.value = ok
+    selectedPath.value = path
+    editorDirty.value = false
     await loadXattrs()
   }
 
-  async function readFile(path: string, range?: { offset: number; length: number }): Promise<void> {
-    const headers: Record<string, string> = {}
-    let label = 'Read'
-    if (range) {
-      if (!Number.isInteger(range.offset) || range.offset < 0 || !Number.isInteger(range.length) || range.length < 1) {
-        toasts.error('Range: offset must be ≥ 0 and length ≥ 1')
-        return
-      }
-      headers.Range = `bytes=${range.offset}-${range.offset + range.length - 1}`
-      label = 'Read range'
-    }
+  async function readFile(path: string): Promise<void> {
     previewLoading.value = true
     try {
-      await run(label, async () => {
-        const result = await request<unknown>(url(projectURL('/content'), { path }), { headers })
-        editorContent.value =
-          typeof result.payload === 'string' ? result.payload : JSON.stringify(result.payload, null, 2)
+      await run('Read', async () => {
+        // rawBody: the bytes are file content, not an API envelope. Parsing
+        // and re-stringifying JSON here would corrupt the file on save.
+        const result = await request<string>(url(projectURL('/content'), { path }), { rawBody: true })
+        editorContent.value = result.payload
+        editorETag.value = result.etag
         editorIsText.value = true
         previewKind.value = 'text'
         clearPreview()
@@ -268,44 +307,54 @@ export function useConsole() {
       previewLoading.value = false
     }
   }
-  async function loadStats(): Promise<void> {
+  async function loadStats(): Promise<boolean> {
     if (sharedMode.value) {
       // For shared view, stats are not available via /projects/{p} (read-only).
       // Hide the grid instead of showing dashes.
       stats.value = {}
-      return
+      return true
     }
-    await run('Stats', async () => {
-      const payload = await getJSON<{ stats?: ProjectStats }>(projectURL(''))
-      stats.value = payload.stats ?? {}
-    })
+    return (
+      (await run('Stats', async () => {
+        const payload = await getJSON<{ stats?: ProjectStats }>(projectURL(''))
+        stats.value = payload.stats ?? {}
+      })) !== null
+    )
   }
 
-  async function loadRevisions(): Promise<void> {
+  async function loadRevisions(): Promise<boolean> {
     if (sharedMode.value || !project.value) {
       revisions.value = []
-      return
+      return true
     }
-    await run('Revisions', async () => {
-      const payload = await getJSON<{ revisions?: Revision[] }>(url(projectURL('/revisions')))
-      revisions.value = payload.revisions ?? []
-    })
+    return (
+      (await run('Revisions', async () => {
+        const payload = await getJSON<{ revisions?: Revision[] }>(url(projectURL('/revisions')))
+        revisions.value = payload.revisions ?? []
+      })) !== null
+    )
   }
 
-  async function loadShares(): Promise<void> {
+  async function loadShares(): Promise<boolean> {
     if (sharedMode.value || !project.value) {
       shares.value = []
-      return
+      return true
     }
-    await run('Shares', async () => {
-      const payload = await getJSON<{ shares?: Share[] }>(url(projectURL('/shares')))
-      shares.value = payload.shares ?? []
-    })
+    return (
+      (await run('Shares', async () => {
+        const payload = await getJSON<{ shares?: Share[] }>(url(projectURL('/shares')))
+        shares.value = payload.shares ?? []
+      })) !== null
+    )
   }
 
-  async function refreshAll(): Promise<void> {
-    await Promise.all([loadStats(), loadDirectory(currentPath.value), loadRevisions(), loadShares()])
-    if (selectedPath.value) await inspectPath(selectedPath.value)
+  async function refreshAll(): Promise<boolean> {
+    // Capture the selection: loadDirectory keeps it for same-path refreshes,
+    // and inspectPath below re-reads the entry so the panes stay in sync.
+    const keep = selectedPath.value
+    const results = await Promise.all([loadStats(), loadDirectory(currentPath.value), loadRevisions(), loadShares()])
+    if (keep) await inspectPath(keep)
+    return results.every(Boolean)
   }
 
   // ---- Session & project ---------------------------------------------------
@@ -339,6 +388,9 @@ export function useConsole() {
     principal.value = null
     sessionStorage.removeItem('storhub.token')
     sessionStorage.removeItem('storhub.principal')
+    // Drop every trace of the last project: on a shared machine the drawer
+    // must not keep listing its files and shares after sign-out.
+    reset()
     toasts.info('Signed out')
   }
 
@@ -371,11 +423,13 @@ export function useConsole() {
     selectedEntry.value = null
     editorContent.value = ''
     editorDirty.value = false
+    editorETag.value = ''
     xattrs.value = []
     editorIsText.value = true
     clearPreview()
-    const failed = (await run('Load project', refreshAll)) === null
-    if (failed) {
+    // refreshAll reports whether the underlying loads succeeded; a typo'd
+    // project must not leave the console parked on an empty phantom.
+    if (!(await refreshAll())) {
       reset()
       return false
     }
@@ -403,15 +457,12 @@ export function useConsole() {
       // Try to extract jti from JWT if id not in payload.
       if (!shareId.value && shareToken.value.includes('.')) {
         try {
-          const body = JSON.parse(atob(shareToken.value.split('.')[1] ?? ''))
+          const body = JSON.parse(atob(shareToken.value.split('.')[1] ?? '')) as { jti?: string; id?: string }
           shareId.value = body.jti ?? body.id ?? ''
-          if (body.exp) shareExpiresAt.value = new Date(body.exp * 1000).toISOString()
         } catch {
           void 0
         }
       }
-      if (payload.expires_at) shareExpiresAt.value = payload.expires_at
-      shareDownloadAllowed.value = true
       const root = shareRootPath.value
       const statResult = await run('Shared resource', () =>
         getJSON<{ entry?: EntryInfo }>(url(projectURL('/nodes'), { path: root })),
@@ -419,7 +470,7 @@ export function useConsole() {
       const entry = statResult?.entry
       if (entry && !entry.is_dir) {
         currentPath.value = root
-        entries.value = [entry]
+        entries.value = [{ ...entry, name: entry.path.split('/').pop() ?? entry.path }]
         selectedPath.value = root
         selectedEntry.value = entry
         await readFile(root)
@@ -429,7 +480,11 @@ export function useConsole() {
       }
       return true
     } catch {
+      // A dead link must not strand the UI in shared mode: clear every piece
+      // of share state so the login card and project input come back.
+      shareRequested.value = false
       shareToken.value = ''
+      shareId.value = ''
       token.value = ''
       project.value = ''
       shareRootPath.value = ''
@@ -462,10 +517,11 @@ export function useConsole() {
    * and binary get one ranged sniff window. Files above PREVIEW_MAX_BYTES
    * are never fetched - the range bar covers targeted reads.
    */
-  async function loadPreview(entry: EntryInfo): Promise<void> {
+  async function loadPreview(entry: AnyEntry): Promise<void> {
     clearPreview()
     editorContent.value = ''
     editorDirty.value = false
+    editorETag.value = ''
     editorIsText.value = false
     previewLoading.value = true
     try {
@@ -486,7 +542,7 @@ export function useConsole() {
           previewKind.value = mediaKind
           previewMeta.value = { shown: entry.size, total: entry.size }
         } catch (error) {
-          previewKind.value = 'too-large'
+          previewKind.value = 'error'
           toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
         }
         return
@@ -508,6 +564,9 @@ export function useConsole() {
       if (kind === 'text') {
         editorContent.value = new TextDecoder().decode(bytes)
         editorIsText.value = true
+        // Only a complete fetch is safe to PUT back; a truncated sniff
+        // window keeps no CAS token so saveFile stays honest about it.
+        if (bytes.byteLength === entry.size) editorETag.value = result.etag
       } else if (kind === 'binary') {
         previewHex.value = toHexDump(bytes, { maxRows: 4096 })
       }
@@ -516,7 +575,7 @@ export function useConsole() {
     }
   }
 
-  async function selectEntry(entry: EntryInfo): Promise<void> {
+  async function selectEntry(entry: AnyEntry): Promise<void> {
     await inspectPath(entry.path)
     const current = selectedEntry.value
     if (!current) return
@@ -533,16 +592,22 @@ export function useConsole() {
   async function saveFile(): Promise<void> {
     // Only genuine text loads may be PUT back: saving over a file we merely
     // hex-dumped or never fetched would destroy data.
-    if (!canEditFile.value || !editorIsText.value || !selectedPath.value) return
-    const ok = await run('Save', () =>
-      request(url(projectURL('/content'), { path: selectedPath.value! }), {
+    const target = selectedPath.value
+    if (!canEditFile.value || !editorIsText.value || !target) return
+    const headers: Record<string, string> = {}
+    if (editorETag.value) headers['If-Match'] = editorETag.value
+    const res = await run('Save', () =>
+      request<{ etag?: string }>(url(projectURL('/content'), { path: target }), {
         method: 'PUT',
+        headers,
         body: editorContent.value,
       }),
     )
-    if (ok !== null) {
+    if (res !== null) {
       editorDirty.value = false
-      toasts.success(`Saved ${selectedPath.value}`)
+      // The PUT answers with the fresh node; chain its ETag into the next save.
+      editorETag.value = res.payload.etag ?? res.etag
+      toasts.success(`Saved ${target}`)
       await refreshAll()
     }
   }
@@ -555,18 +620,19 @@ export function useConsole() {
 
   async function patchOp(label: string, params: Record<string, string>, body?: string): Promise<boolean> {
     const target = selectedPath.value
+    if (!target) return false
     const ok = await run(label, () =>
-      request(url(projectURL('/content'), { path: target!, ...params }), { method: 'PATCH', body }),
+      request(url(projectURL('/content'), { path: target, ...params }), { method: 'PATCH', body }),
     )
     if (ok !== null) {
-      await readFile(target!)
-      await inspectPath(target!)
+      await readFile(target)
+      await inspectPath(target)
       await loadRevisions()
     }
     return ok !== null
   }
 
-  async function removeSelected(entry: EntryInfo): Promise<boolean> {
+  async function removeSelected(entry: AnyEntry): Promise<boolean> {
     // For directories, use recursive path via removeMany
     if (entry.is_dir) return removeMany([entry.path])
     const done = await op(`Remove ${entry.path}`, 'unlink', { path: entry.path })
@@ -582,7 +648,7 @@ export function useConsole() {
   async function removeRecursive(path: string): Promise<boolean> {
     // List children and delete them first (depth-first)
     try {
-      const payload = await getJSON<{ entries?: EntryInfo[] }>(url(projectURL('/children'), { path }))
+      const payload = await getJSON<{ entries?: DirEntry[] }>(url(projectURL('/children'), { path }))
       const kids = payload.entries ?? []
       for (const kid of kids) {
         const ok = await removeRecursive(kid.path)
@@ -616,12 +682,11 @@ export function useConsole() {
     if (!ok) toasts.error(`Failed to remove ${results.filter((v) => !v).length}/${paths.length} items`)
     for (const p of paths) selectedPaths.value.delete(p)
     selectedPaths.value = new Set(selectedPaths.value)
-    if (selectedPaths.value.size === 0) clearSelection()
-    else {
-      const last = [...selectedPaths.value].pop()!
-      selectedPath.value = last
-      await inspectPath(last)
-    }
+    const remaining = [...selectedPaths.value].pop()
+    if (remaining === undefined) clearSelection()
+    else selectedPath.value = remaining
+    // refreshAll keeps the (now re-selected) path and re-inspects it, so the
+    // details pane survives the reload instead of being wiped by it.
     await refreshAll()
     return ok
   }
@@ -633,6 +698,7 @@ export function useConsole() {
     lastSelected.value = null
     editorContent.value = ''
     editorDirty.value = false
+    editorETag.value = ''
     xattrs.value = []
     editorIsText.value = true
     clearPreview()
@@ -655,7 +721,8 @@ export function useConsole() {
     selectedPaths.value = next
     lastSelected.value = path
     if (next.size === 1) {
-      selectedPath.value = [...next][0]!
+      const only = [...next][0]
+      if (only !== undefined) selectedPath.value = only
     } else if (next.size === 0) {
       clearSelection()
       return
@@ -680,9 +747,10 @@ export function useConsole() {
 
   function selectAll(): void {
     selectedPaths.value = new Set(entries.value.map((e) => e.path))
-    if (entries.value.length) {
-      lastSelected.value = entries.value[entries.value.length - 1]!.path
-      selectedPath.value = lastSelected.value!
+    const lastEntry = entries.value.at(-1)
+    if (lastEntry) {
+      lastSelected.value = lastEntry.path
+      selectedPath.value = lastEntry.path
     }
   }
 
@@ -699,8 +767,23 @@ export function useConsole() {
     return op(`Rollback to ${sha.slice(0, 10)}`, 'rollback', { commit_sha: sha })
   }
 
+  interface PurgeResult {
+    project?: string
+    status?: string
+    deleted_releases?: number
+    deleted_assets?: number
+  }
+
   async function purgeUntracked(): Promise<boolean> {
-    return op('Purge untracked', 'purge', {})
+    const result = await run('Purge untracked', async () => {
+      const payload = await postJSON<PurgeResult>(projectURL('/ops/purge'), {})
+      await refreshAll()
+      return payload
+    })
+    if (result) {
+      toasts.info(`Purged ${result.deleted_releases ?? 0} releases, ${result.deleted_assets ?? 0} assets`)
+    }
+    return result !== null
   }
 
   // Revert a single path (file or directory subtree) to a historical revision,
@@ -778,34 +861,49 @@ export function useConsole() {
     xattrs.value = []
     editorContent.value = ''
     editorDirty.value = false
+    editorETag.value = ''
     editorIsText.value = true
     uploadedDirs.clear()
     clearPreview()
   }
 
-  // B3 + D2: immediate browser download via /api/v1/projects/{p}/content?path=&token= (token = auth or share)
-  async function downloadEntry(entry: EntryInfo): Promise<void> {
+  // Downloads fetch the bytes with the bearer header (the REST layer
+  // rejects auth tokens on the query string) and hand them to the browser
+  // through a same-origin blob URL + [download], so the SPA never navigates
+  // away and inline types (.txt, .png, ...) still save as files.
+  async function downloadEntry(entry: AnyEntry): Promise<void> {
     if (entry.is_dir) {
       toasts.error('Directory download not yet implemented')
       return
     }
-    const t = token.value
-    if (!t) {
+    if (!token.value) {
       toasts.error('Not authenticated')
       return
     }
-    const target = url(projectURL('/content'), { path: entry.path, token: t })
-    const absolute = new URL(target, window.location.origin).toString()
+    const fileName = entry.path.split('/').pop() ?? 'file'
+    const href = await run('Download', async () => {
+      const result = await request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
+        binary: true,
+      })
+      return URL.createObjectURL(new Blob([result.payload]))
+    })
+    if (!href) return
     const anchor = document.createElement('a')
-    anchor.href = absolute
+    anchor.href = href
+    anchor.download = fileName
     anchor.rel = 'noopener'
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
+    // Revoke on the next task: immediate revocation races with the download
+    // start in some browsers.
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
   }
 
-  // B2: 5 min download_url via createShare; D1: remaining via deriveShare (server caps to parent)
-  async function copyDirectLink(entry: EntryInfo): Promise<void> {
+  // A direct link is a share's download_url: in shared view, derive a child
+  // share from the active one (the server caps its expiry to the parent's
+  // remaining time); otherwise create a fresh share valid for 5 minutes.
+  async function copyDirectLink(entry: AnyEntry): Promise<void> {
     if (entry.is_dir) {
       toasts.error('Directory direct links not yet implemented')
       return
@@ -832,7 +930,7 @@ export function useConsole() {
   }
 
   /** Select an entry non-navigatively: stat it so detail panes follow along. */
-  async function focusEntry(entry: EntryInfo): Promise<void> {
+  async function focusEntry(entry: AnyEntry): Promise<void> {
     await inspectPath(entry.path)
   }
 
@@ -870,6 +968,10 @@ export function useConsole() {
       const xhr = new XMLHttpRequest()
       xhr.open('PUT', url(projectURL('/content'), { path: fullPath }))
       if (token.value) xhr.setRequestHeader('Authorization', `Bearer ${token.value}`)
+      // A half-open connection must not pin the progress bar forever: give
+      // the transfer a generous ceiling and fail loudly when it is hit.
+      xhr.timeout = 15 * 60_000
+      xhr.ontimeout = () => reject(new ApiError(408, 'upload timed out', null))
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) onBytes(event.loaded)
       }
@@ -948,7 +1050,7 @@ export function useConsole() {
     await refreshAll()
     const { done, failed, total } = uploadProgress.value
     if (failed === 0) toasts.success(`Uploaded ${done}/${total} · ${formatBytes(bytesTotal)}`)
-    else toasts.error(`Uploaded ${done - failed}/${total} - ${firstError}`)
+    else toasts.error(`Uploaded ${done - failed}/${total}. ${firstError}`)
   }
 
   // ---- Modal ---------------------------------------------------------------
@@ -1010,8 +1112,9 @@ export function useConsole() {
           if (!oldPath) throw new Error('original path is required')
           if (!newPath) throw new Error('new path is required')
           if (oldPath === newPath) throw new Error('new path must be different')
-          const ok = await op('rename', 'rename', { old_path: oldPath, new_path: newPath })
-          if (!ok) throw new Error('rename failed - see notification for details')
+          // op() already surfaces a toast on failure; keep the modal open
+          // with the user's input instead of reporting the same error twice.
+          if (!(await op('rename', 'rename', { old_path: oldPath, new_path: newPath }))) return
           break
         }
         case 'move': {
@@ -1021,12 +1124,14 @@ export function useConsole() {
           const dest = f.newPath.trim()
           if (!dest) throw new Error('destination is required')
           if (srcs.length === 1) {
-            await op('move', 'rename', { old_path: srcs[0], new_path: dest })
+            const first = srcs[0]
+            if (first === undefined) throw new Error('no selection')
+            await op('move', 'rename', { old_path: first, new_path: dest })
           } else {
             const destDir = normalizePath(dest)
             let ok = true
             for (const src of srcs) {
-              const base = src.split('/').pop()!
+              const base = src.split('/').pop() ?? src
               const dst = destDir ? `${destDir}/${base}` : base
               const res = await run(`Move ${src}`, () => postJSON(projectURL('/ops/rename'), { old_path: src, new_path: dst }), true)
               if (res === null) ok = false
@@ -1044,12 +1149,14 @@ export function useConsole() {
           const dest = f.newPath.trim()
           if (!dest) throw new Error('destination is required')
           if (srcs.length === 1) {
-            await op('copy', 'copy', { src_path: srcs[0], dst_path: dest })
+            const first = srcs[0]
+            if (first === undefined) throw new Error('no selection')
+            await op('copy', 'copy', { src_path: first, dst_path: dest })
           } else {
             const destDir = normalizePath(dest)
             let ok = true
             for (const src of srcs) {
-              const base = src.split('/').pop()!
+              const base = src.split('/').pop() ?? src
               const dst = destDir ? `${destDir}/${base}` : base
               const res = await run(`Copy ${src}`, () => postJSON(projectURL('/ops/copy'), { src_path: src, dst_path: dst }), true)
               if (res === null) ok = false
@@ -1071,9 +1178,18 @@ export function useConsole() {
           await op('chmod', 'chmod', { path: selectedPath.value, mode })
           break
         }
-        case 'chown':
-          await op('chown', 'chown', { path: selectedPath.value, uid: Number(f.uid), gid: Number(f.gid) })
+        case 'chown': {
+          // A cleared number input yields '' (v-model.number), and
+          // Number('') === 0 would silently chown the entry to root.
+          const uid = Number(f.uid)
+          const gid = Number(f.gid)
+          if (f.uid === '' || !Number.isInteger(uid) || uid < 0)
+            throw new Error('uid must be a non-negative integer')
+          if (f.gid === '' || !Number.isInteger(gid) || gid < 0)
+            throw new Error('gid must be a non-negative integer')
+          await op('chown', 'chown', { path: selectedPath.value, uid, gid })
           break
+        }
         case 'utimes': {
           const atime = f.atime ? new Date(f.atime) : null
           const mtime = f.mtime ? new Date(f.mtime) : null
@@ -1087,14 +1203,20 @@ export function useConsole() {
           })
           break
         }
-        case 'xattr-set':
+        case 'xattr-set': {
+          const target = selectedPath.value
+          if (!target) throw new Error('select an entry first')
           if (!f.name.trim()) throw new Error('attribute name is required')
-          await setXattr(selectedPath.value!, f.name.trim(), f.value)
+          await setXattr(target, f.name.trim(), f.value)
           break
-        case 'xattr-remove':
+        }
+        case 'xattr-remove': {
+          const target = selectedPath.value
+          if (!target) throw new Error('select an entry first')
           if (!f.name.trim()) throw new Error('attribute name is required')
-          await removeXattr(selectedPath.value!, f.name.trim())
+          await removeXattr(target, f.name.trim())
           break
+        }
         case 'append':
           await patchOp('Append text', { op: 'append' }, f.text)
           break
@@ -1166,8 +1288,6 @@ export function useConsole() {
     shareToken,
     shareRootPath,
     shareId,
-    shareExpiresAt,
-    shareDownloadAllowed,
     canWrite,
     canEditFile,
 

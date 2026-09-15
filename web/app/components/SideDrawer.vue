@@ -2,12 +2,29 @@
 defineProps<{ open: boolean; width?: number }>()
 const emit = defineEmits<{ close: [] }>()
 
+// Below lg the closed drawer is translated off-screen but still rendered;
+// without `inert` it stays in the tab order for keyboard/AT users. At lg+
+// it is a visible column and must never be inert.
+const isDesktop = ref(false)
+function updateIsDesktop() {
+  isDesktop.value = window.matchMedia('(min-width: 1024px)').matches
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+let query: MediaQueryList | null = null
+onMounted(() => {
+  updateIsDesktop()
+  query = window.matchMedia('(min-width: 1024px)')
+  query.addEventListener('change', updateIsDesktop)
+  window.addEventListener('keydown', onKeydown)
+})
+onUnmounted(() => {
+  query?.removeEventListener('change', updateIsDesktop)
+  window.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <template>
@@ -40,6 +57,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
            lg:sticky lg:top-14 lg:h-[calc(100dvh-3.5rem)] lg:self-start lg:overflow-y-auto lg:[width:var(--panel-w,18rem)]"
     :class="open ? 'max-lg:translate-x-0' : 'max-lg:-translate-x-full'"
     :style="{ '--panel-w': width ? `${width}px` : undefined }"
+    :inert="!open && !isDesktop"
+    :aria-hidden="!open && !isDesktop ? 'true' : undefined"
     aria-label="Console controls"
   >
     <slot />
