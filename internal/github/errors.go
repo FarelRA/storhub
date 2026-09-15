@@ -89,17 +89,6 @@ func (e *CDNError) Transient() bool {
 	return e != nil && (e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
 }
 
-// IsPrimaryRateLimit reports whether err is a confirmed primary rate-limit
-// rejection: the hourly budget is gone and the request must wait for the
-// documented reset time instead of being retried on backoff.
-func IsPrimaryRateLimit(err error) (*APIError, bool) {
-	apiErr, ok := err.(*APIError)
-	if !ok || apiErr == nil || !apiErr.RateLimited || !apiErr.Primary {
-		return nil, false
-	}
-	return apiErr, true
-}
-
 // BodySnippet returns up to the first kilobyte of the response body for
 // logs: enough to carry GitHub's errors[] detail (e.g. file_count), small
 // enough to keep failure logs readable. The v18 incident cost a manual

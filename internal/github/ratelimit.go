@@ -164,9 +164,36 @@ func (g *rateGovernor) acquire(ctx context.Context, cost int64, content, assetUp
 	select {
 	case g.inflight <- struct{}{}:
 	case <-ctx.Done():
+		// The zero-wait reservation was already committed in reserve();
+		// the request will never be sent, so undo the accounting instead
+		// of over-counting a phantom request.
+		g.rollback(cost, content, assetUpload)
 		return nil, ctx.Err()
 	}
 	return func() { <-g.inflight }, nil
+}
+
+// rollback undoes a committed zero-wait reservation whose request never
+// reached the wire (the concurrency slot select failed on ctx.Done). It
+// clamps at zero because the accounting window may already have rolled
+// over between commit and rollback.
+func (g *rateGovernor) rollback(cost int64, content, assetUpload bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.winPoints >= cost {
+		g.winPoints -= cost
+	} else {
+		g.winPoints = 0
+	}
+	if content && g.winContent > 0 {
+		g.winContent--
+	}
+	if !assetUpload {
+		g.tokens += float64(cost)
+		if g.budget.seen && g.budget.remaining < g.budget.limit {
+			g.budget.remaining++
+		}
+	}
 }
 
 // reserve computes the wait before sending; commit happens only when the

@@ -331,6 +331,15 @@ func (c *Client) DeleteAssetByID(ctx context.Context, owner, project string, ass
 func (c *Client) DeleteRepo(ctx context.Context, owner, project string) error {
 	resp, err := c.doJSONWithRetryable(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil, true)
 	if err != nil {
+		// Real GitHub 404s a DELETE for an unknown repo. The delete is
+		// retryable, so a lost response after the first delete landed
+		// re-sends against a repo that is already gone: gone IS success
+		// for an idempotent delete, and reporting failure would wedge
+		// DeleteProject on a retry loop against a deleted project.
+		var apiErr *APIError
+		if errorAs(err, &apiErr) && apiErr.NotFound() {
+			return nil
+		}
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -423,12 +432,9 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			continue
 		}
 		// Non-redirect response: treat it as the final answer (also keeps
-		// test servers that stream bytes directly working unchanged).
-		if resp.StatusCode >= 400 {
-			apiErr := decodeAPIError(resp)
-			_ = resp.Body.Close()
-			return nil, 0, apiErr
-		}
+		// test servers that stream bytes directly working unchanged). Error
+		// statuses never reach here: doRequest already converted every
+		// >=400 response into an *APIError.
 		return resp.Body, resp.ContentLength, nil
 	}
 	return nil, 0, fmt.Errorf("download asset %d: exhausted cdn re-resolution attempts", assetID)
@@ -597,6 +603,15 @@ func computeGitBlobSHA(data []byte) string {
 // PutFileContent creates or updates filePath with payload, using previousSHA
 // as an optimistic-concurrency precondition (empty means create). It returns
 // the commit SHA and the new blob content SHA.
+//
+// The PUT stays retryable: a lost-response create retry now
+// lands on GitHub's 422 create-collision, which is NOT retried here
+// (422 is not a retryable status) and is resolved by the caller's
+// content-addressed collision check (writeObjects verifies the upstream
+// bytes and treats a match as success). A lost-response update retry
+// carries the now-stale previousSHA and 409s - survivable: the commit
+// loop rebases. Disabling retries for creates instead would forfeit the
+// 429/5xx retry that rate-limited metadata commits depend on.
 func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath string, payload []byte, previousSHA, message string) (string, string, error) {
 	body, err := json.Marshal(putFileRequest{
 		Message: message,
@@ -700,7 +715,14 @@ func (c *Client) FindAssetIDByName(ctx context.Context, owner, project, tag, nam
 	if err != nil {
 		return 0, err
 	}
-	for _, asset := range release.Assets {
+	// Scan the dedicated list-assets endpoint, never the array embedded in
+	// the release object: that embed truncates near 1000 assets (see
+	// ListReleaseAssets), so a name past the ceiling would be missed.
+	assets, err := c.ListReleaseAssets(ctx, owner, project, release.ID)
+	if err != nil {
+		return 0, err
+	}
+	for _, asset := range assets {
 		if asset.Name == name {
 			return asset.ID, nil
 		}
@@ -746,7 +768,12 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		started := time.Now().UTC()
 		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
-		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload, opts.assetUpload)
+		// GitHub's ~80/min content-generation secondary window counts
+		// every request that creates repository content: asset uploads
+		// AND contents-API PUT/DELETE (metadata commits). Passing only
+		// assetUpload here let a metadata-chatty mount burst past the
+		// window and eat real secondary penalties.
+		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload || isContentsWrite(method, endpoint), opts.assetUpload)
 		if err != nil {
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && attempt < c.maxRetries && opts.retryable && apiErr.IsRetryable() {
@@ -780,12 +807,15 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			req.ContentLength = opts.contentSize
 		}
 		client := c.client
-		switch {
-		case opts.noFollow:
+		if opts.noFollow {
 			client = c.noFollow
-		case opts.stream || opts.assetUpload:
+		}
+		if opts.stream || opts.assetUpload {
 			// Sized transfers are bounded by transferDeadline below, not
 			// by the client-wide timeout that amputates large payloads.
+			// Applies on top of noFollow too: the legacy direct-200
+			// streaming path (no redirect) must not stay bounded by the
+			// 5-minute client timeout either.
 			noTimeout := *client
 			noTimeout.Timeout = 0
 			client = &noTimeout
@@ -960,21 +990,26 @@ func containsAny(haystack string, needles []string) bool {
 // rejections follow GitHub's documented guidance instead of the generic
 // exponential backoff: primary exhaustion means waiting for
 // x-ratelimit-reset (the doRequest caller refuses waits beyond maxWait),
-// a present Retry-After is honored exactly but bounded by maxRetryDelay,
-// and other secondary limits wait at least one minute with exponential
-// growth. Every branch is bounded and jittered so a hostile header or a
-// synchronized fleet cannot stall or thunder-herd callers.
+// a rate-limited Retry-After is honored exactly (GitHub's secondary-limit
+// hints run 30-120s; truncating them to maxRetryDelay manufactures repeat
+// rejections and burns the point window - the maxWait ceiling is what
+// refuses an excessive wait, mirroring the reset branch), other
+// Retry-After hints are bounded by maxRetryDelay, and bare secondary
+// rejections wait at least one minute with exponential growth. Every
+// branch is bounded and jittered so a hostile header or a synchronized
+// fleet cannot stall or thunder-herd callers.
 func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 	if apiErr != nil && apiErr.RateLimited {
 		if !apiErr.RateLimitReset.IsZero() {
 			// Wait for the documented reset exactly: the server dictates the
 			// resume instant, so jitter/caps here only overshoot it. Pinned
 			// by TestRateLimitAwareRetry — the floor only prevents a hot
-			// loop when the clock has already passed reset.
-			return nonNegativeDelay(time.Until(apiErr.RateLimitReset))
+			// loop when the clock has already passed reset. The client's
+			// single (injectable) clock keeps fake-clock tests honest.
+			return nonNegativeDelay(apiErr.RateLimitReset.Sub(c.now()))
 		}
 		if apiErr.RetryAfter > 0 {
-			return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
+			return nonNegativeDelay(apiErr.RetryAfter)
 		}
 		if attempt > 10 {
 			attempt = 10 // keep the shift below from overflowing on wild input
@@ -1014,6 +1049,16 @@ func isRetrySafeMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+// isContentsWrite reports whether a request mutates repository content
+// through the contents API - the requests GitHub's content-generation
+// secondary window counts (besides asset uploads).
+func isContentsWrite(method, endpoint string) bool {
+	if method != http.MethodPut && method != http.MethodDelete {
+		return false
+	}
+	return strings.Contains(endpoint, "/contents/")
 }
 
 func nonNegativeDelay(delay time.Duration) time.Duration {
@@ -1060,16 +1105,31 @@ func addJitter(d time.Duration) time.Duration {
 }
 
 // isRetryableNetworkError reports whether a transport failure is worth
-// another attempt. User cancellation is never retried; timeouts, torn
-// connections and truncated reads are, because a release-asset PUT is
-// atomic (no partial asset on a dropped connection) and range GETs are
-// read-only - the only cost of a spurious retry is bandwidth, while
-// refusing to retry turns every capped-link stall into a failed commit.
+// another attempt. User cancellation and caller deadlines are never
+// retried; timeouts, torn connections and reset/aborted connections are,
+// because a release-asset PUT is atomic (no partial asset on a dropped
+// connection) and range GETs are read-only - the only cost of a spurious
+// retry is bandwidth, while refusing to retry turns every capped-link
+// stall into a failed commit. Permanent name failures (DNS NXDOMAIN) are
+// refused too: no retry resolves a name that does not exist.
 //
 // The semantic is shared with the storage layer's isRetryableNetworkError;
 // keep the two identical.
 func isRetryableNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// A *url.Error always satisfies net.Error, so the deadline check must
+	// come first: a caller deadline is the caller's decision and must not
+	// burn the governor's budget on retries. http.Client's own timeout
+	// surfaces as the same wrapped context.DeadlineExceeded but carries
+	// the "Client.Timeout exceeded" marker - a stalled transfer is
+	// exactly what retries exist to absorb.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return strings.Contains(err.Error(), "Client.Timeout exceeded")
+	}
+	var dnsErr *net.DNSError
+	if errorAs(err, &dnsErr) && dnsErr.IsNotFound {
 		return false
 	}
 	var netErr net.Error
@@ -1090,9 +1150,11 @@ func errorAs(err error, target any) bool {
 	return err != nil && errors.As(err, target)
 }
 
-// boundedWait caps server-provided wait hints (Retry-After, rate-limit
-// reset) at maxRetryDelay so a hostile or misconfigured header cannot stall
-// callers invisibly for minutes.
+// boundedWait caps non-rate-limit server-provided wait hints (a plain
+// Retry-After on a 5xx) at maxRetryDelay so a hostile or misconfigured
+// header cannot stall callers invisibly for minutes. Rate-limit waits do
+// not pass through here: they are honored exactly and refused up front by
+// the maxWait ceiling in doRequest.
 func (c *Client) boundedWait(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0

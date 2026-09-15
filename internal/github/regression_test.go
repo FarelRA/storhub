@@ -1,8 +1,8 @@
 package github
 
-// Regression tests for the github-client leftover findings B1, B7, B8,
-// B9, B10. Each test fails against the pre-fix code (RED) and passes
-// after the fix (GREEN).
+// Regression tests for the github-client rate-limit, cache, and path
+// fixes. Each test pins the fixed behavior: it fails against the pre-fix
+// code and passes after the fix.
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 )
 
-// B1: body-text rate-limit markers must only classify on the statuses
+// Body-text rate-limit markers must only classify on the statuses
 // GitHub actually uses for rate/abuse rejections (403/429). A 404, 401,
 // 422 or 5xx whose body prose happens to mention "secondary rate limit"
 // must not be misclassified as rate-limited (wrong retry path).
@@ -47,7 +47,7 @@ func TestDecodeRateMarkersRequireAbuseStatuses(t *testing.T) {
 	}
 }
 
-// B1: GitHub 422 bodies carry structured errors[].code entries. Matching
+// GitHub 422 bodies carry structured errors[].code entries. Matching
 // must use status + structured code, never bare body substrings such as
 // "1000" or "too many" (false positives on message variants) and never
 // on non-422 statuses.
@@ -98,7 +98,7 @@ func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
 	}
 }
 
-// B7: the asset-URL cache must run on one clock. Storing with the wall
+// The asset-URL cache must run on one clock. Storing with the wall
 // clock while checking with the governor clock breaks TTL under an
 // injected test clock (and skews under any clock discipline change).
 func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
@@ -127,9 +127,9 @@ func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
 	}
 }
 
-// B8: acquire() must not park the concurrency slot while sleeping out a
-// throttle wait. A throttled waiter holding a slot head-of-line-blocks
-// cheap requests behind it.
+// The acquire() call must not park the concurrency slot while sleeping
+// out a throttle wait. A throttled waiter holding a slot
+// head-of-line-blocks cheap requests behind it.
 func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 	var mu sync.Mutex
 	now := time.Now()
@@ -209,8 +209,8 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 	}
 }
 
-// B9: observe() must not let a stale (late-arriving) snapshot regress the
-// budget: an older window, or a higher remaining count for the same
+// A stale (late-arriving) snapshot passed to observe() must not regress
+// the budget: an older window, or a higher remaining count for the same
 // window, is strictly older information and must be ignored. Adopting a
 // newer window re-arms the one-shot budget warnings.
 func TestObserveIgnoresStaleSnapshots(t *testing.T) {
@@ -269,7 +269,7 @@ func TestObserveIgnoresStaleSnapshots(t *testing.T) {
 	}
 }
 
-// B10: content paths normalize (clean "." / ".." / empty segments,
+// Content paths must normalize (clean "." / ".." / empty segments,
 // clamped at the repo root) instead of being rejected or leaking ".."
 // into the request URL.
 func TestEscapeContentPathNormalizes(t *testing.T) {

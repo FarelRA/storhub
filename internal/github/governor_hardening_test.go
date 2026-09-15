@@ -14,22 +14,54 @@ import (
 	"time"
 )
 
-// TestHardenedRetryAfterCappedByMaxRetryDelay pins that a hostile or
-// misconfigured Retry-After (even on a rate-limited rejection) can never
-// stall callers past maxRetryDelay.
-func TestHardenedRetryAfterCappedByMaxRetryDelay(t *testing.T) {
+// TestHardenedRetryAfterHonoredOnRateLimit pins that a rate-limited
+// Retry-After is honored exactly (GitHub's secondary-limit
+// hints run 30-120s; truncating them to maxRetryDelay manufactures repeat
+// rejections and burns the point window). The doRequest maxWait ceiling,
+// not maxRetryDelay, is what refuses an excessive wait. A plain
+// (non-rate-limited) Retry-After stays capped at maxRetryDelay.
+func TestHardenedRetryAfterHonoredOnRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 	c := NewClient("t", retryTaxonomyConfig(server, nil)) // MaxRetryDelay 5ms
-	apiErr := &APIError{StatusCode: http.StatusTooManyRequests, RateLimited: true, RetryAfter: time.Hour}
-	if got := c.retryDelay(0, apiErr); got > c.maxRetryDelay {
-		t.Fatalf("rate-limited Retry-After must be capped at %v, got %v", c.maxRetryDelay, got)
+	rateLimited := &APIError{StatusCode: http.StatusTooManyRequests, RateLimited: true, RetryAfter: 90 * time.Second}
+	if got := c.retryDelay(0, rateLimited); got != 90*time.Second {
+		t.Fatalf("rate-limited Retry-After must be honored exactly, got %v", got)
+	}
+	hostile := &APIError{StatusCode: http.StatusForbidden, RateLimited: true, RetryAfter: time.Hour}
+	if got := c.retryDelay(0, hostile); got != time.Hour {
+		t.Fatalf("hostile rate-limited Retry-After must still be honored (maxWait refuses it upstream), got %v", got)
 	}
 	plain := &APIError{StatusCode: http.StatusServiceUnavailable, RetryAfter: 30 * time.Second}
 	if got := c.retryDelay(1, plain); got > c.maxRetryDelay {
 		t.Fatalf("plain Retry-After must be capped at %v, got %v", c.maxRetryDelay, got)
+	}
+}
+
+// TestHardenedMaxWaitRefusesLongRateLimit pins the ceiling that bounds the
+// honored Retry-After: a rate-limited wait beyond the governor's maxWait
+// is refused up front instead of stalling the caller.
+func TestHardenedMaxWaitRefusesLongRateLimit(t *testing.T) {
+	var hits atomic.Int32
+	var sleeps []time.Duration
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	cfg := retryTaxonomyConfig(server, &sleeps)
+	c := NewClient("t", cfg)
+	if _, err := c.GetAuthenticatedUser(context.Background()); err == nil {
+		t.Fatal("a 3600s rate-limit wait beyond maxWait must be refused")
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("refused wait must not sleep, slept %v", sleeps)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("refused wait must not re-send, hits=%d", hits.Load())
 	}
 }
 
