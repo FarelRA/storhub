@@ -193,7 +193,17 @@ func cloneReleaseRefMap(src map[string]ReleaseRef) map[string]ReleaseRef {
 }
 
 func (m *RepoMetadata) ToJSON() ([]byte, error) {
-	data, err := json.Marshal(m)
+	// A blob document is always maxBlobVersion: version 5 is the split
+	// (manifest + objects) layout, which ToJSON cannot express. The in-memory
+	// Version records the tree's target layout; the write path re-stamps it
+	// via MarkSplit when publishing the split.
+	out := m
+	if m.Version > maxBlobVersion {
+		trimmed := *m
+		trimmed.Version = maxBlobVersion
+		out = &trimmed
+	}
+	data, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -247,7 +257,7 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 // understands ONLY the current blob schema - legacy spellings never reach it.
 // A version-5 split-index manifest is NOT a blob and must go through
 // ParseManifest. The resulting tree carries the document version it was read
-// as (4 for a legacy blob, 5 for a current-form blob).
+// as (maxBlobVersion: blobs stop at 4; 5 is manifest-only).
 func (m *RepoMetadata) FromJSON(data []byte) error {
 	upgraded, version, err := Migrate(data)
 	if err != nil {
@@ -261,11 +271,13 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 }
 
 // UnmarshalJSON enforces the current-schema contract at the type level: only
-// documents written in a current blob schema (version maxBlobVersion or
-// maxMetadataVersion, which share an entry shape) decode. Older payloads must
-// go through FromJSON/Migrate, and a split-index manifest must go through
-// ParseManifest/LoadTree - a direct unmarshal fails loudly instead of silently
-// yielding an empty tree from ignored unknown fields.
+// documents written in the current blob schema (version maxBlobVersion)
+// decode. Older payloads must go through FromJSON/Migrate, and a split-index
+// manifest must go through ParseManifest/LoadTree - a direct unmarshal fails
+// loudly instead of silently yielding an empty tree from ignored unknown
+// fields. Version 5 is manifest-only: a v5 document without a non-empty tree
+// root is a truncated manifest, not a blob, and decoding it as one would
+// hand the next commit an empty tree over the real index.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		V        *int   `json:"v"`
@@ -280,8 +292,11 @@ func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
 	if probe.TreeRoot != "" {
 		return fmt.Errorf("document is a v%d split-index manifest; load it via ParseManifest/LoadTree, not RepoMetadata", maxMetadataVersion)
 	}
-	if *probe.V != maxBlobVersion && *probe.V != maxMetadataVersion {
-		return fmt.Errorf("metadata version %d is not a current blob version (%d or %d); migrate first", *probe.V, maxBlobVersion, maxMetadataVersion)
+	if *probe.V == maxMetadataVersion {
+		return fmt.Errorf("document claims v%d with no tree root: v%d documents are manifests (load via ParseManifest/LoadTree); blobs are v%d or older", maxMetadataVersion, maxMetadataVersion, maxBlobVersion)
+	}
+	if *probe.V != maxBlobVersion {
+		return fmt.Errorf("metadata version %d is not a current blob version (%d); migrate first", *probe.V, maxBlobVersion)
 	}
 	type alias RepoMetadata
 	var raw alias
@@ -419,14 +434,16 @@ func (d *DirMeta) Normalize(now int64) {
 
 func (f *FileMeta) Normalize(now int64) {
 	if f.Mode == 0 {
-		f.Mode = defaultFileMode(NodeKindFile)
+		f.Mode = defaultFileMode(nodeKindOf(f))
 	}
 	// See DirMeta.Normalize: zeros are authoritative epoch values, never
 	// gaps to repair here.
 	if f.Chunks == nil {
 		f.Chunks = make([]int64, 0)
 	}
-	sort.Slice(f.Chunks, func(i, j int) bool { return f.Chunks[i] < f.Chunks[j] })
+	// Stored chunk order is by data offset, a RepoMetadata-level invariant
+	// enforced by sortFileChunksByOffset; sorting by id here would break it
+	// for standalone callers.
 	if f.Symlink != "" {
 		f.Chunks = make([]int64, 0)
 		f.Size = int64(len([]byte(f.Symlink)))
@@ -435,6 +452,10 @@ func (f *FileMeta) Normalize(now int64) {
 }
 
 func (m *RepoMetadata) GetRelease(tag string) *ReleaseRef {
+	// Snapshot footgun (same as FindFile): the pointer targets a copy of the
+	// map value, so field mutations of the result are silently dropped.
+	// Apply changes through EnsureRelease or a transaction that writes the
+	// map back.
 	if ref, ok := m.Releases[tag]; ok {
 		return &ref
 	}
@@ -442,6 +463,7 @@ func (m *RepoMetadata) GetRelease(tag string) *ReleaseRef {
 }
 
 func (m *RepoMetadata) HasDirectory(path string) bool {
+	path = normalizeStoredPath(path)
 	if path == "" {
 		return true
 	}
@@ -450,6 +472,7 @@ func (m *RepoMetadata) HasDirectory(path string) bool {
 }
 
 func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
+	path = normalizeStoredPath(path)
 	if path == "" {
 		root := m.Root
 		return &root
@@ -499,6 +522,10 @@ func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 }
 
 func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
+	// Snapshot footgun (same as FindFile/GetRelease): the returned pointer
+	// targets a copy, so mutating its fields never reaches stored state.
+	// The pointer is a read convenience only; write through this method or a
+	// transaction.
 	if ref, ok := m.Releases[tag]; ok {
 		return &ref
 	}
@@ -680,6 +707,7 @@ func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
 // DirNLink returns the POSIX directory link count: 2 plus the number of
 // immediate subdirectories.
 func (m *RepoMetadata) DirNLink(path string) int {
+	path = normalizeStoredPath(path)
 	if path != "" {
 		if _, ok := m.Dirs[path]; !ok {
 			return 0
@@ -692,7 +720,7 @@ func (m *RepoMetadata) DirNLink(path string) int {
 }
 
 func (m *RepoMetadata) FileNLink(name string) int {
-	file, ok := m.Files[name]
+	file, ok := m.Files[normalizeStoredPath(name)]
 	if !ok {
 		return 0
 	}
@@ -788,7 +816,7 @@ func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 func initializeNewFileIdentityFields(file *FileMeta, now int64) {
 	uid, gid := defaultOwnerIDs()
 	if file.Mode == 0 {
-		file.Mode = defaultFileMode(NodeKindFile)
+		file.Mode = defaultFileMode(nodeKindOf(file))
 	}
 	// Owner IDs are always materialized at creation (0 legitimately means
 	// root); they are never re-stamped afterwards.
@@ -824,7 +852,12 @@ func (m *RepoMetadata) normalizeRoot(now int64) {
 	}
 	// Root timestamps are authoritative under v4 (see DirMeta.Normalize).
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
+	m.reconcileCounters()
+}
 
+// reconcileCounters raises the allocation counters past every id actually
+// present, so deleting the highest-numbered entry cannot mint duplicates.
+func (m *RepoMetadata) reconcileCounters() {
 	maxInode := m.Root.Inode
 	for _, dir := range m.Dirs {
 		if dir.Inode > maxInode {
@@ -920,6 +953,11 @@ func (m *RepoMetadata) Validate() error {
 		if err := file.Validate(); err != nil {
 			return fmt.Errorf("file %s: %w", path, err)
 		}
+		// One path, one node: a key present in both maps makes the FS view
+		// ambiguous even though the flat maps round-trip fine.
+		if _, ok := seenDirs[path]; ok {
+			return fmt.Errorf("path %q is both a file and a directory", path)
+		}
 		if file.Inode == 0 {
 			return fmt.Errorf("file %s inode is required", path)
 		}
@@ -941,6 +979,7 @@ func (m *RepoMetadata) Validate() error {
 		}
 		seenChunk := map[int64]struct{}{}
 		var prevOffset int64 = -1
+		var prevEnd int64 = -1
 		for _, id := range file.Chunks {
 			chunk, ok := m.Chunks[id]
 			if !ok {
@@ -959,10 +998,20 @@ func (m *RepoMetadata) Validate() error {
 			if chunk.Offset < prevOffset {
 				return fmt.Errorf("file %s: chunks not stored in offset order (%d after %d)", path, chunk.Offset, prevOffset)
 			}
-			prevOffset = chunk.Offset
-			if file.Symlink == "" && chunk.Offset+chunk.Size > file.Size {
-				return fmt.Errorf("file %s: chunk data extends beyond file size (%d > %d)", path, chunk.Offset+chunk.Size, file.Size)
+			// Ranges must be disjoint: equal or overlapping starts make
+			// binary-search readers ambiguous. prevEnd is overflow-free
+			// because the bounds check below already passed for it.
+			if chunk.Offset < prevEnd {
+				return fmt.Errorf("file %s: chunk %d overlaps the previous chunk (offset %d < %d)", path, id, chunk.Offset, prevEnd)
 			}
+			prevOffset = chunk.Offset
+			// Overflow-free form of `chunk.Offset+chunk.Size > file.Size`:
+			// a naive sum wraps negative at extreme offsets and lets a
+			// chunk claim bytes past EOF.
+			if file.Symlink == "" && chunk.Size > file.Size-chunk.Offset {
+				return fmt.Errorf("file %s: chunk data extends beyond file size (%d+%d > %d)", path, chunk.Offset, chunk.Size, file.Size)
+			}
+			prevEnd = chunk.Offset + chunk.Size
 		}
 	}
 
@@ -987,14 +1036,21 @@ func (m *RepoMetadata) Validate() error {
 	return nil
 }
 
-// validateStoredPathKey rejects map keys that can never be produced by the
-// path normalizer: absolute paths, empty segments, and ".." traversal.
+// validateStoredPathKey rejects map keys the storage normalizer could never
+// produce: absolute paths, empty segments, ".." traversal, and any key that
+// is not its own canonical form. Non-canonical keys ("a/", "a//b", "a/./b")
+// pass a naive check but re-emerge canonicalized through the split round-trip
+// - mutating the key or silently clobbering the entry already stored under
+// the canonical form.
 func validateStoredPathKey(path string) error {
 	if path == "" || strings.HasPrefix(path, "/") {
 		return fmt.Errorf("invalid stored path %q", path)
 	}
 	if path == ".." || strings.HasPrefix(path, "../") || strings.Contains(path, "/../") {
 		return fmt.Errorf("stored path escapes root: %q", path)
+	}
+	if cleaned := normalizeStoredPath(path); cleaned != path {
+		return fmt.Errorf("stored path %q is not canonical (normalizes to %q)", path, cleaned)
 	}
 	return nil
 }

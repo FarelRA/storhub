@@ -193,6 +193,188 @@ func TestRevertRestoresMissingRelease(t *testing.T) {
 	}
 }
 
+// Reusing a historical id must advance dst's allocation
+// counters past it. The collision test above only covers taken-id remap; this
+// covers counter regression: a revision whose persisted ni/nc sit behind the
+// ids revert restores.
+func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
+	hist := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+		m.Chunks[500] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
+		m.UpsertFile("d/f", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{500}}, 100)
+		f := *m.FindFile("d/f")
+		f.Inode = 400
+		m.WriteFileDirect("d/f", f)
+		m.EnsureRelease("v1", 100)
+	})
+	cur := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+	})
+	// Simulate a legacy revision whose counters regressed behind history.
+	cur.NextChunkID = 11
+	cur.NextInode = 12
+
+	if err := RevertSubtree(cur, hist, "d/f", 300); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if _, live := cur.Chunks[500]; !live {
+		t.Fatal("fixture: historical chunk 500 not restored")
+	}
+	if cur.NextChunkID <= 500 {
+		t.Fatalf("NextChunkID %d not advanced past reused chunk 500", cur.NextChunkID)
+	}
+	if cur.NextInode <= 400 {
+		t.Fatalf("NextInode %d not advanced past reused inode 400", cur.NextInode)
+	}
+	// Allocations inside the same operation must not hand out the live ids.
+	for i := 0; i < 300; i++ {
+		if id := cur.AllocateChunkID(); id <= 500 {
+			t.Fatalf("AllocateChunkID returned %d while chunk 500 is live", id)
+		}
+	}
+	for i := 0; i < 300; i++ {
+		if ino := cur.AllocateInode(); ino <= 400 {
+			t.Fatalf("AllocateInode returned %d while inode 400 is live", ino)
+		}
+	}
+}
+
+// Reverting one name of a hardlink family must reuse the family inode
+// when the colliding live path shares that inode in src too - the sibling is
+// related, not unrelated live data.
+func TestRevertKeepsHardlinkFamilyIntact(t *testing.T) {
+	hist := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
+		m.UpsertFile("d/b", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
+		// Hardlink: d/b shares d/a's inode in history.
+		b := *m.FindFile("d/b")
+		b.Inode = m.FindFile("d/a").Inode
+		m.WriteFileDirect("d/b", b)
+		m.EnsureRelease("v1", 100)
+	})
+	familyInode := hist.FindFile("d/a").Inode
+	cur := clonePtr(hist)
+	cur.RemoveFile("d/a")
+	cur.Normalize("demo", 200)
+
+	if err := RevertSubtree(cur, hist, "d/a", 300); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	a := cur.FindFile("d/a")
+	if a == nil {
+		t.Fatal("d/a not restored")
+	}
+	if a.Inode != familyInode {
+		t.Fatalf("hardlink family split: restored d/a inode %d, want family inode %d", a.Inode, familyInode)
+	}
+	if n := cur.NLink(familyInode); n != 2 {
+		t.Fatalf("family nlink = %d, want 2", n)
+	}
+	cur.Normalize("demo", 300)
+	if err := cur.Validate(); err != nil {
+		t.Fatalf("reverted tree invalid: %v", err)
+	}
+}
+
+// A colliding holder that is NOT family in src (unrelated
+// live data) must still force a remap.
+func TestRevertRemapsInodeForUnrelatedHolder(t *testing.T) {
+	hist := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
+		m.EnsureRelease("v1", 100)
+	})
+	familyInode := hist.FindFile("d/a").Inode
+	cur := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+		m.Chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
+		m.UpsertFile("d/b", FileMeta{Size: 9, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{2}}, 100)
+		// d/b is unrelated in src but squats on the historical inode.
+		b := *m.FindFile("d/b")
+		b.Inode = familyInode
+		m.WriteFileDirect("d/b", b)
+		m.EnsureRelease("v1", 100)
+	})
+	if err := RevertSubtree(cur, hist, "d/a", 300); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	a := cur.FindFile("d/a")
+	if a == nil {
+		t.Fatal("d/a not restored")
+	}
+	if a.Inode == familyInode {
+		t.Fatal("unrelated holder must force a remap")
+	}
+}
+
+// The helper ensureAncestors must deep-clone the source directory; a shallow struct
+// copy aliases src's XAttrs map (and its values) into dst, so a preview
+// mutation leaks into the source tree the commit reverts from.
+func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
+	hist := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("x", 100)
+		xd := m.Dirs["x"]
+		xd.XAttrs = XAttrMap{"user.a": []byte("1")}
+		m.Dirs["x"] = xd
+		m.Chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 11}
+		m.UpsertFile("x/f", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
+		m.EnsureRelease("v1", 100)
+	})
+	cur := clonePtr(hist)
+	cur.RemoveFile("x/f")
+	cur.RemoveDirectory("x")
+	cur.Normalize("demo", 200)
+
+	if err := RevertSubtree(cur, hist, "x/f", 300); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	xd, ok := cur.Dirs["x"]
+	if !ok {
+		t.Fatal("ancestor x not restored")
+	}
+	xd.XAttrs["user.new"] = []byte("v")
+	if _, aliased := hist.Dirs["x"].XAttrs["user.new"]; aliased {
+		t.Fatal("dst mutation leaked into src: XAttrs map aliased")
+	}
+	xd.XAttrs["user.a"] = []byte("mutated")
+	if string(hist.Dirs["x"].XAttrs["user.a"]) != "1" {
+		t.Fatal("dst mutation leaked into src: XAttrs value aliased")
+	}
+}
+
+// Dropping a dangling source chunk reference must not leave the restored
+// file declaring bytes it can no longer serve.
+func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
+	hist := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.Chunks[2] = ChunkInfo{Size: 4, Offset: 4, Release: "v1", AssetID: 12}
+		m.UpsertFile("d/f", FileMeta{Size: 8, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1, 2}}, 100)
+		m.EnsureRelease("v1", 100)
+	})
+	// Corrupt history: chunk 2's record is gone while the file still lists it.
+	delete(hist.Chunks, 2)
+	cur := buildTree(t, func(m *RepoMetadata) {
+		m.EnsureDirectory("d", 100)
+	})
+	if err := RevertSubtree(cur, hist, "d/f", 300); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	f := cur.FindFile("d/f")
+	if f == nil {
+		t.Fatal("file not restored")
+	}
+	if len(f.Chunks) != 1 {
+		t.Fatalf("dangling reference not dropped: %v", f.Chunks)
+	}
+	if f.Size != 4 {
+		t.Fatalf("restored size %d still counts dropped chunk bytes, want 4", f.Size)
+	}
+}
+
 func TestRevertRejectsRoot(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {})
 	cur := buildTree(t, func(m *RepoMetadata) {})

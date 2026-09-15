@@ -29,12 +29,14 @@ func normalizeStoredPathErr(value string) (string, error) {
 
 // normalizeStoredPath canonicalizes user-supplied paths to storage keys:
 // relative, slash-clean, and without a leading separator. Surrounding
-// whitespace is significant - leading/trailing spaces are legal filename
-// characters on Unix and are preserved verbatim. It is idempotent and
-// total: escaping paths ("..") are returned unchanged for now; Validate
-// rejects such keys at load/commit boundaries. Semantics intentionally
-// mirror fs.NormalizePath; TestPathNormalizerConformance pins the two
-// implementations together so they cannot drift again.
+// whitespace inside a non-blank value is significant - leading/trailing
+// spaces are legal filename characters on Unix and are preserved verbatim -
+// but a value that is entirely whitespace normalizes to "" (the empty key,
+// which Validate then rejects), mirroring fs.NormalizePath's blank check.
+// It is idempotent and total: escaping paths ("..") are returned unchanged
+// for now; Validate rejects such keys at load/commit boundaries. Semantics
+// intentionally mirror fs.NormalizePath; TestPathNormalizerConformance pins
+// the two implementations together so they cannot drift again.
 func normalizeStoredPath(value string) string {
 	cleaned, err := normalizeStoredPathErr(value)
 	if err != nil {

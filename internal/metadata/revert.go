@@ -3,6 +3,7 @@ package metadata
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -15,10 +16,14 @@ import (
 // The historical identity (inode, chunk ids) is preserved where it does not
 // collide with unrelated live data; on collision it is remapped to a fresh
 // allocation so a revert can never clobber a node it was not asked to touch.
-// Chunk records and any release a reverted chunk references are copied in, so
-// the restored file resolves against assets that full-history retention keeps
-// alive. Reverting a path that is absent in src removes it from dst (restoring
-// "this did not exist then").
+// Hardlink siblings in src are related data, not collisions: reverting one
+// name of a family reuses the family inode. Every reused id also advances
+// dst's allocation counters past it, so later allocations in the same
+// operation cannot hand out a live identifier. Chunk records and any release
+// a reverted chunk references are copied in, so the restored file resolves
+// against assets that full-history retention keeps alive. Reverting a path
+// that is absent in src removes it from dst (restoring "this did not exist
+// then").
 func RevertSubtree(dst, src *RepoMetadata, path string, now int64) error {
 	clean := normalizeStoredPath(path)
 	if clean == "" {
@@ -35,28 +40,56 @@ func RevertSubtree(dst, src *RepoMetadata, path string, now int64) error {
 	}
 	if src.HasDirectory(clean) {
 		ensureAncestors(dst, src, clean, now)
-		return copyDirTree(dst, src, clean, now)
+		// Build the children index once for the whole walk: the public
+		// DirectoryChildren deliberately rebuilds eagerly on every call,
+		// which would make this traversal quadratic.
+		childDirs, childFiles := buildChildIndexes(src)
+		return copyDirTree(dst, src, clean, now, childDirs, childFiles)
 	}
 	// Absent in history: the revert is a deletion, already applied above.
 	return nil
+}
+
+// buildChildIndexes maps each directory to its immediate child paths in one
+// pass (sorted, matching DirectoryChildren's output).
+func buildChildIndexes(m *RepoMetadata) (childDirs, childFiles map[string][]string) {
+	childDirs = make(map[string][]string, len(m.Dirs))
+	childFiles = make(map[string][]string, len(m.Files))
+	for p := range m.Dirs {
+		parent := parentPath(p)
+		childDirs[parent] = append(childDirs[parent], p)
+	}
+	for p := range m.Files {
+		parent := parentPath(p)
+		childFiles[parent] = append(childFiles[parent], p)
+	}
+	for _, children := range childDirs {
+		sort.Strings(children)
+	}
+	for _, children := range childFiles {
+		sort.Strings(children)
+	}
+	return childDirs, childFiles
 }
 
 // removeSubtree deletes path (file or directory and everything under it) from
 // m. Chunk records are left in place; PruneUnreferencedChunks reclaims them
 // once nothing references them.
 func removeSubtree(m *RepoMetadata, path string) {
-	if m.FindFile(path) != nil {
-		m.RemoveFile(path)
-	}
-	if !m.HasDirectory(path) {
+	childDirs, childFiles := buildChildIndexes(m)
+	removeSubtreeWith(m, path, childDirs, childFiles)
+}
+
+func removeSubtreeWith(m *RepoMetadata, path string, childDirs, childFiles map[string][]string) {
+	m.RemoveFile(path)
+	if _, ok := m.Dirs[path]; !ok {
 		return
 	}
-	dirs, files := m.DirectoryChildren(path)
-	for _, f := range files {
+	for _, f := range childFiles[path] {
 		m.RemoveFile(f)
 	}
-	for _, d := range dirs {
-		removeSubtree(m, d)
+	for _, d := range childDirs[path] {
+		removeSubtreeWith(m, d, childDirs, childFiles)
 	}
 	m.RemoveDirectory(path)
 }
@@ -76,9 +109,17 @@ func ensureAncestors(dst, src *RepoMetadata, path string, now int64) {
 		if dst.HasDirectory(cur) {
 			continue
 		}
+		// A file squatting on the ancestor path would end up both a file
+		// and a directory once the ancestor is recreated; the directory
+		// wins (the reverted entry lives under it).
+		dst.RemoveFile(cur)
 		if sd := src.GetDirectory(cur); sd != nil {
-			clone := *sd
+			// Deep-clone: a shallow struct copy aliases src's XAttrs map
+			// (and its values) into dst, leaking preview mutations back
+			// into the historical tree the commit reverts from.
+			clone := sd.Clone()
 			if inodeFreeFor(dst, clone.Inode, cur) {
+				bumpInodePast(dst, clone.Inode)
 				dst.WriteDirDirect(cur, clone)
 				continue
 			}
@@ -93,8 +134,16 @@ func copyFile(dst, src *RepoMetadata, path string, now int64) error {
 		return fmt.Errorf("revert source file vanished: %s", path)
 	}
 	clone := sf.Clone()
-	clone.Chunks = remapChunks(dst, src, clone.Chunks)
-	if !inodeFreeFor(dst, clone.Inode, path) {
+	ids, dropped := remapChunks(dst, src, clone.Chunks)
+	clone.Chunks = ids
+	if dropped && clone.Symlink == "" {
+		// Dangling source references were dropped; the declared size must
+		// not keep counting bytes the restored file can no longer serve.
+		clone.Size = chunksCoveredSize(dst.Chunks, ids)
+	}
+	if inodeFreeFor(dst, clone.Inode, path) || hardlinkFamilyHolds(dst, src, clone.Inode, path) {
+		bumpInodePast(dst, clone.Inode)
+	} else {
 		clone.Inode = dst.AllocateInode()
 	}
 	_ = now
@@ -102,26 +151,26 @@ func copyFile(dst, src *RepoMetadata, path string, now int64) error {
 	return nil
 }
 
-func copyDirTree(dst, src *RepoMetadata, path string, now int64) error {
+func copyDirTree(dst, src *RepoMetadata, path string, now int64, childDirs, childFiles map[string][]string) error {
 	sd := src.GetDirectory(path)
 	if sd == nil {
 		return fmt.Errorf("revert source directory vanished: %s", path)
 	}
-	clone := *sd
-	clone.XAttrs = normalizeXAttrs(clone.XAttrs)
-	if !inodeFreeFor(dst, clone.Inode, path) {
+	clone := sd.Clone()
+	if inodeFreeFor(dst, clone.Inode, path) {
+		bumpInodePast(dst, clone.Inode)
+	} else {
 		clone.Inode = dst.AllocateInode()
 	}
 	dst.WriteDirDirect(path, clone)
 
-	dirs, files := src.DirectoryChildren(path)
-	for _, f := range files {
+	for _, f := range childFiles[path] {
 		if err := copyFile(dst, src, f, now); err != nil {
 			return err
 		}
 	}
-	for _, d := range dirs {
-		if err := copyDirTree(dst, src, d, now); err != nil {
+	for _, d := range childDirs[path] {
+		if err := copyDirTree(dst, src, d, now, childDirs, childFiles); err != nil {
 			return err
 		}
 	}
@@ -129,17 +178,20 @@ func copyDirTree(dst, src *RepoMetadata, path string, now int64) error {
 }
 
 // remapChunks copies the historical chunk records for ids into dst's catalog,
-// returning the (possibly remapped) id list the restored file should use. An
-// id whose record already matches is reused; an id reused for different
-// content gets a fresh allocation so the live data is not clobbered.
-func remapChunks(dst, src *RepoMetadata, ids []int64) []int64 {
+// returning the (possibly remapped) id list the restored file should use and
+// whether any dangling reference was dropped. An id whose record already
+// matches is reused; an id reused for different content gets a fresh
+// allocation so the live data is not clobbered.
+func remapChunks(dst, src *RepoMetadata, ids []int64) ([]int64, bool) {
 	out := make([]int64, 0, len(ids))
+	dropped := false
 	for _, id := range ids {
 		record, ok := src.Chunks[id]
 		if !ok {
 			// Dangling reference in the source; drop it rather than invent
 			// a record. Validate would reject a file pointing at a missing
 			// chunk, so skipping keeps the revert loadable.
+			dropped = true
 			continue
 		}
 		if existing, taken := dst.Chunks[id]; taken && existing != record {
@@ -148,6 +200,7 @@ func remapChunks(dst, src *RepoMetadata, ids []int64) []int64 {
 			out = append(out, newID)
 		} else {
 			dst.Chunks[id] = record
+			bumpChunkPast(dst, id)
 			out = append(out, id)
 		}
 		if record.Release != "" {
@@ -160,17 +213,50 @@ func remapChunks(dst, src *RepoMetadata, ids []int64) []int64 {
 			}
 		}
 	}
-	return out
+	return out, dropped
+}
+
+// chunksCoveredSize is the highest byte offset the given chunk records
+// reach: the size a restored file can actually serve.
+func chunksCoveredSize(records map[int64]ChunkInfo, ids []int64) int64 {
+	var end int64
+	for _, id := range ids {
+		if c, ok := records[id]; ok {
+			if e := c.Offset + c.Size; e > end {
+				end = e
+			}
+		}
+	}
+	return end
+}
+
+// bumpInodePast and bumpChunkPast keep the allocation counters ahead of every
+// live id after revert reuses a historical identifier. AllocateInode and
+// AllocateChunkID trust the counter unconditionally, so a revision whose
+// persisted counters regressed behind the ids revert restores would otherwise
+// re-mint them and clobber the just-restored records.
+func bumpInodePast(m *RepoMetadata, inode uint64) {
+	if inode >= m.NextInode {
+		m.NextInode = inode + 1
+	}
+}
+
+func bumpChunkPast(m *RepoMetadata, id int64) {
+	if id >= m.NextChunkID {
+		m.NextChunkID = id + 1
+	}
 }
 
 // inodeFreeFor reports whether inode is unused in dst, or already belongs to
-// this exact path (identity, not collision). It checks both files and dirs.
+// this exact path (identity, not collision). It checks both files and dirs,
+// scanning the maps directly: the inode index would have to be rebuilt on
+// every call during a subtree walk.
 func inodeFreeFor(m *RepoMetadata, inode uint64, path string) bool {
 	if inode == 0 {
 		return false
 	}
-	for _, p := range m.FindFilesByInode(inode) {
-		if p != path {
+	for p, f := range m.Files {
+		if f.Inode == inode && p != path {
 			return false
 		}
 	}
@@ -180,4 +266,32 @@ func inodeFreeFor(m *RepoMetadata, inode uint64, path string) bool {
 		}
 	}
 	return true
+}
+
+// hardlinkFamilyHolds reports whether the dst paths currently squatting on
+// inode are all members of the same hardlink family as path in src (they
+// share the inode there too). Reverting one name of a family must reuse the
+// family inode - the sibling is related data, not an unrelated collision -
+// while any holder that is unrelated in src, or a directory, still forces a
+// remap.
+func hardlinkFamilyHolds(dst, src *RepoMetadata, inode uint64, path string) bool {
+	if inode == 0 {
+		return false
+	}
+	holders := 0
+	for p, f := range dst.Files {
+		if f.Inode != inode || p == path {
+			continue
+		}
+		holders++
+		if sf := src.FindFile(p); sf == nil || sf.Inode != inode {
+			return false
+		}
+	}
+	for dp, d := range dst.Dirs {
+		if d.Inode == inode && dp != path {
+			return false
+		}
+	}
+	return holders > 0
 }

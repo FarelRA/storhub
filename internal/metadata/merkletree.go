@@ -116,7 +116,10 @@ func IsManifest(data []byte) bool {
 	return probe.V != nil && *probe.V == maxMetadataVersion && probe.TreeRoot != ""
 }
 
-// ParseManifest decodes a v5 manifest.
+// ParseManifest decodes a v5 manifest. Every object reference must be a
+// sha256 content address (64-char lowercase hex): the storage layer builds
+// repo paths from these strings via ObjectPath, so arbitrary text must never
+// survive the parse boundary.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -128,7 +131,33 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if m.TreeRoot == "" {
 		return nil, fmt.Errorf("manifest has no tree root")
 	}
+	if !isContentSHA(m.TreeRoot) {
+		return nil, fmt.Errorf("manifest tree root %q is not a sha256 content address", m.TreeRoot)
+	}
+	if m.Releases != "" && !isContentSHA(m.Releases) {
+		return nil, fmt.Errorf("manifest releases sha %q is not a sha256 content address", m.Releases)
+	}
+	for i, sha := range m.ChunkBuckets {
+		if !isContentSHA(sha) {
+			return nil, fmt.Errorf("manifest chunk bucket %d sha %q is not a sha256 content address", i, sha)
+		}
+	}
 	return &m, nil
+}
+
+// isContentSHA reports whether s is a sha256 hex digest: exactly 64
+// lowercase hex characters.
+func isContentSHA(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // MarshalManifest serializes a v5 manifest deterministically.
@@ -143,9 +172,29 @@ func MarshalManifest(m *Manifest) ([]byte, error) {
 // BuildTree serializes a flat RepoMetadata into the Merkle object set. The
 // flat model is unchanged; this is purely a serialization step. Callers must
 // pass a normalized tree so entry ordering (and therefore object shas) is
-// deterministic.
+// deterministic. A tree whose entries have missing parent directories is
+// rejected: nodes are built only for stored directories, so an orphaned file
+// or directory group would be silently dropped and the round-trip would
+// quietly lose data.
 func BuildTree(meta *RepoMetadata) (*TreeResult, error) {
 	objects := make(map[string][]byte)
+
+	// Round-trip identity guard: every non-root entry's parent must exist,
+	// or its group would never be serialized.
+	for p := range meta.Files {
+		if parent := parentPath(p); parent != "" {
+			if _, ok := meta.Dirs[parent]; !ok {
+				return nil, fmt.Errorf("build tree: file %q has no parent directory %q", p, parent)
+			}
+		}
+	}
+	for p := range meta.Dirs {
+		if parent := parentPath(p); parent != "" {
+			if _, ok := meta.Dirs[parent]; !ok {
+				return nil, fmt.Errorf("build tree: directory %q has no parent directory %q", p, parent)
+			}
+		}
+	}
 
 	// Group files by parent directory (keyed by base name within the node).
 	filesByParent := make(map[string]map[string]FileMeta, len(meta.Files))
@@ -249,8 +298,10 @@ func buildChunkBuckets(meta *RepoMetadata, objects map[string][]byte) ([]string,
 
 // LoadTree reconstructs a flat RepoMetadata from a manifest, fetching each
 // referenced object through getObject (which the caller backs with the
-// content-addressed cache + repo). The returned tree is not yet normalized;
-// callers Normalize/RecomputeStats as they do after any load.
+// content-addressed cache + repo). Every object is verified against its
+// content address here, so a bit-rotted cache entry cannot poison the tree
+// even if the fetch layer returns it unchecked. The returned tree is not yet
+// normalized; callers Normalize/RecomputeStats as they do after any load.
 func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("nil manifest")
@@ -274,6 +325,9 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		if err != nil {
 			return nil, fmt.Errorf("load chunk bucket %s: %w", shortObj(sha), err)
 		}
+		if err := verifyObject(sha, data, "chunk bucket"); err != nil {
+			return nil, err
+		}
 		var b ChunkBucket
 		if err := json.Unmarshal(data, &b); err != nil {
 			return nil, fmt.Errorf("decode chunk bucket %s: %w", shortObj(sha), err)
@@ -287,6 +341,9 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		if err != nil {
 			return nil, fmt.Errorf("load releases %s: %w", shortObj(manifest.Releases), err)
 		}
+		if err := verifyObject(manifest.Releases, data, "releases"); err != nil {
+			return nil, err
+		}
 		var rel ReleasesObject
 		if err := json.Unmarshal(data, &rel); err != nil {
 			return nil, fmt.Errorf("decode releases: %w", err)
@@ -296,6 +353,10 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		}
 	}
 	meta.RecomputeStats()
+	// Reconcile the allocation counters against the content actually loaded:
+	// a stale or regressed manifest must not yield a tree whose counters sit
+	// behind live ids (callers of LoadTree may never Normalize).
+	meta.reconcileCounters()
 	return meta, nil
 }
 
@@ -312,6 +373,9 @@ func loadNode(meta *RepoMetadata, dirPath, sha string, getObject func(string) ([
 	data, err := getObject(sha)
 	if err != nil {
 		return fmt.Errorf("load tree node %q: %w", dirPath, err)
+	}
+	if err := verifyObject(sha, data, fmt.Sprintf("tree node %q", dirPath)); err != nil {
+		return err
 	}
 	var node TreeNode
 	if err := json.Unmarshal(data, &node); err != nil {
@@ -338,6 +402,15 @@ func joinStored(dirPath, name string) string {
 		return name
 	}
 	return dirPath + "/" + name
+}
+
+// verifyObject enforces the content address: bytes whose sha256 does not
+// match the sha they were fetched by are corruption, not data.
+func verifyObject(sha string, data []byte, what string) error {
+	if got := ObjectSHA(data); got != sha {
+		return fmt.Errorf("%s %s failed content-address check (sha256 %s)", what, shortObj(sha), shortObj(got))
+	}
+	return nil
 }
 
 func nodeDepth(p string) int {

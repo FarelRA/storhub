@@ -65,7 +65,8 @@ func TestMigrateRejectsNewerAndInvalid(t *testing.T) {
 	}
 }
 
-// Identity: a current document passes through byte-for-byte.
+// Identity: a current document passes through byte-for-byte. ToJSON emits
+// the blob layout (maxBlobVersion): v5 is manifest-only.
 func TestMigrateIdentityOnCurrent(t *testing.T) {
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123)
@@ -74,7 +75,7 @@ func TestMigrateIdentityOnCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, version, err := Migrate(blob)
-	if err != nil || version != maxMetadataVersion {
+	if err != nil || version != maxBlobVersion {
 		t.Fatalf("identity migrate failed: %d %v", version, err)
 	}
 	if string(out) != string(blob) {
@@ -196,6 +197,71 @@ func TestFullChainV1ToCurrent(t *testing.T) {
 	}
 	if _, ok := m.Dirs["docs"]; !ok {
 		t.Fatal("directory lost across chain")
+	}
+}
+
+// The v3->v4 dangling-reference repair must be real - strip the dead id
+// (and the bytes it claimed) so the migrated document actually passes
+// Validate instead of keeping a reference to a record the migration dropped.
+func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
+	v3 := `{"v":3,"p":"demo","tf":2,"ts":14,"lm":900,` +
+		`"rt":{"ca":100,"ma":101,"i":1},` +
+		`"f":{"gone.bin":{"s":10,"cs":[7],"ua":300,"ma":301,"i":5},` +
+		`"partial.bin":{"s":4,"cs":[1,9],"ua":300,"ma":301,"i":6}},` +
+		`"c":{"1":{"s":2,"o":0,"r":"v1","a":3}},` +
+		`"r":{"v1":{"ac":1,"ca":5}},"ni":7,"nc":2}`
+	v4, err := migrators[3]([]byte(v3))
+	if err != nil {
+		t.Fatalf("migrate v3->v4: %v", err)
+	}
+	var m RepoMetadata
+	if err := json.Unmarshal(v4, &m); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("repaired v4 document must pass Validate: %v", err)
+	}
+	gone := m.Files["gone.bin"]
+	if len(gone.Chunks) != 0 || gone.Size != 0 {
+		t.Fatalf("fully dangling file not repaired: %+v", gone)
+	}
+	part := m.Files["partial.bin"]
+	if len(part.Chunks) != 1 || part.Chunks[0] != 1 || part.Size != 2 {
+		t.Fatalf("partially dangling file not repaired: %+v", part)
+	}
+	if m.TotalSize != 2 {
+		t.Fatalf("TotalSize %d must follow the repaired sizes", m.TotalSize)
+	}
+	// And the repaired document loads through the normal path.
+	var back RepoMetadata
+	if err := back.FromJSON(v4); err != nil {
+		t.Fatalf("reloaded repaired document: %v", err)
+	}
+}
+
+// Owner materialization in the v2->v3 migration must cover GID, not just UID.
+func TestStepV2ToV3MaterializesGID(t *testing.T) {
+	_, gid := defaultOwnerIDs()
+	if gid == 0 {
+		t.Skip("running as root group: materialization is a no-op by design")
+	}
+	v2 := `{"v":2,"p":"demo","f":{"a.txt":{"s":1,"i":7,"ua":50}},"d":{"x":{"ca":1,"ma":1}}}`
+	v3, err := migrators[2]([]byte(v2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc docTopV3
+	if err := json.Unmarshal(v3, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Files["a.txt"].GID != gid {
+		t.Fatalf("file GID not materialized: %d, want %d", doc.Files["a.txt"].GID, gid)
+	}
+	if doc.Dirs["x"].GID != gid {
+		t.Fatalf("dir GID not materialized: %d, want %d", doc.Dirs["x"].GID, gid)
+	}
+	if doc.Root.GID != gid {
+		t.Fatalf("root GID not materialized: %d, want %d", doc.Root.GID, gid)
 	}
 }
 

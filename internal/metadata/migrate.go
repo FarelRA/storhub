@@ -47,12 +47,13 @@ var migrators = [...]func([]byte) ([]byte, error){
 
 // Migrate upgrades a serialized metadata BLOB to the current blob schema by
 // applying every required step in order; a document already current (version
-// maxBlobVersion or maxMetadataVersion, which share an entry shape) passes
-// through unchanged. A split-index manifest is rejected: it loads through
-// ParseManifest/LoadTree, never as a blob. Loading is eager: every blob parse
-// funnels through here, so no code path outside this file can observe an older
-// schema shape. The upgraded document persists when the next mutation commits
-// it (as a version-5 split).
+// maxBlobVersion) passes through unchanged. A split-index manifest is
+// rejected: it loads through ParseManifest/LoadTree, never as a blob - and so
+// is any version-5 document lacking a tree root, which is a truncated
+// manifest, not a blob (v5 documents are manifests; blobs are v<=4). Loading
+// is eager: every blob parse funnels through here, so no code path outside
+// this file can observe an older schema shape. The upgraded document persists
+// when the next mutation commits it (as a version-5 split).
 func Migrate(data []byte) ([]byte, int, error) {
 	if IsManifest(data) {
 		return nil, maxMetadataVersion, fmt.Errorf("metadata version %d is the split-index manifest; load it via ParseManifest, not Migrate", maxMetadataVersion)
@@ -67,9 +68,12 @@ func Migrate(data []byte) ([]byte, int, error) {
 	if from < 1 {
 		return nil, from, fmt.Errorf("invalid metadata version %d", from)
 	}
-	if from >= maxBlobVersion {
-		// Version 4 (legacy blob) and version 5 (current-form blob) share the
-		// entry shape; both load as-is. The 4->5 split happens at write time.
+	if from == maxMetadataVersion {
+		return nil, from, fmt.Errorf("metadata version %d with no tree root is a corrupt split-index manifest, not a blob; blobs are v%d or older", maxMetadataVersion, maxBlobVersion)
+	}
+	if from == maxBlobVersion {
+		// Version 4 is the newest single-blob schema; the 4->5 step is the
+		// write-time layout split, not a blob transform.
 		return data, from, nil
 	}
 	for v := from; v < maxBlobVersion; v++ {
@@ -243,10 +247,13 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, &in); err != nil {
 		return nil, fmt.Errorf("decode v2: %w", err)
 	}
-	uid, _ := defaultOwnerIDs()
-	materialize := func(owner *uint32) {
-		if *owner == 0 && uid != 0 {
-			*owner = uid
+	uid, gid := defaultOwnerIDs()
+	materialize := func(ownerUID, ownerGID *uint32) {
+		if *ownerUID == 0 && uid != 0 {
+			*ownerUID = uid
+		}
+		if *ownerGID == 0 && gid != 0 {
+			*ownerGID = gid
 		}
 	}
 
@@ -259,11 +266,11 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 		Chunks:   in.Chunks,
 		Releases: in.Releases,
 	}
-	materialize(&out.Root.UID)
+	materialize(&out.Root.UID, &out.Root.GID)
 	maxInode := out.Root.Inode
 	for path, d := range in.Dirs {
 		dv3 := dirV2ToV3(d)
-		materialize(&dv3.UID)
+		materialize(&dv3.UID, &dv3.GID)
 		if dv3.Inode > maxInode {
 			maxInode = dv3.Inode
 		}
@@ -271,7 +278,7 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	}
 	for path, f := range in.Files {
 		fv3 := fileV2ToV3(f)
-		materialize(&fv3.UID)
+		materialize(&fv3.UID, &fv3.GID)
 		if fv3.Inode > maxInode {
 			maxInode = fv3.Inode
 		}
@@ -320,18 +327,39 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 	}
 	for path, f := range in.Files {
 		fv4 := fileV3ToV4(f, in.LastMod)
-		m.Files[path] = fv4
-		for _, id := range fv4.Chunks {
-			c, ok := in.Chunks[id]
-			if !ok {
-				// Repair, not fatal: a dangling reference could never
-				// download anyway; keeping it would only trip Validate.
-				continue
+		if len(fv4.Chunks) > 0 {
+			kept := make([]int64, 0, len(fv4.Chunks))
+			var end int64
+			for _, id := range fv4.Chunks {
+				c, ok := in.Chunks[id]
+				if !ok {
+					// Repair for real: the record is gone, so the bytes it
+					// claimed are unrecoverable. Strip the dead reference
+					// and shrink the declared size to what survives - a
+					// kept id with no record would trip Validate and make
+					// the whole project permanently unloadable.
+					continue
+				}
+				kept = append(kept, id)
+				// Digest deliberately dropped: it left the schema at v4.
+				m.Chunks[id] = ChunkInfo{Size: c.Size, Offset: c.Offset,
+					Release: c.Release, AssetOffset: c.AssetOffset, AssetID: c.AssetID}
+				if e := c.Offset + c.Size; e > end {
+					end = e
+				}
 			}
-			// Digest deliberately dropped: it left the schema at v4.
-			m.Chunks[id] = ChunkInfo{Size: c.Size, Offset: c.Offset,
-				Release: c.Release, AssetOffset: c.AssetOffset, AssetID: c.AssetID}
+			if len(kept) != len(fv4.Chunks) {
+				fv4.Chunks = kept
+				if len(kept) == 0 {
+					m.TotalSize -= fv4.Size
+					fv4.Size = 0
+				} else if end < fv4.Size {
+					m.TotalSize -= fv4.Size - end
+					fv4.Size = end
+				}
+			}
 		}
+		m.Files[path] = fv4
 	}
 	for tag, r := range in.Releases {
 		m.Releases[tag] = ReleaseRef(r)
@@ -376,6 +404,19 @@ func completeMode(mode uint32, dir bool) uint32 {
 	return defaultFileMode(NodeKindFile)
 }
 
+// fileModeOrDefault mirrors completeMode but picks the symlink default for
+// link entries: a v3-era link with no stored mode must not be materialized
+// as a regular file.
+func fileModeOrDefault(mode uint32, symlink bool) uint32 {
+	if mode != 0 {
+		return mode
+	}
+	if symlink {
+		return defaultFileMode(NodeKindSymlink)
+	}
+	return defaultFileMode(NodeKindFile)
+}
+
 func dirV3ToV4(d docDirV3, lastMod int64) DirMeta {
 	cr, ma, aa, ch := completeTimes(d.CreatedAt, d.ModifiedAt, d.AccessedAt, d.ChangedAt, lastMod, d.TimesExplicit)
 	return DirMeta{
@@ -390,7 +431,7 @@ func fileV3ToV4(f docFileV3, lastMod int64) FileMeta {
 	out := FileMeta{
 		Size: f.Size, Chunks: f.Chunks, Symlink: f.Symlink,
 		UploadedAt: up, ModifiedAt: ma, AccessedAt: aa, ChangedAt: ch,
-		Mode: completeMode(f.Mode, false), UID: f.UID, GID: f.GID,
+		Mode: fileModeOrDefault(f.Mode, f.Symlink != ""), UID: f.UID, GID: f.GID,
 		Inode: f.Inode, XAttrs: f.XAttrs.Clone(),
 	}
 	if out.Symlink != "" {

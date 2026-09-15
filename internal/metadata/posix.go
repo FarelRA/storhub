@@ -21,12 +21,23 @@ func normalizeXAttrs(attrs XAttrMap) XAttrMap {
 		if k == "" {
 			continue
 		}
-		clone[k] = v
+		// Deep-copy the value too: sharing []byte backing arrays lets a
+		// mutation of stored metadata reach the tree it was copied from.
+		clone[k] = append([]byte(nil), v...)
 	}
 	if len(clone) == 0 {
 		return nil
 	}
 	return clone
+}
+
+// nodeKindOf classifies a file entry for mode defaults: an entry carrying a
+// symlink target is a link, everything else a regular file.
+func nodeKindOf(f *FileMeta) NodeKind {
+	if f != nil && f.Symlink != "" {
+		return NodeKindSymlink
+	}
+	return NodeKindFile
 }
 
 func defaultFileMode(kind NodeKind) uint32 {

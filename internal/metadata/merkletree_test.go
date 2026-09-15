@@ -242,6 +242,145 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 	}
 }
 
+// BuildTree must not silently drop entries whose parent directory is
+// missing from Dirs - the round-trip identity would be broken without a word.
+func TestBuildTreeRejectsOrphanEntries(t *testing.T) {
+	orphanFile := NewRepoMetadata("demo")
+	orphanFile.Files["ghost/f"] = FileMeta{Inode: 5, Size: 0}
+	if _, err := BuildTree(orphanFile); err == nil {
+		t.Fatal("file under a missing parent directory built silently")
+	}
+	orphanDir := NewRepoMetadata("demo")
+	orphanDir.Dirs["ghost/deep"] = DirMeta{Inode: 6, CreatedAt: 1, ModifiedAt: 1}
+	if _, err := BuildTree(orphanDir); err == nil {
+		t.Fatal("directory under a missing parent built silently")
+	}
+	// A normalized tree with complete parents still builds.
+	m := sampleTree(t)
+	if _, err := BuildTree(m); err != nil {
+		t.Fatalf("valid tree rejected: %v", err)
+	}
+}
+
+// LoadTree must reconcile the allocation counters against the content it
+// loaded; a stale manifest must not yield a tree whose counters sit behind
+// live ids (callers like loadIndexTreeAtRef never Normalize).
+func TestLoadTreeReconcilesCounters(t *testing.T) {
+	m := sampleTree(t)
+	res, err := BuildTree(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := manifestFrom(t, m, res)
+	manifest.NextInode = 2
+	manifest.NextChunkID = 1
+	loaded, err := LoadTree(manifest, func(sha string) ([]byte, error) {
+		d, ok := res.Objects[sha]
+		if !ok {
+			return nil, fmt.Errorf("missing %s", sha)
+		}
+		return d, nil
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	maxInode := loaded.Root.Inode
+	for _, d := range loaded.Dirs {
+		if d.Inode > maxInode {
+			maxInode = d.Inode
+		}
+	}
+	for _, f := range loaded.Files {
+		if f.Inode > maxInode {
+			maxInode = f.Inode
+		}
+	}
+	if loaded.NextInode <= maxInode {
+		t.Fatalf("NextInode %d not past max live inode %d", loaded.NextInode, maxInode)
+	}
+	maxChunk := int64(0)
+	for id := range loaded.Chunks {
+		if id > maxChunk {
+			maxChunk = id
+		}
+	}
+	if loaded.NextChunkID <= maxChunk {
+		t.Fatalf("NextChunkID %d not past max live chunk %d", loaded.NextChunkID, maxChunk)
+	}
+	// A fresh manifest's counters survive untouched (round-trip identity).
+	fresh, err := LoadTree(manifestFrom(t, m, res), func(sha string) ([]byte, error) {
+		return res.Objects[sha], nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.NextInode != m.NextInode || fresh.NextChunkID != m.NextChunkID {
+		t.Fatalf("healthy counters were disturbed: ni %d->%d, nc %d->%d",
+			m.NextInode, fresh.NextInode, m.NextChunkID, fresh.NextChunkID)
+	}
+}
+
+// Manifest references are content addresses; ParseManifest must reject
+// anything that is not 64-char lowercase hex before ObjectPath builds repo
+// paths out of arbitrary text.
+func TestParseManifestValidatesSHAShape(t *testing.T) {
+	good := &Manifest{
+		Version: CurrentVersion, Project: "demo",
+		TreeRoot: strings.Repeat("a", 64), Releases: strings.Repeat("b", 64),
+		ChunkBuckets: []string{strings.Repeat("c", 64)},
+	}
+	data, err := MarshalManifest(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseManifest(data); err != nil {
+		t.Fatalf("well-shaped manifest rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Manifest){
+		"uppercase tree root":  func(mf *Manifest) { mf.TreeRoot = strings.Repeat("A", 64) },
+		"short tree root":      func(mf *Manifest) { mf.TreeRoot = "deadbeef" },
+		"path traversal root":  func(mf *Manifest) { mf.TreeRoot = "../../etc/passwd" },
+		"bad releases sha":     func(mf *Manifest) { mf.Releases = "x" },
+		"bad chunk bucket sha": func(mf *Manifest) { mf.ChunkBuckets = []string{"nope"} },
+	} {
+		bad := *good
+		mutate(&bad)
+		raw, err := MarshalManifest(&bad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseManifest(raw); err == nil {
+			t.Fatalf("%s accepted by ParseManifest", name)
+		}
+	}
+}
+
+// LoadTree must reject an object whose bytes no longer hash to the sha it
+// was referenced by (bit-rot in the caller's cache must not poison the tree).
+func TestLoadTreeVerifiesContentAddresses(t *testing.T) {
+	m := sampleTree(t)
+	res, err := BuildTree(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := manifestFrom(t, m, res)
+	rotted := make(map[string][]byte, len(res.Objects))
+	for sha, data := range res.Objects {
+		rotted[sha] = data
+	}
+	rotted[manifest.TreeRoot] = append([]byte{}, rotted[manifest.TreeRoot][:len(rotted[manifest.TreeRoot])-1]...)
+	_, err = LoadTree(manifest, func(sha string) ([]byte, error) {
+		d, ok := rotted[sha]
+		if !ok {
+			return nil, fmt.Errorf("missing %s", sha)
+		}
+		return d, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "content-address") {
+		t.Fatalf("rotted root object accepted: %v", err)
+	}
+}
+
 func TestObjectAddressing(t *testing.T) {
 	data := []byte(`{"hello":"world"}`)
 	sha := ObjectSHA(data)
