@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"syscall"
 	"testing"
 
@@ -228,8 +229,10 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	if err := svc.RenameContext(ctx, "demo", "docs", "docs/archive/nested"); err == nil {
 		t.Fatal("expected self-rename failure")
 	}
-	if _, err := svc.ReadFileAtContext(ctx, "demo", "docs/archive/final.txt", 99, 1); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected eof, got %v", err)
+	// Reads at/past EOF return zero bytes, not io.EOF (which the
+	// FUSE layer mapped to EIO).
+	if data, err := svc.ReadFileAtContext(ctx, "demo", "docs/archive/final.txt", 99, 1); err != nil || len(data) != 0 {
+		t.Fatalf("expected empty read past EOF, got %q %v", data, err)
 	}
 	if info := EntryInfoFromFile(seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")); info.Path != "docs/readme.txt" || !EntryInfoFromDirectory(&meta.DirMeta{Inode: 2, Mode: 0o755}, "docs", 2).IsDir {
 		t.Fatal("entry helper conversion failed")
@@ -250,7 +253,8 @@ func TestServiceErrors(t *testing.T) {
 	svc := NewService(backend)
 	backend.seedDir("docs")
 	backend.seedFile("docs/link", []byte("abc"))
-	backend.repo.UpsertFile("docs/symlink", meta.FileMeta{Mode: 0o777, Symlink: "docs/link", UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
+	backend.repo.UpsertFile("docs/symlink", meta.FileMeta{Mode: 0o777, Symlink: "link", UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
+	backend.repo.UpsertFile("docs/dangling", meta.FileMeta{Mode: 0o777, Symlink: "nowhere", UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
 
 	if _, err := svc.CreateFileContext(context.Background(), "bad/project", "docs/x"); err == nil {
 		t.Fatal("expected project validation error")
@@ -264,11 +268,20 @@ func TestServiceErrors(t *testing.T) {
 	if _, err := svc.WriteFileAtContext(context.Background(), "demo", "docs/link", -1, []byte("x")); err == nil {
 		t.Fatal("expected negative offset error")
 	}
-	if _, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/symlink", 0, 1); err == nil {
-		t.Fatal("expected symlink read failure")
+	// Read/append have open() semantics and follow the final
+	// symlink to its target instead of failing on the link itself.
+	rootCtx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	if data, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/symlink", 0, 3); err != nil || string(data) != "abc" {
+		t.Fatalf("expected read through symlink to succeed, got %q err=%v", data, err)
 	}
-	if _, err := svc.AppendFileContext(context.Background(), "demo", "docs/symlink", []byte("x")); err == nil {
-		t.Fatal("expected symlink append failure")
+	if _, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/dangling", 0, 1); err == nil {
+		t.Fatal("expected dangling symlink read to fail with not-found")
+	}
+	if _, err := svc.AppendFileContext(rootCtx, "demo", "docs/symlink", []byte("!")); err != nil {
+		t.Fatalf("expected append through symlink to succeed: %v", err)
+	}
+	if data, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/link", 0, 4); err != nil || string(data) != "abc!" {
+		t.Fatalf("append through symlink must land on the target, got %q err=%v", data, err)
 	}
 	if _, err := svc.TruncateFileContext(context.Background(), "demo", "docs/symlink", 1); err == nil {
 		t.Fatal("expected symlink truncate failure")
@@ -495,5 +508,188 @@ func TestWhitespaceNamesEndToEnd(t *testing.T) {
 	}
 	if err := svc.RmdirContext(ctx, proj, "my docs"); err != nil {
 		t.Fatalf("rmdir spaced dir after cleanup: %v", err)
+	}
+}
+
+// A REST-supplied length near MaxInt64 must not overflow the
+// offset+length addition into a make() panic.
+func TestReadFileAtOverflowLengthClamped(t *testing.T) {
+	backend := newTestBackend(700)
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	backend.seedFile("big.bin", []byte("0123456789"))
+	data, err := svc.ReadFileAtContext(ctx, "demo", "big.bin", 0, math.MaxInt64)
+	if err != nil {
+		t.Fatalf("max-int read: %v", err)
+	}
+	if string(data) != "0123456789" {
+		t.Fatalf("expected clamped full read, got %q", data)
+	}
+	data, err = svc.ReadFileAtContext(ctx, "demo", "big.bin", 8, math.MaxInt64)
+	if err != nil || string(data) != "89" {
+		t.Fatalf("expected clamped tail read, got %q %v", data, err)
+	}
+}
+
+// A whitespace-only name must never masquerade as the root
+// directory. Until the metadata store stops collapsing such names to the
+// root key (cross-file), the fs layer rejects them loudly.
+func TestWhitespaceOnlyNameIsNotRoot(t *testing.T) {
+	backend := newTestBackend(710)
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	if _, err := svc.StatPathContext(ctx, "demo", " "); err == nil {
+		t.Fatal("stat of a whitespace-only name must not return root")
+	}
+	if _, err := svc.CreateFileContext(ctx, "demo", " "); err == nil {
+		t.Fatal("create of a whitespace-only name must not fabricate a root-keyed entry")
+	}
+	if backend.repo.FindFile("") != nil {
+		t.Fatal("rejected create must not write a root-keyed phantom")
+	}
+	// Names with *significant* whitespace around real content stay legal.
+	if _, err := svc.CreateFileContext(ctx, "demo", " pad "); err != nil {
+		t.Fatalf("create padded name: %v", err)
+	}
+	if entry, err := svc.StatPathContext(ctx, "demo", " pad "); err != nil || entry.IsDir {
+		t.Fatalf("stat padded name: %+v %v", entry, err)
+	}
+}
+
+// Extending a file must stream fixed-size zero chunks instead of
+// materializing the whole hole in RAM. The observable contract is the
+// resulting content; the memory bound is structural (chunked loop).
+func TestTruncateExtensionStreamsZeros(t *testing.T) {
+	backend := newTestBackend(720)
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	backend.seedFile("grow.bin", []byte("ab"))
+	// Two MiB: more than one 1 MiB chunk, so the streaming loop iterates.
+	if _, err := svc.TruncateFileContext(ctx, "demo", "grow.bin", 2<<20); err != nil {
+		t.Fatalf("extend: %v", err)
+	}
+	data, err := svc.ReadFileAtContext(ctx, "demo", "grow.bin", 0, 2<<20)
+	if err != nil || len(data) != 2<<20 {
+		t.Fatalf("extended read: len=%d err=%v", len(data), err)
+	}
+	if string(data[:2]) != "ab" {
+		t.Fatalf("head lost: %q", data[:2])
+	}
+	for _, b := range data[2:] {
+		if b != 0 {
+			t.Fatal("extension must be zeros")
+		}
+	}
+	// Sparse write past EOF fills the hole the same way.
+	if _, err := svc.WriteFileAtContext(ctx, "demo", "grow.bin", 3<<20, []byte("tail")); err != nil {
+		t.Fatalf("sparse write: %v", err)
+	}
+	data, err = svc.ReadFileAtContext(ctx, "demo", "grow.bin", 3<<20, 4)
+	if err != nil || string(data) != "tail" {
+		t.Fatalf("sparse tail read: %q %v", data, err)
+	}
+}
+
+// WithNoReplace must reject an existing destination inside the
+// update transaction, not via a pre-stat the caller could race.
+func TestRenameNoReplaceInTransaction(t *testing.T) {
+	backend := newTestBackend(730)
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	if _, err := svc.CreateFileContext(ctx, "demo", "src.txt"); err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+	if _, err := svc.CreateFileContext(ctx, "demo", "dst.txt"); err != nil {
+		t.Fatalf("create dst: %v", err)
+	}
+	if err := svc.RenameContext(ctx, "demo", "src.txt", "dst.txt", WithNoReplace()); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected EEXIST from in-transaction no-replace, got %v", err)
+	}
+	if backend.repo.FindFile("src.txt") == nil || backend.repo.FindFile("dst.txt") == nil {
+		t.Fatal("failed no-replace rename must not mutate the tree")
+	}
+	if err := svc.RenameContext(ctx, "demo", "src.txt", "fresh.txt", WithNoReplace()); err != nil {
+		t.Fatalf("no-replace onto free name: %v", err)
+	}
+	// Without the option, replacement stays unconditional.
+	if _, err := svc.CreateFileContext(ctx, "demo", "src.txt"); err != nil {
+		t.Fatalf("recreate src: %v", err)
+	}
+	if err := svc.RenameContext(ctx, "demo", "src.txt", "fresh.txt"); err != nil {
+		t.Fatalf("plain replace rename: %v", err)
+	}
+}
+
+// CopyContext must check read access on the source, not just
+// traversal, or unreadable 0600 files can be duplicated by strangers.
+func TestCopyRequiresSourceReadAccess(t *testing.T) {
+	backend := newTestBackend(740)
+	backend.seedDir("mine")
+	file := backend.seedFile("mine/secret.txt", []byte("hush"))
+	file.Mode = 0o600
+	file.UID = 11
+	file.GID = 22
+	backend.repo.UpsertFile("mine/secret.txt", *file, backend.now)
+	dir := backend.repo.GetDirectory("mine")
+	dir.Mode = 0o755
+	backend.repo.Dirs["mine"] = *dir
+	backend.seedDir("theirs")
+	theirs := backend.repo.GetDirectory("theirs")
+	theirs.Mode = 0o777
+	backend.repo.Dirs["theirs"] = *theirs
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	attacker := WithIdentity(context.Background(), Identity{UID: 30, GID: 40, Groups: []uint32{40}})
+	if err := svc.CopyContext(attacker, "demo", "mine/secret.txt", "theirs/copy.txt"); !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("expected EACCES copying unreadable source, got %v", err)
+	}
+	if backend.repo.FindFile("theirs/copy.txt") != nil {
+		t.Fatal("denied copy must not create the destination")
+	}
+	owner := WithIdentity(context.Background(), Identity{UID: 11, GID: 22, Groups: []uint32{22}})
+	if err := svc.CopyContext(owner, "demo", "mine/secret.txt", "theirs/copy.txt"); err != nil {
+		t.Fatalf("owner copy: %v", err)
+	}
+}
+
+// The file owner keeps the POSIX chgrp right (into a group they
+// belong to) but may not hand the file away.
+func TestCanChownOwnerRights(t *testing.T) {
+	entry := &EntryInfo{Path: "f", UID: 1000, GID: 100, Mode: 0o644}
+	owner := WithIdentity(context.Background(), Identity{UID: 1000, GID: 100, Groups: []uint32{100, 200}})
+	if err := CanChown(owner, entry, entry.UID, 200); err != nil {
+		t.Fatalf("owner chgrp into member group: %v", err)
+	}
+	if err := CanChown(owner, entry, entry.UID, 999); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("owner chgrp into foreign group must be EPERM, got %v", err)
+	}
+	if err := CanChown(owner, entry, 1234, entry.GID); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("owner give-away must be EPERM, got %v", err)
+	}
+	stranger := WithIdentity(context.Background(), Identity{UID: 7, GID: 7, Groups: []uint32{7}})
+	if err := CanChown(stranger, entry, entry.UID, 100); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("non-owner chown must be EPERM, got %v", err)
+	}
+	root := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	if err := CanChown(root, entry, 1234, 5678); err != nil {
+		t.Fatalf("admin chown: %v", err)
+	}
+}
+
+// Nits: a truncate to the current size must still bump mtime/ctime.
+func TestTruncateSameSizeTouchesTimestamps(t *testing.T) {
+	backend := newTestBackend(750)
+	svc := NewService(backend)
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	backend.seedFile("ts.bin", []byte("abc"))
+	before := backend.repo.FindFile("ts.bin")
+	beforeMtime, beforeCtime := before.ModifiedAt, before.ChangedAt
+	backend.now = 760
+	if _, err := svc.TruncateFileContext(ctx, "demo", "ts.bin", 3); err != nil {
+		t.Fatalf("same-size truncate: %v", err)
+	}
+	after := backend.repo.FindFile("ts.bin")
+	if after.ModifiedAt != 760 || after.ChangedAt != 760 {
+		t.Fatalf("same-size truncate must update mtime/ctime: before=%d/%d after=%d/%d", beforeMtime, beforeCtime, after.ModifiedAt, after.ChangedAt)
 	}
 }

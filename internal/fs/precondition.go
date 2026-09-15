@@ -18,6 +18,7 @@ type mutateOptions struct {
 	expectedRevision string
 	expectedSize     int64
 	hasSize          bool
+	noReplace        bool
 }
 
 // ExpectedRevision returns the revision declared via WithExpectedRevision
@@ -64,6 +65,19 @@ func WithSize(n int64) MutateOption {
 
 // ExpectedSize returns the declared body size and whether one was declared.
 func (o mutateOptions) ExpectedSize() (int64, bool) { return o.expectedSize, o.hasSize }
+
+// WithNoReplace declares that the mutation must fail with EEXIST if the
+// destination already exists, checked inside the update transaction rather
+// than by a pre-transaction stat (which is a TOCTOU window). Currently
+// consumed by RenameContext for RENAME_NOREPLACE.
+func WithNoReplace() MutateOption {
+	return func(o *mutateOptions) {
+		o.noReplace = true
+	}
+}
+
+// NoReplace reports whether WithNoReplace was declared.
+func (o mutateOptions) NoReplace() bool { return o.noReplace }
 
 // RevisionSource is implemented by backends that can report the current
 // committed metadata revision (content SHA) of a project.

@@ -50,18 +50,37 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	if err := s.backend.ValidateProjectName(project); err != nil {
 		return nil, err
 	}
-	cleanPath, err := shfs.NormalizePath(linkPath)
-	if err != nil {
-		return nil, err
+	// Symlink(2) resource limits, enforced server-side because
+	// REST-originated calls bypass the kernel's VFS checks. An empty
+	// target is ENOENT (symlink(2) on an empty oldpath), an over-long
+	// one ENAMETOOLONG.
+	if target == "" {
+		return nil, syscall.ENOENT
 	}
-	if cleanPath == "" {
-		return nil, errors.New("symlink path is required")
+	if len(target) > shfs.PathMax {
+		return nil, syscall.ENAMETOOLONG
+	}
+	if err := shfs.ValidateAccessPathShape(linkPath); err != nil {
+		return nil, err
 	}
 	if err := s.backend.EnsureRepoContext(ctx, project); err != nil {
 		return nil, err
 	}
 	repo, _, err := s.backend.LoadRepoMetadataContext(ctx, project)
 	if err != nil {
+		return nil, err
+	}
+	// symlink(2) creates the link itself: a final component that already
+	// exists (including as a symlink) is EEXIST, never followed, so
+	// followFinal is false.
+	cleanPath, traversed, err := shfs.ResolveAccessPath(repo, linkPath, false)
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "" {
+		return nil, errors.New("symlink path is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, err
 	}
 	if err := shfs.CheckParentWrite(ctx, repo, cleanPath); err != nil {
@@ -90,6 +109,9 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	}
 	symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(repo, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
+		if err := shfs.CheckTraversal(ctx, current, traversed); err != nil {
+			return err
+		}
 		if err := shfs.CheckParentWrite(ctx, current, cleanPath); err != nil {
 			return err
 		}
@@ -115,15 +137,19 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "readlink start", "path", linkPath)
 	defer func() { s.logFinish(project, "readlink", started, err, "path", linkPath) }()
-	cleanPath, err := shfs.NormalizePath(linkPath)
-	if err != nil {
+	if err := shfs.ValidateAccessPathShape(linkPath); err != nil {
 		return "", err
 	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return "", err
 	}
-	if err := shfs.CheckTraverse(ctx, repo, cleanPath); err != nil {
+	// readlink(2) operates on the link itself: followFinal is false.
+	cleanPath, traversed, err := shfs.ResolveAccessPath(repo, linkPath, false)
+	if err != nil {
+		return "", err
+	}
+	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
 		return "", err
 	}
 	file := repo.FindFile(cleanPath)
@@ -142,11 +168,24 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "link start", "source", existingPath, "path", newPath)
 	defer func() { s.logFinish(project, "link", started, err, "source", existingPath, "path", newPath) }()
-	sourcePath, err := shfs.NormalizePath(existingPath)
+	if err := shfs.ValidateAccessPathShape(existingPath); err != nil {
+		return nil, err
+	}
+	if err := shfs.ValidateAccessPathShape(newPath); err != nil {
+		return nil, err
+	}
+	repoPre, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	linkPath, err := shfs.NormalizePath(newPath)
+	// link(2) does not follow a final symlink on either endpoint (the VFS
+	// refuses to hard link a symlink, which the EPERM branch below
+	// reproduces), so followFinal is false for both.
+	sourcePath, sourceTraversed, err := shfs.ResolveAccessPath(repoPre, existingPath, false)
+	if err != nil {
+		return nil, err
+	}
+	linkPath, linkTraversed, err := shfs.ResolveAccessPath(repoPre, newPath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -154,19 +193,26 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		return nil, errors.New("source and link paths are required")
 	}
 	if sourcePath == linkPath {
-		// POSIX: link(x, x) succeeds when x exists.
-		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
-		if err != nil {
-			return nil, err
+		// POSIX: link(x, x) succeeds when x exists. A directory source is
+		// EPERM (hard links to directories are not permitted) - returning
+		// (nil, nil) for it would hand callers a nil entry to dereference.
+		if file := repoPre.FindFile(sourcePath); file != nil {
+			return file, nil
 		}
-		if repo.FindFile(sourcePath) == nil && !repo.HasDirectory(sourcePath) {
-			return nil, s.backend.FileNotFound(sourcePath)
+		if repoPre.HasDirectory(sourcePath) {
+			return nil, syscall.EPERM
 		}
-		return repo.FindFile(sourcePath), nil
+		return nil, s.backend.FileNotFound(sourcePath)
 	}
 	now := s.backend.Now()
 	var linked meta.FileMeta
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := shfs.CheckTraversal(ctx, repo, sourceTraversed); err != nil {
+			return err
+		}
+		if err := shfs.CheckTraversal(ctx, repo, linkTraversed); err != nil {
+			return err
+		}
 		if err := shfs.CheckReadAccess(ctx, repo, sourcePath); err != nil {
 			return err
 		}
@@ -223,12 +269,19 @@ func entryForRepoPath(repo *meta.RepoMetadata, targetPath string) (*shfs.EntryIn
 // check against the metadata state inside the update transaction. The
 // pre-transaction snapshot exists for fast rejection; only the in-transaction
 // check closes the window where a concurrent rename/replace could swap the
-// node between authorize and mutate.
+// node between authorize and mutate. targetPath is the raw user path: it is
+// re-resolved physically against the live transaction state (chmod/chown/
+// chtimes/xattr all follow a final symlink), and the DAC walk consumes the
+// fresh traversed chain.
 func (s *Service) reauthorizeInTransaction(ctx context.Context, repo *meta.RepoMetadata, targetPath string, check func(entry *shfs.EntryInfo) error) error {
-	if err := shfs.CheckTraverse(ctx, repo, targetPath); err != nil {
+	key, traversed, err := shfs.ResolveAccessPath(repo, targetPath, true)
+	if err != nil {
 		return err
 	}
-	entry, err := entryForRepoPath(repo, targetPath)
+	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
+		return err
+	}
+	entry, err := entryForRepoPath(repo, key)
 	if err != nil {
 		return err
 	}
@@ -274,21 +327,22 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "chown start", "path", targetPath, "uid", uid, "gid", gid)
 	defer func() { s.logFinish(project, "chown", started, err, "path", targetPath, "uid", uid, "gid", gid) }()
-	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
+	entryForAccess, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
 		return err
 	}
-	if err := shfs.CanChown(ctx); err != nil {
+	const keepOwner = ^uint32(0)
+	if err := shfs.CanChown(ctx, entryForAccess, uid, gid); err != nil {
 		return err
 	}
 	// POSIX chown(2): an owner value of (uid_t)-1 means "leave unchanged".
 	// uid_t is unsigned, so -1's wire encoding is all-ones; accept it per
 	// field. The kernel resolves these before FUSE CHOWN, so this only
 	// affects direct library callers.
-	const keepOwner = ^uint32(0)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
-		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
-			return shfs.CanChown(ctx)
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			return shfs.CanChown(ctx, current, uid, gid)
 		}); err != nil {
 			return err
 		}
@@ -324,13 +378,25 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 	if err != nil {
 		return err
 	}
-	if err := shfs.CanSetTimes(ctx, entry); err != nil {
+	// A caller with only write permission may set "now" (the verb's
+	// zero-means-now contract), not arbitrary timestamps.
+	var atimePtr, mtimePtr *time.Time
+	if atime != 0 {
+		t := time.Unix(atime, 0)
+		atimePtr = &t
+	}
+	if mtime != 0 {
+		t := time.Unix(mtime, 0)
+		mtimePtr = &t
+	}
+	now := s.backend.Now()
+	if err := shfs.CanSetTimesValues(ctx, entry, atimePtr, mtimePtr, now); err != nil {
 		return err
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
 		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
-			return shfs.CanSetTimes(ctx, current)
+			return shfs.CanSetTimesValues(ctx, current, atimePtr, mtimePtr, now)
 		}); err != nil {
 			return err
 		}
@@ -359,13 +425,20 @@ func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPat
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "chtimes-explicit start", "path", targetPath, "has_atime", atime != nil, "has_mtime", mtime != nil)
 	defer func() { s.logFinish(project, "chtimes-explicit", started, err, "path", targetPath) }()
-	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
+	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	// Write-only callers may omit (nil) or set "now", not arbitrary
+	// timestamps.
+	now := s.backend.Now()
+	if err := shfs.CanSetTimesValues(ctx, entry, atime, mtime, now); err != nil {
 		return err
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
 		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
-			return shfs.CanSetTimes(ctx, current)
+			return shfs.CanSetTimesValues(ctx, current, atime, mtime, now)
 		}); err != nil {
 			return err
 		}
@@ -391,7 +464,12 @@ func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPat
 	})
 }
 
-func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte) (err error) {
+// SetXAttrContext stores an extended attribute. The optional mode
+// qualifies create/replace semantics (XAttrCreate/XAttrReplace); the
+// existence test runs inside the update transaction so it cannot race a
+// concurrent set/remove. Size and name limits are enforced server-side
+// because REST-originated calls bypass the kernel's VFS caps.
+func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) (err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "setxattr start", "path", targetPath, "attr", attr, "bytes", len(data))
 	defer func() {
@@ -399,6 +477,16 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	}()
 	if strings.TrimSpace(attr) == "" {
 		return errors.New("xattr name is required")
+	}
+	if len(attr) > shfs.XAttrNameMax {
+		return syscall.ERANGE
+	}
+	if len(data) > shfs.XAttrSizeMax {
+		return syscall.ERANGE
+	}
+	var m shfs.XAttrMode
+	for _, option := range mode {
+		m |= option
 	}
 	repo, cleanPath, _, _, err := s.lookupPath(ctx, project, targetPath)
 	if err != nil {
@@ -410,10 +498,22 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	value := append([]byte(nil), data...)
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
-		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
-			return shfs.CheckWriteAccess(ctx, repo, targetPath)
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			return shfs.CanAccessEntry(shfs.IdentityFromContext(ctx), current, shfs.AccessWrite)
 		}); err != nil {
 			return err
+		}
+		exists := false
+		if file != nil {
+			_, exists = file.XAttrs[attr]
+		} else if dir != nil {
+			_, exists = dir.XAttrs[attr]
+		}
+		if m&shfs.XAttrCreate != 0 && exists {
+			return syscall.EEXIST
+		}
+		if m&shfs.XAttrReplace != 0 && !exists {
+			return shfs.XAttrNotFound(cleanPath)
 		}
 		if file != nil {
 			return UpdateFileFamily(repo, file.Inode, func(current *meta.FileMeta) {
@@ -521,8 +621,8 @@ func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, a
 	}
 	return s.updatePathMetadataContext(ctx, project, targetPath, func(repo *meta.RepoMetadata, file *meta.FileMeta, dir *meta.DirMeta) error {
 		now := s.backend.Now()
-		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(_ *shfs.EntryInfo) error {
-			return shfs.CheckWriteAccess(ctx, repo, targetPath)
+		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(current *shfs.EntryInfo) error {
+			return shfs.CanAccessEntry(shfs.IdentityFromContext(ctx), current, shfs.AccessWrite)
 		}); err != nil {
 			return err
 		}
@@ -542,15 +642,17 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 	started := time.Now().UTC()
 	logging.Debug(s.logger(project), "update-path-metadata start", "path", targetPath)
 	defer func() { s.logFinish(project, "update-path-metadata", started, err, "path", targetPath) }()
-	cleanPath := ""
-	if strings.TrimSpace(targetPath) != "" {
-		var err error
-		cleanPath, err = shfs.NormalizePath(targetPath)
+	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		// Resolve the raw user path physically against the live
+		// transaction state (metadata verbs follow a final symlink), then
+		// re-run the traversal DAC against the fresh chain.
+		cleanPath, traversed, err := shfs.ResolveAccessPath(repo, targetPath, true)
 		if err != nil {
 			return err
 		}
-	}
-	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
+			return err
+		}
 		if cleanPath == "" {
 			root := &meta.DirMeta{
 				Inode:      repo.Root.Inode,
@@ -599,7 +701,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			return nil
 		}
 		return s.backend.FileNotFound(cleanPath)
-	}, fmt.Sprintf("storhub: update metadata for %s", cleanPath))
+	}, fmt.Sprintf("storhub: update metadata for %s", targetPath))
 	return err
 }
 
@@ -610,11 +712,12 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 	if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
 		return nil
 	}
-	if _, err := s.lookupEntryForAccess(ctx, project, targetPath); err != nil {
+	entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
+	if err != nil {
 		return err
 	}
 	if patch.HasOwner {
-		if err := shfs.CanChown(ctx); err != nil {
+		if err := shfs.CanChown(ctx, entry, patch.UID, patch.GID); err != nil {
 			return err
 		}
 	}
@@ -627,7 +730,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 		sanitizedMode := patch.Mode
 		if err := s.reauthorizeInTransaction(ctx, repo, targetPath, func(live *shfs.EntryInfo) error {
 			if patch.HasOwner {
-				if err := shfs.CanChown(ctx); err != nil {
+				if err := shfs.CanChown(ctx, live, patch.UID, patch.GID); err != nil {
 					return err
 				}
 			}
@@ -643,7 +746,16 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 				sanitizedMode = shfs.SanitizeChmodMode(ctx, &liveCopy, patch.Mode)
 			}
 			if patch.HasTimes {
-				if err := shfs.CanSetTimes(ctx, live); err != nil {
+				var atimePtr, mtimePtr *time.Time
+				if !patch.ATime.IsZero() {
+					t := patch.ATime
+					atimePtr = &t
+				}
+				if !patch.MTime.IsZero() {
+					t := patch.MTime
+					mtimePtr = &t
+				}
+				if err := shfs.CanSetTimesValues(ctx, live, atimePtr, mtimePtr, now); err != nil {
 					return err
 				}
 			}
@@ -693,17 +805,20 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 	})
 }
 
+// lookupPath resolves a raw user path physically (metadata/xattr verbs
+// follow a final symlink, so followFinal is true), enforces the traversal
+// DAC of the real walk, and returns the concrete key plus the node's
+// snapshot.
 func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*meta.RepoMetadata, string, *meta.FileMeta, *meta.DirMeta, error) {
-	cleanPath := ""
-	if strings.TrimSpace(targetPath) != "" {
-		var err error
-		cleanPath, err = shfs.NormalizePath(targetPath)
-		if err != nil {
-			return nil, "", nil, nil, err
-		}
-	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
+		return nil, "", nil, nil, err
+	}
+	cleanPath, traversed, err := shfs.ResolveAccessPath(repo, targetPath, true)
+	if err != nil {
+		return nil, "", nil, nil, err
+	}
+	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, "", nil, nil, err
 	}
 	if cleanPath == "" {
@@ -734,9 +849,6 @@ func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*
 func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
 	repo, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
 	if err != nil {
-		return nil, err
-	}
-	if err := shfs.CheckTraverse(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
 	if file != nil {

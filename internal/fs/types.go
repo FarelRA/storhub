@@ -73,6 +73,29 @@ type MetadataPatch struct {
 	MTime    time.Time
 }
 
+// XAttrMode qualifies a SetXAttr request. XAttrCreate fails with EEXIST
+// when the name is already present; XAttrReplace fails with ENODATA when
+// it is absent. Both are decided inside the update transaction so the
+// existence test and the write cannot race.
+type XAttrMode uint32
+
+const (
+	XAttrCreate  XAttrMode = 1 << 0
+	XAttrReplace XAttrMode = 1 << 1
+)
+
+// POSIX/Linux resource limits enforced at the fs/posix boundary. FUSE's
+// VFS applies them before dispatching, but REST-originated calls bypass
+// the kernel entirely, so the server must not.
+const (
+	// XAttrNameMax mirrors XATTR_NAME_MAX (255 bytes, NUL excluded).
+	XAttrNameMax = 255
+	// XAttrSizeMax mirrors XATTR_SIZE_MAX (64 KiB).
+	XAttrSizeMax = 65536
+	// PathMax mirrors PATH_MAX for symlink targets.
+	PathMax = 4096
+)
+
 // RangeEdit replaces the byte span [Start, Start+DeleteSize) with Data in
 // one step. A batch of RangeEdits is applied to a file as a single
 // operation: one release resolution, one asset per chunk of edited bytes,

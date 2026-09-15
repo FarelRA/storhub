@@ -3,10 +3,9 @@ package fs
 import (
 	"context"
 	"os"
-	"path"
 	"slices"
-	"strings"
 	"syscall"
+	"time"
 
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -55,6 +54,13 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 	if id.GID != 0 {
 		id.Groups = uniqueGIDs(append(id.Groups, id.GID))
 	}
+	// Admin is granted only to an *explicitly declared* uid-0 identity.
+	// The process-user fallback in IdentityFromContext must never mint it:
+	// a root-run daemon would otherwise hand superuser rights to every
+	// surface that forgets WithIdentity (fail-open).
+	if id.UID == 0 {
+		id.Admin = true
+	}
 	return context.WithValue(ctx, identityContextKey, id)
 }
 
@@ -66,9 +72,10 @@ func IdentityFromContext(ctx context.Context) Identity {
 	}
 	// Fail closed: an absent identity means the local process operating its
 	// own repository - never an anonymous superuser. Multi-user surfaces
-	// (FUSE, REST) must attach the real caller via WithIdentity; only a
-	// process that genuinely runs as root normalizes to Admin.
-	return normalizeIdentity(Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())})
+	// (FUSE, REST) must attach the real caller via WithIdentity; the
+	// fallback deliberately carries no Admin even when the daemon runs as
+	// root, because the *process* uid is not a caller assertion.
+	return Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
 }
 
 func IdentityPresent(ctx context.Context) bool {
@@ -119,10 +126,6 @@ func CheckWriteAccess(ctx context.Context, repo *meta.RepoMetadata, filePath str
 	return checkPathAccess(ctx, repo, filePath, accessWrite)
 }
 
-func CheckExecAccess(ctx context.Context, repo *meta.RepoMetadata, filePath string) error {
-	return checkPathAccess(ctx, repo, filePath, accessExec)
-}
-
 func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath string) error {
 	if err := CheckTraverse(ctx, repo, dirPath); err != nil {
 		return err
@@ -138,28 +141,50 @@ func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath st
 }
 
 func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
-	id := IdentityFromContext(ctx)
 	// Symlink components are followed before checking ancestors: POSIX
-	// traversal permission applies to the directories actually walked.
-	// The final component is left unresolved so that lstat/readlink-style
-	// operations check permission to reach the link itself, not its target.
-	resolved, err := ResolvePath(repo, targetPath, false)
+	// traversal permission applies to the directories actually walked, in
+	// walk order. The final component is left unresolved so that
+	// lstat/readlink-style operations check permission to reach the link
+	// itself, not its target. The walked set includes the chain up to every
+	// spliced absolute link, not just the final path's ancestors.
+	_, traversed, err := resolvePathTracked(repo, targetPath, false)
 	if err != nil {
 		return err
 	}
-	for _, ancestor := range ancestorPaths(resolved) {
-		attrs, err := lookupNode(repo, ancestor)
-		if err != nil {
-			return err
-		}
-		if !attrs.IsDir {
-			return syscall.ENOTDIR
-		}
-		if err := checkAccess(id, attrs, accessExec); err != nil {
+	return CheckTraversal(ctx, repo, traversed)
+}
+
+// CheckTraversal verifies execute permission on the directories a
+// resolution walk actually descended into, in walk order (root first).
+// Operations that resolved a user path with ResolveAccessPath must consume
+// the returned traversed list through this check: re-resolving only the
+// concrete key would miss the ancestors of an absolute link's own parent
+// chain (a 0700 directory containing "link -> /pub/x" must not leak
+// through the link).
+func CheckTraversal(ctx context.Context, repo *meta.RepoMetadata, traversed []string) error {
+	id := IdentityFromContext(ctx)
+	checked := make(map[string]struct{}, len(traversed))
+	for _, dir := range traversed {
+		if err := checkDirExec(id, repo, checked, dir); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struct{}, dirPath string) error {
+	if _, done := checked[dirPath]; done {
+		return nil
+	}
+	checked[dirPath] = struct{}{}
+	attrs, err := lookupNode(repo, dirPath)
+	if err != nil {
+		return err
+	}
+	if !attrs.IsDir {
+		return syscall.ENOTDIR
+	}
+	return checkAccess(id, attrs, accessExec)
 }
 
 func CheckParentWrite(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
@@ -201,19 +226,72 @@ func SanitizeWrittenFileMode(mode uint32) uint32 {
 	return mode &^ 0o6000
 }
 
-func CanChown(ctx context.Context) error {
-	if IdentityFromContext(ctx).Admin {
+// CanChown enforces POSIX chown(2): only root may move a file between
+// owners; the file's owner may change the group to any group they belong
+// to (Linux allows the owner the chgrp right, and a no-op uid value).
+// The all-ones value is the chown(2) "leave unchanged" sentinel.
+func CanChown(ctx context.Context, entry *EntryInfo, uid, gid uint32) error {
+	const keepOwner = ^uint32(0)
+	id := normalizeIdentity(IdentityFromContext(ctx))
+	if id.Admin {
 		return nil
 	}
-	return syscall.EPERM
+	if id.UID != entry.UID {
+		return syscall.EPERM
+	}
+	if uid != keepOwner && uid != entry.UID {
+		return syscall.EPERM
+	}
+	if gid != keepOwner && gid != entry.GID && !identityInGroup(id, gid) {
+		return syscall.EPERM
+	}
+	return nil
 }
 
+// CanSetTimes gates utimensat-style timestamp updates. Owners and admins
+// may set anything; a caller with only write permission may set the
+// current time or omit a field (POSIX UTIME_NOW/UTIME_OMIT). Because the
+// kernel resolves UTIME_NOW server-side, "current" is recognized within a
+// small tolerance instead of by an unavailable flag.
 func CanSetTimes(ctx context.Context, entry *EntryInfo) error {
 	id := IdentityFromContext(ctx)
 	if id.Admin || id.UID == entry.UID {
 		return nil
 	}
 	return checkAccess(id, nodeAttrsFromEntry(entry), accessWrite)
+}
+
+// CanSetTimesValues is the value-aware form of CanSetTimes: nil pointers
+// denote UTIME_OMIT. Non-owners with write permission may only omit or
+// supply "now".
+func CanSetTimesValues(ctx context.Context, entry *EntryInfo, atime, mtime *time.Time, now int64) error {
+	id := IdentityFromContext(ctx)
+	if id.Admin || id.UID == entry.UID {
+		return nil
+	}
+	if err := checkAccess(id, nodeAttrsFromEntry(entry), accessWrite); err != nil {
+		return err
+	}
+	for _, stamp := range []*time.Time{atime, mtime} {
+		if stamp == nil {
+			continue
+		}
+		if !isNowish(stamp.Unix(), now) {
+			return syscall.EPERM
+		}
+	}
+	return nil
+}
+
+// isNowish reports whether a requested timestamp is within the tolerance
+// the kernel's UTIME_NOW resolution can produce (request handling latency
+// plus coarse clocks).
+func isNowish(requested, now int64) bool {
+	diff := requested - now
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= 2
 }
 
 func CanAccessEntry(id Identity, entry *EntryInfo, need int) error {
@@ -345,32 +423,17 @@ func identityInGroup(id Identity, gid uint32) bool {
 	return false
 }
 
-func ancestorPaths(targetPath string) []string {
-	clean := normalizeStoredPath(targetPath)
-	if clean == "" {
-		return []string{""}
-	}
-	parts := strings.Split(clean, "/")
-	paths := []string{""}
-	current := ""
-	for i := 0; i < len(parts)-1; i++ {
-		current = path.Join(current, parts[i])
-		paths = append(paths, current)
-	}
-	return paths
-}
-
 func nodeAttrsFromEntry(entry *EntryInfo) nodeAttrs {
 	return nodeAttrs{Path: entry.Path, Mode: entry.Mode, UID: entry.UID, GID: entry.GID, IsDir: entry.IsDir, Kind: entry.Kind}
 }
 
+// normalizeIdentity canonicalizes group membership only. The Admin bit is
+// decided where an identity is *asserted* (WithIdentity), never here: a
+// uid-0 value that merely flowed through a check must not self-promote.
 func normalizeIdentity(id Identity) Identity {
 	id.Groups = uniqueGIDs(append([]uint32(nil), id.Groups...))
 	if id.GID != 0 {
 		id.Groups = uniqueGIDs(append(id.Groups, id.GID))
-	}
-	if id.UID == 0 {
-		id.Admin = true
 	}
 	return id
 }

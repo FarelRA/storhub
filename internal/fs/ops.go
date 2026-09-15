@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 
@@ -63,12 +61,11 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "create-file start", "path", filePath)
 	defer func() { s.logFinish(project, "create-file", started, err, "path", filePath) }()
-	cleanPath, err := NormalizePath(filePath)
-	if err != nil {
+	// Create addresses the new node itself (O_CREAT|O_EXCL never follows a
+	// final symlink), so followFinal is false; intermediate symlink
+	// components are still resolved physically.
+	if err := ValidateAccessPathShape(filePath); err != nil {
 		return nil, err
-	}
-	if cleanPath == "" {
-		return nil, errors.New("file path is required")
 	}
 	if err := s.backend.ValidateProjectName(project); err != nil {
 		return nil, err
@@ -78,6 +75,16 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	}
 	repoMeta, _, err := s.backend.LoadRepoMetadataContext(ctx, project)
 	if err != nil {
+		return nil, err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repoMeta, filePath, false)
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "" {
+		return nil, errors.New("file path is required")
+	}
+	if err := CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	if err := CheckParentWrite(ctx, repoMeta, cleanPath); err != nil {
@@ -108,6 +115,9 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	}
 	fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repoMeta, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 	if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckTraversal(ctx, repo, traversed); err != nil {
+			return err
+		}
 		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
 			return err
 		}
@@ -136,7 +146,23 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "mkdir start", "path", dirPath)
 	defer func() { s.logFinish(project, "mkdir", started, err, "path", dirPath) }()
-	cleanPath, err := NormalizePath(dirPath)
+	// mkdir never creates through a final symlink (EEXIST on the link
+	// itself), so followFinal is false; intermediate components resolve
+	// physically.
+	if err := ValidateAccessPathShape(dirPath); err != nil {
+		return err
+	}
+	if err := s.backend.ValidateProjectName(project); err != nil {
+		return err
+	}
+	if err := s.backend.EnsureRepoContext(ctx, project); err != nil {
+		return err
+	}
+	repoMeta, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+	if err != nil {
+		return err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repoMeta, dirPath, false)
 	if err != nil {
 		return err
 	}
@@ -145,13 +171,10 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		// exists.
 		return AlreadyExists("/")
 	}
-	if err := s.backend.ValidateProjectName(project); err != nil {
-		return err
-	}
-	if err := s.backend.EnsureRepoContext(ctx, project); err != nil {
-		return err
-	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckTraversal(ctx, repo, traversed); err != nil {
+			return err
+		}
 		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
 			return err
 		}
@@ -181,14 +204,29 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "rmdir start", "path", dirPath)
 	defer func() { s.logFinish(project, "rmdir", started, err, "path", dirPath) }()
-	cleanPath, err := NormalizePath(dirPath)
+	// rmdir removes the final component itself; a symlink there must not be
+	// followed (POSIX rmdir on a symlink is ENOTDIR), so followFinal is
+	// false.
+	if err := ValidateAccessPathShape(dirPath); err != nil {
+		return err
+	}
+	repoMeta, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+	if err != nil {
+		return err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repoMeta, dirPath, false)
 	if err != nil {
 		return err
 	}
 	if cleanPath == "" {
-		return errors.New("cannot remove root directory")
+		// POSIX: rmdir("/") fails with EBUSY, not a generic error that
+		// errno mapping would surface as EIO.
+		return syscall.EBUSY
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckTraversal(ctx, repo, traversed); err != nil {
+			return err
+		}
 		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
 			return err
 		}
@@ -212,30 +250,46 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 	return err
 }
 
-func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string) (err error) {
+func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...MutateOption) (err error) {
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "rename start", "old_path", oldPath, "new_path", newPath)
 	defer func() { s.logFinish(project, "rename", started, err, "old_path", oldPath, "new_path", newPath) }()
-	oldClean, err := NormalizePath(oldPath)
+	mutate := ApplyMutateOptions(opts)
+	// rename(2) renames the final component itself: a symlink endpoint is
+	// moved, never followed, so followFinal is false on both endpoints
+	// (intermediate components still resolve physically).
+	if err := ValidateAccessPathShape(oldPath); err != nil {
+		return err
+	}
+	if err := ValidateAccessPathShape(newPath); err != nil {
+		return err
+	}
+	preRepo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return err
 	}
-	newClean, err := NormalizePath(newPath)
+	oldClean, oldTraversed, err := ResolveAccessPath(preRepo, oldPath, false)
+	if err != nil {
+		return err
+	}
+	newClean, newTraversed, err := ResolveAccessPath(preRepo, newPath, false)
 	if err != nil {
 		return err
 	}
 	if oldClean == newClean {
 		// POSIX: rename(x, x) succeeds when x exists, ENOENT otherwise.
-		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
-		if err != nil {
-			return err
-		}
-		if repo.FindFile(oldClean) == nil && !repo.HasDirectory(oldClean) {
+		if preRepo.FindFile(oldClean) == nil && !preRepo.HasDirectory(oldClean) {
 			return NotFound(oldClean)
 		}
 		return nil
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckTraversal(ctx, repo, oldTraversed); err != nil {
+			return err
+		}
+		if err := CheckTraversal(ctx, repo, newTraversed); err != nil {
+			return err
+		}
 		srcFile := repo.FindFile(oldClean)
 		srcIsDir := repo.HasDirectory(oldClean)
 		if srcFile == nil && !srcIsDir {
@@ -247,14 +301,17 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		if err := CheckParentWrite(ctx, repo, newClean); err != nil {
 			return err
 		}
-		if err := CheckTraverse(ctx, repo, oldClean); err != nil {
-			return err
-		}
 		if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
 			return NotFound(parent)
 		}
 		dstFile := repo.FindFile(newClean)
 		dstDir := repo.GetDirectory(newClean)
+		// RENAME_NOREPLACE: the existence decision is made against the
+		// live transaction state, closing the TOCTOU window a pre-stat
+		// check leaves open.
+		if mutate.NoReplace() && (dstFile != nil || dstDir != nil) {
+			return AlreadyExists(newClean)
+		}
 		now := s.backend.Now()
 
 		if srcFile != nil {
@@ -308,25 +365,25 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			repo.RemoveDirectory(newClean)
 		}
 		updatedDirs := make(map[string]meta.DirMeta, len(repo.Dirs))
-		for path, dir := range repo.Dirs {
-			if IsParentOrSame(oldClean, path) {
-				newPath := RemapPath(oldClean, newClean, path)
+		for dirPath, dir := range repo.Dirs {
+			if IsParentOrSame(oldClean, dirPath) {
+				newPath := RemapPath(oldClean, newClean, dirPath)
 				dir.ModifiedAt = now
 				dir.ChangedAt = now
 				updatedDirs[newPath] = dir
 			} else {
-				updatedDirs[path] = dir
+				updatedDirs[dirPath] = dir
 			}
 		}
 		repo.Dirs = updatedDirs
 		updatedFiles := make(map[string]meta.FileMeta, len(repo.Files))
-		for path, file := range repo.Files {
-			if IsParentOrSame(oldClean, path) {
-				newPath := RemapPath(oldClean, newClean, path)
+		for filePath, file := range repo.Files {
+			if IsParentOrSame(oldClean, filePath) {
+				newPath := RemapPath(oldClean, newClean, filePath)
 				file.ChangedAt = now
 				updatedFiles[newPath] = file
 			} else {
-				updatedFiles[path] = file
+				updatedFiles[filePath] = file
 			}
 		}
 		repo.Files = updatedFiles
@@ -342,32 +399,57 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "copy start", "src", srcPath, "dst", dstPath)
 	defer func() { s.logFinish(project, "copy", started, err, "src", srcPath, "dst", dstPath) }()
-	srcClean, err := NormalizePath(srcPath)
+	// cp follows symlinks at both endpoints: the source is read through
+	// (stat semantics) and the destination is written through (open
+	// semantics), so followFinal is true on both.
+	if err := ValidateAccessPathShape(srcPath); err != nil {
+		return err
+	}
+	if err := ValidateAccessPathShape(dstPath); err != nil {
+		return err
+	}
+	preRepo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return err
 	}
-	dstClean, err := NormalizePath(dstPath)
+	srcClean, srcTraversed, err := ResolveAccessPath(preRepo, srcPath, true)
+	if err != nil {
+		return err
+	}
+	dstClean, dstTraversed, err := ResolveAccessPath(preRepo, dstPath, true)
 	if err != nil {
 		return err
 	}
 	if srcClean == dstClean {
-		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
-		if err != nil {
-			return err
-		}
-		if repo.FindFile(srcClean) == nil && !repo.HasDirectory(srcClean) {
+		if preRepo.FindFile(srcClean) == nil && !preRepo.HasDirectory(srcClean) {
 			return NotFound(srcClean)
 		}
 		return AlreadyExists(srcClean)
 	}
 	_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+		if err := CheckTraversal(ctx, repo, srcTraversed); err != nil {
+			return err
+		}
+		if err := CheckTraversal(ctx, repo, dstTraversed); err != nil {
+			return err
+		}
 		srcFile := repo.FindFile(srcClean)
 		srcIsDir := repo.HasDirectory(srcClean)
 		if srcFile == nil && !srcIsDir {
 			return NotFound(srcClean)
 		}
-		if err := CheckTraverse(ctx, repo, srcClean); err != nil {
-			return err
+		// A copy is a read of the source: mirror the read-side DAC of
+		// ReadFileAtContext/ReadDirContext, or an attacker could duplicate
+		// unreadable 0600 files (content refs, sizes, symlink targets)
+		// into their own directory.
+		if srcFile != nil {
+			if err := CheckReadAccess(ctx, repo, srcClean); err != nil {
+				return err
+			}
+		} else {
+			if err := CheckListDirAccess(ctx, repo, srcClean); err != nil {
+				return err
+			}
 		}
 		if err := CheckParentWrite(ctx, repo, dstClean); err != nil {
 			return err
@@ -479,8 +561,9 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "truncate start", "path", filePath, "size", size)
 	defer func() { s.logFinish(project, "truncate", started, err, "path", filePath, "size", size) }()
-	cleanPath, err := NormalizePath(filePath)
-	if err != nil {
+	// truncate(2) has open() semantics: a final symlink is followed to its
+	// target.
+	if err := ValidateAccessPathShape(filePath); err != nil {
 		return nil, err
 	}
 	if size < 0 {
@@ -490,6 +573,13 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	if err != nil {
 		return nil, err
 	}
+	cleanPath, traversed, err := ResolveAccessPath(repo, filePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+		return nil, err
+	}
 	file := repo.FindFile(cleanPath)
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
@@ -497,11 +587,31 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Symlink != "" {
-		return nil, fmt.Errorf("cannot truncate symlink: %s", cleanPath)
-	}
 	if size == file.Size {
+		// POSIX: even a no-op truncate updates mtime/ctime.
+		now := s.backend.Now()
+		if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
+			if err := CheckTraversal(ctx, repo, traversed); err != nil {
+				return err
+			}
+			if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+				return err
+			}
+			current := repo.FindFile(cleanPath)
+			if current == nil {
+				return s.backend.FileNotFound(cleanPath)
+			}
+			clone := current.Clone()
+			clone.ModifiedAt = now
+			clone.ChangedAt = now
+			repo.ReplaceFile(cleanPath, clone)
+			return nil
+		}, fmt.Sprintf("storhub: truncate touch %s", cleanPath)); err != nil {
+			return nil, err
+		}
 		clone := file.Clone()
+		clone.ModifiedAt = now
+		clone.ChangedAt = now
 		result = &clone
 		return result, nil
 	}
@@ -509,8 +619,47 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, size, file.Size-size, nil)
 		return result, err
 	}
-	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, make([]byte, size-file.Size))
+	result, err = s.zeroExtendFile(ctx, project, cleanPath, traversed, size)
 	return result, err
+}
+
+// zeroFillChunkSize bounds one streamed zero-fill patch: the extension
+// region is never materialized in RAM (a `truncate -s 1T` must not OOM the
+// process), it is written to the backend in fixed-size chunks.
+const zeroFillChunkSize = 1 << 20
+
+// zeroExtendFile grows a file to targetSize by streaming fixed-size zero
+// chunks through the backend's range-patch verb. The repo view is
+// re-loaded per chunk so each patch plans against the layout its previous
+// patch produced.
+func (s *Service) zeroExtendFile(ctx context.Context, project, cleanPath string, traversed []string, targetSize int64) (*meta.FileMeta, error) {
+	buf := make([]byte, zeroFillChunkSize)
+	for {
+		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+		if err != nil {
+			return nil, err
+		}
+		file := repo.FindFile(cleanPath)
+		if file == nil {
+			return nil, s.backend.FileNotFound(cleanPath)
+		}
+		if err := CheckTraversal(ctx, repo, traversed); err != nil {
+			return nil, err
+		}
+		if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+			return nil, err
+		}
+		if file.Size >= targetSize {
+			return file, nil
+		}
+		n := targetSize - file.Size
+		if n > int64(len(buf)) {
+			n = int64(len(buf))
+		}
+		if _, err := s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, buf[:n]); err != nil {
+			return nil, err
+		}
+	}
 }
 
 func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMeta, err error) {
@@ -521,8 +670,15 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	if err != nil {
 		return nil, err
 	}
-	cleanPath, err := NormalizePath(filePath)
+	// append has open() semantics: a final symlink is followed.
+	if err := ValidateAccessPathShape(filePath); err != nil {
+		return nil, err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repo, filePath, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, err
 	}
 	file := repo.FindFile(cleanPath)
@@ -531,9 +687,6 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	}
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
-	}
-	if file.Symlink != "" {
-		return nil, fmt.Errorf("cannot append to symlink: %s", cleanPath)
 	}
 	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, data)
 	return result, err
@@ -545,12 +698,19 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	defer func() {
 		s.logFinish(project, "write-at", started, err, "path", filePath, "offset", offset, "bytes", len(data))
 	}()
-	cleanPath, err := NormalizePath(filePath)
-	if err != nil {
+	// pwrite has open() semantics: a final symlink is followed.
+	if err := ValidateAccessPathShape(filePath); err != nil {
 		return nil, err
 	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
+		return nil, err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repo, filePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, err
 	}
 	file := repo.FindFile(cleanPath)
@@ -559,9 +719,6 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	}
 	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
-	}
-	if file.Symlink != "" {
-		return nil, fmt.Errorf("cannot write symlink: %s", cleanPath)
 	}
 	if offset < 0 {
 		return nil, errors.New("write offset must be non-negative")
@@ -572,8 +729,20 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 		return result, nil
 	}
 	if offset > file.Size {
-		gap := make([]byte, offset-file.Size)
-		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, append(gap, data...))
+		// The hole is streamed as fixed-size zero chunks (never
+		// materialized in RAM), then the real data lands at offset.
+		if _, err := s.zeroExtendFile(ctx, project, cleanPath, traversed, offset); err != nil {
+			return nil, err
+		}
+		repo, _, err = s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+		if err != nil {
+			return nil, err
+		}
+		file = repo.FindFile(cleanPath)
+		if file == nil {
+			return nil, s.backend.FileNotFound(cleanPath)
+		}
+		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, offset, 0, data)
 		return result, err
 	}
 	deleteSize := int64(len(data))
@@ -590,8 +759,8 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	defer func() {
 		s.logFinish(project, "read-at", started, err, "path", filePath, "offset", offset, "length", length)
 	}()
-	cleanPath, err := NormalizePath(filePath)
-	if err != nil {
+	// pread has open() semantics: a final symlink is followed.
+	if err := ValidateAccessPathShape(filePath); err != nil {
 		return nil, err
 	}
 	if offset < 0 || length < 0 {
@@ -601,6 +770,13 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if err != nil {
 		return nil, err
 	}
+	cleanPath, traversed, err := ResolveAccessPath(repo, filePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+		return nil, err
+	}
 	file := repo.FindFile(cleanPath)
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
@@ -608,20 +784,22 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if err := CheckReadAccess(ctx, repo, cleanPath); err != nil {
 		return nil, err
 	}
-	if file.Symlink != "" {
-		return nil, fmt.Errorf("cannot read symlink as file: %s", cleanPath)
-	}
-	if offset > file.Size {
-		return nil, io.EOF
+	if offset >= file.Size {
+		// POSIX read(2) at or past EOF returns 0 bytes, not an error;
+		// surfacing io.EOF here mapped to EIO at the FUSE boundary.
+		result = []byte{}
+		return result, nil
 	}
 	if length == 0 {
 		result = []byte{}
 		return result, nil
 	}
-	end := offset + length
-	if end > file.Size {
-		end = file.Size
+	// Clamp before adding: a REST-supplied length near MaxInt64 would
+	// overflow `offset + length` negative and panic the make below.
+	if length > file.Size-offset {
+		length = file.Size - offset
 	}
+	end := offset + length
 	result = make([]byte, end-offset)
 	chunks := repo.FileChunks(cleanPath)
 	startIndex := sort.Search(len(chunks), func(i int) bool {
@@ -654,11 +832,12 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "stat-path start", "path", targetPath)
 	defer func() { s.logFinish(project, "stat-path", started, err, "path", targetPath) }()
-	cleanPath := ""
-	if strings.TrimSpace(targetPath) != "" {
-		var err error
-		cleanPath, err = NormalizePath(targetPath)
-		if err != nil {
+	// lstat semantics: the final symlink is NOT followed (followFinal
+	// false); intermediate symlink components are resolved physically.
+	// Callers wanting stat() semantics resolve first (ResolvePath) and then
+	// look up.
+	if targetPath != "" {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return nil, err
 		}
 	}
@@ -666,7 +845,11 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckTraverse(ctx, repo, cleanPath); err != nil {
+	cleanPath, traversed, err := ResolveAccessPath(repo, targetPath, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, err
 	}
 	if cleanPath == "" {
@@ -674,8 +857,7 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 		return result, nil
 	}
 	// lstat semantics: a terminal symlink reports itself; intermediate
-	// components were already resolved by CheckTraverse. Callers wanting
-	// stat() semantics compose LookupNodeFollowed/ResolvePath.
+	// components were resolved by ResolveAccessPath above.
 	if file := repo.FindFile(cleanPath); file != nil {
 		result = EntryInfoFromFile(file, cleanPath, repo.FileNLink(cleanPath))
 		return result, nil
@@ -724,16 +906,22 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	started := time.Now().UTC()
 	logging.Info(s.logger(project), "readdir start", "path", dirPath)
 	defer func() { s.logFinish(project, "readdir", started, err, "path", dirPath) }()
-	cleanPath := ""
-	if strings.TrimSpace(dirPath) != "" {
-		var err error
-		cleanPath, err = NormalizePath(dirPath)
-		if err != nil {
+	// opendir follows a final symlink to a directory, so followFinal is
+	// true.
+	if dirPath != "" {
+		if err := ValidateAccessPathShape(dirPath); err != nil {
 			return nil, err
 		}
 	}
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
+		return nil, err
+	}
+	cleanPath, traversed, err := ResolveAccessPath(repo, dirPath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
 		return nil, err
 	}
 	if err := CheckListDirAccess(ctx, repo, cleanPath); err != nil {

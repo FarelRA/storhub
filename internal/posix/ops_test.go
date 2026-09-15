@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -424,5 +425,97 @@ func TestChtimesExplicitSemantics(t *testing.T) {
 	entry3, _ := svc.lookupEntryForAccess(ctx, "demo", "ts.txt")
 	if entry3.AccessedAt == 0 && entry3.AccessedAt != svc.backend.Now() && entry3.AccessedAt < 1_000_000_000 {
 		t.Fatalf("legacy zero should map to now-ish, got %d", entry3.AccessedAt)
+	}
+}
+
+// Xattr name/value size caps and symlink target caps must be
+// enforced server-side; REST-originated calls bypass the kernel's VFS.
+func TestXAttrAndSymlinkResourceLimits(t *testing.T) {
+	backend := newTestBackend(800)
+	backend.seedDir("docs")
+	base := backend.seedFile("docs/base.txt")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: base.UID, GID: base.GID})
+
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.big", bytes.Repeat([]byte{1}, shfs.XAttrSizeMax+1)); !errors.Is(err, syscall.ERANGE) {
+		t.Fatalf("oversized xattr value must be ERANGE, got %v", err)
+	}
+	longName := "user." + strings.Repeat("n", shfs.XAttrNameMax)
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", longName, []byte("v")); !errors.Is(err, syscall.ERANGE) {
+		t.Fatalf("oversized xattr name must be ERANGE, got %v", err)
+	}
+	if _, err := svc.SymlinkContext(ctx, "demo", "", "docs/empty.link"); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("empty symlink target must be ENOENT, got %v", err)
+	}
+	if _, err := svc.SymlinkContext(ctx, "demo", strings.Repeat("t", shfs.PathMax+1), "docs/long.link"); !errors.Is(err, syscall.ENAMETOOLONG) {
+		t.Fatalf("oversized symlink target must be ENAMETOOLONG, got %v", err)
+	}
+	// Boundary values stay legal.
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.max", bytes.Repeat([]byte{2}, shfs.XAttrSizeMax)); err != nil {
+		t.Fatalf("max-size xattr: %v", err)
+	}
+}
+
+// Create/replace semantics are decided inside the update
+// transaction, not by a racy pre-stat.
+func TestSetXAttrCreateReplaceAtomic(t *testing.T) {
+	backend := newTestBackend(810)
+	backend.seedDir("docs")
+	base := backend.seedFile("docs/base.txt")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: base.UID, GID: base.GID})
+
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.once", []byte("a"), shfs.XAttrReplace); !errors.Is(err, shfs.ErrXAttrNotFound) {
+		t.Fatalf("replace on missing must be ENODATA, got %v", err)
+	}
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.once", []byte("a"), shfs.XAttrCreate); err != nil {
+		t.Fatalf("create on missing: %v", err)
+	}
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.once", []byte("b"), shfs.XAttrCreate); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("create on existing must be EEXIST, got %v", err)
+	}
+	if err := svc.SetXAttrContext(ctx, "demo", "docs/base.txt", "user.once", []byte("c"), shfs.XAttrReplace); err != nil {
+		t.Fatalf("replace on existing: %v", err)
+	}
+	got, err := svc.GetXAttrContext(ctx, "demo", "docs/base.txt", "user.once")
+	if err != nil || string(got) != "c" {
+		t.Fatalf("replace payload: %q %v", got, err)
+	}
+}
+
+// Hard-linking a directory onto itself, link(x, x), must return EPERM,
+// never (nil, nil) - the FUSE layer dereferences the returned entry.
+func TestLinkSamePathDirectoryIsEPERM(t *testing.T) {
+	backend := newTestBackend(820)
+	backend.seedDir("docs")
+	svc := NewService(backend)
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	if _, err := svc.LinkContext(ctx, "demo", "docs", "docs"); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("same-path directory link must be EPERM, got %v", err)
+	}
+}
+
+// A write-permitted non-owner may not plant arbitrary timestamps.
+func TestChtimesWriteOnlyCannotForgeTimestamps(t *testing.T) {
+	backend := newTestBackend(830)
+	backend.seedDir("docs")
+	base := backend.seedFile("docs/w.txt")
+	base.Mode = 0o622
+	base.UID = 1000
+	base.GID = 1000
+	backend.repo.UpsertFile("docs/w.txt", *base, backend.now)
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	writer := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 2000, GID: 2000, Groups: []uint32{2000}})
+	forged := time.Unix(10, 0)
+	if err := svc.ChtimesExplicitContext(writer, "demo", "docs/w.txt", &forged, nil); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("write-only forged timestamp must be EPERM, got %v", err)
+	}
+	if err := svc.ChtimesExplicitContext(writer, "demo", "docs/w.txt", nil, nil); err != nil {
+		t.Fatalf("write-only pure-omit chtimes: %v", err)
+	}
+	now := time.Unix(backend.now, 0)
+	if err := svc.ChtimesExplicitContext(writer, "demo", "docs/w.txt", &now, &now); err != nil {
+		t.Fatalf("write-only now-ish chtimes: %v", err)
 	}
 }
