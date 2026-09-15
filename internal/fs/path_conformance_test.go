@@ -133,6 +133,11 @@ func TestConformanceAbsoluteLinkParentChainStillGuarded(t *testing.T) {
 	backend.repo.UpsertFile("a/abs", meta.FileMeta{Symlink: "/pub/secret.txt", Mode: 0o777, UID: 1, GID: 2, UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now}, backend.now)
 	dir := backend.repo.GetDirectory("a")
 	dir.Mode = 0o700
+	// Pin the owner explicitly: EnsureDirectory inherits the process UID,
+	// and CI runners are UID 1001, which would otherwise make the "attacker"
+	// below the directory's own owner and silently pass the check.
+	dir.UID = 0
+	dir.GID = 0
 	backend.repo.Dirs["a"] = *dir
 	attacker := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1001, Groups: []uint32{1001}})
 	if _, err := svc.ReadFileAtContext(attacker, "demo", "a/abs", 0, 3); !errors.Is(err, syscall.EACCES) {
