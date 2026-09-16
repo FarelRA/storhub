@@ -3,7 +3,6 @@ package storage
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -359,13 +358,161 @@ func applyOps(meta *RepoMetadata, ops []Op) error {
 	return applyOpsWithResolutions(meta, ops, nil)
 }
 
-func applyOpsWithResolutions(meta *RepoMetadata, ops []Op, resolutions *[]ConflictResolution) error {
+// replayPlan makes a batch of ops apply order-independently. The fold
+// emits ops in map order, so emission carries no meaning and replay must
+// converge to the same final tree in ANY sequence. Two pieces of batch
+// state make that true:
+//
+//   - doomed: every path the batch removes - OpDeleteFile and OpRmdir
+//     paths plus OpRename from-paths. OpRmdir skips only when children
+//     exist OUTSIDE this set, which preserves the upstream-children
+//     guarantee (data preservation) for intra-batch deletes replayed in
+//     any order.
+//
+//   - moved: subtree prefixes relocated by dir renames applied so far in
+//     this batch (recorded-from prefix -> current prefix). A later op
+//     that references a path under a moved prefix resolves it to the live
+//     location; a path that still exists literally wins (a same-path
+//     recreation is real state, not a stale reference). Only references
+//     to PRE-EXISTING state are resolved (rename-from, delete, rmdir,
+//     setattr/patch/truncate targets); creates, mkdirs, rename-to paths
+//     and EnsureDirectory parents stay literal - a literal new path is
+//     real, never stale.
+type replayPlan struct {
+	doomed map[string]struct{}
+	moved  map[string]string
+}
+
+func newReplayPlan(ops []Op) *replayPlan {
+	p := &replayPlan{doomed: make(map[string]struct{}), moved: make(map[string]string)}
 	for _, op := range ops {
-		if err := applyOneOp(meta, op, resolutions); err != nil {
+		switch op.Type {
+		case OpDeleteFile, OpRmdir:
+			if len(op.Paths) > 0 {
+				p.doomed[op.Paths[0]] = struct{}{}
+			}
+		case OpRename:
+			if len(op.Paths) == 2 {
+				p.doomed[op.Paths[0]] = struct{}{}
+			}
+		}
+	}
+	return p
+}
+
+// unremove drops an op's paths from the doomed set. Call it when a batch
+// member is SKIPPED during a conflict-resolving replay (rebase): its removal
+// never lands, so a later rmdir must see the survivor as a live child again.
+// Removing a path that was never doomed is a no-op.
+func (p *replayPlan) unremove(op Op) {
+	for _, path := range op.Paths {
+		delete(p.doomed, path)
+	}
+}
+
+func applyOpsWithResolutions(meta *RepoMetadata, ops []Op, resolutions *[]ConflictResolution) error {
+	plan := newReplayPlan(ops)
+	for _, op := range ops {
+		if err := applyOneOp(meta, op, plan, resolutions); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// recordMove notes that a dir rename relocated a subtree: later ops in
+// this batch referencing the recorded from-prefix resolve to the live
+// location. Called only when the source existed at apply time, so the
+// table never maps a phantom prefix onto an unrelated live tree.
+func (p *replayPlan) recordMove(from, to string) {
+	if from == "" {
+		return
+	}
+	p.moved[from] = to
+}
+
+// longestMovedPrefix returns the longest table key that is the path itself
+// or a strict parent of it (the trailing-slash check keeps "/ab" from
+// matching key "/a"). Empty keys never match.
+func longestMovedPrefix(moved map[string]string, path string) string {
+	best := ""
+	for k := range moved {
+		if k == "" {
+			continue
+		}
+		if path == k || strings.HasPrefix(path, k+"/") {
+			if len(k) > len(best) {
+				best = k
+			}
+		}
+	}
+	return best
+}
+
+// resolve returns the live location for a reference to pre-existing state:
+// the literal path when anything lives there, else the longest
+// moved-prefix translation that lands on something live. Chains are
+// followed with a visited set; anything unresolvable returns the original
+// path so the handler's missing-entry semantics apply unchanged.
+func (p *replayPlan) resolve(meta *RepoMetadata, path string) string {
+	if path == "" {
+		return path
+	}
+	live := func(s string) bool {
+		return meta.GetDirectory(s) != nil || meta.FindFile(s) != nil
+	}
+	if live(path) {
+		return path
+	}
+	seen := map[string]struct{}{path: {}}
+	cur := path
+	for range len(p.moved) + 1 {
+		key := longestMovedPrefix(p.moved, cur)
+		if key == "" {
+			return path
+		}
+		next := p.moved[key] + cur[len(key):]
+		if _, dup := seen[next]; dup {
+			return path
+		}
+		seen[next] = struct{}{}
+		cur = next
+		if live(cur) {
+			return cur
+		}
+	}
+	return path
+}
+
+// forward translates a recorded path to its current location by following
+// the batch's recorded subtree moves to a fixed point (cycle-safe via the
+// visited set). Pure translation: no liveness checks.
+func (p *replayPlan) forward(path string) string {
+	cur := path
+	seen := map[string]struct{}{path: {}}
+	for range len(p.moved) + 1 {
+		key := longestMovedPrefix(p.moved, cur)
+		if key == "" {
+			break
+		}
+		next := p.moved[key] + cur[len(key):]
+		if _, dup := seen[next]; dup {
+			break
+		}
+		seen[next] = struct{}{}
+		cur = next
+	}
+	return cur
+}
+
+// liveRemovals translates every recorded-removed path to its current
+// location at this point in the replay, for the OpRmdir children check.
+func (p *replayPlan) liveRemovals() map[string]struct{} {
+	out := make(map[string]struct{}, len(p.doomed))
+	for r := range p.doomed {
+		out[p.forward(r)] = struct{}{}
+	}
+	return out
 }
 
 func recordResolution(resolutions *[]ConflictResolution, op Op, path, note string) {
@@ -396,7 +543,7 @@ func cloneOpPayloads(op Op) Op {
 	return op
 }
 
-func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) error {
+func applyOneOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution) error {
 	now := op.Timestamp
 	path := opPath(op)
 	// Work on private payloads: collision remapping rewrites identifiers
@@ -405,20 +552,28 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 	op = cloneOpPayloads(op)
 	// Divergent-writer protection: identifiers both writers allocated for
 	// different records are remapped before the state assertion applies.
-	remapOpCollisions(meta, &op, resolutions)
+	remapOpCollisions(meta, &op, plan, resolutions)
 	switch op.Type {
 	case OpPutFile, OpTruncate, OpPatch, OpSetattr, OpXattr:
+		target := path
+		if op.Type != OpPutFile {
+			// Rewrite targets reference pre-existing state: resolve a
+			// stale prefix moved by an earlier rename in this batch. Puts
+			// stay literal - a put's path is its final location, recorded
+			// against the post-mutation candidate.
+			target = plan.resolve(meta, path)
+		}
 		if op.File != nil {
-			if parent := shfs.ParentPath(path); parent != "" {
+			if parent := shfs.ParentPath(target); parent != "" {
 				meta.EnsureDirectory(parent, now)
 			}
-			meta.WriteFileDirect(path, op.File.Clone())
+			meta.WriteFileDirect(target, op.File.Clone())
 		} else if op.Dir != nil {
-			if path != "" {
-				if parent := shfs.ParentPath(path); parent != "" {
+			if target != "" {
+				if parent := shfs.ParentPath(target); parent != "" {
 					meta.EnsureDirectory(parent, now)
 				}
-				meta.WriteDirDirect(path, op.Dir.Clone())
+				meta.WriteDirDirect(target, op.Dir.Clone())
 			} else {
 				meta.Root = op.Dir.Clone()
 			}
@@ -436,10 +591,31 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			meta.EnsureDirectory(path, now)
 		}
 	case OpDeleteFile:
-		meta.RemoveFile(path)
+		meta.RemoveFile(plan.resolve(meta, path))
 	case OpRmdir:
+		path = plan.resolve(meta, path)
+		// Order-independent delete: skip only for children the batch did
+		// NOT remove (liveRemovals translates recorded removals to their
+		// current locations, following intra-batch renames). An upstream
+		// child still blocks, exactly as before.
+		removed := plan.liveRemovals()
 		childDirs, childFiles := meta.DirectoryChildren(path)
-		if len(childDirs) > 0 || len(childFiles) > 0 {
+		blocked := false
+		for _, child := range childDirs {
+			if _, ok := removed[child]; !ok {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			for _, child := range childFiles {
+				if _, ok := removed[child]; !ok {
+					blocked = true
+					break
+				}
+			}
+		}
+		if blocked {
 			recordResolution(resolutions, op, path,
 				"skipped rmdir: upstream directory non-empty (data preservation)")
 			return nil
@@ -449,7 +625,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 		if len(op.Paths) != 2 {
 			return fmt.Errorf("rename op %d has %d paths, want 2", op.Seq, len(op.Paths))
 		}
-		from, to := op.Paths[0], op.Paths[1]
+		from, to := plan.resolve(meta, op.Paths[0]), op.Paths[1]
 		if op.File != nil {
 			meta.RemoveFile(from)
 			if parent := shfs.ParentPath(to); parent != "" {
@@ -457,10 +633,12 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			}
 			meta.WriteFileDirect(to, op.File.Clone())
 		} else {
-			// Directory rename: entries upstream added under the old
-			// subtree move along with the rename instead of being
-			// orphaned; ops for children recorded explicitly have already
-			// replayed (children-first ordering), leaving nothing to remap.
+			// Directory rename moves the whole subtree in place
+			// (remapSubtree): entries upstream added under the old subtree
+			// ride along instead of being orphaned. No emission ordering is
+			// needed: the move is recorded in the batch plan, and later
+			// ops referencing the old prefix resolve to the live location.
+			fromExisted := meta.GetDirectory(from) != nil
 			remapSubtree(meta, from, to)
 			if parent := shfs.ParentPath(to); parent != "" {
 				meta.EnsureDirectory(parent, now)
@@ -472,7 +650,14 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			} else {
 				meta.EnsureDirectory(to, now)
 			}
-			meta.RemoveDirectory(from)
+			// Remove the RECORDED source, not the resolved one: resolve
+			// only diverts when the literal is missing (nothing there to
+			// remove), and when resolution maps from onto to itself this
+			// must not delete the just-written target.
+			meta.RemoveDirectory(op.Paths[0])
+			if fromExisted {
+				plan.recordMove(op.Paths[0], to)
+			}
 		}
 	case OpRelease:
 		if op.Release != nil {
@@ -532,203 +717,6 @@ func remapSubtree(meta *RepoMetadata, from, to string) {
 		meta.RemoveFile(mv.from)
 		meta.WriteFileDirect(mv.to, mv.file)
 	}
-}
-
-// synthesizeOpsFromDiff derives the op set for one metadata transaction by
-// diffing the pre-transaction tree against the post-mutation candidate. It
-// covers every mutation that flows through UpdateRepoMetadataContext; direct
-// mutation sites emit their ops explicitly. Rename detection pairs a removed
-// entry with an added entry carrying the same identity (rename bumps
-// ChangedAt on files and ModifiedAt/ChangedAt on dirs, so those fields are
-// ignored when pairing).
-func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64) []Op {
-	stack := &opStack{}
-
-	removedFiles := map[string]FileMeta{}
-	removedDirs := map[string]DirMeta{}
-	type dirChange struct {
-		path  string
-		entry DirMeta
-		kind  OpType
-	}
-	var dirChanges []dirChange
-	addedDirs := map[string]DirMeta{}
-
-	for path, entry := range before.Files() {
-		if _, ok := after.Files()[path]; !ok {
-			removedFiles[path] = entry
-		}
-	}
-	for path, entry := range before.Dirs() {
-		if _, ok := after.Dirs()[path]; !ok {
-			removedDirs[path] = entry
-		}
-	}
-	for path, entry := range after.Dirs() {
-		prev, ok := before.Dirs()[path]
-		if !ok {
-			addedDirs[path] = entry
-			continue
-		}
-		if dirEntriesEquivalent(prev, entry) {
-			continue
-		}
-		dirChanges = append(dirChanges, dirChange{path: path, entry: entry, kind: OpSetattr})
-	}
-	if !dirEntriesEquivalent(before.Root, after.Root) {
-		dirChanges = append(dirChanges, dirChange{path: "", entry: after.Root, kind: OpSetattr})
-	}
-
-	// Rename pairing: a rename preserves the inode, so pair removed and
-	// added entries by inode (O(n)) and confirm with a body comparison
-	// that ignores the ChangedAt bump a rename applies. Depth-descending
-	// emission keeps replay correct (children move before their parent).
-	type renamePair struct {
-		from, to string
-		file     *FileMeta
-		dir      *DirMeta
-	}
-	var renames []renamePair
-	consumedFiles := map[string]bool{}
-	consumedDirs := map[string]bool{}
-	addedByInode := make(map[uint64][]string)
-	for path, entry := range after.Files() {
-		if _, existed := before.Files()[path]; !existed {
-			addedByInode[entry.Inode] = append(addedByInode[entry.Inode], path)
-		}
-	}
-	for fromPath, fromEntry := range removedFiles {
-		for _, toPath := range addedByInode[fromEntry.Inode] {
-			if consumedFiles[toPath] {
-				continue
-			}
-			toEntry := after.Files()[toPath]
-			if fileRenameEquivalent(fromEntry, toEntry) {
-				entry := toEntry.Clone()
-				renames = append(renames, renamePair{from: fromPath, to: toPath, file: &entry})
-				consumedFiles[toPath] = true
-				delete(removedFiles, fromPath)
-				break
-			}
-		}
-	}
-	addedDirByInode := make(map[uint64]string, len(addedDirs))
-	for path, entry := range addedDirs {
-		addedDirByInode[entry.Inode] = path
-	}
-	for fromPath, fromEntry := range removedDirs {
-		toPath, ok := addedDirByInode[fromEntry.Inode]
-		if !ok || consumedDirs[toPath] {
-			continue
-		}
-		toEntry := addedDirs[toPath]
-		if dirRenameEquivalent(fromEntry, toEntry) {
-			entry := toEntry.Clone()
-			renames = append(renames, renamePair{from: fromPath, to: toPath, dir: &entry})
-			consumedDirs[toPath] = true
-			delete(removedDirs, fromPath)
-		}
-	}
-	sort.Slice(renames, func(i, j int) bool { return depthOf(renames[i].from) > depthOf(renames[j].from) })
-	for _, rn := range renames {
-		op := Op{Type: OpRename, Paths: []string{rn.from, rn.to}, Cause: cause, Timestamp: now}
-		if rn.file != nil {
-			op.File = rn.file
-			op.Chunks = chunkRecordsFor(after, rn.file.Chunks)
-		} else {
-			op.Dir = rn.dir
-		}
-		stack.append(op)
-	}
-
-	// Remaining deletes, deepest first so an rmdir replays after its
-	// (separately recorded) children are gone.
-	delPaths := make([]string, 0, len(removedFiles)+len(removedDirs))
-	for path := range removedFiles {
-		delPaths = append(delPaths, path)
-	}
-	for path := range removedDirs {
-		delPaths = append(delPaths, path)
-	}
-	sort.Slice(delPaths, func(i, j int) bool { return depthOf(delPaths[i]) > depthOf(delPaths[j]) })
-	for _, path := range delPaths {
-		if entry, ok := removedFiles[path]; ok {
-			stack.append(Op{Type: OpDeleteFile, Paths: []string{path}, Cause: cause, Timestamp: now, FreedChunks: len(entry.Chunks)})
-			continue
-		}
-		stack.append(Op{Type: OpRmdir, Paths: []string{path}, Cause: cause, Timestamp: now})
-	}
-
-	// Directory creates/changes, shallowest first; root setattr (path "")
-	// sorts first naturally.
-	sort.Slice(dirChanges, func(i, j int) bool { return depthOf(dirChanges[i].path) < depthOf(dirChanges[j].path) })
-	for _, ch := range dirChanges {
-		entry := ch.entry.Clone()
-		stack.append(Op{Type: ch.kind, Paths: []string{ch.path}, Cause: cause, Timestamp: now, Dir: &entry})
-	}
-	addedDirPaths := make([]string, 0, len(addedDirs))
-	for path := range addedDirs {
-		if consumedDirs[path] {
-			continue
-		}
-		addedDirPaths = append(addedDirPaths, path)
-	}
-	sort.Strings(addedDirPaths)
-	for _, path := range addedDirPaths {
-		entry := addedDirs[path].Clone()
-		stack.append(Op{Type: OpMkdir, Paths: []string{path}, Cause: cause, Timestamp: now, Dir: &entry})
-	}
-
-	// File creates/changes, skipping entries already consumed as rename
-	// targets.
-	for path, entry := range after.Files() {
-		if consumedFiles[path] {
-			continue
-		}
-		prev, ok := before.Files()[path]
-		if ok && fileEntriesEquivalent(prev, entry) {
-			continue
-		}
-		kind := OpPutFile
-		if ok && chunksEqual(prev.Chunks, entry.Chunks) && prev.Size == entry.Size && prev.Symlink == entry.Symlink {
-			kind = OpSetattr
-		}
-		clone := entry.Clone()
-		op := Op{Type: kind, Paths: []string{path}, Cause: cause, Timestamp: now, File: &clone}
-		if kind == OpPutFile {
-			op.Chunks = chunkRecordsFor(after, clone.Chunks)
-		}
-		stack.append(op)
-	}
-
-	// Release catalog: additions/changes and removals. AssetCount is
-	// derived (RecomputeStats rewrites it), so only CreatedAt is compared.
-	for tag, ref := range after.Releases() {
-		if prev, ok := before.Releases()[tag]; ok && prev.CreatedAt == ref.CreatedAt {
-			continue
-		}
-		clone := ref.Clone()
-		stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Release: &clone, Cause: cause, Timestamp: now})
-	}
-	for tag := range before.Releases() {
-		if _, ok := after.Releases()[tag]; !ok {
-			stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: cause, Timestamp: now})
-		}
-	}
-
-	// Chunk catalog shrinkage (PruneUnreferencedChunks): one merged op.
-	var removedChunks []int64
-	for id := range before.Chunks() {
-		if _, ok := after.Chunks()[id]; !ok {
-			removedChunks = append(removedChunks, id)
-		}
-	}
-	if len(removedChunks) > 0 {
-		sort.Slice(removedChunks, func(i, j int) bool { return removedChunks[i] < removedChunks[j] })
-		stack.append(Op{Type: OpChunkPrune, Cause: cause, Timestamp: now, RemovedChunks: removedChunks})
-	}
-
-	return stack.ops
 }
 
 func chunksEqual(a, b []int64) bool {
@@ -819,13 +807,6 @@ func chunkRecordsFor(meta *RepoMetadata, ids []int64) map[int64]ChunkInfo {
 		}
 	}
 	return out
-}
-
-func depthOf(path string) int {
-	if path == "" {
-		return 0
-	}
-	return strings.Count(path, "/") + 1
 }
 
 // opSummaryCounts renders the per-class op counts for a commit summary

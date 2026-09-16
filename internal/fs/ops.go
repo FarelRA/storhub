@@ -480,7 +480,7 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		}
 		TouchParentDirectory(repo, oldClean, now)
 		TouchParentDirectory(repo, newClean, now)
-		repo.RecomputeStats()
+
 		return nil
 	}, fmt.Sprintf("storhub: rename %s to %s", oldClean, newClean))
 	return err
@@ -647,7 +647,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			repo.UpsertFile(newPath, f, now)
 		}
 		TouchParentDirectory(repo, dstClean, now)
-		repo.RecomputeStats()
+
 		return nil
 	}, fmt.Sprintf("storhub: copy %s to %s", srcClean, dstClean))
 	return err

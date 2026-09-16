@@ -125,6 +125,11 @@ func opConflictKeys(op Op) []string {
 func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byte, strict bool) (*RepoMetadata, []ConflictResolution, error) {
 	changed := changedPaths(base, upstream)
 	working := upstream.Clone()
+	// One shared replay plan for the batch: moves recorded by earlier
+	// renames resolve later from-references, and removals skipped by
+	// conflict resolution below (plan.unremove) reappear as live children
+	// for later rmdirs.
+	plan := newReplayPlan(ops)
 	var resolutions []ConflictResolution
 	for _, op := range ops {
 		conflictPath := ""
@@ -159,6 +164,9 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 			if upstreamHas {
 				resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
 					Note: fmt.Sprintf("put wins over our delete (data preservation): %s", conflictPath)})
+				// The skipped removal never lands: drop its paths from the
+				// doomed set so a later rmdir sees the survivor again.
+				plan.unremove(op)
 				continue
 			}
 		}
@@ -172,7 +180,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 				Note: fmt.Sprintf("upstream newer for %s (kept upstream, our stale %s dropped)", conflictPath, op.Type)})
 			continue
 		}
-		if err := applyOneOp(working, op, &resolutions); err != nil {
+		if err := applyOneOp(working, op, plan, &resolutions); err != nil {
 			return nil, nil, err
 		}
 		if conflictPath != "" {
@@ -298,7 +306,7 @@ func (h *StorHub) rebaseOntoUpstream(ctx context.Context, project string, ops []
 // inode collisions and duplicate directory inodes; file/file sharing is
 // legal hardlink semantics and stays). Caller provides storage for the
 // recorded resolutions.
-func remapOpCollisions(meta *RepoMetadata, op *Op, resolutions *[]ConflictResolution) {
+func remapOpCollisions(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions *[]ConflictResolution) {
 	if op.File != nil {
 		idRemap := make(map[int64]int64)
 		for id, record := range op.Chunks {
@@ -334,7 +342,30 @@ func remapOpCollisions(meta *RepoMetadata, op *Op, resolutions *[]ConflictResolu
 		// A root setattr asserts the SAME root node, not a competing one:
 		// its inode matching upstream root is identity, not collision.
 		isRootOp := opPath(*op) == "" && op.Type == OpSetattr
-		if !isRootOp && inodeTakenByAnyNode(meta, op.Dir.Inode) {
+		// A rename replays its own entry mid-move: the from-path holding
+		// the payload's inode in the target is the SAME record, not a
+		// competing allocation - and so is its forward-resolved location
+		// when an earlier rename in this batch already relocated the
+		// subtree there. Without this exemption every rename replay
+		// renumbers its own entry - differently per application order -
+		// defeating rename identity AND order-independent replay. A
+		// genuinely divergent upstream record at either path is already
+		// surfaced as a rebase conflict before replay begins. The same
+		// holds for any dir op at its own target path: a setattr, mkdir
+		// or put asserting an entry whose path already holds that inode
+		// is updating that same record in place (a competing allocation
+		// would be a different inode, and a genuinely divergent upstream
+		// record is a rebase conflict, not a replay collision).
+		except := map[string]struct{}{}
+		if len(op.Paths) > 0 {
+			except[op.Paths[0]] = struct{}{}
+			if op.Type == OpRename && plan != nil {
+				// The entry may already live at its batch-forwarded
+				// location when an earlier rename relocated the subtree.
+				except[plan.forward(op.Paths[0])] = struct{}{}
+			}
+		}
+		if !isRootOp && inodeTakenByAnotherNode(meta, op.Dir.Inode, except) {
 			op.Dir.Inode = meta.AllocateInode()
 			recordResolution(resolutions, *op, opPath(*op),
 				"directory inode remapped (collides with upstream node)")
@@ -357,16 +388,22 @@ func inodeCollidesWithDirFamily(meta *RepoMetadata, inode uint64) bool {
 	return false
 }
 
-// inodeTakenByAnyNode reports whether inode is taken by the root, any
-// directory, or any file - everything an incoming DIRECTORY node must
-// avoid (duplicate directory inodes and file/dir sharing both fail
-// Validate).
-func inodeTakenByAnyNode(meta *RepoMetadata, inode uint64) bool {
-	if inodeCollidesWithDirFamily(meta, inode) {
+// inodeTakenByAnotherNode reports whether inode is taken by the root, any
+// directory, or any file OTHER than the entries at exceptPaths. The
+// exemptions are for rename replay: the from-path (and its
+// batch-forwarded location) holding the payload's own inode is identity,
+// not a collision (see the OpRename call site above).
+func inodeTakenByAnotherNode(meta *RepoMetadata, inode uint64, exceptPaths map[string]struct{}) bool {
+	if inode == meta.Root.Inode {
 		return true
 	}
-	for _, f := range meta.Files() {
-		if f.Inode == inode {
+	for path, d := range meta.Dirs() {
+		if _, ok := exceptPaths[path]; !ok && d.Inode == inode {
+			return true
+		}
+	}
+	for path, f := range meta.Files() {
+		if _, ok := exceptPaths[path]; !ok && f.Inode == inode {
 			return true
 		}
 	}

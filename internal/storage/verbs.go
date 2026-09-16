@@ -780,6 +780,13 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// single-blob size limit (admission is per-object at commit), so
 	// measuring the blob serialization must not reject growth on it.
 	candidate := cowTree(pm.meta)
+	// Intent recording: the tracked mutators record what fn changes while
+	// it runs, so op synthesis after admission folds the recorded intents
+	// (O(changes)) instead of diffing the whole pre-transaction tree
+	// (O(tree)). The recorder is transaction-scoped: attached here, dropped
+	// by Clone, detached before the candidate is published.
+	rec := metadata.NewIntentRecorder()
+	candidate.AttachIntentRecorder(rec)
 	// beforeSize is the pre-transaction serialized size, measured on the
 	// private copy (the engine's incremental SerializedSize, not a whole-tree
 	// ToJSON marshal). It is captured before fn so the shrink test below has
@@ -802,8 +809,16 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// resurrects work that was never acknowledged.
 	cause := causeFromMessage(message)
 	admitNow := h.config.Now().Unix()
-	candidate.Normalize(project, admitNow)
-	candidate.RecomputeStats()
+	// Canonicalize the files the mutation touched (chunk-id order is part of
+	// the entry's serialized bytes and the read order), then stamp the
+	// per-transaction bookkeeping. O(changes): the candidate's entries are
+	// already normalized and its stats were maintained incrementally by the
+	// mutators - the full Normalize/RecomputeStats walk is wholesale-
+	// construction work (load, migrate, rebase replay), not mutation work.
+	for path := range rec.FileIntents() {
+		candidate.SortFileChunks(path)
+	}
+	candidate.SealTransaction(project, admitNow)
 	// Admission, expressed for the split layout (version 5). The whole-tree
 	// serialized size is a cheap upper bound (incremental counter, no
 	// allocation-heavy encode): if the entire tree serializes under the
@@ -856,17 +871,14 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	} else {
 		pm.sizeCapped = false
 	}
-	// Op synthesis: diff the pre-transaction tree against the (normalized,
-	// admitted) candidate so every transaction-level mutation (fs/posix
-	// ops, prune, release catalog changes) lands in the op stack - rich
-	// commit messages, the crash-recovery journal, and rebase all read
-	// from it. Runs only after admission: a rejected mutation leaves the
-	// shared stack and journal untouched.
-	//
-	// NEEDS-INTEGRATION(11): intent-based op synthesis (the caller declaring
-	// what it changed) would replace this full before/after diff; until then
-	// the diff is the only way a generic fn's effect is captured.
-	for _, op := range synthesizeOpsFromDiff(pm.meta, candidate, cause, h.config.Now().Unix()) {
+	// Op synthesis: fold the intents the tracked mutators recorded while fn
+	// ran, so every transaction-level mutation (fs/posix ops, prune, release
+	// catalog changes) lands in the op stack - rich commit messages, the
+	// crash-recovery journal, and rebase all read from it. Runs only after
+	// admission: a rejected mutation leaves the shared stack and journal
+	// untouched (the recorder dies with the discarded candidate).
+	candidate.DetachIntentRecorder()
+	for _, op := range synthesizeOpsFromIntents(pm.meta, candidate, rec, cause, h.config.Now().Unix()) {
 		h.appendOpLocked(project, pm, op)
 	}
 	// Publish: candidate was normalized (indexes rebuilt) and is private, so

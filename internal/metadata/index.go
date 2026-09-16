@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"maps"
 	"reflect"
 	"sort"
 	"sync/atomic"
@@ -40,6 +41,16 @@ type derivedState struct {
 	// sections caches the JSON byte contribution of each stored map so
 	// SerializedSize can answer without marshalling the whole tree.
 	sections [4]sectionSize
+
+	// pendingAssets counts chunks that reference a release tag with no
+	// stored ref yet (chunk puts land before the release op replays, or
+	// the release was removed). EnsureRelease and PutRelease drain the
+	// entry into the new ref's AssetCount, so per-release counts stay
+	// exact in every order; RecomputeStats rebuilds this map from the
+	// chunk walk. Per-tree like everything else here: Clone copies it,
+	// the owner-mismatch replacement copies it, and it is never shared
+	// for writing.
+	pendingAssets map[string]int
 }
 
 // invalidateIndexes marks the derived indexes stale without rebuilding them;
@@ -61,7 +72,7 @@ func (m *RepoMetadata) ensureDerived() *derivedState {
 		return m.derived
 	}
 	if d.owner != m {
-		m.derived = &derivedState{idxDirty: true, owner: m, sections: d.sections}
+		m.derived = &derivedState{idxDirty: true, owner: m, sections: d.sections, pendingAssets: maps.Clone(d.pendingAssets)}
 		return m.derived
 	}
 	return d
@@ -265,10 +276,6 @@ func sameMap[K comparable, V any](a, b map[K]V) bool {
 		return a == nil && b == nil
 	}
 	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
-}
-
-func (m *RepoMetadata) markSectionStale(i int) {
-	m.ensureDerived().sections[i].ok = false
 }
 
 func stableSortStrings(strs []string) {

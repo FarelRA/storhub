@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -122,6 +123,13 @@ type RepoMetadata struct {
 	// writing into the shared maps.
 	derived *derivedState `json:"-"`
 
+	// recorder, when non-nil, collects one transaction's mutation intents
+	// (see recorder.go). It is deliberately NOT copied by Clone: it belongs
+	// to exactly one transaction on exactly one tree, and it must never
+	// reach the JSON shadow (unexported, and the shadow is built
+	// explicitly).
+	recorder *IntentRecorder `json:"-"`
+
 	// noCopy makes struct copies (t := *m) a `go vet` copylocks error. A
 	// copy would alias the derived state pointer without the Clone-time
 	// sharing handshake; the runtime owner guard still defends against it,
@@ -222,8 +230,9 @@ func (m *RepoMetadata) Clone() *RepoMetadata {
 	}
 	if d := m.derived; d != nil {
 		cd := &derivedState{
-			idxDirty: d.idxDirty,
-			sections: d.sections,
+			idxDirty:      d.idxDirty,
+			sections:      d.sections,
+			pendingAssets: maps.Clone(d.pendingAssets),
 		}
 		if !d.idxDirty {
 			// Publish the shared maps read-only: mark them shared on BOTH
@@ -404,6 +413,12 @@ func (m *RepoMetadata) RecomputeStats() {
 		}
 	}
 
+	// pendingAssets is rebuilt from the chunk walk: counts that belong to
+	// existing refs land in the refs above; counts for tags with no ref
+	// survive here for a later EnsureRelease/PutRelease to drain. This is
+	// the authoritative reset that keeps the incremental path exact.
+	d := m.ensureDerived()
+	d.pendingAssets = make(map[string]int)
 	for tag := range m.releases {
 		ref := m.releases[tag]
 		if ref.AssetCount != assetCounts[tag] {
@@ -411,6 +426,13 @@ func (m *RepoMetadata) RecomputeStats() {
 			ref.AssetCount = assetCounts[tag]
 			m.releases[tag] = ref
 			m.sizePutRelease(tag, original, true, ref)
+		}
+	}
+	for _, chunk := range m.chunks {
+		if chunk.Release != "" {
+			if _, ok := m.releases[chunk.Release]; !ok {
+				d.pendingAssets[chunk.Release]++
+			}
 		}
 	}
 
@@ -430,6 +452,11 @@ func (m *RepoMetadata) RecomputeStats() {
 // immediately before squashing git history, after PurgeUntracked has
 // reclaimed the corresponding remote assets) - a rollback to an older
 // revision restores its own chunk catalog wholesale.
+//
+// Removals go through DeleteChunk (not raw map deletes) so the tracked
+// mutator stays the single chokepoint for chunk removal: the size section
+// stays exact incrementally and a transaction's intent recorder sees the
+// prune.
 func (m *RepoMetadata) PruneUnreferencedChunks() int {
 	referenced := make(map[int64]struct{})
 	for _, file := range m.files {
@@ -440,12 +467,9 @@ func (m *RepoMetadata) PruneUnreferencedChunks() int {
 	removed := 0
 	for id := range m.chunks {
 		if _, ok := referenced[id]; !ok {
-			delete(m.chunks, id)
+			m.DeleteChunk(id)
 			removed++
 		}
-	}
-	if removed > 0 {
-		m.markSectionStale(secChunks)
 	}
 	return removed
 }
@@ -526,8 +550,10 @@ func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 		CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
 		Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode(),
 	}
+	dir.Normalize(now)
 	m.dirs[path] = dir
 	m.trackDirPut(path, DirMeta{}, false, dir)
+	m.recordDirPut(path, DirMeta{}, false)
 }
 
 func (m *RepoMetadata) RemoveDirectory(path string) bool {
@@ -538,6 +564,7 @@ func (m *RepoMetadata) RemoveDirectory(path string) bool {
 	}
 	delete(m.dirs, path)
 	m.trackDirRemove(path, old)
+	m.recordDirRemove(path, old)
 	return true
 }
 
@@ -568,9 +595,17 @@ func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
 	if ref, ok := m.releases[tag]; ok {
 		return &ref
 	}
-	m.releases[tag] = ReleaseRef{CreatedAt: createdAt}
-	ref := m.releases[tag]
+	ref := ReleaseRef{CreatedAt: createdAt}
+	if d := m.derived; d != nil {
+		// Chunks may reference this tag before the release exists (replay
+		// order, or a put racing the release op): their counts waited in
+		// pendingAssets and land here, keeping AssetCount exact.
+		ref.AssetCount = d.pendingAssets[tag]
+		delete(d.pendingAssets, tag)
+	}
+	m.releases[tag] = ref
 	m.sizePutRelease(tag, ReleaseRef{}, false, ref)
+	m.recordReleasePut(tag, ReleaseRef{}, false)
 	return &ref
 }
 
@@ -594,8 +629,11 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	} else {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
+	file.Normalize(createdAt)
 	m.files[name] = file
 	m.trackFilePut(name, existing, existed, file)
+	m.statsFilePut(existing, existed, file)
+	m.recordFilePut(name, existing, existed)
 }
 
 // FindFile returns a SNAPSHOT of the entry: the pointer targets a copy of
@@ -621,6 +659,7 @@ func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
 		file.AccessedAt = atime
 		m.files[name] = file
 		m.sizePutFile(name, original, true, file)
+		m.recordFilePut(name, original, true)
 		return true
 	}
 	return false
@@ -635,6 +674,7 @@ func (m *RepoMetadata) SetDirAtime(path string, atime int64) bool {
 		dir.AccessedAt = atime
 		m.dirs[path] = dir
 		m.sizePutDir(path, original, true, dir)
+		m.recordDirPut(path, original, true)
 		return true
 	}
 	return false
@@ -657,8 +697,11 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
 	name = normalizeStoredPath(name)
 	existing, existed := m.files[name]
+	file.Normalize(file.ChangedAt)
 	m.files[name] = file
 	m.trackFilePut(name, existing, existed, file)
+	m.statsFilePut(existing, existed, file)
+	m.recordFilePut(name, existing, existed)
 }
 
 // WriteDirDirect stores a directory entry verbatim, mirroring
@@ -667,8 +710,10 @@ func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
 func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
 	path = normalizeStoredPath(path)
 	existing, existed := m.dirs[path]
+	dir.Normalize(dir.ChangedAt)
 	m.dirs[path] = dir
 	m.trackDirPut(path, existing, existed, dir)
+	m.recordDirPut(path, existing, existed)
 }
 
 func (m *RepoMetadata) RemoveFile(name string) bool {
@@ -679,6 +724,8 @@ func (m *RepoMetadata) RemoveFile(name string) bool {
 	}
 	delete(m.files, name)
 	m.trackFileRemove(name, old)
+	m.statsFileRemove(old)
+	m.recordFileRemove(name, old)
 	return true
 }
 
@@ -727,6 +774,7 @@ func (m *RepoMetadata) RemoveRelease(tag string) bool {
 	// Releases are not part of the derived indexes; only the size cache
 	// needs the removal.
 	m.sizeRemoveRelease(tag, old)
+	m.recordReleaseRemove(tag)
 	return true
 }
 
@@ -739,6 +787,13 @@ func (m *RepoMetadata) PutChunk(id int64, info ChunkInfo) {
 	old, existed := m.chunks[id]
 	m.chunks[id] = info
 	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, old, existed, info, true)
+	if existed && old.Release != info.Release {
+		m.countAsset(old.Release, -1)
+	}
+	if !existed || old.Release != info.Release {
+		m.countAsset(info.Release, +1)
+	}
+	m.recordChunkPut(id, existed)
 }
 
 // DeleteChunk removes a chunk record, maintaining the serialized-size cache
@@ -750,6 +805,8 @@ func (m *RepoMetadata) DeleteChunk(id int64) bool {
 	}
 	delete(m.chunks, id)
 	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, old, true, ChunkInfo{}, false)
+	m.countAsset(old.Release, -1)
+	m.recordChunkDelete(id)
 	return true
 }
 
@@ -760,8 +817,15 @@ func (m *RepoMetadata) DeleteChunk(id int64) bool {
 // fingerprint), so tracked writers must use this.
 func (m *RepoMetadata) PutRelease(tag string, ref ReleaseRef) {
 	old, existed := m.releases[tag]
+	if d := m.derived; d != nil {
+		// Fold in counts that arrived while the tag had no ref, exactly
+		// like EnsureRelease; then the stored ref is authoritative.
+		ref.AssetCount += d.pendingAssets[tag]
+		delete(d.pendingAssets, tag)
+	}
 	m.releases[tag] = ref
 	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, old, existed, ref, true)
+	m.recordReleasePut(tag, old, existed)
 }
 
 func (m *RepoMetadata) AllFiles() []FileMeta {
@@ -1227,7 +1291,10 @@ func (m *RepoMetadata) ReplaceFile(name string, file FileMeta) bool {
 		return false
 	}
 	replacement := file.Clone()
+	replacement.Normalize(replacement.ChangedAt)
 	m.files[name] = replacement
 	m.trackFilePut(name, existing, true, replacement)
+	m.statsFilePut(existing, true, replacement)
+	m.recordFilePut(name, existing, true)
 	return true
 }
