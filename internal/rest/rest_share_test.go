@@ -13,6 +13,7 @@ import (
 // the embedder never sets it: a zero option value must mean "default bound",
 // never "unbounded".
 func TestShareTTLDefaultClamp(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{
 		AllowAnonymous:  true,
@@ -49,7 +50,8 @@ func TestShareTTLDefaultClamp(t *testing.T) {
 // creation works immediately AND existing links keep verifying after a
 // restart or across handler instances.
 func TestShareKeyDerivedFromAuthSigningKey(t *testing.T) {
-	auth := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}
+	t.Parallel()
+	auth := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", PasswordHash: testHashPass, UID: 0, PrimaryGID: 0, Admin: true}}}
 
 	newAuthed := func(t *testing.T, client *fakeRESTClient) (http.Handler, string) {
 		t.Helper()
@@ -105,6 +107,7 @@ func TestShareKeyDerivedFromAuthSigningKey(t *testing.T) {
 }
 
 func TestSweepExpiredSharesBoundsRegistry(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler := &restHandler{
 		client: client,

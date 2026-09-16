@@ -35,6 +35,7 @@ func seedDownloadFile(t *testing.T, client *fakeRESTClient, path, content string
 // via GET /shares/{id}/download (attachment + exact bytes), Range resume,
 // and strict claim scoping. Replaces the old POST /downloads + GET /download/{project}.
 func TestDownloadLinkLifecycle(t *testing.T) {
+	t.Parallel()
 	const content = "hello native download\n"
 	fake := newFakeRESTClient()
 	seedDownloadFile(t, fake, "docs/report.txt", content)
@@ -90,6 +91,7 @@ func TestDownloadLinkLifecycle(t *testing.T) {
 // TestDownloadLinkRequiresSigningKey: anonymous deployments without any key
 // get the actionable 403, not a 500.
 func TestDownloadLinkRequiresSigningKey(t *testing.T) {
+	t.Parallel()
 	fake := newFakeRESTClient()
 	seedDownloadFile(t, fake, "f.txt", "x")
 	handler, err := newHandlerForClient(fake, Options{AllowAnonymous: true})
@@ -108,7 +110,7 @@ func newAuthedShareHandler(t *testing.T, client *fakeRESTClient) (http.Handler, 
 	opts := DefaultOptions()
 	opts.Auth = &AuthOptions{
 		TokenSigningKey: []byte("download-test-signing-key-32bytes!"),
-		Users:           []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}},
+		Users:           []User{{Username: "admin", PasswordHash: testHashPass, UID: 0, PrimaryGID: 0, Admin: true}},
 	}
 	handler, err := newHandlerForClient(client, opts)
 	if err != nil {

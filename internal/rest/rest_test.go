@@ -25,6 +25,7 @@ import (
 )
 
 func TestRESTFilesystemWorkflow(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -128,6 +129,7 @@ func TestRESTFilesystemWorkflow(t *testing.T) {
 }
 
 func TestRESTRevertPathAndPrune(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -157,6 +159,7 @@ func TestRESTRevertPathAndPrune(t *testing.T) {
 }
 
 func TestRESTPreconditionsAndDeleteErrors(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -197,6 +200,7 @@ func TestRESTPreconditionsAndDeleteErrors(t *testing.T) {
 }
 
 func TestRESTProjectDeleteAndConditionalNodeRead(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -225,6 +229,7 @@ func TestRESTProjectDeleteAndConditionalNodeRead(t *testing.T) {
 }
 
 func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -239,7 +244,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 	if body := string(readBody(t, config)); !strings.Contains(body, "authEnabled") || !strings.Contains(body, "/api/v1") {
 		t.Fatalf("unexpected config body: %q", body)
 	}
-	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", Password: "pass", UID: 0, PrimaryGID: 0, Admin: true}}}})
+	authed, err := newHandlerForClient(client, Options{Auth: &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeg"), Users: []User{{Username: "admin", PasswordHash: testHashPass, UID: 0, PrimaryGID: 0, Admin: true}}}})
 	if err != nil {
 		t.Fatalf("new authed handler: %v", err)
 	}
@@ -250,6 +255,7 @@ func TestRESTUISurfacesDocumentAndConfig(t *testing.T) {
 }
 
 func TestRESTShareCreateAndAccess(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
@@ -275,6 +281,7 @@ func TestRESTShareCreateAndAccess(t *testing.T) {
 }
 
 func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
@@ -293,6 +300,7 @@ func TestRESTShareDownloadCanBeDisabled(t *testing.T) {
 }
 
 func TestRESTShareCanonicalizesPath(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
@@ -312,6 +320,7 @@ func TestRESTShareCanonicalizesPath(t *testing.T) {
 }
 
 func TestRESTProjectShareListAndDelete(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte("abcdef0123456789abcdef0123456789")})
 	if err != nil {
@@ -1481,6 +1490,7 @@ func (b *gatedBody) Read(p []byte) (int, error) {
 // server accepts an upload it finishes even though the HTTP request's
 // context was canceled (client vanished / connection deadline fired).
 func TestReplaceOutlivesCanceledRequestContext(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {

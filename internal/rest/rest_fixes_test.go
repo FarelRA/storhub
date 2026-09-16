@@ -18,6 +18,7 @@ const testShareKey = "abcdef0123456789abcdef0123456789"
 // ---- GET /projects/{p}/shares/{id} must not leak the token ----
 
 func TestProjectShareGetDoesNotLeakToken(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -51,6 +52,7 @@ func TestProjectShareGetDoesNotLeakToken(t *testing.T) {
 // ---- The clientFor wrapper fails closed; wrappers assert Client ----
 
 func TestClientForFailsClosedOnForeignContextValue(t *testing.T) {
+	t.Parallel()
 	h := &restHandler{
 		client: newFakeRESTClient(),
 		opts:   DefaultOptions(),
@@ -69,6 +71,7 @@ func TestClientForFailsClosedOnForeignContextValue(t *testing.T) {
 }
 
 func TestClientForKeepsAnonymousRawClient(t *testing.T) {
+	t.Parallel()
 	h := &restHandler{
 		client: newFakeRESTClient(),
 		opts:   DefaultOptions(),
@@ -83,6 +86,7 @@ func TestClientForKeepsAnonymousRawClient(t *testing.T) {
 // ---- Redemption routes run as nobody, scoped ----
 
 func TestShareRedemptionRunsAsNobody(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte(testShareKey)})
 	if err != nil {
@@ -100,6 +104,7 @@ func TestShareRedemptionRunsAsNobody(t *testing.T) {
 }
 
 func TestShareDeriveRunsAsNobody(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte(testShareKey)})
 	if err != nil {
@@ -135,6 +140,7 @@ func assertRedemptionIdentities(t *testing.T, client *fakeRESTClient) {
 }
 
 func TestShareRedemptionStaysScopedToSharedPath(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte(testShareKey)})
 	if err != nil {
@@ -153,6 +159,7 @@ func TestShareRedemptionStaysScopedToSharedPath(t *testing.T) {
 // ---- Input validation answers 400, never storage 500s ----
 
 func TestInputValidationReturnsBadRequest(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -211,6 +218,7 @@ func TestInputValidationReturnsBadRequest(t *testing.T) {
 }
 
 func TestFakePruneRejectsUnknownScope(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	if err := client.MkdirContext(context.Background(), "demo", "seed"); err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -226,6 +234,7 @@ func TestFakePruneRejectsUnknownScope(t *testing.T) {
 // ---- Mapped 5xx-class errors never echo internal wording ----
 
 func TestInternalErrorsAreNotEchoed(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -245,6 +254,7 @@ func TestInternalErrorsAreNotEchoed(t *testing.T) {
 }
 
 func TestValidationErrorsKeepTheirMessage(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -260,6 +270,7 @@ func TestValidationErrorsKeepTheirMessage(t *testing.T) {
 // ---- The /content route never renders stored bytes as active content ----
 
 func TestContentReadNeverInlineExecutable(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -290,6 +301,7 @@ func TestContentReadNeverInlineExecutable(t *testing.T) {
 }
 
 func TestDetectContentTypeAllowlist(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ file, want string }{
 		{"a.html", "application/octet-stream"},
 		{"a.svg", "application/octet-stream"},
@@ -307,6 +319,7 @@ func TestDetectContentTypeAllowlist(t *testing.T) {
 // ---- Share management is creator ∪ admin ----
 
 func TestShareManagementRequiresOwnershipOrAdmin(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -351,12 +364,13 @@ func TestShareManagementRequiresOwnershipOrAdmin(t *testing.T) {
 // ---- Auth tokens are revocable via the live user record ----
 
 func TestAuthMiddlewareRechecksUserRecord(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	auth, err := newAuthenticator(AuthOptions{
 		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
 		Users: []User{
-			{Username: "alice", Password: "alice-pass", UID: 1001, PrimaryGID: 2001},
-			{Username: "root", Password: "root-pass", UID: 0, PrimaryGID: 0, Admin: true},
+			{Username: "alice", PasswordHash: testHashAlicePass, UID: 1001, PrimaryGID: 2001},
+			{Username: "root", PasswordHash: testHashRootPass, UID: 0, PrimaryGID: 0, Admin: true},
 		},
 	})
 	if err != nil {
@@ -426,6 +440,7 @@ func TestAuthMiddlewareRechecksUserRecord(t *testing.T) {
 // ---- Auth JWTs are not accepted via ?token= ----
 
 func TestAuthTokenRejectedViaQuery(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -438,6 +453,7 @@ func TestAuthTokenRejectedViaQuery(t *testing.T) {
 }
 
 func TestShareTokenStillAcceptedViaQuery(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -455,6 +471,7 @@ func TestShareTokenStillAcceptedViaQuery(t *testing.T) {
 // ---- Revocation state is per-handler and self-expiring ----
 
 func TestRevocationIsPerHandler(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	newHandler := func() http.Handler {
 		handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte(testShareKey)})
@@ -475,6 +492,7 @@ func TestRevocationIsPerHandler(t *testing.T) {
 }
 
 func TestRevocationEntriesSelfExpire(t *testing.T) {
+	t.Parallel()
 	h := &restHandler{client: newFakeRESTClient(), opts: DefaultOptions(), shares: &shareRegistry{items: map[string]*shareRecord{}, revoked: map[string]time.Time{}}}
 	h.revokeShare("gone", time.Now().Add(-time.Minute))
 	if h.isRevoked("gone") {
@@ -492,6 +510,7 @@ func TestRevocationEntriesSelfExpire(t *testing.T) {
 // ---- UI guard precision + no directory listings ----
 
 func TestSafeDistNameGuard(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ in, want string }{
 		{"/_nuxt/index.html", "_nuxt/index.html"},
 		{"/_nuxt/chunk..2.js", "_nuxt/chunk..2.js"}, // legitimate hashed name
@@ -512,6 +531,7 @@ func TestSafeDistNameGuard(t *testing.T) {
 }
 
 func TestUIDirectoryListingDisabled(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -526,6 +546,7 @@ func TestUIDirectoryListingDisabled(t *testing.T) {
 // ---- Misc hardening ----
 
 func TestBasePathSlashFallsBackToDefault(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, BasePath: "/"})
 	if err != nil {
@@ -535,6 +556,7 @@ func TestBasePathSlashFallsBackToDefault(t *testing.T) {
 }
 
 func TestRecursiveQueryBoolParsing(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -551,6 +573,7 @@ func TestRecursiveQueryBoolParsing(t *testing.T) {
 }
 
 func TestPruneAcceptsBodylessPOST(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -566,6 +589,7 @@ func TestPruneAcceptsBodylessPOST(t *testing.T) {
 }
 
 func TestPatchSuccessReturnsNode(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -581,6 +605,7 @@ func TestPatchSuccessReturnsNode(t *testing.T) {
 }
 
 func TestCanonicalSharePathRejectsEscapes(t *testing.T) {
+	t.Parallel()
 	for _, escaping := range []string{"../x", "docs/../../etc/passwd", "..", "a/../../b", "  ../x  "} {
 		if got, err := canonicalSharePath(escaping); err == nil {
 			t.Fatalf("canonicalSharePath(%q) = %q, want escape rejection", escaping, got)
@@ -603,6 +628,7 @@ func TestCanonicalSharePathRejectsEscapes(t *testing.T) {
 // ---- Constant-work login path ----
 
 func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
+	t.Parallel()
 	auth, err := newAuthenticator(AuthOptions{
 		TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"),
 		Users:           []User{{Username: "alice", Password: "alice-pass", UID: 1, PrimaryGID: 1}},
@@ -650,6 +676,7 @@ func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
 // ---- HTTP-level authz gaps (rollback/revert-path/prune) ----
 
 func TestOpsRoutesDenyNonAdminAndShareTokens(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)

@@ -9,7 +9,21 @@ import (
 	"time"
 )
 
+// Precomputed bcrypt hashes (MinCost) for the shared test users: the
+// authenticator skips hashing when PasswordHash is set, so every handler
+// construction no longer pays a bcrypt generation per user. Login still
+// runs the real bcrypt verify path (just at the cheap cost). The two
+// bcrypt-specific tests (TestHashPasswordAndTokenExpiry,
+// TestLoginConstantWorkForUnknownUsers) keep plaintext passwords to pin
+// real hashing and constant-work behavior at DefaultCost.
+const (
+	testHashAlicePass = "bcrypt$$2a$04$oK0pncMkg4EnPa0nse3I8urQlaVrZcrH3HIgdNCh/qkytBD4BWdje" // alice-pass
+	testHashRootPass  = "bcrypt$$2a$04$mrtVKi7Gl1.j/rzPmzP9Hej5D9Gkw3p2MmDezWRfPp1qeNq.rzh3G" // root-pass
+	testHashPass      = "bcrypt$$2a$04$vfwkqGAcEhulvtmkfrwca.mHwrURLYpraw1GUL.B9St9ke/wOlGwm" // pass
+)
+
 func TestRESTAuthLoginAndPermissions(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -39,6 +53,7 @@ func TestRESTAuthLoginAndPermissions(t *testing.T) {
 }
 
 func TestRESTAuthAdminAndInvalidBearer(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -61,6 +76,7 @@ func TestRESTAuthAdminAndInvalidBearer(t *testing.T) {
 }
 
 func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -89,6 +105,7 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 }
 
 func TestRESTShareBearerCannotEscapeSharedPath(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -109,6 +126,7 @@ func TestRESTShareBearerCannotEscapeSharedPath(t *testing.T) {
 }
 
 func TestRESTShareBearerCannotCreateNestedShares(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -126,6 +144,7 @@ func TestRESTShareBearerCannotCreateNestedShares(t *testing.T) {
 }
 
 func TestHashPasswordAndTokenExpiry(t *testing.T) {
+	t.Parallel()
 	hash, err := HashPassword("secret")
 	if err != nil || !verifyPassword("secret", hash) || verifyPassword("wrong", hash) {
 		t.Fatalf("unexpected password verification result: hash=%q err=%v", hash, err)
@@ -155,8 +174,8 @@ func newAuthedTestHandler(t *testing.T, client *fakeRESTClient) http.Handler {
 	opts.Auth = &AuthOptions{
 		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
 		Users: []User{
-			{Username: "alice", Password: "alice-pass", UID: 1001, PrimaryGID: 2001},
-			{Username: "root", Password: "root-pass", UID: 0, PrimaryGID: 0, Admin: true},
+			{Username: "alice", PasswordHash: testHashAlicePass, UID: 1001, PrimaryGID: 2001},
+			{Username: "root", PasswordHash: testHashRootPass, UID: 0, PrimaryGID: 0, Admin: true},
 		},
 	}
 	handler, err := newHandlerForClient(client, opts)

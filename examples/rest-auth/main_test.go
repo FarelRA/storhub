@@ -8,6 +8,9 @@ import (
 )
 
 func TestMainRequiresToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runRESTAuthHelper(t, nil)
 	if !strings.Contains(out, "GITHUB_TOKEN environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)
@@ -15,6 +18,9 @@ func TestMainRequiresToken(t *testing.T) {
 }
 
 func TestMainRequiresPassword(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runRESTAuthHelper(t, []string{"GITHUB_TOKEN=test-token"})
 	if !strings.Contains(out, "STORHUB_REST_ADMIN_PASSWORD environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)
@@ -22,6 +28,9 @@ func TestMainRequiresPassword(t *testing.T) {
 }
 
 func TestMainRequiresSigningKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runRESTAuthHelper(t, []string{"GITHUB_TOKEN=test-token", "STORHUB_REST_ADMIN_PASSWORD=secret"})
 	if !strings.Contains(out, "STORHUB_REST_SIGNING_KEY environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)

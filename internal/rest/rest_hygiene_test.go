@@ -11,6 +11,7 @@ import (
 // Authorization: Bearer wins inline whitespace, and callers keep their own
 // header-vs-query precedence on top of it.
 func TestRequestBearerTokenPrecedence(t *testing.T) {
+	t.Parallel()
 	withHeader := httptest.NewRequest(http.MethodGet, "/x", nil)
 	withHeader.Header.Set("Authorization", "Bearer   abc123  ")
 	if got := requestBearerToken(withHeader); got != "abc123" {
@@ -30,6 +31,7 @@ func TestRequestBearerTokenPrecedence(t *testing.T) {
 // TestReadSizedBodyMessages pins the per-endpoint 413 wordings surviving the
 // readMutationBody/readPatchBody merge.
 func TestReadSizedBodyMessages(t *testing.T) {
+	t.Parallel()
 	h := &restHandler{opts: DefaultOptions()}
 	mutationMsg := "mutation body exceeds the configured limit of 8388608 bytes; use full-file PUT for large payloads"
 	if _, err := h.readSizedBody(strings.NewReader(strings.Repeat("x", 9<<20)), mutationMsg); err == nil {
@@ -51,6 +53,7 @@ func TestReadSizedBodyMessages(t *testing.T) {
 // TestServeUIDistErrorShapes pins the merged UI handler: the hashed-bundle
 // route keeps its JSON 404, the public route keeps stock http.NotFound.
 func TestServeUIDistErrorShapes(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {

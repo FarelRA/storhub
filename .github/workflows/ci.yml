@@ -94,7 +94,17 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test -count=1 ./...
+      # PR fast path: -short skips the long integration suites (the ones
+      # honoring testing.Short()); the full non-race sweep still runs on
+      # every push to main and on nightly, so coverage is not lost.
+      # Default build parallelism (-p=NumCPU) is used deliberately: a
+      # serialized -p=1 build only wastes wall time.
+      - name: test (PR fast path)
+        if: github.event_name == 'pull_request'
+        run: go test -short -count=1 ./...
+      - name: test
+        if: github.event_name != 'pull_request'
+        run: go test -count=1 ./...
 
   race-amd64:
     runs-on: ubuntu-24.04
@@ -106,7 +116,19 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test -race -count=1 ./...
+      # -race only pays off where there is concurrency to catch, so the PR
+      # gate instruments the concurrency-sensitive packages (storage,
+      # github, fusefs, rest, cli). The FULL -race sweep over ./... runs
+      # nightly (nightly.yml), so coverage is not lost.
+      - name: race (concurrency-sensitive packages)
+        run: >
+          go test -race -count=1
+          ./internal/storage/...
+          ./internal/github/...
+          ./internal/fusefs/...
+          ./internal/rest/...
+          ./rest/...
+          ./internal/cli/...
 
   test-arm64:
     runs-on: ubuntu-24.04-arm
@@ -118,7 +140,12 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test -count=1 ./...
+      - name: test (PR fast path)
+        if: github.event_name == 'pull_request'
+        run: go test -short -count=1 ./...
+      - name: test
+        if: github.event_name != 'pull_request'
+        run: go test -count=1 ./...
 
   race-arm64:
     runs-on: ubuntu-24.04-arm
@@ -130,7 +157,15 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test -race -count=1 ./...
+      - name: race (concurrency-sensitive packages)
+        run: >
+          go test -race -count=1
+          ./internal/storage/...
+          ./internal/github/...
+          ./internal/fusefs/...
+          ./internal/rest/...
+          ./rest/...
+          ./internal/cli/...
 
   build-cross:
     runs-on: ubuntu-24.04

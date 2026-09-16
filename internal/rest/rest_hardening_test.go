@@ -15,6 +15,7 @@ import (
 // TestPanickingHandlerReturns500 pins the recovery middleware: a panic in
 // any handler becomes a clean internal_error, not a dropped connection.
 func TestPanickingHandlerReturns500(t *testing.T) {
+	t.Parallel()
 	handler := &restHandler{
 		client: newFakeRESTClient(),
 		opts:   Options{AllowAnonymous: true}.withDefaults(),
@@ -32,6 +33,7 @@ func TestPanickingHandlerReturns500(t *testing.T) {
 }
 
 func TestOversizedJSONBodyRejectedWith413(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
@@ -45,6 +47,7 @@ func TestOversizedJSONBodyRejectedWith413(t *testing.T) {
 }
 
 func TestUpstreamErrorsAreSanitized(t *testing.T) {
+	t.Parallel()
 	// The mapped message for upstream failures must be generic; raw GitHub
 	// error bodies can carry infrastructure details.
 	if status := mappedStatus(&ghapi.APIError{StatusCode: 500}); status != http.StatusBadGateway {
@@ -68,6 +71,7 @@ func TestUpstreamErrorsAreSanitized(t *testing.T) {
 }
 
 func TestUpstreamNotFoundSanitizedAndCoded(t *testing.T) {
+	t.Parallel()
 	err := &ghapi.APIError{StatusCode: 404, Message: `{"message":"Not Found","documentation_url":"https://docs.github.com"}`}
 	if status := mappedStatus(err); status != http.StatusNotFound {
 		t.Fatalf("upstream 404 should map to 404, got %d", status)
@@ -89,12 +93,14 @@ func TestUpstreamNotFoundSanitizedAndCoded(t *testing.T) {
 }
 
 func TestMappedCodeNamesBadGateway(t *testing.T) {
+	t.Parallel()
 	if code := mappedCode(http.StatusBadGateway); code != "bad_gateway" {
 		t.Fatalf("502 must map to bad_gateway, got %q", code)
 	}
 }
 
 func TestShareDownloadSupportsHead(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{
 		AllowAnonymous:  true,
@@ -125,6 +131,7 @@ func TestShareDownloadSupportsHead(t *testing.T) {
 // in-memory registry is only bookkeeping for listings/revocation), listings
 // never leak it, and deletion revokes immediately for this process.
 func TestShareRedemptionIsStateless(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)

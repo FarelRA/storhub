@@ -8,6 +8,9 @@ import (
 )
 
 func TestMainRequiresToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	helper := os.Args[0]
 	cmd := exec.Command(helper, "-test.run=TestRESTHelperProcess", "--", "main")
 	cmd.Env = append(os.Environ(), "GO_WANT_REST_HELPER=1")

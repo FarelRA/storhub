@@ -60,6 +60,7 @@ func (f *authorizedClientFactory) as(p restPrincipal) *authorizedClient {
 }
 
 func TestAuthorizationMatrix(t *testing.T) {
+	t.Parallel()
 	f := newMatrixTree(t)
 	owner := restPrincipal{Kind: "user", Username: "alice", UID: 1001, PrimaryGID: 2001}
 	groupMember := restPrincipal{Kind: "user", Username: "bob", UID: 1002, PrimaryGID: 3000, Groups: []uint32{2001}}

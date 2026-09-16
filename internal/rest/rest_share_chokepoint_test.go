@@ -25,6 +25,7 @@ type panickingClient struct {
 // interface, and a read method whose zero-argument path escapes the share
 // scope likewise trips the panicking underlying.
 func TestRestrictedClientDeniesEverything(t *testing.T) {
+	t.Parallel()
 	client := newRestrictedClient(panickingClient{}, "unshared-project", "shared")
 	if client.allowedPath == "" {
 		t.Fatal("test expects a non-root allowed path so zero args cannot match")
@@ -68,6 +69,7 @@ func TestRestrictedClientDeniesEverything(t *testing.T) {
 
 // TestShareCreateLocationHeader pins the 201 creation convention.
 func TestShareCreateLocationHeader(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -99,6 +101,7 @@ func TestShareCreateLocationHeader(t *testing.T) {
 // that revision is enforced against the backend (stale revision fails 412),
 // and classic attribute ETags keep their freshness semantics.
 func TestRevisionPreconditionEndToEnd(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
@@ -163,6 +166,7 @@ func quote(v string) string { return `"` + v + `"` }
 // truncate) to backend CAS instead of being false-412'd by the attribute-
 // ETag fast path, and a stale revision still fails 412 on every one of them.
 func TestRevisionCASOnPatchFamily(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)

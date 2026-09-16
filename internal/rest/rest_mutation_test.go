@@ -13,6 +13,7 @@ import (
 // anything beyond the configured cap is refused with 413 instead of being
 // written chunk-by-chunk with torn intermediate states.
 func TestRESTAppendRejectsOversizedBodies(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, MaxPatchBodySize: 8})
 	if err != nil {
@@ -42,6 +43,7 @@ func TestRESTAppendRejectsOversizedBodies(t *testing.T) {
 // TestRESTRemovesOrphanOnFailedReplace ensures a failed body transfer after
 // create does not strand an empty placeholder file.
 func TestRESTRemovesOrphanOnFailedReplace(t *testing.T) {
+	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {
