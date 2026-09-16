@@ -424,7 +424,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			}
 		}
 		for id, info := range op.Chunks {
-			meta.Chunks[id] = info
+			meta.PutChunk(id, info)
 		}
 	case OpMkdir:
 		if op.Dir != nil {
@@ -476,7 +476,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 		}
 	case OpRelease:
 		if op.Release != nil {
-			meta.Releases[op.Tag] = op.Release.Clone()
+			meta.PutRelease(op.Tag, op.Release.Clone())
 		} else {
 			meta.RemoveRelease(op.Tag)
 		}

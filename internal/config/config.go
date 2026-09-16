@@ -74,6 +74,12 @@ type Config struct {
 	BaseRetryDelay   time.Duration
 	MaxRetryDelay    time.Duration
 
+	// RevivalTimeout bounds how long a dirty-mutation revival waits for an
+	// evicted project's commit loop to finish exiting before it revives the
+	// entry without swapping the loop's channels. Zero takes the library
+	// default (5s); embedders and tests may shorten it.
+	RevivalTimeout time.Duration
+
 	// RateReserve keeps this many requests of the hourly GitHub budget
 	// unspent as headroom for recovery operations. Negative restores the
 	// client default.
@@ -144,6 +150,7 @@ func Default() Config {
 		MaxRetries:            4,
 		BaseRetryDelay:        500 * time.Millisecond,
 		MaxRetryDelay:         8 * time.Second,
+		RevivalTimeout:        5 * time.Second,
 		RateReserve:           25,
 		RateMaxWait:           15 * time.Minute,
 		RatePointsPerMin:      720,

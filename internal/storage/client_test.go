@@ -397,10 +397,15 @@ func TestConflictRecoveryRetainsPendingOps(t *testing.T) {
 func TestRevivalTimeoutRetainsAcknowledgedMutation(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
+	cfg := smallTransferTestConfig()
+	// Shorten the revival bound so the timeout branch is reached in ~50ms
+	// instead of the 5s production default; the assertion (entry retained +
+	// marked dirty) is about the branch's behavior, not its duration.
+	cfg.RevivalTimeout = 50 * time.Millisecond
+	hub := backend.newClient(t, cfg)
 
 	// Fabricate an evicted instance whose loop never exits: stoppedCh stays
-	// open, so markProjectDirtyLiveLocked takes the 5s timeout branch.
+	// open, so markProjectDirtyLiveLocked takes the timeout branch.
 	pm := &projectMetadata{
 		meta:      NewRepoMetadata("strand"),
 		sha:       "tok",

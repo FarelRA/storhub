@@ -592,6 +592,16 @@ func (h *StorHub) startCommitLoopLocked(project string, pm *projectMetadata) boo
 // Caller must hold pm.mu; the lock is dropped and re-acquired around cache
 // bookkeeping so metaMu→pm.mu ordering stays consistent with
 // getOrCreateProjectMeta.
+// revivalTimeout returns the configured bound on waiting for an evicted
+// commit loop to exit during revival, defaulting to 5s when unset (a
+// literally-constructed Config that never ran WithDefaults).
+func (h *StorHub) revivalTimeout() time.Duration {
+	if d := h.config.RevivalTimeout; d > 0 {
+		return d
+	}
+	return 5 * time.Second
+}
+
 func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) chan struct{} {
 	if !pm.stopped {
 		markProjectDirtyLocked(pm)
@@ -608,7 +618,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	// has actually returned.
 	select {
 	case <-stoppedCh:
-	case <-time.After(5 * time.Second):
+	case <-time.After(h.revivalTimeout()):
 		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
 		// The mutation is already acknowledged. Re-insert the entry
 		// (the old loop is still alive and will exit on its closed
@@ -702,7 +712,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 func (h *StorHub) debugf(format string, args ...any) {
 	// Guard the level before Sprintf: at Info level the format work was
 	// pure discarded allocation on every call.
-	if !h.logger.Enabled(context.TODO(), slog.LevelDebug) {
+	if !h.logger.Enabled(context.Background(), slog.LevelDebug) {
 		return
 	}
 	logging.Debug(h.logger, fmt.Sprintf(format, args...))
@@ -1637,7 +1647,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	chunkIDs := make([]int64, len(chunks))
 	for i := range chunks {
 		id := tree.AllocateChunkID()
-		tree.Chunks[id] = chunks[i]
+		tree.PutChunk(id, chunks[i])
 		chunkIDs[i] = id
 	}
 	fileMeta.Chunks = chunkIDs
@@ -1880,7 +1890,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	chunkIDs := make([]int64, len(newChunks))
 	for i := range newChunks {
 		id := tree.AllocateChunkID()
-		tree.Chunks[id] = newChunks[i]
+		tree.PutChunk(id, newChunks[i])
 		chunkIDs[i] = id
 	}
 	patched.Chunks = chunkIDs
@@ -1957,7 +1967,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	chunkIDs := make([]int64, len(newChunks))
 	for i := range newChunks {
 		id := tree.AllocateChunkID()
-		tree.Chunks[id] = newChunks[i]
+		tree.PutChunk(id, newChunks[i])
 		chunkIDs[i] = id
 	}
 	patched.Chunks = chunkIDs
@@ -2030,7 +2040,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	chunkIDs := make([]int64, len(newChunks))
 	for i := range newChunks {
 		id := tree.AllocateChunkID()
-		tree.Chunks[id] = newChunks[i]
+		tree.PutChunk(id, newChunks[i])
 		chunkIDs[i] = id
 	}
 	rewritten.Chunks = chunkIDs
@@ -2227,7 +2237,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	chunkIDs := make([]int64, len(results))
 	for i := range results {
 		id := tree.AllocateChunkID()
-		tree.Chunks[id] = results[i]
+		tree.PutChunk(id, results[i])
 		chunkIDs[i] = id
 	}
 	fileMeta.Chunks = chunkIDs
