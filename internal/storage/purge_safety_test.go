@@ -13,6 +13,7 @@ import (
 // snapshot: a file committed after the local cache was populated must be
 // visible, or purge deletes live releases.
 func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -53,6 +54,7 @@ func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 // A release whose asset count cannot be determined must be skipped
 // (fail-closed), never deleted: the picker fail-closes the same way.
 func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -95,6 +97,7 @@ func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 // classifying against a dirty tree (or overwriting it on prune-commit)
 // risks deleting releases a pending commit is about to reference.
 func TestPurgeRefusesDirtyProject(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	project := "project-purge-dirty"

@@ -18,6 +18,7 @@ import (
 // A rollback snapshot that references a chunk ID absent from the chunk
 // catalog must be rejected, not silently skipped.
 func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -46,6 +47,7 @@ func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 // rollback. The intercept deletes the asset inside the commit PUT itself,
 // i.e. after validateMetadataSnapshot already passed.
 func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -87,9 +89,15 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 // A failed commit must not mutate shared state. The oversize payload is
 // staged by direct (test-only) surgery to bypass admission; LastMod is
 // the canary: pre-fix Normalize/LastMod/RecomputeStats run in place before
-// the size check. 65000 chunked files serialize to ~8.7MB, safely past the
-// 8MB ceiling (60000 only reaches ~8.0MB and never trips it).
+// the size check. 13000 chunked files padded to ~740B each serialize to
+// ~9.6MB, safely past the 8MiB ceiling: the minimum fixture that crosses
+// it (the old 65000-entry shape proved the same invariant at 5x the
+// per-entry CPU cost; entry count, not bytes, drives the commit-path work).
 func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("oversize fixture is heavy")
+	}
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -99,8 +107,9 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	pm.meta.LastMod = 12345
 	sharedChunk := pm.meta.AllocateChunkID()
 	pm.meta.Chunks[sharedChunk] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 1}
-	for i := 0; i < 65000; i++ {
-		name := strings.Repeat("x", 8) + itoa(i)
+	pad := strings.Repeat("x", 600)
+	for i := 0; i < 13000; i++ {
+		name := strings.Repeat("x", 8) + itoa(i) + pad
 		pm.meta.UpsertFile(name, FileMeta{Size: 1, Mode: 0o644, Chunks: []int64{sharedChunk}}, 1700000000)
 	}
 	markProjectDirtyLocked(pm)
@@ -124,6 +133,7 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 // FlushMetadata must run commitLoop-style conflict recovery: after a
 // 409 the local cache must converge on remote HEAD instead of staying stale.
 func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
@@ -184,6 +194,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 // Branch names are not revisions. 'main' must be rejected even though
 // the contents API would otherwise resolve it to HEAD content.
 func TestHardeningRollbackRejectsBranchName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -214,6 +225,7 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 // Shutdown drains dirty metadata without an explicit flush.
 // Must keep passing after the shutdown sweep lands.
 func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -238,6 +250,7 @@ func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 // A mutation that lands after its commit loop already exited (its
 // trigger poke has no listener) must still converge on a later Shutdown.
 func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -275,6 +288,7 @@ func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 // Patch builders must return the release that actually holds the new
 // chunks, not the (now full) release they started from.
 func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -323,6 +337,7 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 // The release cache must deep-copy: mutating a fetched slice must not
 // corrupt the cache.
 func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -349,6 +364,7 @@ func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
 // -1 placeholder bumps must not skew picker math: once placeholders are
 // present the true count has to be resolved from the server.
 func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	backend.embedCap = 2
@@ -393,15 +409,23 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 // 8MB ceiling — fail fast, never accept-then-never-commit. An
 // UpdateRepoMetadataContext mutation whose result exceeds maxMetadataBytes
 // must be rejected at admission with a clear error, leaving shared state
-// untouched and the project still usable. 70000 plain files serialize to
-// ~8.5MB, safely past the ceiling (60000 only reaches ~7.3MB).
+// untouched and the project still usable. 13000 plain files padded to
+// ~730B each serialize to ~9.4MB, safely past the ceiling: the minimum
+// fixture that crosses it (entry count, not bytes, drives the admission
+// path's per-entry work).
 func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("oversize fixture is heavy")
+	}
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
+	pad := strings.Repeat("y", 600)
+	firstName := "bulk-0-" + pad
 	_, err := hub.UpdateRepoMetadataContext(ctx, "project-ceiling", func(meta *RepoMetadata) error {
-		for i := 0; i < 70000; i++ {
-			meta.UpsertFile("bulk-"+itoa(i), FileMeta{Size: 1, Mode: 0o644}, 1700000000)
+		for i := 0; i < 13000; i++ {
+			meta.UpsertFile("bulk-"+itoa(i)+"-"+pad, FileMeta{Size: 1, Mode: 0o644}, 1700000000)
 		}
 		return nil
 	}, "bulk fill past ceiling")
@@ -414,7 +438,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	pm := hub.getOrCreateProjectMeta("project-ceiling")
 	pm.mu.RLock()
 	stillDirty := pm.dirty
-	ghost := pm.meta.FindFile("bulk-0")
+	ghost := pm.meta.FindFile(firstName)
 	pm.mu.RUnlock()
 	if ghost != nil {
 		t.Fatal("rejected bulk leaked into shared state")

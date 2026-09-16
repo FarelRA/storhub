@@ -15,6 +15,7 @@ import (
 // the entry in that window; the old code panicked dereferencing the nil
 // result of GetDirectory/FindFile before calling Clone.
 func TestAtimeUpdateSurvivesDeleteDuringRevival(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := smallTransferTestConfig()
 	cfg.AtimePolicy = "strictatime"
@@ -73,10 +74,17 @@ func TestAtimeUpdateSurvivesDeleteDuringRevival(t *testing.T) {
 		panicCh <- nil
 	}()
 
-	// Let the atime writer pass SetDirAtime and park in the revival
-	// select (pm.mu released), then delete the directory through the same
-	// pointer - the stale-pointer delete of the failure scenario.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the event that matters: the atime writer has completed its
+	// SetDirAtime read (visible in the tree) and released pm.mu, so it is
+	// parked in the revival critical section. The delete below then lands
+	// in the stale-pointer window deterministically - the revival's
+	// re-read cannot run before close(release) unblocks the wedged loop.
+	pollUntil(t, 3*time.Second, "atime writer to pass SetDirAtime", func() bool {
+		pm.mu.RLock()
+		defer pm.mu.RUnlock()
+		dir := pm.meta.GetDirectory("docs")
+		return dir != nil && dir.AccessedAt == 1700000200
+	})
 	pm.mu.Lock()
 	pm.meta.RemoveDirectory("docs")
 	pm.mu.Unlock()

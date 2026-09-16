@@ -13,6 +13,7 @@ import (
 )
 
 func TestSpliceEdit(t *testing.T) {
+	t.Parallel()
 	mk := func(offset, size, assetOffset, assetID int64) ChunkInfo {
 		return ChunkInfo{Offset: offset, Size: size, AssetOffset: assetOffset, AssetID: assetID, Release: "v1"}
 	}
@@ -83,6 +84,7 @@ func TestSpliceEdit(t *testing.T) {
 }
 
 func TestSpliceEditSuffixAssetOffset(t *testing.T) {
+	t.Parallel()
 	chunk := ChunkInfo{Offset: 0, Size: 20, AssetOffset: 7, AssetID: 3}
 	got := spliceEdit([]ChunkInfo{chunk}, 10, 5, 1, []ChunkInfo{{Offset: 10, Size: 1, AssetID: 5}})
 	var suffix *ChunkInfo
@@ -104,6 +106,7 @@ func TestSpliceEditSuffixAssetOffset(t *testing.T) {
 // one new asset per edited chunk, one playlist rebuild - instead of one
 // release-listing round trip per edit.
 func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "batch.txt", []byte("0123456789"))

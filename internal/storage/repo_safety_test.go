@@ -14,6 +14,7 @@ import (
 // TestUpdateRepoMetadataReturnsClone proves the returned snapshot is a copy:
 // mutating it must not leak into the hub's live in-memory metadata.
 func TestUpdateRepoMetadataReturnsClone(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{DisableGitBackend: true})
 	ctx := context.Background()
@@ -53,6 +54,10 @@ func TestUpdateRepoMetadataReturnsClone(t *testing.T) {
 // on the git path: a write carrying a stale version token must fail with a
 // 409 conflict (like the REST path) instead of silently overwriting.
 func TestCommitRepoMetadataGitPathRejectsStalePreviousSHA(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{GitCacheDir: t.TempDir()})
@@ -73,6 +78,10 @@ func TestCommitRepoMetadataGitPathRejectsStalePreviousSHA(t *testing.T) {
 // TestSquashHistorySyncsFromRemote proves ordering: squash must observe the
 // latest remote content, not the locally cached HEAD.
 func TestSquashHistorySyncsFromRemote(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	ctx := context.Background()
 	a := newGitRepo(t.TempDir(), "owner", "demo", "")
@@ -103,6 +112,10 @@ func TestSquashHistorySyncsFromRemote(t *testing.T) {
 // not a blind force-push: a stale expected-old-OID aborts with 409 before
 // mutating anything, while a fresh base succeeds.
 func TestSquashHistoryCASRejectsStaleBase(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	ctx := context.Background()
 	a := newGitRepo(t.TempDir(), "owner", "demo", "")
@@ -155,6 +168,10 @@ func TestSquashHistoryCASRejectsStaleBase(t *testing.T) {
 // TestRollbackGitPathHappyPath guards the Rollback region edit: a rollback
 // with a fresh token on the git path must still succeed end to end.
 func TestRollbackGitPathHappyPath(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	backend := newMockGitHub(t)
 	backend.repos["demo"] = &mockRepo{

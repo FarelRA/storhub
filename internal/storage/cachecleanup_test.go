@@ -31,6 +31,7 @@ func TestCacheBasePrecedence(t *testing.T) {
 }
 
 func TestProjectLockLifecycle(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	if err := claimProjectLock(base, "demo"); err != nil {
 		t.Fatalf("claim: %v", err)
@@ -52,6 +53,7 @@ func TestProjectLockLifecycle(t *testing.T) {
 }
 
 func TestClaimRefusesLiveForeignLock(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	lockDir := filepath.Join(base, ".locks")
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
@@ -68,6 +70,7 @@ func TestClaimRefusesLiveForeignLock(t *testing.T) {
 }
 
 func TestClaimReclaimsDeadLock(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	lockDir := filepath.Join(base, ".locks")
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
@@ -98,6 +101,7 @@ func TestClaimReclaimsDeadLock(t *testing.T) {
 }
 
 func TestReapOrphanedRemovesDeadAndSparesLive(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 
 	// Orphan: unlocked project dir.
@@ -151,6 +155,10 @@ func TestReapOrphanedRemovesDeadAndSparesLive(t *testing.T) {
 }
 
 func TestGitRepoEnsureReclaimsStaleDirectory(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	base := t.TempDir()
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(base, "owner", "demo", "")
@@ -193,6 +201,7 @@ func TestGitRepoEnsureReclaimsStaleDirectory(t *testing.T) {
 // object cache otherwise lingers forever. Liveness is judged by the git
 // worktree lock (the object cache has none of its own).
 func TestReapOrphanedObjectCaches(t *testing.T) {
+	t.Parallel()
 	gitBase := t.TempDir()
 	objectsBase := t.TempDir()
 
@@ -253,6 +262,7 @@ func TestObjectCacheBaseMirrorsConfigLayout(t *testing.T) {
 }
 
 func TestWrapNoSpaceTyping(t *testing.T) {
+	t.Parallel()
 	dir := "/cache/git"
 	plain := errors.New("write failed")
 	if wrapNoSpace(dir, plain) != plain {

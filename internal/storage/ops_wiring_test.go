@@ -19,6 +19,7 @@ import (
 // hub on the same journal dir must replay them onto the remote state and
 // commit them.
 func TestJournalWrittenByMutations(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	journalDir := t.TempDir()
 	cfg := Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, JournalDir: journalDir}
@@ -70,6 +71,7 @@ func TestJournalWrittenByMutations(t *testing.T) {
 }
 
 func TestJournalReplayOnColdStart(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	journalDir := t.TempDir()
 	cfg := Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, JournalDir: journalDir}
@@ -144,6 +146,7 @@ func TestJournalReplayOnColdStart(t *testing.T) {
 }
 
 func TestJournalCorruptTailDropped(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	journalDir := t.TempDir()
 	cfg := Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, JournalDir: journalDir}
@@ -191,6 +194,7 @@ func TestJournalCorruptTailDropped(t *testing.T) {
 }
 
 func TestCommitMessageRecordsOps(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
@@ -239,6 +243,7 @@ func TestCommitMessageRecordsOps(t *testing.T) {
 }
 
 func TestStackClearedOnCommitRetainedOnFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
@@ -293,6 +298,7 @@ func TestStackClearedOnCommitRetainedOnFailure(t *testing.T) {
 }
 
 func TestConflictRebasesOps(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
@@ -359,6 +365,7 @@ func TestConflictRebasesOps(t *testing.T) {
 }
 
 func TestConflictStrictModeRetainsStack(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, StrictConflicts: true})
 	ctx := context.Background()
@@ -399,6 +406,7 @@ func TestConflictStrictModeRetainsStack(t *testing.T) {
 // family and touches the parent directory; every touched entry must land in
 // the op stack, or a conflict replay would silently revert the propagation.
 func TestFamilyPropagationCaptured(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
@@ -450,6 +458,7 @@ func TestFamilyPropagationCaptured(t *testing.T) {
 }
 
 func TestAtimeOpEmitted(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, AtimePolicy: "strictatime"})
 	ctx := context.Background()
@@ -479,6 +488,7 @@ func TestAtimeOpEmitted(t *testing.T) {
 // TestBulkImportStackPerformance guards the coalescing index: a large bulk
 // import must synthesize ops without quadratic behavior.
 func TestBulkImportStackPerformance(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("perf guard skipped in short mode")
 	}

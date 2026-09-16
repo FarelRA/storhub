@@ -186,8 +186,9 @@ func ReapOrphanedCaches(logger *slog.Logger) int {
 // caches carry no lock of their own, so liveness is judged by the git
 // worktree lock in lockBase: a git-backed mount is spared outright. A
 // REST-only mount has no lock and may lose its cached bytes here — that is
-// a performance event, never a correctness one: the cache is verify-on-read
-// and self-healing, and every miss simply refetches from the repo.
+// a performance event, never a correctness one: the cache verifies a cold
+// entry's content address on first read and self-heals, and every miss
+// simply refetches from the repo.
 func reapOrphanedObjectCaches(logger *slog.Logger, objectsBase, lockBase string) int {
 	entries, err := os.ReadDir(objectsBase)
 	if err != nil {

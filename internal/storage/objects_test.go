@@ -18,6 +18,7 @@ import (
 func objBytes(s string) []byte { return []byte(s) }
 
 func TestObjectCachePutGetHit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c := newObjectCache(dir, 128)
 	data := objBytes(`{"m":{"i":1}}`)
@@ -36,6 +37,7 @@ func TestObjectCachePutGetHit(t *testing.T) {
 }
 
 func TestObjectCacheGetMiss(t *testing.T) {
+	t.Parallel()
 	c := newObjectCache(t.TempDir(), 128)
 	if _, ok := c.get(meta.ObjectSHA(objBytes("nope"))); ok {
 		t.Fatal("expected miss for uncached object")
@@ -43,6 +45,7 @@ func TestObjectCacheGetMiss(t *testing.T) {
 }
 
 func TestObjectCacheVerifyOnRead(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c := newObjectCache(dir, 128)
 	data := objBytes("good content")
@@ -63,6 +66,7 @@ func TestObjectCacheVerifyOnRead(t *testing.T) {
 }
 
 func TestObjectCachePutRejectsMismatchedSHA(t *testing.T) {
+	t.Parallel()
 	c := newObjectCache(t.TempDir(), 128)
 	// Claiming the wrong address must not store the object.
 	if c.put(meta.ObjectSHA(objBytes("other")), objBytes("this")) {
@@ -71,6 +75,7 @@ func TestObjectCachePutRejectsMismatchedSHA(t *testing.T) {
 }
 
 func TestObjectCacheLRUEviction(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	max := 4
 	c := newObjectCache(dir, max)
@@ -100,6 +105,7 @@ func TestObjectCacheLRUEviction(t *testing.T) {
 }
 
 func TestObjectCacheGetRefreshesRecency(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c := newObjectCache(dir, 2)
 	a := objBytes("a")
@@ -123,6 +129,7 @@ func TestObjectCacheGetRefreshesRecency(t *testing.T) {
 // contents-API size limit), so eviction must also honor a byte budget,
 // evicting least-recently-used first and keeping the accounting consistent.
 func TestObjectCacheByteBudgetEviction(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c := newObjectCache(dir, 1000) // count cap irrelevant; bytes must bind
 	c.maxBytes = 100
@@ -156,6 +163,7 @@ func TestObjectCacheByteBudgetEviction(t *testing.T) {
 // A single object larger than the whole budget must be evicted immediately,
 // not wedge the eviction loop.
 func TestObjectCacheOversizedSinglePut(t *testing.T) {
+	t.Parallel()
 	c := newObjectCache(t.TempDir(), 100)
 	c.maxBytes = 10
 	data := objBytes(strings.Repeat("y", 50))

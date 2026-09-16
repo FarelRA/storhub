@@ -27,6 +27,7 @@ import (
 // through the public CDN surface, never mock internals) and the byte total
 // must match the file size.
 func TestPatchedFileDownloadContentCorrectness(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
@@ -130,6 +131,7 @@ func cdnAssetSize(t *testing.T, backend *mockGitHub, assetID int64) int64 {
 
 // Renaming a file onto an existing file atomically replaces it.
 func TestRenameOntoExistingFileReplaces(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -160,6 +162,7 @@ func TestRenameOntoExistingFileReplaces(t *testing.T) {
 // Renaming a file onto a directory fails with EISDIR; renaming a
 // directory onto a file fails with ENOTDIR.
 func TestRenameAcrossKindsFails(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -180,6 +183,7 @@ func TestRenameAcrossKindsFails(t *testing.T) {
 
 // Copy duplicates file content, keeps the source, and copies trees.
 func TestCopyFileAndDirectory(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -220,6 +224,7 @@ func TestCopyFileAndDirectory(t *testing.T) {
 
 // Copy error paths — missing source, self-copy, dir onto file.
 func TestCopyErrors(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -244,6 +249,10 @@ func TestCopyErrors(t *testing.T) {
 // Git backend round trip — write through one handle, read through a
 // fresh handle and through the hub's git path.
 func TestGitBackendWriteReadRoundTrip(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{GitCacheDir: t.TempDir()})
@@ -293,6 +302,10 @@ func TestGitBackendWriteReadRoundTrip(t *testing.T) {
 
 // Git backend revision history is visible through listFileCommits.
 func TestGitBackendRevisionHistory(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(t.TempDir(), "owner", "demo", "")
 	r.remoteBase = url
@@ -330,6 +343,7 @@ func TestGitBackendRevisionHistory(t *testing.T) {
 // path (valid chunk references); the update itself is a metadata-only
 // marker entry, which validates as an empty file.
 func TestAdvancedMetadataAPI(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -422,6 +436,7 @@ func TestAdvancedMetadataAPI(t *testing.T) {
 // Each atime change is queued BEFORE the synchronous flush that commits
 // it, so no polling for the async commit loop is needed.
 func TestAtimePolicies(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	strictCfg := smallTransferTestConfig()
 	strictCfg.AtimePolicy = "strictatime"
@@ -501,6 +516,7 @@ func TestAtimePolicies(t *testing.T) {
 // FlushProjectContext persists one project, accepts unknown names,
 // and rejects invalid ones.
 func TestFlushProject(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -541,6 +557,7 @@ func TestFlushProject(t *testing.T) {
 // probe fails if the suite ever needs metaCache/pm access. It exercises a
 // full mutation cycle purely through public APIs.
 func TestPublicAPIOnlyMutationCycle(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()

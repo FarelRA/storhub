@@ -13,6 +13,7 @@ import (
 // it.
 
 func TestStorageConformanceSymlinkAndDotDotMatrix(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})

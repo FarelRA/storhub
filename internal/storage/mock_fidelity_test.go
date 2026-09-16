@@ -21,6 +21,7 @@ import (
 // Asset downloads must redirect to a signed CDN URL; range fetches then
 // hit the CDN without an Authorization header.
 func TestMockAssetDownloadRedirectsToCDN(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -121,6 +122,7 @@ func TestMockAssetDownloadRedirectsToCDN(t *testing.T) {
 // Release listing must emit RFC 5988 Link headers and the client must
 // page through them.
 func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -156,6 +158,7 @@ func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
 // Edge case: when the total is an exact multiple of the page size the client
 // must still fetch the terminating empty page instead of stopping early.
 func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -194,6 +197,7 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 // retry succeeds: served==1 proves the fault fired, puts>=2 proves the
 // retry, and the observer proves remote truth converged.
 func TestMockRateLimitRetryOptIn(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	// smallRetryTestConfig inherits RateMaxWait:-1 (fail-fast: any
 	// rate-limit wait is refused, so no retry can happen). Retrying a 429
@@ -253,6 +257,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 
 // API routes require a bearer token; wrong or missing auth 401s.
 func TestMockRequiresAuthorization(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	get := func(auth string) int {
 		req, _ := http.NewRequest(http.MethodGet, backend.server.URL+"/user", nil)
@@ -300,6 +305,7 @@ func TestMockRequiresAuthorization(t *testing.T) {
 // Embedded asset arrays must be deterministic (sorted by asset ID),
 // not Go map-iteration order.
 func TestMockEmbeddedAssetsDeterministicOrder(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()

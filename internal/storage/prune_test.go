@@ -33,6 +33,7 @@ func injectOrphanObject(t *testing.T, hub *StorHub, project string) string {
 }
 
 func TestPruneObjectsRemovesOrphans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -80,6 +81,7 @@ func TestPruneObjectsRemovesOrphans(t *testing.T) {
 // errors, so one blip orphaned (and deleted) everything only that revision
 // referenced — including, if the blip hit HEAD's own read, the live index.
 func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -129,6 +131,7 @@ func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
 // at the cap may be truncated, and an object the cap hides would be deleted
 // as an orphan — prune must refuse to classify from a partial enumeration.
 func TestPruneObjectsRefusesTruncatedListing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -243,6 +246,7 @@ func TestPrunePartialDeleteDropsCachedShas(t *testing.T) {
 }
 
 func TestPruneObjectsLegacyIsNoop(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -264,6 +268,7 @@ func TestPruneObjectsLegacyIsNoop(t *testing.T) {
 // An uninitialized project must be reported honestly, not mislabeled as the
 // legacy single-blob layout it never had.
 func TestPruneObjectsUninitializedIsNoop(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -280,6 +285,7 @@ func TestPruneObjectsUninitializedIsNoop(t *testing.T) {
 }
 
 func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -300,6 +306,10 @@ func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
 // is a threshold, not a retention count. keep > 1 promises retention the
 // squash cannot deliver and must be rejected — on either backend.
 func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -365,6 +375,10 @@ func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 }
 
 func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	ctx := context.Background()
 	url := seedBareMetadataRepo(t)
 	hub := newGitBackedHub(t, url, smallTransferTestConfig())
@@ -406,6 +420,7 @@ func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
 }
 
 func TestRollbackAsRevertV2(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -467,6 +482,7 @@ func TestRollbackAsRevertV2(t *testing.T) {
 // asset is reclaimed, the tracked release AND its referenced asset survive,
 // and the reported counts are the truth, not a sum.
 func TestPruneAssetsWiresPurge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -529,6 +545,7 @@ func TestPruneAssetsWiresPurge(t *testing.T) {
 // PruneAll = history (honestly refused on REST) + objects + assets, with
 // exact per-stage counts.
 func TestPruneAllReclaimsObjectsAndAssets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -584,6 +601,7 @@ func TestPruneAllReclaimsObjectsAndAssets(t *testing.T) {
 // map to the typed scopes and unknown scopes are rejected, not silently
 // treated as no-ops.
 func TestPruneContextScopeAdapter(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -613,6 +631,7 @@ func TestPruneContextScopeAdapter(t *testing.T) {
 // classifying (or committing) against a dirty tree risks deleting what a
 // pending commit is about to reference.
 func TestPruneRefusesDirtyProject(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())

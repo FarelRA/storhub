@@ -17,6 +17,7 @@ import (
 )
 
 func TestHelperUtilities(t *testing.T) {
+	t.Parallel()
 	if got, err := shfs.NormalizePath(" docs/guide.txt "); err != nil || got != " docs/guide.txt " {
 		t.Fatalf("whitespace must be preserved in fs paths: %q %v", got, err)
 	}
@@ -77,6 +78,7 @@ func TestHelperUtilities(t *testing.T) {
 }
 
 func TestNewStorHubAndFUSEDefaults(t *testing.T) {
+	t.Parallel()
 	if _, err := NewStorHub(""); err == nil {
 		t.Fatal("expected empty token error")
 	}
@@ -121,6 +123,7 @@ func requireEnvValue(t *testing.T, name string) string {
 }
 
 func TestAssetNamingDictionaryRegression(t *testing.T) {
+	t.Parallel()
 	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
 	seenExts := make(map[string]int)
 	namer := newAssetNamer()

@@ -10,6 +10,7 @@ import (
 // writer commits while our ops are pending; the commit rebases instead of
 // discarding, and BOTH writers' changes land.
 func TestRebasePreservesBothWriters(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	basePaths := hashPaths(base)
 
@@ -43,6 +44,7 @@ func TestRebasePreservesBothWriters(t *testing.T) {
 }
 
 func TestRebaseLWWOnSamePath(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	seed := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("a.txt", seed, 1700000000)
@@ -84,6 +86,7 @@ func TestRebaseLWWOnSamePath(t *testing.T) {
 // is not "we wrote later". A slow client whose op predates the upstream
 // entry's change must NOT clobber the newer upstream write.
 func TestRebaseOlderLocalWriteLosesToNewerUpstream(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	seed := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("a.txt", seed, 1700000000)
@@ -118,6 +121,7 @@ func TestRebaseOlderLocalWriteLosesToNewerUpstream(t *testing.T) {
 }
 
 func TestRebaseDeleteVsPutPutWins(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	seed := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("keep.txt", seed, 1700000000)
@@ -146,6 +150,7 @@ func TestRebaseDeleteVsPutPutWins(t *testing.T) {
 }
 
 func TestRebaseStrictModeFails(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	seed := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("a.txt", seed, 1700000000)
@@ -166,6 +171,7 @@ func TestRebaseStrictModeFails(t *testing.T) {
 }
 
 func TestRebaseChunkIDCollisionRemapped(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	basePaths := hashPaths(base)
 
@@ -217,6 +223,7 @@ func TestRebaseChunkIDCollisionRemapped(t *testing.T) {
 }
 
 func TestRebaseInodeDirCollisionRemapped(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	basePaths := hashPaths(base)
 
@@ -252,6 +259,7 @@ func TestRebaseInodeDirCollisionRemapped(t *testing.T) {
 }
 
 func TestChangedPathsDetection(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	f := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("same.txt", f, 1700000000)
@@ -277,6 +285,7 @@ func TestChangedPathsDetection(t *testing.T) {
 }
 
 func TestRebaseMessageNote(t *testing.T) {
+	t.Parallel()
 	ops := []Op{
 		{Type: OpPutFile, Paths: []string{"a.txt"}, Cause: "upload", Timestamp: 1700000200, File: &FileMeta{Size: 1, Mode: 0o644, Inode: 2, Chunks: []int64{}}},
 	}
@@ -291,6 +300,7 @@ func TestRebaseMessageNote(t *testing.T) {
 // cap must not split a UTF-8 sequence and emit invalid bytes into a commit
 // message.
 func TestRebaseMessageNoteTruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("a", maxRebaseNoteBytes-1) + "é" // last rune straddles the cap
 	resolutions := []ConflictResolution{{Seq: 1, Path: "x", Note: long}}
 	note := rebaseMessageNote(resolutions, "f00dfeed1234")

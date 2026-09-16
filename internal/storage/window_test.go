@@ -35,6 +35,7 @@ func (f *fragmentReader) Read(p []byte) (int, error) {
 // and only the unconsumed suffix from live - and the reassembled bytes are
 // identical to the original.
 func TestWindowReaderReplayAfterFailure(t *testing.T) {
+	t.Parallel()
 	const size = 8
 	live := &fragmentReader{piece: 3, remaining: size, data: 'A'}
 

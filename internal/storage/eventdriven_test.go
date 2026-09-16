@@ -44,7 +44,7 @@ func pollUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
 		if cond() {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
@@ -70,6 +70,7 @@ func metaIsClean(pm *projectMetadata) bool {
 // contract: a mutation publishes metadata with no periodic flush behind
 // it - there is no interval left to rely on.
 func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 	var puts atomic.Int32
@@ -90,8 +91,15 @@ func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
 // exactly one attempt per trigger; the next trigger retries; Shutdown
 // performs the final drain attempt.
 func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, singleChunkTestConfig())
+	cfg := singleChunkTestConfig()
+	var slept atomic.Int32
+	cfg.Sleep = func(_ context.Context, _ time.Duration) error {
+		slept.Add(1)
+		return nil
+	}
+	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
 	project := "project-failed-push"
 
@@ -123,11 +131,17 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 	pollUntil(t, 3*time.Second, "first failed attempt", func() bool { return attempts.Load() >= 2 })
 
 	// No timer may retry behind the scenes: attempts freeze until the
-	// next explicit trigger.
+	// next explicit trigger. The cfg.Sleep tripwire catches any
+	// backoff-style retry timer deterministically; the short settle
+	// window only covers a raw ticker regression.
 	frozen := attempts.Load()
-	time.Sleep(150 * time.Millisecond)
+	slept.Store(0)
+	time.Sleep(30 * time.Millisecond)
 	if got := attempts.Load(); got != frozen {
 		t.Fatalf("failed push retried on its own: attempts went %d -> %d without a trigger", frozen, got)
+	}
+	if n := slept.Load(); n != 0 {
+		t.Fatalf("commit loop slept %d times without a trigger; a retry timer is back", n)
 	}
 	if metaIsClean(pm) {
 		t.Fatal("dirty state must survive a failed push")
@@ -168,6 +182,7 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 // remote via the read's own trigger instead of waiting for a later
 // mutation or shutdown.
 func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := singleChunkTestConfig()
 	cfg.AtimePolicy = storcfg.AtimeStrict
@@ -199,6 +214,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 // TestInvalidateRepoMetadataStopsCommitLoop pins the leak fix: removing a
 // project from the cache stops its commit loop instead of orphaning it.
 func TestInvalidateRepoMetadataStopsCommitLoop(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 	ctx := context.Background()
@@ -245,6 +261,7 @@ func TestInvalidateRepoMetadataStopsCommitLoop(t *testing.T) {
 // degrades honestly (unbounded insert + warn-once), and an evicted
 // pointer still revives instead of stranding mutations.
 func TestMaxTrackedProjectsCapEvictsOldestCleanKeepsDirty(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := singleChunkTestConfig()
 	cfg.MaxTrackedProjects = 3

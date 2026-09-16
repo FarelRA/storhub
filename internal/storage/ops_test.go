@@ -14,6 +14,7 @@ func newTestMeta(project string) *RepoMetadata {
 }
 
 func TestOpStackPutCoalescing(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	file := FileMeta{Size: 10, Mode: 0o644, Inode: 2, Chunks: []int64{}}
@@ -43,6 +44,7 @@ func TestOpStackPutCoalescing(t *testing.T) {
 }
 
 func TestOpStackDeleteThenPutCoalescesToPut(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	stack.append(Op{Type: OpDeleteFile, Paths: []string{"a.txt"}, Cause: "unlink", Timestamp: 100})
@@ -61,6 +63,7 @@ func TestOpStackDeleteThenPutCoalescesToPut(t *testing.T) {
 }
 
 func TestOpStackPutThenDeleteCoalescesToDelete(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{7}}
@@ -79,6 +82,7 @@ func TestOpStackPutThenDeleteCoalescesToDelete(t *testing.T) {
 }
 
 func TestOpStackRenameChain(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
@@ -106,6 +110,7 @@ func TestOpStackRenameChain(t *testing.T) {
 // so a commit mid-flight would publish A->C after having announced A->B (and
 // rebase onto the wrong target).
 func TestOpStackSnapshotNotAliasedByRenameCoalesce(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
 	stack.append(Op{
@@ -134,6 +139,7 @@ func TestOpStackSnapshotNotAliasedByRenameCoalesce(t *testing.T) {
 // it. The commit publishes A->B; a merged A->C in the surviving stack would
 // replay as "remove A (absent), write C" and leave B as a phantom duplicate.
 func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
 	stack.append(Op{
@@ -172,6 +178,7 @@ func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
 // survive as "delete B" (the next replay removes the committed B), not
 // collapse to "delete A" (a no-op that strands B).
 func TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
 	stack.append(Op{
@@ -199,6 +206,7 @@ func TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit(t *testing.T) {
 }
 
 func TestOpStackRenameThenDeleteTarget(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
@@ -217,6 +225,7 @@ func TestOpStackRenameThenDeleteTarget(t *testing.T) {
 }
 
 func TestApplyOpsRoundTrip(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	base.EnsureDirectory("docs", 1700000000)
 	chunkID := base.AllocateChunkID()
@@ -277,6 +286,7 @@ func TestApplyOpsRoundTrip(t *testing.T) {
 }
 
 func TestApplyOpsRmdirSkipsNonEmptyUpstream(t *testing.T) {
+	t.Parallel()
 	base := newTestMeta("p")
 	// Upstream (rebase target) gained a child under tmp after our base.
 	upstream := base.Clone()
@@ -303,6 +313,7 @@ func TestApplyOpsRmdirSkipsNonEmptyUpstream(t *testing.T) {
 }
 
 func TestBuildCommitMessage(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 
 	file := FileMeta{Size: 2400000, Mode: 0o644, Inode: 2, Chunks: []int64{1, 2}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
@@ -331,6 +342,7 @@ func TestBuildCommitMessage(t *testing.T) {
 }
 
 func TestBuildCommitMessageCapsBody(t *testing.T) {
+	t.Parallel()
 	stack := &opStack{}
 	for i := 0; i < 150; i++ {
 		file := FileMeta{Size: 1, Mode: 0o644, Inode: uint64(i + 2), Chunks: []int64{}}
@@ -350,6 +362,7 @@ func TestBuildCommitMessageCapsBody(t *testing.T) {
 }
 
 func TestBuildCommitMessageFallback(t *testing.T) {
+	t.Parallel()
 	msg := buildCommitMessage(nil, "")
 	if msg != "storhub: update metadata" {
 		t.Fatalf("expected fallback message, got %q", msg)
@@ -357,6 +370,7 @@ func TestBuildCommitMessageFallback(t *testing.T) {
 }
 
 func TestSynthesizeDiffOps(t *testing.T) {
+	t.Parallel()
 	before := newTestMeta("p")
 	before.EnsureDirectory("docs", 1700000000)
 	cid := before.AllocateChunkID()
@@ -409,6 +423,7 @@ func TestSynthesizeDiffOps(t *testing.T) {
 }
 
 func TestSynthesizeDiffOpsDelete(t *testing.T) {
+	t.Parallel()
 	before := newTestMeta("p")
 	cid := before.AllocateChunkID()
 	before.Chunks[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
@@ -428,6 +443,7 @@ func TestSynthesizeDiffOpsDelete(t *testing.T) {
 }
 
 func TestSynthesizeDiffOpsDirRename(t *testing.T) {
+	t.Parallel()
 	before := newTestMeta("p")
 	before.EnsureDirectory("olddir", 1700000000)
 	before.EnsureDirectory("olddir/sub", 1700000000)
@@ -483,6 +499,7 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 }
 
 func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
+	t.Parallel()
 	before := newTestMeta("p")
 	before.EnsureDirectory("src", 1700000000)
 	for i := 0; i < 3000; i++ {
@@ -517,6 +534,7 @@ func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
 }
 
 func TestOpSummaryCounts(t *testing.T) {
+	t.Parallel()
 	counts := opSummaryCounts([]Op{
 		{Type: OpPutFile}, {Type: OpPutFile}, {Type: OpDeleteFile}, {Type: OpMkdir},
 	})
@@ -526,6 +544,7 @@ func TestOpSummaryCounts(t *testing.T) {
 }
 
 func TestHumanizeBytes(t *testing.T) {
+	t.Parallel()
 	cases := map[int64]string{
 		0:          "0B",
 		512:        "512B",

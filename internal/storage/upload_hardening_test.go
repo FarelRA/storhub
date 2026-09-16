@@ -32,6 +32,7 @@ func hardeningAssetCount(t *testing.T, backend *mockGitHub, project string) int 
 // A single-edit patch that dies on its second chunk must not leak the
 // first chunk's asset: only the seed asset may remain afterwards.
 func TestUploadHardeningPatchCompensatesMidUploadFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
@@ -60,6 +61,7 @@ func TestUploadHardeningPatchCompensatesMidUploadFailure(t *testing.T) {
 // A batched patch that dies during its second edit must not leak the
 // first edit's assets either.
 func TestUploadHardeningPatchBatchCompensatesMidUploadFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("0123456789abcdef0123456789abcdef"))
@@ -91,6 +93,7 @@ func TestUploadHardeningPatchBatchCompensatesMidUploadFailure(t *testing.T) {
 
 // A rewrite that dies on its second dirty chunk must not leak the first.
 func TestUploadHardeningRewriteCompensatesMidUploadFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -129,6 +132,7 @@ func TestUploadHardeningRewriteCompensatesMidUploadFailure(t *testing.T) {
 // Six consecutive release-full rotations must still upload: rotations
 // must not consume the 5x name-collision budget.
 func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -165,6 +169,7 @@ func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
 // exhaustion after exactly seven upload attempts: collisions keep the
 // max-5 budget even when mixed with rotations.
 func TestUploadHardeningNameCollisionBudgetKeptAcrossRotations(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -208,6 +213,7 @@ func TestUploadHardeningNameCollisionBudgetKeptAcrossRotations(t *testing.T) {
 // 422 Validation Failed with an already_exists entry, so the client
 // already_exists matcher recognizes it.
 func TestUploadHardeningDuplicateRepoMatchesAlreadyExists(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))

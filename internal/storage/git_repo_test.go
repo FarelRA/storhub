@@ -2,9 +2,12 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,63 +18,131 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// seedBareMetadataRepo builds a local bare repository holding two commits
-// of .storhub/metadata.json on main and returns its URL, exercising the
-// full clone/commit/push/list/squash machinery without GitHub.
+// The go-git fixture is expensive to build (2 inits + commits + push) and
+// cheap to copy, so the package seeds ONE two-commit bare template behind a
+// sync.Once and every test gets its own copy of it. Isolation is preserved
+// (each test pushes into its private copy), while the seed cost is paid at
+// most once per package run. TestMain removes the template afterwards.
+var (
+	gitSeedOnce  sync.Once
+	gitSeedRoot  string
+	gitSeedBare  string
+	gitSeedError error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if gitSeedRoot != "" {
+		_ = os.RemoveAll(gitSeedRoot)
+	}
+	os.Exit(code)
+}
+
+// seedBareMetadataRepo returns the URL of a private copy of the shared
+// bare repository holding two commits of .storhub/metadata.json on main,
+// exercising the full clone/commit/push/list/squash machinery without
+// GitHub.
 func seedBareMetadataRepo(t *testing.T) string {
 	t.Helper()
-	bareDir := filepath.Join(t.TempDir(), "demo.git")
+	gitSeedOnce.Do(func() { gitSeedRoot, gitSeedBare, gitSeedError = buildBareMetadataTemplate() })
+	if gitSeedError != nil {
+		t.Fatalf("seed bare template: %v", gitSeedError)
+	}
+	dest := filepath.Join(t.TempDir(), "demo.git")
+	if err := copyTree(gitSeedBare, dest); err != nil {
+		t.Fatalf("copy seeded repo: %v", err)
+	}
+	return "file://" + dest
+}
+
+func buildBareMetadataTemplate() (root, bareDir string, err error) {
+	root, err = os.MkdirTemp("", "storhub-git-seed-*")
+	if err != nil {
+		return "", "", fmt.Errorf("seed temp: %w", err)
+	}
+	fail := func(format string, args ...any) (string, string, error) {
+		return "", "", fmt.Errorf(format, args...)
+	}
+	bareDir = filepath.Join(root, "demo.git")
 	bare, err := git.PlainInit(bareDir, true)
 	if err != nil {
-		t.Fatalf("init bare: %v", err)
+		return fail("init bare: %v", err)
 	}
 	if err := bare.Storer.SetReference(plumbNewHead()); err != nil {
-		t.Fatalf("set HEAD: %v", err)
+		return fail("set HEAD: %v", err)
 	}
 
-	work := filepath.Join(t.TempDir(), "work")
+	work := filepath.Join(root, "work")
 	repo, err := git.PlainInit(work, false)
 	if err != nil {
-		t.Fatalf("init work: %v", err)
+		return fail("init work: %v", err)
 	}
 	// PlainInit defaults to master; pin main before any commit lands.
 	if err := repo.Storer.SetReference(plumbNewHead()); err != nil {
-		t.Fatalf("set work HEAD: %v", err)
+		return fail("set work HEAD: %v", err)
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		t.Fatalf("worktree: %v", err)
+		return fail("worktree: %v", err)
 	}
-	mustCommit := func(content string, msg string) {
-		t.Helper()
+	mustCommit := func(content string, msg string) error {
 		p := filepath.Join(work, metadataFilePath)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if _, err := wt.Add(metadataFilePath); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		sig := &object.Signature{Name: "test", Email: "t@e.st", When: time.Now()}
-		if _, err := wt.Commit(msg, &git.CommitOptions{Author: sig, Committer: sig, AllowEmptyCommits: true}); err != nil {
-			t.Fatalf("commit %q: %v", msg, err)
-		}
+		_, err := wt.Commit(msg, &git.CommitOptions{Author: sig, Committer: sig, AllowEmptyCommits: true})
+		return err
 	}
-	mustCommit(`{"v":4,"p":"demo"}`, "seed v1")
-	mustCommit(`{"v":4,"p":"demo","tf":1}`, "seed v2")
+	if err := mustCommit(`{"v":4,"p":"demo"}`, "seed v1"); err != nil {
+		return fail("commit seed v1: %v", err)
+	}
+	if err := mustCommit(`{"v":4,"p":"demo","tf":1}`, "seed v2"); err != nil {
+		return fail("commit seed v2: %v", err)
+	}
 
 	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{"file://" + bareDir}}); err != nil {
-		t.Fatalf("remote: %v", err)
+		return fail("remote: %v", err)
 	}
 	if err := repo.PushContext(context.Background(), &git.PushOptions{RemoteName: "origin", RefSpecs: pushMainRefSpecs()}); err != nil {
-		t.Fatalf("push: %v", err)
+		return fail("push: %v", err)
 	}
-	return "file://" + bareDir
+	return root, bareDir, nil
+}
+
+// copyTree recursively copies src (a small bare git dir) into dst.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }
 
 func TestGitRepoLocalHarnessLifecycle(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(t.TempDir(), "owner", "demo", "")
 	r.remoteBase = url

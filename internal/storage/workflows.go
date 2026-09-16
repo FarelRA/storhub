@@ -194,6 +194,10 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		m := NewRepoMetadata(project)
 		pendingOps := h.journalReplayForLoad(project, m)
 		h.storeRepoMetadata(project, *m, "", pendingOps, 0)
+		// The returned tree may be published directly (hydration swaps it
+		// into pm.meta); journal replay invalidates the indexes, so rebuild
+		// before handing it out.
+		m.RebuildIndexes()
 		logging.Info(h.projectLogger(project), "load metadata initialized empty repository metadata", "elapsed", h.config.Now().UTC().Sub(started))
 		return m, "", nil
 	}
@@ -207,6 +211,7 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	// blob sha for a split project, metadata blob sha for a legacy one). It
 	// must never be consumed as a git ref: pins capture chunk layouts instead.
 	h.storeRepoMetadata(project, *m, sha, pendingOps, objectCount)
+	m.RebuildIndexes()
 	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "split", m.IsSplit())
 	return m, sha, nil
 }
@@ -414,6 +419,21 @@ func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string
 	return data, nil
 }
 
+// validateMetadataSnapshot checks a snapshot against live server state
+// before a rollback/revert commits it. Structural validation is total;
+// asset existence is checked LAZILY and TARGETED: only releases the
+// snapshot references are examined, and a release's full asset list is
+// paginated only when its embedded view is untrustworthy (at/above the
+// truncation danger band, or an expected ID is missing from it). The old
+// form built an index over every asset of every release - O(total assets)
+// transient memory per call, three calls per rollback.
+//
+// The release list itself stays a fresh (uncached) listReleases: the point
+// of the re-checks around the commit is to catch deletions that landed
+// after the previous check, which a TTL cache would hide.
+// NEEDS-INTEGRATION(13): a targeted GET /releases/assets/{id} would replace
+// the per-release fallback entirely; the ghapi client exposes no such
+// method today, so the fallback paginates ListReleaseAssets instead.
 func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
 	// Structural validation first - chunk/file size consistency
 	// (chunks beyond EOF, negative geometry, dangling references,
@@ -426,15 +446,11 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 		return err
 	}
 	releaseIndex := make(map[string]ghapi.Release, len(releases))
-	assetIndex := make(map[string]map[int64]struct{}, len(releases))
 	for _, release := range releases {
 		releaseIndex[release.TagName] = release
-		assets := make(map[int64]struct{}, len(release.Assets))
-		for _, asset := range release.Assets {
-			assets[asset.ID] = struct{}{}
-		}
-		assetIndex[release.TagName] = assets
 	}
+	// Collect the asset IDs the snapshot actually references, per release.
+	referenced := make(map[string]map[int64]struct{})
 	for path, file := range metadata.Files {
 		for _, chunkName := range file.Chunks {
 			// A dangling chunk reference must fail validation outright.
@@ -449,12 +465,46 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 			if chunk.Size < 0 || chunk.Offset < 0 {
 				return fmt.Errorf("rollback metadata chunk %d has invalid geometry (offset %d, size %d)", chunkName, chunk.Offset, chunk.Size)
 			}
-			release, ok := releaseIndex[chunk.Release]
-			if !ok {
-				return fmt.Errorf("rollback metadata references missing release: %s", chunk.Release)
+			ids := referenced[chunk.Release]
+			if ids == nil {
+				ids = make(map[int64]struct{})
+				referenced[chunk.Release] = ids
 			}
-			if _, ok := assetIndex[release.TagName][chunk.AssetID]; !ok {
-				return fmt.Errorf("rollback metadata references missing asset %d in release %s", chunk.AssetID, chunk.Release)
+			ids[chunk.AssetID] = struct{}{}
+		}
+	}
+	for tag, ids := range referenced {
+		release, ok := releaseIndex[tag]
+		if !ok {
+			return fmt.Errorf("rollback metadata references missing release: %s", tag)
+		}
+		present := make(map[int64]struct{}, len(release.Assets))
+		for _, asset := range release.Assets {
+			present[asset.ID] = struct{}{}
+		}
+		missing := false
+		for id := range ids {
+			if _, ok := present[id]; !ok {
+				missing = true
+				break
+			}
+		}
+		// The embedded asset view is truncated near the ceiling, so a
+		// missing ID (or a release already in the danger band) proves
+		// nothing: resolve the true membership with one targeted list.
+		if missing || len(release.Assets) >= embeddedAssetTrustLimit {
+			assets, err := h.gh.ListReleaseAssets(ctx, h.owner, project, release.ID)
+			if err != nil {
+				return fmt.Errorf("verify assets of release %s: %w", tag, err)
+			}
+			present = make(map[int64]struct{}, len(assets))
+			for _, asset := range assets {
+				present[asset.ID] = struct{}{}
+			}
+		}
+		for id := range ids {
+			if _, ok := present[id]; !ok {
+				return fmt.Errorf("rollback metadata references missing asset %d in release %s", id, tag)
 			}
 		}
 	}
@@ -634,7 +684,9 @@ func (h *StorHub) listReleases(ctx context.Context, project string) ([]ghapi.Rel
 }
 
 func (h *StorHub) listReleasesCached(ctx context.Context, project string) ([]ghapi.Release, error) {
-	if cached, ok := h.getCachedReleases(project); ok {
+	// The shared view is read-only for the picker (it only reads tag/URL/ID
+	// and asset IDs); no per-read deep copy of every asset array.
+	if cached, ok := h.cachedReleasesView(project); ok {
 		return cached, nil
 	}
 	return h.listReleases(ctx, project)
@@ -669,9 +721,13 @@ func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
 	if err := h.gh.DeleteRepo(ctx, h.owner, project); err != nil {
 		return err
 	}
-	h.setRepoState(project, false)
+	// Stop the commit loop + drop the metadata cache entry (cascading
+	// residue if it was resident), then cascade unconditionally: a deleted
+	// repo must leave no gitRepos/objCaches/repoState/releaseCache entry
+	// even if it was never resident in metaCache. releaseProjectResidue is
+	// idempotent, so the double call is safe.
 	h.invalidateRepoMetadata(project)
-	h.invalidateReleaseCache(project)
+	h.releaseProjectResidue(project)
 	return nil
 }
 
@@ -750,6 +806,42 @@ func (h *StorHub) setRepoState(project string, exists bool) {
 	h.repoState[project] = exists
 }
 
+// forgetRepoState drops the cached existence bool for a project that no
+// longer exists, so a deleted project's entry cannot linger forever.
+func (h *StorHub) forgetRepoState(project string) {
+	h.repoMu.Lock()
+	defer h.repoMu.Unlock()
+	delete(h.repoState, project)
+}
+
+// releaseProjectResidue tears down every per-project map entry besides the
+// metadata cache: the git mirror handle (closing the *git.Repository and
+// removing its claimed cache dir), the object cache handle, the repo-state
+// bool, and the release list. Eviction and project deletion must cascade
+// here or a long-lived server leaks one heavy entry per create/delete churn.
+//
+// It takes each map's own lock and never metaMu, so callers may hold metaMu
+// (eviction) or no lock at all (deleteRepo) without inverting lock order.
+func (h *StorHub) releaseProjectResidue(project string) {
+	h.gitMu.Lock()
+	repo := h.gitRepos[project]
+	delete(h.gitRepos, project)
+	h.gitMu.Unlock()
+	if repo != nil {
+		if err := repo.release(true); err != nil {
+			logging.Warn(h.projectLogger(project), "release git mirror on eviction failed", "err", err)
+		}
+	}
+	h.objCacheMu.Lock()
+	delete(h.objCaches, project)
+	h.objCacheMu.Unlock()
+	h.forgetRepoState(project)
+	h.invalidateReleaseCache(project)
+	// Drop the cached per-project logger too, so project churn cannot grow
+	// the logger cache without bound.
+	h.loggers.Delete(project)
+}
+
 func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, bool) {
 	h.metaMu.RLock()
 	entry, ok := h.metaCache[project]
@@ -757,11 +849,16 @@ func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, boo
 	if !ok {
 		return nil, "", false
 	}
+	// Share the immutable current pointer: published trees are never
+	// mutated in place (cowTree/publishTreeLocked discipline), so a reader
+	// holding the pointer after releasing the lock sees a frozen snapshot.
+	// Cloning here was a full deep copy per read (O(tree) allocations); the
+	// indexes were built at store/publish time and stay valid.
 	entry.mu.RLock()
-	defer entry.mu.RUnlock()
-	meta := entry.meta.Clone()
-	meta.RebuildIndexes()
-	return &meta, entry.sha, true
+	meta := entry.meta
+	sha := entry.sha
+	entry.mu.RUnlock()
+	return meta, sha, true
 }
 
 func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, string, bool) {
@@ -772,15 +869,42 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 		return nil, "", false
 	}
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	// An unhydrated entry carries an EMPTY tree that is not remote truth;
 	// serving it lets a cold-cache mutation commit over real remote state.
 	// Miss instead: the caller falls through to a fresh load.
 	if !pm.hydrated {
+		pm.mu.RUnlock()
 		return nil, "", false
 	}
-	meta := pm.meta.Clone()
-	return &meta, pm.sha, true
+	meta := pm.meta
+	sha := pm.sha
+	pm.mu.RUnlock()
+	return meta, sha, true
+}
+
+// cowTree returns a private, mutable copy of a published metadata tree.
+//
+// Published trees (pm.meta) are shared with lock-free readers, so no code
+// may mutate one in place. Mutation sites take a copy here, apply their
+// changes, and publish with publishTreeLocked. The copy is the metadata
+// engine's Clone: the four stored maps are copied while their immutable
+// entry VALUES are shared, and a clean derived index is shared read-only, so
+// the copy is cheap. The first tracked mutation drops the copy to a private
+// dirty derived state (the engine's owner/mapsShared guard), never writing
+// into maps the published tree still reads.
+func cowTree(m *RepoMetadata) *RepoMetadata {
+	c := m.Clone()
+	return &c
+}
+
+// publishTreeLocked swaps a mutated COW copy in as the new shared truth.
+// It rebuilds the derived indexes so the published tree is clean and
+// exclusively owned: a lock-free reader's index read (NLink/DirNLink/
+// FindFilesByInode) then hits a fresh index and never triggers a rebuild
+// write that would race other readers. Caller holds pm.mu for writing.
+func publishTreeLocked(pm *projectMetadata, tree *RepoMetadata) {
+	tree.RebuildIndexes()
+	pm.meta = tree
 }
 
 // storeRepoMetadata caches remote truth for a project. The tree's own version
@@ -809,7 +933,7 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 		pm.hydrated = true
 		pm.objectCount = objectCount
 		// The rebase baseline moves to the freshly loaded state.
-		pm.basePaths = hashPaths(&clone)
+		pm.baseTree = &clone
 		pm.opStack.clear()
 		for _, op := range pendingOps {
 			pm.opStack.append(op)
@@ -831,7 +955,7 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 	pm.hydrated = true
 	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
-	pm.basePaths = hashPaths(&clone)
+	pm.baseTree = &clone
 	pm.dirty = false // Just stored, so not dirty
 	pm.opStack.clear()
 	pm.version++
@@ -926,6 +1050,11 @@ func (h *StorHub) invalidateRepoMetadata(project string) {
 		pm.mu.Unlock()
 	}
 	h.metaMu.Unlock()
+	if ok {
+		// Cascade outside metaMu: the git mirror release does directory
+		// I/O and must not stall cache readers.
+		h.releaseProjectResidue(project)
+	}
 }
 
 func isMetadataNotFound(err error) bool {

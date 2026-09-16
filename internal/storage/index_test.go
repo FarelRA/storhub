@@ -96,6 +96,7 @@ func countObjectFiles(backend *mockGitHub, project string) int {
 }
 
 func TestSplitIndexEndToEndREST(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -125,6 +126,7 @@ func TestSplitIndexEndToEndREST(t *testing.T) {
 }
 
 func TestSplitIndexMigrationFromLegacy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 
@@ -162,6 +164,7 @@ func TestSplitIndexMigrationFromLegacy(t *testing.T) {
 }
 
 func TestSplitIndexLegacyRevisionReadableAfterMigration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub1 := backend.newClient(t, smallTransferTestConfig())
@@ -187,6 +190,7 @@ func TestSplitIndexLegacyRevisionReadableAfterMigration(t *testing.T) {
 }
 
 func TestSplitIndexDedupUnchangedSubtree(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -242,6 +246,7 @@ func newGitBackedHub(t *testing.T, url string, cfg Config) *StorHub {
 }
 
 func TestHistoryWarnOncePerWindow(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := smallTransferTestConfig()
 	cfg.HistoryWarnObjects = 1 // any commit crosses it
@@ -263,6 +268,7 @@ func TestHistoryWarnOncePerWindow(t *testing.T) {
 }
 
 func TestOversizeErrorMessagePointsAtRemediation(t *testing.T) {
+	t.Parallel()
 	err := &oversizeError{size: 9 << 20, limit: 8 << 20}
 	msg := err.Error()
 	if !strings.Contains(msg, "storhub prune") || !strings.Contains(msg, "subdirectories") {
@@ -271,6 +277,10 @@ func TestOversizeErrorMessagePointsAtRemediation(t *testing.T) {
 }
 
 func TestSplitIndexGitPathEndToEnd(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	ctx := context.Background()
 	url := seedBareMetadataRepo(t)
 	hub := newGitBackedHub(t, url, smallTransferTestConfig())
@@ -297,6 +307,7 @@ func TestSplitIndexGitPathEndToEnd(t *testing.T) {
 }
 
 func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -338,6 +349,7 @@ func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
 // instead of letting the contents API answer with a bare 422 that livelocks
 // the retry loop.
 func TestCheckManifestSizeBoundsTheManifest(t *testing.T) {
+	t.Parallel()
 	if err := checkManifestSize(make([]byte, maxMetadataBytes)); err != nil {
 		t.Fatalf("manifest at the ceiling must pass, got %v", err)
 	}

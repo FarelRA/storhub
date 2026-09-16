@@ -11,6 +11,7 @@ import (
 // the crash journal - silently discarding mutations the callers were told
 // had succeeded.
 func TestStoreRepoMetadataPreservesPendingWork(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "guard", "docs", "a.txt", 1)
@@ -57,6 +58,7 @@ func TestStoreRepoMetadataPreservesPendingWork(t *testing.T) {
 // no pending work the remote truth applies back, hydrates, and bumps the
 // version so an in-flight transaction's guard observes the swap.
 func TestStoreRepoMetadataAppliesBackWhenClean(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -91,6 +93,7 @@ func TestStoreRepoMetadataAppliesBackWhenClean(t *testing.T) {
 // re-assert them over newer remote state. Ops newer than the remote entry
 // still replay (the crash-survival contract).
 func TestJournalReplaySkipsSupersededOps(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := smallTransferTestConfig()
 	cfg.JournalDir = t.TempDir()

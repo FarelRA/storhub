@@ -19,6 +19,7 @@ func uploadFile(t *testing.T, hub *StorHub, project, remote, content string) {
 }
 
 func TestRevertPathRestoresOlderFileLeavingOthers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -56,6 +57,7 @@ func TestRevertPathRestoresOlderFileLeavingOthers(t *testing.T) {
 }
 
 func TestRevertPathRestoresPriorContent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -88,6 +90,7 @@ func TestRevertPathRestoresPriorContent(t *testing.T) {
 }
 
 func TestRevertPathRejectsBranchAndRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())

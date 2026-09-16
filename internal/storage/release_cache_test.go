@@ -14,6 +14,7 @@ import (
 )
 
 func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
@@ -51,6 +52,7 @@ func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
 }
 
 func TestRegressionEqualScanOrphaned(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
@@ -79,6 +81,7 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 }
 
 func TestRegression422Handling(t *testing.T) {
+	t.Parallel()
 	if !isAlreadyExists(&ghapi.APIError{StatusCode: http.StatusUnprocessableEntity, Body: `{"message":"Validation Failed","errors":[{"code":"already_exists"}]}`}) {
 		t.Fatal("expected already_exists detection")
 	}
@@ -106,6 +109,7 @@ func TestRegression422Handling(t *testing.T) {
 }
 
 func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
+	t.Parallel()
 	// Reproduces storhub-web v18 (2026-09-09): the cached release list shows
 	// space (prod: embedded 980) but the server is full (prod: true 1000).
 	// The upload must rotate to a new release instead of failing.
@@ -134,6 +138,7 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 }
 
 func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
+	t.Parallel()
 	// storhub-web v18 (2026-09-09): embedded list shows 980 while the true
 	// count is 1000. The picker must resolve the true count inside the
 	// danger band instead of trusting the truncated embedded list.
@@ -162,6 +167,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 }
 
 func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
+	t.Parallel()
 	// A file that dies on its second chunk must not leak the first chunk's
 	// asset: only the seed asset may remain afterwards.
 	backend := newMockGitHub(t)
@@ -191,6 +197,7 @@ func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
 }
 
 func TestRegressionPreferredTagRemoved(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-preferred-removed")
@@ -202,6 +209,7 @@ func TestRegressionPreferredTagRemoved(t *testing.T) {
 }
 
 func TestRegressionReleaseCacheLifetime(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
@@ -236,6 +244,7 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 // GitHub answers the loser's create with 422 already_exists; we must reuse
 // the rival's release, not fail the upload.
 func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
@@ -268,6 +277,7 @@ func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
 // sort ("v10" < "v9"), so the preference is enforced prod-side and is
 // independent of listing order.
 func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
@@ -296,6 +306,7 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 // must never be dropped. Curated rotation targets (and freshly created
 // releases awaiting their first upload) are exactly such empties.
 func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
@@ -322,6 +333,7 @@ func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
 // already_exists; the sink must retry with a fresh name and the file must
 // land intact. collideNext injects exactly one such collision.
 func TestRegressionAssetNameCollisionRetries(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	backend.collideNext = map[string]bool{"project-collide/v1": true}
@@ -351,6 +363,7 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 // file must download intact. v1 sits at 999 true assets behind a truncated
 // 950 embedded array, so the picker targets it and chunk 2 forces rotation.
 func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	backend.embedCap = 950
 	hub := backend.newClient(t, smallTransferTestConfig())

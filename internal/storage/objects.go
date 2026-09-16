@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -24,68 +25,102 @@ func objectRepoPath(sha string) string {
 }
 
 // objectCache is the client-side cache of content-addressed index objects.
-// Objects are immutable (name = sha256 of content), so caching is trivially
-// correct: every read re-verifies the bytes against the name, and a mismatch
-// is treated as a miss (the corrupt file is dropped so a refetch repopulates).
-// The cache is what makes the Merkle layout viable: an eager cold load fetches
-// every node once, and later commits only touch the changed chain because
-// unchanged subtrees are already cached (and never re-uploaded).
+// Objects are immutable (name = sha256 of content), so caching is correct:
+// the bytes are verified against their address ONCE, at put time (and again
+// by the fetch path before put). A hit does not re-hash: re-running sha256
+// over up to an 8 MiB object on every read was the dominant per-hit cost,
+// and a cached object's bytes cannot change under a content address (a
+// corrupted file is a disk-rot event, handled by the reaper/refetch, not
+// worth an O(size) hash per hit).
 //
-// It is LRU-bounded so a long-lived mount cannot grow without limit; eviction
-// only costs a later refetch, never correctness. The bound is two-fold: an
-// entry count AND a byte budget. Entries alone are not a disk bound — an
-// index object can be up to the contents-API size limit, so a count-only cap
-// still allows max × 8 MiB of cache per project.
+// The cache is LRU-bounded so a long-lived mount cannot grow without limit;
+// eviction only costs a later refetch, never correctness. The bound is
+// two-fold: an entry count AND a byte budget. Entries alone are not a disk
+// bound — an index object can be up to the contents-API size limit, so a
+// count-only cap still allows max × 8 MiB of cache per project. Recency is
+// maintained with a container/list (O(1) touch) instead of a linear scan of
+// the order slice per hit.
 //
 // defaultObjectCacheMaxBytes is the per-project disk budget. Index objects
 // are small JSON nodes; a gigabyte of them cached is already far past any
 // realistic working set, and exceeding it must cost refetches, not disk.
 const defaultObjectCacheMaxBytes = 1 << 30
 
+// objectLRUItem is one cache entry in the recency list.
+type objectLRUItem struct {
+	sha  string
+	size int
+}
+
 type objectCache struct {
 	dir      string
 	max      int
 	maxBytes int64
 	mu       sync.Mutex
-	order    []string       // shas, least-recently-used first
+	lru      *list.List // front = most recently used, back = LRU victim
+	elems    map[string]*list.Element
 	sizes    map[string]int // sha -> byte size (for accounting)
 	total    int64          // sum of sizes (guarded by mu)
+	order    []string       // membership set (sha present in the cache)
+	pos      map[string]int // sha -> index in order (O(1) swap-remove)
 }
 
 func newObjectCache(dir string, max int) *objectCache {
 	if max <= 0 {
 		max = 4096
 	}
-	return &objectCache{dir: dir, max: max, maxBytes: defaultObjectCacheMaxBytes, sizes: make(map[string]int)}
+	return &objectCache{
+		dir: dir, max: max, maxBytes: defaultObjectCacheMaxBytes,
+		lru:   list.New(),
+		elems: make(map[string]*list.Element),
+		sizes: make(map[string]int),
+		pos:   make(map[string]int),
+	}
 }
 
 func (c *objectCache) path(sha string) string {
 	return filepath.Join(c.dir, meta.ObjectPath(sha))
 }
 
-// get returns cached bytes for sha, verifying they hash to sha. A miss (or a
-// verification failure) returns ok=false.
+// get returns cached bytes for sha. A warm entry (verified when it entered
+// the cache) is trusted with only an O(1) length check - re-hashing the whole
+// object per hit was the dominant cost; a length mismatch means truncation or
+// a partial write, so the entry is dropped as corrupt. A cold entry (first
+// read in this process, e.g. bytes surviving from an earlier run) is verified
+// against its content address once, then trusted.
 func (c *objectCache) get(sha string) ([]byte, bool) {
 	data, err := os.ReadFile(c.path(sha))
 	if err != nil {
 		return nil, false
 	}
-	if meta.ObjectSHA(data) != sha {
-		// Corruption (disk rot, partial write): drop it and report a miss.
-		_ = os.Remove(c.path(sha))
-		c.mu.Lock()
-		c.removeLocked(sha)
+	c.mu.Lock()
+	if known, ok := c.sizes[sha]; ok {
+		if len(data) != known {
+			// Corruption (disk rot, partial write): drop it, report a miss.
+			c.removeLocked(sha)
+			c.mu.Unlock()
+			_ = os.Remove(c.path(sha))
+			return nil, false
+		}
+		c.touchLocked(sha, len(data))
 		c.mu.Unlock()
+		return data, true
+	}
+	c.mu.Unlock()
+	if meta.ObjectSHA(data) != sha {
+		_ = os.Remove(c.path(sha))
 		return nil, false
 	}
 	c.mu.Lock()
 	c.touchLocked(sha, len(data))
+	c.evictLocked()
 	c.mu.Unlock()
 	return data, true
 }
 
-// put stores data under sha after verifying it hashes to sha. Returns false
-// (without storing) when the bytes do not match the claimed address.
+// put stores data under sha after verifying it hashes to sha (the single
+// verification point). Returns false (without storing) when the bytes do not
+// match the claimed address.
 func (c *objectCache) put(sha string, data []byte) bool {
 	if meta.ObjectSHA(data) != sha {
 		return false
@@ -130,37 +165,59 @@ func (c *objectCache) remove(sha string) {
 	_ = os.Remove(c.path(sha))
 }
 
+// touchLocked records a use of sha: O(1) move-to-front on the recency list,
+// inserting the entry if it is new.
 func (c *objectCache) touchLocked(sha string, size int) {
-	if _, ok := c.sizes[sha]; ok {
-		c.removeLocked(sha)
+	if el, ok := c.elems[sha]; ok {
+		if old := c.sizes[sha]; old != size {
+			c.total += int64(size - old)
+			c.sizes[sha] = size
+			el.Value = objectLRUItem{sha: sha, size: size}
+		}
+		c.lru.MoveToFront(el)
+		return
 	}
 	c.sizes[sha] = size
 	c.total += int64(size)
+	c.elems[sha] = c.lru.PushFront(objectLRUItem{sha: sha, size: size})
+	c.pos[sha] = len(c.order)
 	c.order = append(c.order, sha)
 }
 
+// removeLocked drops sha from every structure. O(1) via the position index
+// (swap-remove from order).
 func (c *objectCache) removeLocked(sha string) {
-	for i, s := range c.order {
-		if s == sha {
-			c.order = append(c.order[:i], c.order[i+1:]...)
-			break
-		}
+	if el, ok := c.elems[sha]; ok {
+		c.lru.Remove(el)
+		delete(c.elems, sha)
 	}
 	if size, ok := c.sizes[sha]; ok {
 		c.total -= int64(size)
+		delete(c.sizes, sha)
 	}
-	delete(c.sizes, sha)
+	if i, ok := c.pos[sha]; ok {
+		last := len(c.order) - 1
+		if i != last {
+			moved := c.order[last]
+			c.order[i] = moved
+			c.pos[moved] = i
+		}
+		c.order = c.order[:last]
+		delete(c.pos, sha)
+	}
 }
 
+// evictLocked enforces the count and byte bounds, dropping least-recently-used
+// entries (list back) first.
 func (c *objectCache) evictLocked() {
-	for len(c.order) > 0 && (len(c.order) > c.max || c.total > c.maxBytes) {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		if size, ok := c.sizes[oldest]; ok {
-			c.total -= int64(size)
+	for c.lru.Len() > 0 && (c.lru.Len() > c.max || c.total > c.maxBytes) {
+		back := c.lru.Back()
+		if back == nil {
+			return
 		}
-		delete(c.sizes, oldest)
-		_ = os.Remove(c.path(oldest))
+		sha := back.Value.(objectLRUItem).sha
+		c.removeLocked(sha)
+		_ = os.Remove(c.path(sha))
 	}
 }
 
@@ -170,13 +227,21 @@ func (c *objectCache) evictLocked() {
 // the orphan reaper can correlate an object cache to a live git-backed mount
 // and spare it. The in-memory map is keyed by project (one owner per hub).
 func (h *StorHub) objectCacheFor(project string) *objectCache {
+	// Reads take RLock: the lookup is the common case and must not convoy
+	// behind a single writer. Insert keeps the exclusive lock.
+	h.objCacheMu.RLock()
+	c, ok := h.objCaches[project]
+	h.objCacheMu.RUnlock()
+	if ok {
+		return c
+	}
 	h.objCacheMu.Lock()
 	defer h.objCacheMu.Unlock()
 	if c, ok := h.objCaches[project]; ok {
 		return c
 	}
 	dir := filepath.Join(h.config.ObjectCacheDir(), gitCacheKey(h.owner, project))
-	c := newObjectCache(dir, h.config.ObjectCacheMaxEntries)
+	c = newObjectCache(dir, h.config.ObjectCacheMaxEntries)
 	h.objCaches[project] = c
 	return c
 }

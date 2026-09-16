@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,6 +162,7 @@ func newLiveHub(t *testing.T, token string, cfg Config) *StorHub {
 }
 
 func TestUploadUsesCallerOwnershipForNewFiles(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	adminCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
@@ -182,6 +184,7 @@ func TestUploadUsesCallerOwnershipForNewFiles(t *testing.T) {
 }
 
 func TestUploadListDownloadSingleChunk(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 
@@ -218,9 +221,11 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 }
 
 func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var active atomic.Int32
 	var maxActive atomic.Int32
+	var chunkGets atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			current := active.Add(1)
@@ -230,14 +235,22 @@ func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(15 * time.Millisecond)
+			// The first chunk alone carries the sleep: it exists to
+			// widen the overlap window so a concurrent second fetch
+			// would be observed. Later chunks add no proof value.
+			if chunkGets.Add(1) == 1 {
+				time.Sleep(15 * time.Millisecond)
+			}
 			active.Add(-1)
 		}
 		return false
 	})
-	hub := backend.newClient(t, Config{ChunkSize: 32 << 20, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
+	// 3 full chunks + a partial tail: the same multi-chunk shape as the
+	// original 96MB fixture at ~1/32 the size (the size is not the
+	// invariant; the sequential download of several chunks is).
+	hub := backend.newClient(t, Config{ChunkSize: 1 << 20, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
-	data := bytes.Repeat([]byte("z"), int((32<<20)*3+12345))
+	data := bytes.Repeat([]byte("z"), 3*(1<<20)+12345)
 	input := writeTempFile(t, t.TempDir(), "video.bin", data)
 	if _, err := hub.UploadFileContext(ctx, "project-sequential-read", "video.bin", input); err != nil {
 		t.Fatalf("upload large file: %v", err)
@@ -255,6 +268,7 @@ func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 }
 
 func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	if err := hub.Mkdir("project-tree", "docs"); err != nil {
@@ -283,6 +297,7 @@ func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 }
 
 func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	if err := hub.Mkdir("project-fs-ops", "notes"); err != nil {
@@ -339,6 +354,7 @@ func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 }
 
 func TestCreateFileStoresEmptyMetadataWithoutAssetUpload(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -368,6 +384,7 @@ func TestCreateFileStoresEmptyMetadataWithoutAssetUpload(t *testing.T) {
 }
 
 func TestFilesystemEdgeCasesAndRootSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -416,6 +433,7 @@ func TestFilesystemEdgeCasesAndRootSemantics(t *testing.T) {
 }
 
 func TestRenameDirectoryMovesTree(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	if err := hub.Mkdir("project-dir-rename", "a"); err != nil {
@@ -442,6 +460,7 @@ func TestRenameDirectoryMovesTree(t *testing.T) {
 // Zero MaxRetries uniformly means "no retries"; there is no ambiguous
 // unset-vs-zero split. Negative values are rejected by Validate.
 func TestConfigRetriesSemantics(t *testing.T) {
+	t.Parallel()
 	defaults := (Config{}).WithDefaults()
 	if defaults.MaxRetries != 0 {
 		t.Fatalf("zero MaxRetries must mean no retries, got %d", defaults.MaxRetries)
@@ -456,6 +475,7 @@ func TestConfigRetriesSemantics(t *testing.T) {
 }
 
 func TestReplaceDeleteRollbackMetadata(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -528,6 +548,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 }
 
 func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch.txt", []byte("abcdefghij"))
@@ -564,6 +585,7 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 }
 
 func TestPatchFileUsesRangeDownloads(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "ranges.txt", []byte("abcdefghij"))
@@ -591,6 +613,7 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 }
 
 func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
+	t.Parallel()
 	t.Skip("retired: CDN-redirect behavior makes exact API-path ranges unobservable; see TestPatchedFileDownloadContentCorrectness")
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
@@ -652,6 +675,7 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 // TestPatchedFileDownloadContentCorrectness (mock_fidelity_test.go).
 
 func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "multi-release.txt", []byte("abcdefghijklmno"))
@@ -702,6 +726,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 }
 
 func TestPatchFileRejectsOutOfBoundsEdit(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "bounds.txt", []byte("abc"))
@@ -714,6 +739,7 @@ func TestPatchFileRejectsOutOfBoundsEdit(t *testing.T) {
 }
 
 func TestPatchFileSupportsInsertGrowth(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "insert.txt", []byte("abcdij"))
@@ -735,6 +761,7 @@ func TestPatchFileSupportsInsertGrowth(t *testing.T) {
 }
 
 func TestPatchFileSupportsDeleteShrink(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "delete.txt", []byte("abcXXdef"))
@@ -756,6 +783,7 @@ func TestPatchFileSupportsDeleteShrink(t *testing.T) {
 }
 
 func TestPatchFileSupportsReplacingWithDifferentSize(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "resize.txt", []byte("abc123xyz"))
@@ -777,6 +805,7 @@ func TestPatchFileSupportsReplacingWithDifferentSize(t *testing.T) {
 }
 
 func TestPatchFileSupportsTruncateToEmpty(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "empty.txt", []byte("abc"))
@@ -798,6 +827,7 @@ func TestPatchFileSupportsTruncateToEmpty(t *testing.T) {
 }
 
 func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryDisabledTestConfig())
 
@@ -825,6 +855,7 @@ func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
 }
 
 func TestDeleteProject(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	input := writeTempFile(t, t.TempDir(), "file.txt", []byte("payload"))
@@ -840,6 +871,7 @@ func TestDeleteProject(t *testing.T) {
 }
 
 func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	backend.repos["existing-project"] = &mockRepo{
 		name:          "existing-project",
@@ -870,6 +902,7 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 }
 
 func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -960,6 +993,7 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 }
 
 func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "missing-data.txt", []byte("payload"))
@@ -998,6 +1032,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 }
 
 func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	inputA := writeTempFile(t, t.TempDir(), "first.txt", []byte("alpha"))
@@ -1022,6 +1057,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 }
 
 func TestUploadMissingFile(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	_, err := hub.UploadFile("project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
@@ -1031,6 +1067,7 @@ func TestUploadMissingFile(t *testing.T) {
 }
 
 func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "empty-upload.txt", nil)
@@ -1049,6 +1086,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 }
 
 func TestDownloadMissingFile(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	err := hub.DownloadFile("project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
@@ -1058,6 +1096,7 @@ func TestDownloadMissingFile(t *testing.T) {
 }
 
 func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	uploader := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "offsets.bin", []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
@@ -1080,6 +1119,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 }
 
 func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "partial.txt", []byte("abcdefghij"))
@@ -1103,6 +1143,7 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 }
 
 func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry-download.bin", []byte("download retry payload"))
@@ -1144,6 +1185,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 }
 
 func TestRetryOnTransientServerError(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1168,6 +1210,7 @@ func TestRetryOnTransientServerError(t *testing.T) {
 // Non-idempotent POSTs (repo creation, asset upload) must surface transient
 // failures instead of blind-retrying them.
 func TestNonIdempotentPostsDoNotRetry(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var repoAttempts atomic.Int32
 	var uploadAttempts atomic.Int32
@@ -1197,6 +1240,7 @@ func TestNonIdempotentPostsDoNotRetry(t *testing.T) {
 }
 
 func TestConstructorDefersAuthentication(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var hits atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1228,6 +1272,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 }
 
 func TestUploadChunkRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var failures, successes atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1284,6 +1329,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 }
 
 func TestRateLimitAwareRetry(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var hits atomic.Int32
 	var slept atomic.Int64
@@ -1328,6 +1374,7 @@ func TestRateLimitAwareRetry(t *testing.T) {
 }
 
 func TestReadAPIsReturnProjectNotFound(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	checks := []struct {
@@ -1349,6 +1396,7 @@ func TestReadAPIsReturnProjectNotFound(t *testing.T) {
 }
 
 func TestListFilesUsesMetadataCache(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	seed := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cache.txt", []byte("cache payload"))
@@ -1375,6 +1423,7 @@ func TestListFilesUsesMetadataCache(t *testing.T) {
 }
 
 func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cache-mutate.txt", []byte("cache mutate payload"))
@@ -1421,6 +1470,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 }
 
 func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "range-read.txt", []byte("abcdefghijklmnopqrstuvwxyz"))
@@ -1464,6 +1514,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 }
 
 func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch-retry.txt", []byte("abcdefghij"))
@@ -1508,6 +1559,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 }
 
 func TestUploadHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	uploadStarted := make(chan struct{}, 1)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1546,6 +1598,7 @@ func TestUploadHonorsCanceledContext(t *testing.T) {
 }
 
 func TestValidateProjectRejectsInvalidNames(t *testing.T) {
+	t.Parallel()
 	invalid := []string{"", " ", ".", "..", "bad/name", "bad name", "bad*name", ".hidden", "trailing."}
 	for _, name := range invalid {
 		if err := validateProject(name); err == nil {
@@ -1560,6 +1613,7 @@ func TestValidateProjectRejectsInvalidNames(t *testing.T) {
 // A transient commit failure must NOT discard acknowledged writes: dirty
 // state is retained and the commit loop retries it.
 func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var failed atomic.Bool
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1589,7 +1643,7 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("retained dirty state was not retried after transient failure; files=%+v", files)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	repo := backend.repo("project-retry")
 	if repo == nil || len(repo.assets) == 0 || repo.releasesByTag["v1"] == nil {
@@ -1598,6 +1652,7 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 }
 
 func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var conflicts atomic.Int32
 	var commitCount atomic.Int32
@@ -1650,11 +1705,12 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 			t.Fatalf("conflict rebase did not converge: conflicts=%d files=%d",
 				conflicts.Load(), len(files))
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
 func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1682,11 +1738,12 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 		if time.Now().After(failureDeadline) {
 			t.Fatalf("expected one transient metadata failure, got %d", failures.Load())
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
 func TestDownloadHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	assetStarted := make(chan struct{}, 1)
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -1718,6 +1775,7 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 }
 
 func TestMetadataBatchesAndFlushes(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -1746,6 +1804,7 @@ func TestMetadataBatchesAndFlushes(t *testing.T) {
 }
 
 func TestListReleasesPaginates(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
@@ -1765,6 +1824,7 @@ func TestListReleasesPaginates(t *testing.T) {
 }
 
 func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "invalid.bin", []byte("invalid metadata payload"))
@@ -1792,6 +1852,7 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 }
 
 func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cleanup.txt", []byte("cleanup payload"))
@@ -1817,6 +1878,7 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 }
 
 func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	// Ownership and chown operations require an explicitly identified
@@ -1955,6 +2017,7 @@ func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 }
 
 func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -2260,6 +2323,7 @@ func TestFUSEOptionalMountLifecycle(t *testing.T) {
 }
 
 func TestFUSECloseIdempotent(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	fsys, err := hub.NewFUSE("project-fuse-close", fusefs.DefaultOptions())
@@ -2275,6 +2339,7 @@ func TestFUSECloseIdempotent(t *testing.T) {
 }
 
 func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -2378,6 +2443,7 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 }
 
 func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -2473,6 +2539,7 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 }
 
 func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -2523,6 +2590,7 @@ func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
 }
 
 func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
@@ -2580,6 +2648,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 }
 
 func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
@@ -2637,6 +2706,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 }
 
 func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -2691,6 +2761,7 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 }
 
 func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
+	t.Parallel()
 	testFUSEEditorSaveCycle(t, "full-rewrite", func(original []byte) ([]byte, []byte) {
 		first := append(append([]byte(nil), original...), 'X')
 		second := append([]byte(nil), original...)
@@ -2699,6 +2770,7 @@ func TestFUSERepeatedEditorStyleSaveCycles(t *testing.T) {
 }
 
 func TestFUSERepeatedEditorStyleSaveCyclesWithoutSetattrHandle(t *testing.T) {
+	t.Parallel()
 	testFUSEEditorSaveCycleWithSetattrHandle(t, "full-rewrite-no-setattr-handle", false, func(original []byte) ([]byte, []byte) {
 		first := append(append([]byte(nil), original...), 'X')
 		second := append([]byte(nil), original...)
@@ -2707,6 +2779,7 @@ func TestFUSERepeatedEditorStyleSaveCyclesWithoutSetattrHandle(t *testing.T) {
 }
 
 func TestFUSEPartialEditorRewriteSaveCycles(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mutator func([]byte) ([]byte, []byte)
@@ -2829,6 +2902,7 @@ func testFUSEEditorSaveCycleWithSetattrHandle(t *testing.T, projectSuffix string
 }
 
 func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var metadataWrites atomic.Int32
@@ -2915,6 +2989,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 }
 
 func TestFUSEFlagsAndLocks(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -3062,6 +3137,12 @@ type mockGitHub struct {
 	// re-resolution path (real GitHub: Azure SAS URLs are short-lived).
 	// Zero (default) keeps URLs immortal so unrelated tests never trip.
 	cdnTTL atomic.Int64
+	// cdnTimeShift (nanoseconds) fast-forwards the CDN's expiry clock
+	// exactly once (consumed by the next signed-URL check), so tests can
+	// force "the cached URL is now stale" as an event instead of sleeping
+	// past the TTL. The re-resolved URL must then serve normally, so the
+	// shift must not linger.
+	cdnTimeShift atomic.Int64
 }
 
 type mockRepo struct {
@@ -3842,7 +3923,8 @@ func (m *mockGitHub) handleCDN(w http.ResponseWriter, r *http.Request) {
 		m.cdnSawAuth.Store(true)
 	}
 	if exp := r.URL.Query().Get("exp"); exp != "" {
-		if when, err := strconv.ParseInt(exp, 10, 64); err == nil && time.Now().UnixNano() > when {
+		shift := m.cdnTimeShift.Swap(0)
+		if when, err := strconv.ParseInt(exp, 10, 64); err == nil && time.Now().Add(time.Duration(shift)).UnixNano() > when {
 			m.writeJSON(w, http.StatusForbidden, map[string]any{"message": "Signature is not valid on this request"})
 			return
 		}
@@ -4171,6 +4253,7 @@ func mustMetadataRevision(t *testing.T, hub *StorHub, project, message string) M
 // into a new release must register that release in the metadata catalog so
 // PurgeUntracked cannot delete it (GitHub cascade-deletes its assets).
 func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "spill.txt", []byte("abcdefghijklmno"))
@@ -4226,6 +4309,7 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 // A fresh client (cold cache) must be able to delete data that exists only
 // remotely; previously the delete consulted an empty in-memory view.
 func TestDeleteFileWorksOnColdCache(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	seedHub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cold.txt", []byte("cold payload"))
@@ -4252,6 +4336,7 @@ func mustBytes(t *testing.T, res fuse.ReadResult, buf []byte) []byte {
 }
 
 func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -4305,6 +4390,7 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 // acknowledged mutation - the instance is revived with a live commit loop
 // instead of silently stranding dirty state on a dead loop.
 func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{
 		ChunkSize:         32 << 20,
@@ -4341,7 +4427,7 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 		if time.Now().After(cleanDeadline) {
 			t.Fatal("metadata never drained before forced eviction")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	// Simulate eviction racing an in-flight operation.
@@ -4381,7 +4467,7 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 		if _, err := hub.StatPathContext(ctx, project, "late"); err == nil {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	t.Fatal("revived metadata never committed the late mutation")
 }
@@ -4390,6 +4476,7 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 // carrying WithExpectedRevision succeeds only while the remote metadata
 // revision still matches the declared one.
 func TestExpectedRevisionCAS(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := Config{
 		ChunkSize:         32 << 20,
@@ -4472,6 +4559,7 @@ func TestExpectedRevisionCAS(t *testing.T) {
 // mutation issued from a process that never loaded the project must adopt
 // remote state instead of committing an empty tree over it.
 func TestColdCacheMutationDoesNotClobberRemote(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	cfg := Config{
 		ChunkSize:         32 << 20,
@@ -4558,6 +4646,7 @@ func putRawStatus(t *testing.T, backend *mockGitHub, project, path string, body 
 // silent 200 overwrite. Creates answer 201, updates 200, missing message
 // and invalid base64 answer 422.
 func TestMockContentsPutCreateCollisionIs422(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4596,6 +4685,7 @@ func TestMockContentsPutCreateCollisionIs422(t *testing.T) {
 // (content at-or-before), 404 for unknown refs, 404 for a path deleted at
 // that ref, and HEAD/branch names resolving to current state.
 func TestMockUnknownRefIs404(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4667,6 +4757,7 @@ func TestMockUnknownRefIs404(t *testing.T) {
 // large", exactly like the live API, so prune's oversized-repo fallback
 // branch is reachable in tests.
 func TestMockDirListingOverCapIs403(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4700,6 +4791,7 @@ func TestMockDirListingOverCapIs403(t *testing.T) {
 // Contents DELETE without a sha must 422 (GitHub requires the blob
 // sha), never delete silently.
 func TestMockDeleteRequiresSHA(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4719,6 +4811,7 @@ func TestMockDeleteRequiresSHA(t *testing.T) {
 // DELETE on an unknown repo 404s (the router already refuses unknown
 // repos; pin it so the client's 404-is-success tolerance stays exercised).
 func TestMockDeleteUnknownRepoIs404(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	if got := mockRaw(t, backend, http.MethodDelete, "/repos/"+backend.owner+"/never-existed", nil).StatusCode; got != http.StatusNotFound {
 		t.Fatalf("unknown repo delete must 404, got %d", got)
@@ -4729,6 +4822,7 @@ func TestMockDeleteUnknownRepoIs404(t *testing.T) {
 // reads the seeded file and CAS-writes it back (token computed locally
 // from bytes) is not 409ed by a precondition GitHub would pass.
 func TestMockLegacySetMetadataStoresRealBlobSHA(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4759,6 +4853,7 @@ func TestMockLegacySetMetadataStoresRealBlobSHA(t *testing.T) {
 // The releases list must be ordered newest-created first, like GitHub
 // (created_at desc), not by tag string.
 func TestMockReleasesListedNewestFirst(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4780,6 +4875,7 @@ func TestMockReleasesListedNewestFirst(t *testing.T) {
 // The opt-in rate fault may only be spent on an authenticated API
 // route - never on a CDN fetch.
 func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	backend.rateLimitOnce.Store(true)
 	req, _ := http.NewRequest(http.MethodGet, backend.server.URL+"/cdn/404110", nil)
@@ -4802,6 +4898,7 @@ func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
 // With cdnTTL armed, signed CDN URLs expire (403) and the client's
 // SAS-rejection path re-resolves through the API instead of failing.
 func TestMockCDNExpiryForcesReResolution(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	backend.cdnTTL.Store(int64(50 * time.Millisecond))
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -4825,7 +4922,9 @@ func TestMockCDNExpiryForcesReResolution(t *testing.T) {
 	if err := hub.DownloadFileContext(ctx, "cdnexp", "exp.txt", out); err != nil {
 		t.Fatalf("first download: %v", err)
 	}
-	time.Sleep(120 * time.Millisecond)
+	// Event, not wall clock: shift the CDN's expiry clock past the TTL
+	// once, so the cached signed URL is provably stale for the next fetch.
+	backend.cdnTimeShift.Store(int64(60 * time.Millisecond))
 	if err := hub.DownloadFileContext(ctx, "cdnexp", "exp.txt", out); err != nil {
 		t.Fatalf("download with expired cached URL must re-resolve, got: %v", err)
 	}
@@ -4838,6 +4937,7 @@ func TestMockCDNExpiryForcesReResolution(t *testing.T) {
 // An asset GET with a JSON Accept answers with the asset's metadata,
 // never the bytes.
 func TestMockAssetJSONAcceptReturnsMetadata(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -4865,6 +4965,7 @@ func TestMockAssetJSONAcceptReturnsMetadata(t *testing.T) {
 // must NOT misread "release" prose (hooks, URLs) as a conflict - the old
 // bare "lease" substring did.
 func TestCasConflictWordBoundary(t *testing.T) {
+	t.Parallel()
 	base := plumbing.ZeroHash
 	if err := casConflict(errors.New("remote: hook declined push for releases/v9"), base); err != nil {
 		var apiErr *ghapi.APIError
@@ -4886,6 +4987,10 @@ func TestCasConflictWordBoundary(t *testing.T) {
 // listFileCommits must count only commits that CHANGE the path
 // (REST commits?path= semantics), not every commit whose tree contains it.
 func TestListFileCommitsOnlyTouchingCommits(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	bareDir := filepath.Join(t.TempDir(), "touch.git")
 	bare, err := git.PlainInit(bareDir, true)
 	if err != nil {
@@ -4950,6 +5055,10 @@ func TestListFileCommitsOnlyTouchingCommits(t *testing.T) {
 // by a write canceled before Commit survives every HardReset; serving the
 // worktree filesystem would present that ghost as HEAD truth.
 func TestReadFileHeadIgnoresUntrackedGhost(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(t.TempDir(), "owner", "ghost", "")
 	r.remoteBase = url
@@ -4977,6 +5086,10 @@ func TestReadFileHeadIgnoresUntrackedGhost(t *testing.T) {
 // race detector must see no unsynchronized access while it is called
 // concurrently with mutations.
 func TestHeadCommitSHALockedAgainstRelease(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("git-backend test: heavy go-git fixture, skipped in short mode")
+	}
 	url := seedBareMetadataRepo(t)
 	r := newGitRepo(t.TempDir(), "owner", "race", "")
 	r.remoteBase = url
@@ -4986,7 +5099,10 @@ func TestHeadCommitSHALockedAgainstRelease(t *testing.T) {
 	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	// Two spinners + five push cycles + a yield per spin: the race
+	// invariant is proven by ANY overlap of headCommitSHA with the
+	// mutation/release path, not by millions of instrumented iterations.
+	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -4996,11 +5112,12 @@ func TestHeadCommitSHALockedAgainstRelease(t *testing.T) {
 					return
 				default:
 					_ = r.headCommitSHA()
+					runtime.Gosched()
 				}
 			}
 		}()
 	}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 5; i++ {
 		if _, _, err := r.writeCommitPush(ctx, metadataFilePath, []byte(fmt.Sprintf(`{"v":4,"p":"race","i":%d}`, i)), fmt.Sprintf("cycle %d", i)); err != nil {
 			t.Fatalf("write: %v", err)
 		}

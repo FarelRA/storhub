@@ -43,7 +43,7 @@ func waitClean(t *testing.T, pm *projectMetadata) {
 		if time.Now().After(deadline) {
 			t.Fatal("metadata never drained")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -53,6 +53,7 @@ func waitClean(t *testing.T, pm *projectMetadata) {
 // ceiling is armed, further growth (transaction path AND direct mutation
 // paths) fails fast while shrinks stay open.
 func TestOversizeAdmissionRejectsFastWithoutLeakingState(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("oversize fixture is heavy")
 	}
@@ -133,6 +134,7 @@ func TestOversizeAdmissionRejectsFastWithoutLeakingState(t *testing.T) {
 // the next commit must be detected by the read-back verification and
 // resolved by rebasing, not silently overwritten.
 func TestMigrationClobberDetectedAndRebased(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -223,6 +225,7 @@ func TestMigrationClobberDetectedAndRebased(t *testing.T) {
 // tree that lacks the rival's changes, so the migration must detect that it
 // was migrated underneath and rebase first.
 func TestMigrationAfterConcurrentMigrateRebases(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -304,6 +307,7 @@ func TestMigrationAfterConcurrentMigrateRebases(t *testing.T) {
 // first. Serving the empty tree to the pre-check and mutating it commits an
 // empty tree over real remote state - acknowledged data loss.
 func TestColdCacheUploadHydratesBeforeCommitting(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub1 := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
@@ -340,6 +344,7 @@ func TestColdCacheUploadHydratesBeforeCommitting(t *testing.T) {
 // acknowledged work - a path that, for rebase-capable commits, could not
 // even be reached without destroying data.
 func TestConflictRecoveryRetainsPendingOps(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "conf", "docs", "a.txt", 1)
@@ -390,6 +395,7 @@ func TestConflictRecoveryRetainsPendingOps(t *testing.T) {
 // acknowledged work on an entry outside the cache (survivable only via the
 // journal, which is optional).
 func TestRevivalTimeoutRetainsAcknowledgedMutation(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 
@@ -444,6 +450,7 @@ func TestRevivalTimeoutRetainsAcknowledgedMutation(t *testing.T) {
 // read stopped/triggerCh under pm.mu. The channel/flag swap must be
 // synchronized (run under -race in the authoritative gate).
 func TestConcurrentRevivalSingleLoop(t *testing.T) {
+	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()

@@ -73,25 +73,31 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	}
 	// Run every fallible operation before the irreversible removal so an
 	// error can never leave the file deleted while the caller believes the
-	// delete failed.
+	// delete failed. All mutations apply to a private COW copy; the shared
+	// tree is swapped in only once they have all succeeded.
 	now := h.config.Now().Unix()
-	shfs.TouchParentDirectory(pm.meta, cleanName, now)
-	if len(pm.meta.FindFilesByInode(existing.Inode)) > 0 {
-		if err := implposix.TouchInodeFamilyChangedAt(pm.meta, existing.Inode, now); err != nil {
+	tree := cowTree(pm.meta)
+	shfs.TouchParentDirectory(tree, cleanName, now)
+	if len(tree.FindFilesByInode(existing.Inode)) > 0 {
+		if err := implposix.TouchInodeFamilyChangedAt(tree, existing.Inode, now); err != nil {
 			pm.mu.Unlock()
 			return err
 		}
 	}
-	if !pm.meta.RemoveFile(cleanName) {
+	if !tree.RemoveFile(cleanName) {
 		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
+	// Capture the surviving family members before publishing (FindFilesByInode
+	// rebuilds indexes, which must not happen on the shared tree).
+	siblings := tree.FindFilesByInode(existing.Inode)
+	publishTreeLocked(pm, tree)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	h.appendOpLocked(project, pm, Op{
 		Type: OpDeleteFile, Paths: []string{cleanName}, Cause: "unlink",
 		Timestamp: now, FreedChunks: len(existing.Chunks),
 	})
-	h.emitFamilySiblingsLocked(project, pm, existing.Inode, cleanName, "unlink-family", now)
+	h.emitFamilySiblingsLocked(project, pm, tree, siblings, existing.Inode, cleanName, "unlink-family", now)
 	h.emitParentDirOpLocked(project, pm, cleanName, "unlink-parent", now)
 	pm.mu.Unlock()
 
@@ -124,10 +130,16 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	if !pm.meta.RemoveRelease(tag) {
+	if _, ok := pm.meta.Releases[tag]; !ok {
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
+	tree := cowTree(pm.meta)
+	if !tree.RemoveRelease(tag) {
+		pm.mu.Unlock()
+		return shfs.NotFound(fmt.Sprintf("release %s", tag))
+	}
+	publishTreeLocked(pm, tree)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	h.appendOpLocked(project, pm, Op{
 		Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: "release-delete",
@@ -155,16 +167,19 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 	if err != nil {
 		return err
 	}
+	// The loaded tree may be the hub's shared snapshot: normalize a private
+	// copy and commit that, never the shared one.
 	before := repoMeta.Clone()
 	before.Normalize(project, h.config.Now().Unix())
-	repoMeta.RecomputeStats()
-	repoMeta.Normalize(project, h.config.Now().Unix())
+	working := repoMeta.Clone()
+	working.RecomputeStats()
+	working.Normalize(project, h.config.Now().Unix())
 	beforePayload, beforeErr := before.ToJSON()
-	afterPayload, afterErr := repoMeta.ToJSON()
+	afterPayload, afterErr := working.ToJSON()
 	if beforeErr == nil && afterErr == nil && bytes.Equal(beforePayload, afterPayload) {
 		return nil
 	}
-	_, _, err = h.commitRepoMetadata(ctx, project, *repoMeta, repoMetaSHA, "storhub: cleanup metadata")
+	_, _, err = h.commitRepoMetadata(ctx, project, working, repoMetaSHA, "storhub: cleanup metadata")
 	return err
 }
 
