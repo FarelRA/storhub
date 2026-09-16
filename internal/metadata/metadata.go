@@ -869,6 +869,17 @@ func (m *RepoMetadata) DeleteChunk(id int64) bool {
 	return true
 }
 
+// PutRelease stores a release ref verbatim, maintaining the serialized-size
+// cache incrementally (the release mirror of PutChunk). Direct
+// `meta.Releases[tag] = ref` writes bypass size accounting when they
+// overwrite an existing tag (a new tag is still caught by the length
+// fingerprint), so tracked writers must use this.
+func (m *RepoMetadata) PutRelease(tag string, ref ReleaseRef) {
+	old, existed := m.Releases[tag]
+	m.Releases[tag] = ref
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.Releases, tag, old, existed, ref, true)
+}
+
 func (m *RepoMetadata) AllFiles() []FileMeta {
 	names := make([]string, 0, len(m.Files))
 	for name := range m.Files {
