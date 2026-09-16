@@ -29,6 +29,7 @@ func retryTaxonomyConfig(server *httptest.Server, sleeps *[]time.Duration) storc
 }
 
 func TestRetryTaxonomy(t *testing.T) {
+	t.Parallel()
 	t.Run("idempotent GET retries then succeeds", func(t *testing.T) {
 		var hits atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +115,7 @@ func TestRetryTaxonomy(t *testing.T) {
 }
 
 func TestDownloadAssetStreamRejectsInvalidRange(t *testing.T) {
+	t.Parallel()
 	var unexpected atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		unexpected.Add(1)

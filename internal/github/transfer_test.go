@@ -14,6 +14,7 @@ import (
 )
 
 func TestTransferDeadlineScalesWithSize(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Config{TransferThroughput: 1 << 20}) // 1 MiB/s
 	cases := []struct {
 		name string
@@ -34,6 +35,7 @@ func TestTransferDeadlineScalesWithSize(t *testing.T) {
 }
 
 func TestTransferDeadlineHonorsConfiguredThroughput(t *testing.T) {
+	t.Parallel()
 	fast := NewClient("t", storcfg.Config{TransferThroughput: 8 << 20}) // 8 MiB/s
 	slow := NewClient("t", storcfg.Config{TransferThroughput: 1 << 20})
 	big := int64(4 << 30)
@@ -48,15 +50,20 @@ func TestTransferDeadlineHonorsConfiguredThroughput(t *testing.T) {
 }
 
 func TestUploadCallerDeadlineSurfacesWithoutSpin(t *testing.T) {
+	t.Parallel()
 	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		posts.Add(1)
-		time.Sleep(500 * time.Millisecond)
+		// Long enough to still be in-flight when the 30ms caller deadline
+		// fires (httptest.Close waits for it), short enough to keep the
+		// test cheap (was 500ms: the invariant is "request still open
+		// when the deadline expires", not the absolute duration).
+		time.Sleep(60 * time.Millisecond)
 	}))
 	defer server.Close()
 	c := NewClient("t", retryTaxonomyConfig(server, nil))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	_, err := c.UploadAsset(ctx, "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
@@ -73,6 +80,7 @@ func TestUploadCallerDeadlineSurfacesWithoutSpin(t *testing.T) {
 }
 
 func TestCanceledContextIsNeverRetriedAsTimeout(t *testing.T) {
+	t.Parallel()
 	canceled := context.Canceled
 	if isRetryableNetworkError(canceled) {
 		t.Fatal("cancellation must not be retryable")
@@ -83,7 +91,7 @@ func TestCanceledContextIsNeverRetriedAsTimeout(t *testing.T) {
 	}
 	// A genuine client timeout IS retryable.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}))
 	defer srv.Close()
 	client := &http.Client{Timeout: 20 * time.Millisecond}

@@ -73,7 +73,10 @@ type Client struct {
 	logger             *slog.Logger
 	governor           *rateGovernor
 
-	assetMu   sync.Mutex
+	// assetMu guards assetURLs. Reads take the shared lock: the lookup
+	// runs on every FUSE range read, and an exclusive lock there would
+	// serialize all mounted reads through one convoy.
+	assetMu   sync.RWMutex
 	assetURLs map[int64]cachedAssetURL
 }
 
@@ -483,6 +486,17 @@ func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, len
 // deadlineBoundBody keeps a response context alive until the streamed
 // body is closed, so readers may consume it after the request function
 // has returned.
+//
+// CONTRACT: Close() owns the cancel. fetchCDNRange deliberately does NOT
+// defer cancel() - doing so amputates every live stream the moment the
+// function returns - and transfers the transfer-deadline CancelFunc to
+// this body instead. Every caller MUST Close() the returned reader on
+// ALL paths (defer Close is the idiom). An abandoned, never-closed
+// reader pins its connection and timer until the size-scaled transfer
+// deadline fires: minutes for a large range. That deadline is the
+// deliberate outer bound - a shorter watchdog would kill legitimate
+// slow-but-live streams, so no tighter fallback exists. Close is
+// idempotent and safe to call alongside a read loop.
 type deadlineBoundBody struct {
 	io.ReadCloser
 	cancel context.CancelFunc
@@ -518,9 +532,14 @@ func isCDNRejection(status int) bool {
 		status == StatusSignedURLExpired
 }
 
+// cachedAssetURL is the signed-URL cache read path. It takes the shared
+// read lock so concurrent range reads proceed in parallel; stores and
+// invalidations (the rare paths) take the exclusive lock. An expired
+// entry returns ok=false but is left in place: the insert-time prune in
+// storeAssetURL bounds physical retention.
 func (c *Client) cachedAssetURL(assetID int64) (cachedAssetURL, bool) {
-	c.assetMu.Lock()
-	defer c.assetMu.Unlock()
+	c.assetMu.RLock()
+	defer c.assetMu.RUnlock()
 	cached, ok := c.assetURLs[assetID]
 	return cached, ok && c.now().Before(cached.expires)
 }
@@ -546,6 +565,12 @@ const (
 	// before that; a too-long guess still self-heals via the 618 re-resolution
 	// path.
 	assetURLFallbackTTL = 30*time.Minute - assetURLSafetyMargin
+	// assetURLCacheCap bounds the signed-URL cache. Entries live ~30 min,
+	// so the useful working set is small by construction; the cap exists
+	// only so a long-lived mount touching millions of distinct chunks
+	// cannot retain one dead URL string (~0.5-1.5 KB) per asset forever.
+	// 10k entries cost a few MB at worst.
+	assetURLCacheCap = 10000
 )
 
 func (c *Client) storeAssetURL(assetID int64, rawURL string) {
@@ -565,6 +590,41 @@ func (c *Client) storeAssetURL(assetID int64, rawURL string) {
 	c.assetMu.Lock()
 	defer c.assetMu.Unlock()
 	c.assetURLs[assetID] = cachedAssetURL{url: rawURL, expires: expires}
+	c.pruneAssetURLLocked()
+}
+
+// pruneAssetURLLocked bounds the cache after an insert. Expired entries
+// are swept out first: cachedAssetURL only logically expires them, so
+// without this sweep the map keeps one signed URL per asset ID ever
+// read. If the map is still over the cap - a burst of distinct fresh
+// assets inside one TTL window - the soonest-to-expire entries, a proxy
+// for the oldest, are evicted until it fits. Dropping a still-live entry
+// costs its next reader one API re-resolution, never correctness.
+// Callers must hold c.assetMu exclusively.
+func (c *Client) pruneAssetURLLocked() {
+	if len(c.assetURLs) <= assetURLCacheCap {
+		return
+	}
+	now := c.now()
+	for id, cached := range c.assetURLs {
+		if !now.Before(cached.expires) {
+			delete(c.assetURLs, id)
+		}
+	}
+	for len(c.assetURLs) > assetURLCacheCap {
+		var victim int64
+		var earliest time.Time
+		found := false
+		for id, cached := range c.assetURLs {
+			if !found || cached.expires.Before(earliest) {
+				victim, earliest, found = id, cached.expires, true
+			}
+		}
+		if !found {
+			return
+		}
+		delete(c.assetURLs, victim)
+	}
 }
 
 // signedURLExpiry returns the earliest authoritative expiry carried by a

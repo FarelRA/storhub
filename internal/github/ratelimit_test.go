@@ -45,6 +45,7 @@ func itoa(n int64) string {
 }
 
 func TestMethodCostValues(t *testing.T) {
+	t.Parallel()
 	readMethods := []string{http.MethodGet, http.MethodHead, http.MethodOptions}
 	writeMethods := []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 	for _, m := range readMethods {
@@ -60,6 +61,7 @@ func TestMethodCostValues(t *testing.T) {
 }
 
 func TestGovernorObserveAndLocalAccounting(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(nil)
 	h.observe(5000, 100, 30*time.Minute)
 	snap := h.g.snapshot()
@@ -84,6 +86,7 @@ func TestGovernorObserveAndLocalAccounting(t *testing.T) {
 }
 
 func TestGovernorReserveFloorDeniesWhenFailFast(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 0 })
 	h.observe(5000, 10, 40*time.Minute)
 	_, err := h.g.acquire(context.Background(), 1, false, false)
@@ -100,6 +103,7 @@ func TestGovernorReserveFloorDeniesWhenFailFast(t *testing.T) {
 }
 
 func TestGovernorReserveFloorWaitsUntilReset(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 15 * time.Minute })
 	resetIn := 5 * time.Minute
 	h.observe(5000, 10, resetIn)
@@ -114,6 +118,7 @@ func TestGovernorReserveFloorWaitsUntilReset(t *testing.T) {
 }
 
 func TestGovernorPointsWindowThrottlesWrites(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(func(c *storcfg.Config) {
 		c.RatePointsPerMin = 6
 		c.RateMaxWait = time.Hour
@@ -134,6 +139,7 @@ func TestGovernorPointsWindowThrottlesWrites(t *testing.T) {
 }
 
 func TestGovernorContentWindowCapsUploadsOnly(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(func(c *storcfg.Config) {
 		c.RateContentPerMin = 1
 		c.RateMaxWait = time.Hour
@@ -159,6 +165,7 @@ func TestGovernorContentWindowCapsUploadsOnly(t *testing.T) {
 }
 
 func TestGovernorDormantWithoutServerBudget(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(nil)
 	for i := 0; i < 20; i++ {
 		release, err := h.g.acquire(context.Background(), 1, false, false)

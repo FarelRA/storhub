@@ -21,6 +21,7 @@ import (
 // not maxRetryDelay, is what refuses an excessive wait. A plain
 // (non-rate-limited) Retry-After stays capped at maxRetryDelay.
 func TestHardenedRetryAfterHonoredOnRateLimit(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -44,6 +45,7 @@ func TestHardenedRetryAfterHonoredOnRateLimit(t *testing.T) {
 // honored Retry-After: a rate-limited wait beyond the governor's maxWait
 // is refused up front instead of stalling the caller.
 func TestHardenedMaxWaitRefusesLongRateLimit(t *testing.T) {
+	t.Parallel()
 	var hits atomic.Int32
 	var sleeps []time.Duration
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -69,6 +71,7 @@ func TestHardenedMaxWaitRefusesLongRateLimit(t *testing.T) {
 // guidance: at least ~60s of patience with growth, never past the 15m
 // ceiling (plus bounded jitter).
 func TestHardenedSecondaryBackoffFloorAndCeiling(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -86,6 +89,7 @@ func TestHardenedSecondaryBackoffFloorAndCeiling(t *testing.T) {
 // TestHardenedRedirectStatusesResolve pins that every redirect status the
 // API/CDN may emit carries the signed URL like 302 does.
 func TestHardenedRedirectStatusesResolve(t *testing.T) {
+	t.Parallel()
 	for _, status := range []int{
 		http.StatusMovedPermanently,  // 301
 		http.StatusFound,             // 302
@@ -131,6 +135,7 @@ func (hardenedTimeoutError) Temporary() bool { return true }
 // semantic: timeouts, torn reads and reset/aborted connections retry;
 // user cancellation never does.
 func TestHardenedNetworkErrorsUnified(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -157,6 +162,7 @@ func TestHardenedNetworkErrorsUnified(t *testing.T) {
 // the attempt), the body factory rewinds for every attempt, and a failed
 // first attempt is followed by a successful retry.
 func TestHardenedUploadRetryRewindsAndSucceeds(t *testing.T) {
+	t.Parallel()
 	var posts atomic.Int32
 	var lastBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +195,7 @@ func TestHardenedUploadRetryRewindsAndSucceeds(t *testing.T) {
 // upload deadline grows with payload size and never drops below the
 // general request timeout.
 func TestHardenedTransferDeadlineScalesWithSize(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

@@ -30,6 +30,7 @@ import (
 // second contents write must be refused by the governor while a plain GET
 // still passes.
 func TestContentsWritesDrawFromContentWindow(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
 			_, _ = w.Write([]byte(`{"content":{"sha":"abc"},"commit":{"sha":"c1"}}`))
@@ -63,6 +64,7 @@ func TestContentsWritesDrawFromContentWindow(t *testing.T) {
 // Counterpart to the contents-write pin above: asset uploads keep
 // drawing from the content window too.
 func TestAssetUploadStillDrawsFromContentWindow(t *testing.T) {
+	t.Parallel()
 	var posts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		posts++
@@ -88,6 +90,7 @@ func TestAssetUploadStillDrawsFromContentWindow(t *testing.T) {
 // wait; wall-clock time.Until would compute a wildly different number and
 // fake-clock tests would diverge from the code they pin.
 func TestResetWaitUsesClientClock(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -115,6 +118,7 @@ func TestResetWaitUsesClientClock(t *testing.T) {
 // A caller deadline is permanent (never retried), while http.Client's
 // own timeout stays retryable, and DNS NXDOMAIN is permanent.
 func TestPermanentTransportFailuresNotRetryable(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 	<-ctx.Done()
@@ -138,6 +142,7 @@ func TestPermanentTransportFailuresNotRetryable(t *testing.T) {
 // GitHub 404s a DELETE for an unknown repo; after a lost-response
 // retry the repo is already gone, and gone IS success.
 func TestDeleteRepoTreatsNotFoundAsSuccess(t *testing.T) {
+	t.Parallel()
 	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -166,6 +171,7 @@ func TestDeleteRepoTreatsNotFoundAsSuccess(t *testing.T) {
 // the array embedded in the release object truncates near 1000, so a scan
 // of it silently misses real assets.
 func TestFindAssetIDByNamePaginates(t *testing.T) {
+	t.Parallel()
 	const total = 150
 	target := 120
 	mux := http.NewServeMux()
@@ -206,6 +212,7 @@ func TestFindAssetIDByNamePaginates(t *testing.T) {
 // committed a zero-wait reservation, the accounting must roll back - a
 // request that was never sent must not spend the windows.
 func TestAcquireCtxDoneRollsBackReservation(t *testing.T) {
+	t.Parallel()
 	cfg := storcfg.Default()
 	cfg.MaxConcurrentRequests = 1
 	g := newRateGovernor(cfg, nil, func(context.Context, time.Duration) error { return nil })

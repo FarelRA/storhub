@@ -22,6 +22,7 @@ import (
 // 422 or 5xx whose body prose happens to mention "secondary rate limit"
 // must not be misclassified as rate-limited (wrong retry path).
 func TestDecodeRateMarkersRequireAbuseStatuses(t *testing.T) {
+	t.Parallel()
 	markerBody := `{"message":"You have exceeded a secondary rate limit, please slow down"}`
 	for _, status := range []int{
 		http.StatusNotFound,
@@ -52,6 +53,7 @@ func TestDecodeRateMarkersRequireAbuseStatuses(t *testing.T) {
 // "1000" or "too many" (false positives on message variants) and never
 // on non-422 statuses.
 func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
+	t.Parallel()
 	body := `{"message":"Validation Failed","errors":[` +
 		`{"resource":"Release","code":"already_exists","field":"tag_name","message":"tag exists"},` +
 		`{"resource":"ReleaseAsset","code":"custom","field":"file_count","message":"file_count limited to 1000 assets per release"}]}`
@@ -102,6 +104,7 @@ func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
 // clock while checking with the governor clock breaks TTL under an
 // injected test clock (and skews under any clock discipline change).
 func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	// Start the governor clock well behind the wall clock so the two
 	// clocks observably diverge: a wall-clock store stays valid far
@@ -143,6 +146,7 @@ func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
 // out a throttle wait. A throttled waiter holding a slot
 // head-of-line-blocks cheap requests behind it.
 func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	now := time.Now()
 	var sleeps []time.Duration
@@ -205,7 +209,7 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 			seen = true
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 	releaseA()
 	if !seen {
@@ -226,6 +230,7 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 // window, is strictly older information and must be ignored. Adopting a
 // newer window re-arms the one-shot budget warnings.
 func TestObserveIgnoresStaleSnapshots(t *testing.T) {
+	t.Parallel()
 	h := newGovHarness(nil)
 	reset := h.t.Add(30 * time.Minute).Unix()
 	hdr := func(remaining int64, resetUnix int64) http.Header {
@@ -285,6 +290,7 @@ func TestObserveIgnoresStaleSnapshots(t *testing.T) {
 // clamped at the repo root) instead of being rejected or leaking ".."
 // into the request URL.
 func TestEscapeContentPathNormalizes(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"a/b/c", "a/b/c"},
 		{"a//b/./c", "a/b/c"},

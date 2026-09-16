@@ -10,6 +10,7 @@ import (
 )
 
 func TestAPIErrorErrorFormattingAndHelpers(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  *APIError
@@ -35,6 +36,7 @@ func TestAPIErrorErrorFormattingAndHelpers(t *testing.T) {
 }
 
 func TestAPIErrorRetryability(t *testing.T) {
+	t.Parallel()
 	reset := time.Unix(10, 0)
 	tests := []struct {
 		name string
@@ -61,6 +63,7 @@ func TestAPIErrorRetryability(t *testing.T) {
 }
 
 func TestBodySnippetCarriesFileCountDetail(t *testing.T) {
+	t.Parallel()
 	full := `{"message":"Validation Failed","errors":[{"resource":"ReleaseAsset","code":"custom","field":"file_count","message":"file_count limited to 1000 assets per release"}]}`
 	err := &APIError{StatusCode: http.StatusUnprocessableEntity, Message: "Validation Failed", Body: full}
 	if got := err.BodySnippet(); got != full {

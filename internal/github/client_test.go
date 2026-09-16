@@ -66,6 +66,7 @@ func rateLimitResponse(w http.ResponseWriter, resetIn time.Duration, withHeaders
 }
 
 func TestDecodeAPIErrorClassification(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		status      int
@@ -144,6 +145,7 @@ func TestDecodeAPIErrorClassification(t *testing.T) {
 }
 
 func TestUploadAssetRetriesAfterRateLimit(t *testing.T) {
+	t.Parallel()
 	var posts atomic.Int32
 	var lastBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +181,7 @@ func TestUploadAssetRetriesAfterRateLimit(t *testing.T) {
 }
 
 func TestUploadAssetFailsFastOnDistantReset(t *testing.T) {
+	t.Parallel()
 	var posts atomic.Int32
 	var sleeps []time.Duration
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +207,7 @@ func TestUploadAssetFailsFastOnDistantReset(t *testing.T) {
 }
 
 func TestUploadAssetRetriesOnHeaderlessRateLimit(t *testing.T) {
+	t.Parallel()
 	// Regression for the observed uploads.github.com behavior: a 403
 	// whose only signal is the message text, no x-ratelimit headers at
 	// all. The upload must be classified as rate limited and retried.
@@ -232,6 +236,7 @@ func TestUploadAssetRetriesOnHeaderlessRateLimit(t *testing.T) {
 }
 
 func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
+	t.Parallel()
 	// Regression for the 2026-09-05 FUSE incident: uploads.github.com sends
 	// no X-RateLimit headers, so the governor paces bursts against a stale
 	// low core snapshot and throttles them client-side while the real
@@ -269,6 +274,7 @@ func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
 }
 
 func TestDownloadAssetStreamCachesSignedURL(t *testing.T) {
+	t.Parallel()
 	var apiHits, cdnHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
@@ -320,6 +326,7 @@ func TestDownloadAssetStreamCachesSignedURL(t *testing.T) {
 }
 
 func TestDownloadAssetStreamReresolvesRejectedURL(t *testing.T) {
+	t.Parallel()
 	var apiHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
@@ -362,6 +369,7 @@ func TestDownloadAssetStreamReresolvesRejectedURL(t *testing.T) {
 // token has lapsed must be dropped and re-resolved through the API, then the
 // range served from the fresh URL - not retried against the dead one.
 func TestDownloadAssetStreamReresolvesOn618(t *testing.T) {
+	t.Parallel()
 	var apiHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
@@ -400,6 +408,7 @@ func TestDownloadAssetStreamReresolvesOn618(t *testing.T) {
 }
 
 func TestDownloadAssetStreamDirect200Legacy(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Range") != "bytes=0-4" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -421,6 +430,7 @@ func TestDownloadAssetStreamDirect200Legacy(t *testing.T) {
 }
 
 func TestPrimaryRateLimitWaitHonorsResetOnce(t *testing.T) {
+	t.Parallel()
 	var gets atomic.Int32
 	var sleeps []time.Duration
 	resetAt := time.Now().Add(5 * time.Second)
@@ -465,6 +475,7 @@ func TestPrimaryRateLimitWaitHonorsResetOnce(t *testing.T) {
 // re-resolved through the API roughly sixty times more often than its
 // real ~1h validity required.
 func TestStoreAssetURLParsesAzureSASExpiry(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	// Relative to the test run: a hardcoded past date would make
 	// cachedAssetURL rightly refuse the entry and turn this into a
@@ -485,6 +496,7 @@ func TestStoreAssetURLParsesAzureSASExpiry(t *testing.T) {
 // short residency; rejection-triggered re-resolution covers any guess
 // that runs long.
 func TestStoreAssetURLFallbackKeepsUnknownSchemesCovered(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	c.storeAssetURL(11, "https://cdn.example.com/x?sig=opaque&nonsense=1")
 	_, ok := c.cachedAssetURL(11)
@@ -529,6 +541,7 @@ func testSignedAssetURL(t *testing.T, jwtExp, sasExp time.Time) string {
 // the cache must lapse at the EARLIER expiry, not the SAS. Trusting 'se'
 // alone kept a JWT-dead URL cached for ~10 minutes, guaranteeing 618s.
 func TestStoreAssetURLHonorsEarliestExpiry(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	jwtExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
 	sasExp := jwtExp.Add(10 * time.Minute) // SAS outlives the JWT by 10 min
@@ -545,6 +558,7 @@ func TestStoreAssetURLHonorsEarliestExpiry(t *testing.T) {
 // TestStoreAssetURLHonorsSASWhenEarlier pins the min() symmetry: when the
 // backing SAS expires before the JWT, the SAS is the binding constraint.
 func TestStoreAssetURLHonorsSASWhenEarlier(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	sasExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
 	jwtExp := sasExp.Add(10 * time.Minute)
@@ -561,6 +575,7 @@ func TestStoreAssetURLHonorsSASWhenEarlier(t *testing.T) {
 // TestStoreAssetURLMalformedJWTFallsBackToSAS proves a non-decodable token
 // never poisons the cache: the SAS expiry is still honored, no panic.
 func TestStoreAssetURLMalformedJWTFallsBackToSAS(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	sasExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
 	raw := "https://release-assets.githubusercontent.com/x?jwt=aaa.bbb.ccc&se=" +
@@ -578,6 +593,7 @@ func TestStoreAssetURLMalformedJWTFallsBackToSAS(t *testing.T) {
 // TestStoreAssetURLFallbackIsThirtyMinutes pins the no-expiry default: assume
 // GitHub's ~30min front-door token and re-resolve 30s before it lapses.
 func TestStoreAssetURLFallbackIsThirtyMinutes(t *testing.T) {
+	t.Parallel()
 	c := NewClient("t", storcfg.Default())
 	c.storeAssetURL(24, "https://cdn.example.com/x?sig=opaque")
 	got, ok := c.cachedAssetURL(24)
@@ -593,6 +609,7 @@ func TestStoreAssetURLFallbackIsThirtyMinutes(t *testing.T) {
 // TestIsCDNRejectionIncludesSignedURLExpiry pins that GitHub's non-standard
 // 618 (jwt:expired) routes to re-resolution like the other dead-URL statuses.
 func TestIsCDNRejectionIncludesSignedURLExpiry(t *testing.T) {
+	t.Parallel()
 	for _, status := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusBadRequest, http.StatusGone, StatusSignedURLExpired} {
 		if !isCDNRejection(status) {
 			t.Errorf("status %d must trigger re-resolution", status)
@@ -613,6 +630,7 @@ func TestIsCDNRejectionIncludesSignedURLExpiry(t *testing.T) {
 // after whatever bytes had already buffered), while tiny buffered test
 // bodies kept CI green. Large + slow is what makes this deterministic.
 func TestDownloadAssetStreamBodySurvivesReturn(t *testing.T) {
+	t.Parallel()
 	payload := make([]byte, 512<<10)
 	for i := range payload {
 		payload[i] = byte(i * 7)
