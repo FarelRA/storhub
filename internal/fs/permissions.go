@@ -398,7 +398,7 @@ func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now int64) {
 	if dir := repo.GetDirectory(dirPath); dir != nil {
 		dir.ModifiedAt = now
 		dir.ChangedAt = now
-		repo.Dirs[dirPath] = *dir
+		repo.WriteDirDirect(dirPath, *dir)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,14 +24,28 @@ type Backend = shfs.Backend
 
 type Service struct {
 	backend Backend
+
+	// logMu guards loggers, the per-project logger cache. The hub owns one
+	// long-lived Service (see storage.StorHub.posixService), so building the
+	// logger once per project here avoids the two-logger allocation the old
+	// per-call form paid on every POSIX verb.
+	logMu   sync.Mutex
+	loggers map[string]*slog.Logger
 }
 
 func NewService(backend Backend) *Service {
-	return &Service{backend: backend}
+	return &Service{backend: backend, loggers: make(map[string]*slog.Logger)}
 }
 
 func (s *Service) logger(project string) *slog.Logger {
-	return logging.WithComponent(s.backend.Logger(), "posix").With("project", project)
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if l, ok := s.loggers[project]; ok {
+		return l
+	}
+	l := logging.WithComponent(s.backend.Logger(), "posix").With("project", project)
+	s.loggers[project] = l
+	return l
 }
 
 func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
@@ -697,7 +712,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 			if err := mutate(repo, nil, &copy); err != nil {
 				return err
 			}
-			repo.Dirs[cleanPath] = copy
+			repo.WriteDirDirect(cleanPath, copy)
 			return nil
 		}
 		return s.backend.FileNotFound(cleanPath)

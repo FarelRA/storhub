@@ -36,18 +36,24 @@ type Backend interface {
 
 type Service struct {
 	backend Backend
+
+	// stateMu guards states, the per-project derived state (logger, mutation
+	// counter, StatFS cache). The hub owns one long-lived Service (see
+	// storage.StorHub.fsService), so this cache lives for the hub's lifetime
+	// and is reclaimed with it - no process-global state.
+	stateMu sync.Mutex
+	states  map[string]*projectState
 }
 
 const PendingReleaseTag = "pending"
 
 func NewService(backend Backend) *Service {
-	return &Service{backend: backend}
+	return &Service{backend: backend, states: make(map[string]*projectState)}
 }
 
-// projectState carries the per-(backend, project) derived state that must
-// outlive individual Service values: the hub constructs a fresh Service for
-// every verb call (storage.StorHub.fsService), so caches that live on the
-// struct would be discarded before the next operation could reuse them.
+// projectState carries the per-project derived state reused across FS
+// operations: the lazily-built logger, a mutation counter that invalidates
+// the StatFS cache, and the cached StatFS aggregate itself.
 type projectState struct {
 	mu        sync.Mutex
 	logger    *slog.Logger
@@ -58,16 +64,6 @@ type projectState struct {
 	statfsAt  time.Time
 }
 
-type projectStateKey struct {
-	backend Backend
-	project string
-}
-
-// projectStates is keyed by the backend's identity (the hub pointer), so
-// two hubs - or two embedders - can never share cached state under a
-// colliding project name.
-var projectStates sync.Map // projectStateKey -> *projectState
-
 // statfsCacheTTL bounds how long cached StatFS aggregates may serve even
 // when neither the commit SHA nor the local mutation counter moved: verbs
 // that mutate metadata outside this Service (xattr/symlink/chmod on the
@@ -75,13 +71,14 @@ var projectStates sync.Map // projectStateKey -> *projectState
 const statfsCacheTTL = 2 * time.Second
 
 func (s *Service) state(project string) *projectState {
-	key := projectStateKey{backend: s.backend, project: project}
-	if cached, ok := projectStates.Load(key); ok {
-		return cached.(*projectState)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if st, ok := s.states[project]; ok {
+		return st
 	}
-	state := &projectState{}
-	actual, _ := projectStates.LoadOrStore(key, state)
-	return actual.(*projectState)
+	st := &projectState{}
+	s.states[project] = st
+	return st
 }
 
 // logger returns the per-project fs logger, built once per project. The
@@ -264,7 +261,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 			dir.UID, dir.GID = OwnerIDsForCreate(ctx, dir.UID, dir.GID)
 			dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
 			dir.ChangedAt = s.backend.Now()
-			repo.Dirs[cleanPath] = *dir
+			repo.WriteDirDirect(cleanPath, *dir)
 		}
 		TouchParentDirectory(repo, cleanPath, s.backend.Now())
 		return nil
@@ -590,7 +587,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 		newDir.ChangedAt = now
 		newDir.AccessedAt = now
 		newDir.CreatedAt = now
-		repo.Dirs[dstClean] = newDir
+		repo.WriteDirDirect(dstClean, newDir)
 		dirsToCopy := make(map[string]meta.DirMeta)
 		for p, d := range repo.Dirs {
 			if p == srcClean {
@@ -613,7 +610,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			}
 		}
 		for newPath, d := range dirsToCopy {
-			repo.Dirs[newPath] = d
+			repo.WriteDirDirect(newPath, d)
 		}
 		filesToCopy := make(map[string]meta.FileMeta)
 		for p, f := range repo.Files {
