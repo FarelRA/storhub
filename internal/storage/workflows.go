@@ -193,7 +193,7 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 		// Brand-new (or wiped) project: start on the split layout (version 5).
 		m := NewRepoMetadata(project)
 		pendingOps := h.journalReplayForLoad(project, m)
-		h.storeRepoMetadata(project, *m, "", pendingOps, 0)
+		h.storeRepoMetadata(project, m, "", pendingOps, 0)
 		// The returned tree may be published directly (hydration swaps it
 		// into pm.meta); journal replay invalidates the indexes, so rebuild
 		// before handing it out.
@@ -210,13 +210,13 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	// NOTE: sha is the CAS token for the document that was found (manifest
 	// blob sha for a split project, metadata blob sha for a legacy one). It
 	// must never be consumed as a git ref: pins capture chunk layouts instead.
-	h.storeRepoMetadata(project, *m, sha, pendingOps, objectCount)
+	h.storeRepoMetadata(project, m, sha, pendingOps, objectCount)
 	m.RebuildIndexes()
 	logging.Debug(h.projectLogger(project), "load metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "sha", shortSHA(sha), "bytes", len(data), "split", m.IsSplit())
 	return m, sha, nil
 }
 
-func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metadata RepoMetadata, previousSHA, message string) (string, string, error) {
+func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metadata *RepoMetadata, previousSHA, message string) (string, string, error) {
 	started := h.config.Now().UTC()
 	logging.Info(h.projectLogger(project), "commit metadata start", "message", message, "previous_sha", shortSHA(previousSHA))
 	if err := h.ensureOwner(ctx); err != nil {
@@ -239,7 +239,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 		objectCount = pm.objectCount
 		pm.mu.RUnlock()
 	}
-	commitSHA, contentSHA, newCount, err := h.publishIndex(ctx, project, &metadata, previousSHA, message, objectCount)
+	commitSHA, contentSHA, newCount, err := h.publishIndex(ctx, project, metadata, previousSHA, message, objectCount)
 	if err != nil {
 		logging.Error(h.projectLogger(project), "commit metadata failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return "", "", err
@@ -894,7 +894,7 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 // into maps the published tree still reads.
 func cowTree(m *RepoMetadata) *RepoMetadata {
 	c := m.Clone()
-	return &c
+	return c
 }
 
 // publishTreeLocked swaps a mutated COW copy in as the new shared truth.
@@ -921,19 +921,19 @@ func publishTreeLocked(pm *projectMetadata, tree *RepoMetadata) {
 // rebases onto the remote state instead of silently overwriting it. Shared
 // state that is replaced bumps pm.version so an in-flight transaction's
 // version guard observes the swap.
-func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha string, pendingOps []Op, objectCount uint64) {
+func (h *StorHub) storeRepoMetadata(project string, meta *RepoMetadata, sha string, pendingOps []Op, objectCount uint64) {
 	clone := meta.Clone()
 	clone.RebuildIndexes()
 
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	if len(pendingOps) > 0 {
-		pm.meta = &clone
+		pm.meta = clone
 		pm.sha = sha
 		pm.hydrated = true
 		pm.objectCount = objectCount
 		// The rebase baseline moves to the freshly loaded state.
-		pm.baseTree = &clone
+		pm.baseTree = clone
 		pm.opStack.clear()
 		for _, op := range pendingOps {
 			pm.opStack.append(op)
@@ -950,12 +950,12 @@ func (h *StorHub) storeRepoMetadata(project string, meta RepoMetadata, sha strin
 		pm.mu.Unlock()
 		return
 	}
-	pm.meta = &clone
+	pm.meta = clone
 	pm.sha = sha
 	pm.hydrated = true
 	pm.objectCount = objectCount
 	// The rebase baseline moves to the freshly loaded state.
-	pm.baseTree = &clone
+	pm.baseTree = clone
 	pm.dirty = false // Just stored, so not dirty
 	pm.opStack.clear()
 	pm.version++

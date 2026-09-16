@@ -39,7 +39,7 @@ func (b *testBackend) EnsureRepoContext(context.Context, string) error { return 
 func (b *testBackend) LoadRepoMetadataContext(context.Context, string) (*meta.RepoMetadata, string, error) {
 	clone := b.repo.Clone()
 	clone.RebuildIndexes()
-	return &clone, "sha", nil
+	return clone, "sha", nil
 }
 
 func (b *testBackend) LoadRepoMetadataReadonlyContext(context.Context, string) (*meta.RepoMetadata, string, error) {
@@ -49,12 +49,12 @@ func (b *testBackend) LoadRepoMetadataReadonlyContext(context.Context, string) (
 func (b *testBackend) UpdateRepoMetadataContext(_ context.Context, _ string, fn func(*meta.RepoMetadata) error, _ string) (*meta.RepoMetadata, error) {
 	clone := b.repo.Clone()
 	clone.RebuildIndexes()
-	if err := fn(&clone); err != nil {
+	if err := fn(clone); err != nil {
 		return nil, err
 	}
 	clone.RebuildIndexes()
-	b.repo = &clone
-	return &clone, nil
+	b.repo = clone
+	return clone, nil
 }
 
 func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64) {

@@ -438,12 +438,13 @@ func TestValidateScratchMapStillDetectsDuplicates(t *testing.T) {
 	}
 }
 
-// TestValueCopyDoesNotCorruptSourceIndex pins the owner guard: a plain
-// struct copy (t := *m, NOT Clone) shares the derived state pointer without
-// any sharing bookkeeping. When the copy then diverges its Files map and
-// mutates through tracked methods, the mutation must never be applied
-// in-place to the index maps the original tree still reads.
-func TestValueCopyDoesNotCorruptSourceIndex(t *testing.T) {
+// TestCloneMutationDoesNotCorruptSourceIndex pins the sharing handshake: a
+// Clone shares the derived index maps read-only (mapsShared on both sides),
+// so when the clone diverges its Files map and mutates through tracked
+// methods, the mutation must never be applied in-place to the index maps
+// the original tree still reads. A raw struct copy (t := *m) would be a vet
+// copylocks error; Clone is the only sanctioned sharing path.
+func TestCloneMutationDoesNotCorruptSourceIndex(t *testing.T) {
 	now := int64(10)
 	m := NewRepoMetadata("valuecopy")
 	m.EnsureDirectory("d", now)
@@ -451,7 +452,7 @@ func TestValueCopyDoesNotCorruptSourceIndex(t *testing.T) {
 	m.UpsertFile("d/b", FileMeta{Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now}, now)
 	m.RebuildIndexes()
 
-	copied := *m
+	copied := m.Clone()
 	diverged := make(map[string]FileMeta, len(m.files))
 	for k, v := range m.files {
 		diverged[k] = v
@@ -470,7 +471,7 @@ func TestValueCopyDoesNotCorruptSourceIndex(t *testing.T) {
 		t.Fatalf("source children = %v, want two files", files)
 	}
 	if !m.indexFresh() {
-		t.Fatal("source index must survive the value-copy mutation")
+		t.Fatal("source index must survive the clone mutation")
 	}
 	if n := copied.NLink(777); n != 1 {
 		t.Fatalf("copy NLink(777) = %d, want 1", n)

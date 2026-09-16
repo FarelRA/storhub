@@ -1562,7 +1562,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	}
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile(cleanName)
-	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
 	return releaseTag, uploadURL, err
 }
 
@@ -2153,7 +2153,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	if fileInfo.Size() == 0 {
 		requiredSlots = 0
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
 	if err != nil {
 		return nil, err
 	}
@@ -2161,7 +2161,7 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	results := []ChunkInfo{}
 	if fileInfo.Size() > 0 {
 		prepare := func(remaining int) (string, string, error) {
-			return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
+			return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
 		}
 		results, err = h.uploadChunks(ctx, project, releaseTag, uploadURL, planner, prepare)
 		if err != nil {
@@ -2471,7 +2471,7 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	if err := h.validateMetadataSnapshot(ctx, project, rollbackMeta); err != nil {
 		return fmt.Errorf("rollback snapshot changed before commit: %w", err)
 	}
-	_, _, err = h.commitRepoMetadata(ctx, project, *rollbackMeta, currentSHA, fmt.Sprintf("storhub: rollback metadata to %s", shortSHA(commitSHA)))
+	_, _, err = h.commitRepoMetadata(ctx, project, rollbackMeta, currentSHA, fmt.Sprintf("storhub: rollback metadata to %s", shortSHA(commitSHA)))
 	if err != nil {
 		return err
 	}
@@ -2544,11 +2544,11 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 		return errors.New("revert requires a non-root path")
 	}
 	preview := current.Clone()
-	if err := metadata.RevertSubtree(&preview, historical, cleanPath, h.config.Now().Unix()); err != nil {
+	if err := metadata.RevertSubtree(preview, historical, cleanPath, h.config.Now().Unix()); err != nil {
 		return err
 	}
 	preview.Normalize(project, h.config.Now().Unix())
-	if err := h.validateMetadataSnapshot(ctx, project, &preview); err != nil {
+	if err := h.validateMetadataSnapshot(ctx, project, preview); err != nil {
 		return fmt.Errorf("revert %s: %w", cleanPath, err)
 	}
 	message := fmt.Sprintf("storhub: revert %s to %s", cleanPath, shortSHA(commitSHA))
@@ -2910,7 +2910,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	out := pm.meta.Clone()
 	pm.mu.RUnlock()
 	out.RebuildIndexes()
-	return &out, nil
+	return out, nil
 }
 
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {

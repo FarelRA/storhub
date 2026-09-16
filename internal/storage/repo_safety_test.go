@@ -65,7 +65,7 @@ func TestCommitRepoMetadataGitPathRejectsStalePreviousSHA(t *testing.T) {
 	ctx := context.Background()
 
 	m := meta.NewRepoMetadata("cas-probe")
-	_, _, err := hub.commitRepoMetadata(ctx, "cas-probe", *m, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "storhub: stale write")
+	_, _, err := hub.commitRepoMetadata(ctx, "cas-probe", m, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "storhub: stale write")
 	if err == nil {
 		t.Fatal("expected conflict for stale previousSHA on git path, got nil")
 	}

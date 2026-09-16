@@ -33,7 +33,7 @@ func TestStoreRepoMetadataPreservesPendingWork(t *testing.T) {
 	remote.EnsureRelease("v1", 1700000000)
 	remote.Normalize("guard", 1700000000)
 
-	hub.storeRepoMetadata("guard", *remote, "remote-sha-token", nil, 0)
+	hub.storeRepoMetadata("guard", remote, "remote-sha-token", nil, 0)
 
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -70,7 +70,7 @@ func TestStoreRepoMetadataAppliesBackWhenClean(t *testing.T) {
 	remote := NewRepoMetadata("cleanproj")
 	remote.EnsureDirectory("docs", 1700000000)
 	remote.Normalize("cleanproj", 1700000000)
-	hub.storeRepoMetadata("cleanproj", *remote, "tok", nil, 7)
+	hub.storeRepoMetadata("cleanproj", remote, "tok", nil, 7)
 
 	pm.mu.Lock()
 	defer pm.mu.Unlock()

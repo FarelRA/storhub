@@ -124,7 +124,22 @@ type RepoMetadata struct {
 	// side sees the shared flag and drops to a dirty state instead of
 	// writing into the shared maps.
 	derived *derivedState `json:"-"`
+
+	// noCopy makes struct copies (t := *m) a `go vet` copylocks error. A
+	// copy would alias the derived state pointer without the Clone-time
+	// sharing handshake; the runtime owner guard still defends against it,
+	// but the hazard should be caught before it ships. Clone is the only
+	// sanctioned copy path.
+	noCopy noCopy
 }
+
+// noCopy implements the sync.WaitGroup pattern: embedding a type with
+// pointer-receiver Lock/Unlock methods makes `go vet`'s copylocks check
+// flag every copy of the enclosing struct.
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
 
 // derivedState bundles the index maps, their structural fingerprint, and the
 // per-map serialized-size sections. The struct is owned by exactly one
@@ -136,8 +151,10 @@ type RepoMetadata struct {
 type derivedState struct {
 	idxDirty bool
 	// owner is the tree that may mutate this state's index maps in place.
-	// A plain value copy of a RepoMetadata (t := *m, not Clone) shares the
-	// state pointer WITHOUT marking anything: when the state's owner is
+	// A plain value copy of a RepoMetadata (t := *m, not Clone) would share
+	// the state pointer WITHOUT marking anything; that pattern is now a vet
+	// copylocks error (noCopy), and this guard remains as runtime defense:
+	// when the state's owner is
 	// not the tree mutating it, the mutation replaces the state with a
 	// private dirty one instead of writing into maps the original tree
 	// still reads. owner is nil for states handed to a Clone (whose final
@@ -245,13 +262,23 @@ func (m *RepoMetadata) Chunk(id int64) (ChunkInfo, bool) {
 	return c, ok
 }
 
-func (m RepoMetadata) Clone() RepoMetadata {
-	clone := m
-	clone.dirs = cloneDirMetaMap(m.dirs)
-	clone.files = cloneFileMetaMap(m.files)
-	clone.chunks = cloneChunkInfoMap(m.chunks)
-	clone.releases = cloneReleaseRefMap(m.releases)
-	clone.Root = m.Root.Clone()
+func (m *RepoMetadata) Clone() *RepoMetadata {
+	// Explicit construction, not a struct copy: RepoMetadata embeds noCopy,
+	// so copying it is a vet error. Clone is the one sanctioned copy path.
+	clone := &RepoMetadata{
+		Version:     m.Version,
+		Project:     m.Project,
+		TotalFiles:  m.TotalFiles,
+		TotalSize:   m.TotalSize,
+		LastMod:     m.LastMod,
+		Root:        m.Root.Clone(),
+		dirs:        cloneDirMetaMap(m.dirs),
+		files:       cloneFileMetaMap(m.files),
+		chunks:      cloneChunkInfoMap(m.chunks),
+		releases:    cloneReleaseRefMap(m.releases),
+		NextInode:   m.NextInode,
+		NextChunkID: m.NextChunkID,
+	}
 	if d := m.derived; d != nil {
 		cd := &derivedState{
 			idxDirty: d.idxDirty,
@@ -364,7 +391,7 @@ func (m *RepoMetadata) toShadow() repoMetadataJSON {
 // RepoMetadata and *RepoMetadata satisfy json.Marshaler (a pointer-only
 // method would silently fall back to reflection - and drop the unexported
 // maps - when a value is marshaled directly).
-func (m RepoMetadata) MarshalJSON() ([]byte, error) {
+func (m *RepoMetadata) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.toShadow())
 }
 
@@ -372,14 +399,13 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 	// A blob document is always maxBlobVersion: version 5 is the split
 	// (manifest + objects) layout, which ToJSON cannot express. The in-memory
 	// Version records the tree's target layout; the write path re-stamps it
-	// via MarkSplit when publishing the split.
-	out := m
-	if m.Version > maxBlobVersion {
-		trimmed := *m
-		trimmed.Version = maxBlobVersion
-		out = &trimmed
+	// via MarkSplit when publishing the split. Marshaled through the shadow
+	// directly (RepoMetadata embeds noCopy, so no struct copy here).
+	sh := m.toShadow()
+	if sh.Version > maxBlobVersion {
+		sh.Version = maxBlobVersion
 	}
-	data, err := json.Marshal(out)
+	data, err := json.Marshal(&sh)
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -1297,23 +1323,23 @@ func (m *RepoMetadata) SerializedSize() (int, error) {
 // every SerializedSize answer is built on. It mirrors ToJSON's version trim
 // exactly.
 func (m *RepoMetadata) sizeSkeletonLen() (int, error) {
-	trimmed := *m
-	if trimmed.Version > maxBlobVersion {
-		trimmed.Version = maxBlobVersion
+	sh := m.toShadow()
+	if sh.Version > maxBlobVersion {
+		sh.Version = maxBlobVersion
 	}
-	if trimmed.dirs != nil {
-		trimmed.dirs = map[string]DirMeta{}
+	if sh.Dirs != nil {
+		sh.Dirs = map[string]DirMeta{}
 	}
-	if trimmed.files != nil {
-		trimmed.files = map[string]FileMeta{}
+	if sh.Files != nil {
+		sh.Files = map[string]FileMeta{}
 	}
-	if trimmed.chunks != nil {
-		trimmed.chunks = map[int64]ChunkInfo{}
+	if sh.Chunks != nil {
+		sh.Chunks = map[int64]ChunkInfo{}
 	}
-	if trimmed.releases != nil {
-		trimmed.releases = map[string]ReleaseRef{}
+	if sh.Releases != nil {
+		sh.Releases = map[string]ReleaseRef{}
 	}
-	data, err := json.Marshal(&trimmed)
+	data, err := json.Marshal(&sh)
 	if err != nil {
 		return 0, fmt.Errorf("marshal metadata skeleton: %w", err)
 	}

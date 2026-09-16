@@ -28,21 +28,21 @@ func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
 	hub.invalidateReleaseCache("project-required-slots")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
-	tag1, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", &workingMeta, 1)
+	tag1, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate 1 slot: %v", err)
 	}
 	if tag1 != firstRelease {
 		t.Fatalf("expected reuse of %s for 1 slot, got %s", firstRelease, tag1)
 	}
-	tag2, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", &workingMeta, 2)
+	tag2, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 2)
 	if err != nil {
 		t.Fatalf("getOrCreate 2 slots: %v", err)
 	}
 	if tag2 == firstRelease {
 		t.Fatalf("expected new release for 2 slots, got same %s", tag2)
 	}
-	tag0, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", &workingMeta, 0)
+	tag0, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 0)
 	if err != nil {
 		t.Fatalf("getOrCreate 0 slots: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 	}
 	backend.addAssetsToRelease(t, "project-equal-scan", firstRelease, 999)
 	hub.invalidateReleaseCache("project-equal-scan")
-	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-equal-scan", &workingMeta, 1)
+	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-equal-scan", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	hub.invalidateReleaseCache("project-true-count")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
-	tag, _, err := hub.getOrCreateUploadRelease(ctx, "project-true-count", &workingMeta, 1)
+	tag, _, err := hub.getOrCreateUploadRelease(ctx, "project-true-count", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
@@ -228,12 +228,12 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 	backend.addAssetsToRelease(t, "project-cache-lifetime", firstRelease, 999)
 	backend.addRelease(t, "project-cache-lifetime", "v999")
 	workingMeta := repoMeta.Clone()
-	tag, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", &workingMeta, 1)
+	tag, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", workingMeta, 1)
 	if tag == "v999" {
 		t.Fatal("expected cached result (not v999) before invalidation, got v999")
 	}
 	hub.invalidateReleaseCache("project-cache-lifetime")
-	tag2, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", &workingMeta, 1)
+	tag2, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", workingMeta, 1)
 	if tag2 != "v999" {
 		t.Fatalf("expected v999 after invalidation, got %s", tag2)
 	}
@@ -262,7 +262,7 @@ func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
 	}
 	rival := backend.addRelease(t, "project-race", "v2")
 	workingMeta := repoMeta.Clone()
-	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-race", &workingMeta, 1)
+	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-race", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("must reuse rival release instead of failing: %v", err)
 	}

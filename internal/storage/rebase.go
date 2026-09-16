@@ -162,7 +162,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 				continue
 			}
 		}
-		if conflictPath != "" && isStateClass(op.Type) && upstreamIsNewer(&working, op) {
+		if conflictPath != "" && isStateClass(op.Type) && upstreamIsNewer(working, op) {
 			// True last-writer-wins: "we commit later" is not "we
 			// wrote later". When the upstream entry changed after our op
 			// was recorded, upstream owns the newer write and our stale
@@ -172,7 +172,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 				Note: fmt.Sprintf("upstream newer for %s (kept upstream, our stale %s dropped)", conflictPath, op.Type)})
 			continue
 		}
-		if err := applyOneOp(&working, op, &resolutions); err != nil {
+		if err := applyOneOp(working, op, &resolutions); err != nil {
 			return nil, nil, err
 		}
 		if conflictPath != "" {
@@ -185,7 +185,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 	if err := working.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("rebased tree failed validation: %w", err)
 	}
-	return &working, resolutions, nil
+	return working, resolutions, nil
 }
 
 // upstreamIsNewer reports whether any entry the op asserts over changed

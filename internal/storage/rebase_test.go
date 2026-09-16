@@ -25,7 +25,7 @@ func TestRebasePreservesBothWriters(t *testing.T) {
 		{Type: OpPutFile, Paths: []string{"docs/hello.txt"}, Cause: "create", Timestamp: 1700000200, File: &FileMeta{Size: 0, Mode: 0o644, Inode: 51, Chunks: []int64{}}},
 	}
 
-	rebased, resolutions, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestRebaseLWWOnSamePath(t *testing.T) {
 			Chunks: map[int64]ChunkInfo{ourChunk: {Size: 9, Offset: 0, Release: "v1", AssetID: 9}}},
 	}
 
-	rebased, resolutions, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRebaseOlderLocalWriteLosesToNewerUpstream(t *testing.T) {
 			Chunks: map[int64]ChunkInfo{ourChunk: {Size: 7, Offset: 0, Release: "v1", AssetID: 7}}},
 	}
 
-	rebased, resolutions, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRebaseDeleteVsPutPutWins(t *testing.T) {
 		{Type: OpDeleteFile, Paths: []string{"keep.txt"}, Cause: "unlink", Timestamp: 1700000200, FreedChunks: 1},
 	}
 
-	rebased, resolutions, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestRebaseStrictModeFails(t *testing.T) {
 		{Type: OpPutFile, Paths: []string{"a.txt"}, Cause: "upload", Timestamp: 1700000200, File: &FileMeta{Size: 0, Mode: 0o644, Inode: seed.Inode, Chunks: []int64{}}},
 	}
 
-	_, _, err := rebaseWorkingTree(&upstream, ops, basePaths, true)
+	_, _, err := rebaseWorkingTree(upstream, ops, basePaths, true)
 	if err == nil || !strings.Contains(err.Error(), "conflict") {
 		t.Fatalf("expected strict mode to fail loudly on conflict, got %v", err)
 	}
@@ -192,7 +192,7 @@ func TestRebaseChunkIDCollisionRemapped(t *testing.T) {
 			Chunks: map[int64]ChunkInfo{ourChunkID: ourRecord}},
 	}
 
-	rebased, resolutions, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestRebaseInodeDirCollisionRemapped(t *testing.T) {
 			File: &FileMeta{Size: 0, Mode: 0o644, Inode: 7, Chunks: []int64{}}},
 	}
 
-	rebased, _, err := rebaseWorkingTree(&upstream, ops, basePaths, false)
+	rebased, _, err := rebaseWorkingTree(upstream, ops, basePaths, false)
 	if err != nil {
 		t.Fatalf("rebase: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestChangedPathsDetection(t *testing.T) {
 	gone := FileMeta{Size: 1, Mode: 0o644, Inode: upstream.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
 	upstream.UpsertFile("added.txt", gone, 1700000100)
 
-	changes := changedPaths(basePaths, &upstream)
+	changes := changedPaths(basePaths, upstream)
 	if !changes["f:same.txt"] {
 		t.Fatalf("expected same.txt detected as changed, got %v", changes)
 	}

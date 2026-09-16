@@ -250,7 +250,7 @@ func TestApplyOpsRoundTrip(t *testing.T) {
 	stack.append(Op{Type: OpRename, Paths: []string{"docs", "archive"}, Cause: "mv", Timestamp: 1700000400, Dir: &DirMeta{Inode: 20, Mode: 0o755, CreatedAt: 1700000000, ModifiedAt: 1700000000}})
 
 	replayed := base.Clone()
-	if err := applyOps(&replayed, stack.ops); err != nil {
+	if err := applyOps(replayed, stack.ops); err != nil {
 		t.Fatalf("applyOps: %v", err)
 	}
 	replayed.Normalize("p", 1700000500)
@@ -295,7 +295,7 @@ func TestApplyOpsRmdirSkipsNonEmptyUpstream(t *testing.T) {
 	upstream.UpsertFile("tmp/keep.txt", child, 1700000001)
 
 	resolutions := []ConflictResolution{}
-	err := applyOpsWithResolutions(&upstream, []Op{
+	err := applyOpsWithResolutions(upstream, []Op{
 		{Type: OpRmdir, Paths: []string{"tmp"}, Cause: "rmdir", Timestamp: 1700000100},
 	}, &resolutions)
 	if err != nil {
@@ -395,7 +395,7 @@ func TestSynthesizeDiffOps(t *testing.T) {
 	after.RemoveFile("docs/new.txt")
 	after.UpsertFile("docs/renamed.txt", renamed, 1700000200)
 
-	ops := synthesizeOpsFromDiff(before, &after, "test", 1700000200)
+	ops := synthesizeOpsFromDiff(before, after, "test", 1700000200)
 	counts := map[OpType]int{}
 	for _, op := range ops {
 		counts[op.Type]++
@@ -433,7 +433,7 @@ func TestSynthesizeDiffOpsDelete(t *testing.T) {
 	after := before.Clone()
 	after.RemoveFile("gone.txt")
 
-	ops := synthesizeOpsFromDiff(before, &after, "test", 1700000100)
+	ops := synthesizeOpsFromDiff(before, after, "test", 1700000100)
 	if len(ops) != 1 || ops[0].Type != OpDeleteFile {
 		t.Fatalf("expected single del op, got %+v", ops)
 	}
@@ -454,7 +454,7 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 
 	after := before.Clone()
 	// Mirror fs.RenameContext: remap the subtree, bump dir/file times.
-	remapSubtree(&after, "olddir", "newdir")
+	remapSubtree(after, "olddir", "newdir")
 	for path, dir := range after.Dirs() {
 		dir.ModifiedAt = 1700000500
 		dir.ChangedAt = 1700000500
@@ -464,7 +464,7 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 	file.ChangedAt = 1700000500
 	after.Files()["newdir/sub/f.txt"] = file
 
-	ops := synthesizeOpsFromDiff(before, &after, "rename", 1700000500)
+	ops := synthesizeOpsFromDiff(before, after, "rename", 1700000500)
 	renames := 0
 	for _, op := range ops {
 		if op.Type != OpRename {
@@ -486,7 +486,7 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 
 	// Replay must land the whole subtree at the new location.
 	replayed := before.Clone()
-	if err := applyOps(&replayed, ops); err != nil {
+	if err := applyOps(replayed, ops); err != nil {
 		t.Fatalf("applyOps: %v", err)
 	}
 	replayed.Normalize("p", 1700000600)
@@ -507,7 +507,7 @@ func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
 		before.UpsertFile(path, FileMeta{Size: 0, Mode: 0o644, Inode: before.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}, 1700000000)
 	}
 	after := before.Clone()
-	remapSubtree(&after, "src", "dst")
+	remapSubtree(after, "src", "dst")
 	for path, dir := range after.Dirs() {
 		dir.ChangedAt = 1700000500
 		after.Dirs()[path] = dir
@@ -518,7 +518,7 @@ func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
 	}
 
 	started := time.Now()
-	ops := synthesizeOpsFromDiff(before, &after, "rename", 1700000500)
+	ops := synthesizeOpsFromDiff(before, after, "rename", 1700000500)
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("bulk subtree rename synthesis took %s; pairing regressed to quadratic?", elapsed)
 	}

@@ -15,7 +15,7 @@ func buildTree(t *testing.T, mutate func(m *RepoMetadata)) *RepoMetadata {
 	return m
 }
 
-func clonePtr(m *RepoMetadata) *RepoMetadata { c := m.Clone(); return &c }
+func clonePtr(m *RepoMetadata) *RepoMetadata { c := m.Clone(); return c }
 
 func TestRevertFileRestoresHistoricalContent(t *testing.T) {
 	t.Parallel()

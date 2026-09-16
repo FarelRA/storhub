@@ -21,13 +21,13 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 	if finalSize == 0 && requiredSlots == 0 {
 		return []ChunkInfo{}, "", nil
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
 
 	patchedChunks, actualTag, _, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit, func(remaining int) (string, string, error) {
-		return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
+		return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
 	})
 	if err != nil {
 		h.compensateDeleteAssets(ctx, project, patchedChunks)
@@ -139,7 +139,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	for _, dirty := range dirtySegments {
 		requiredSlots += inlineChunkCount(dirty.end-dirty.start, chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -161,7 +161,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		segment := byteRange{start: offset, end: end}
 		if rangeOverlapsAny(segment, dirtySegments) {
 			uploaded, landedTag, landedURL, err := h.uploadFileRangeChunks(ctx, project, curTag, curURL, snapshot, segment.start, segment.end, func(remaining int) (string, string, error) {
-				return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
+				return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
 			})
 			if err != nil {
 				h.compensateDeleteAssets(ctx, project, append(uploadedAll, uploaded...))
@@ -266,7 +266,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	for _, edit := range edits {
 		requiredSlots += inlineChunkCount(edit.Len(), chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, &workingMeta, requiredSlots)
+	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -284,7 +284,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	curTag, curURL := releaseTag, uploadURL
 	for _, edit := range edits {
 		inserted, landedTag, landedURL, err := h.uploadInlineChunks(ctx, project, curTag, curURL, edit.Start+shift, edit.Data, func(remaining int) (string, string, error) {
-			return h.getOrCreateUploadRelease(ctx, project, &workingMeta, remaining)
+			return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
 		})
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))

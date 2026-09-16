@@ -1844,7 +1844,7 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 			break
 		}
 	}
-	backend.setMetadata(t, "project-invalid-metadata", meta)
+	backend.setMetadata(t, "project-invalid-metadata", &meta)
 	hub = backend.newClient(t, smallTransferTestConfig())
 	if _, err := hub.ListFiles("project-invalid-metadata"); err == nil {
 		t.Fatal("expected invalid metadata to be rejected")
@@ -4048,7 +4048,7 @@ func (m *mockGitHub) removeAsset(t *testing.T, project string, assetID int64) {
 	delete(repo.assets, assetID)
 }
 
-func (m *mockGitHub) setMetadata(t *testing.T, project string, md RepoMetadata) {
+func (m *mockGitHub) setMetadata(t *testing.T, project string, md *RepoMetadata) {
 	t.Helper()
 	repo := m.repo(project)
 	if repo == nil {
@@ -4059,7 +4059,7 @@ func (m *mockGitHub) setMetadata(t *testing.T, project string, md RepoMetadata) 
 	// Match the project's current layout: a split (version-5) project stores
 	// a manifest plus objects; a legacy project a single blob.
 	if repo.files[indexFilePath] != nil {
-		res, err := meta.BuildTree(&md)
+		res, err := meta.BuildTree(md)
 		if err != nil {
 			t.Fatalf("build tree: %v", err)
 		}
@@ -4831,7 +4831,7 @@ func TestMockLegacySetMetadataStoresRealBlobSHA(t *testing.T) {
 	}
 	md := NewRepoMetadata("legacy6")
 	md.EnsureDirectory("docs", 1700000000)
-	backend.setMetadata(t, "legacy6", *md)
+	backend.setMetadata(t, "legacy6", md)
 	repo := backend.repo("legacy6")
 	backend.mu.Lock()
 	file := repo.files[metadataFilePath]
