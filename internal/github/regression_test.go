@@ -119,11 +119,23 @@ func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
 	if _, ok := c.cachedAssetURL(11); !ok {
 		t.Fatal("stored URL must be cached before its TTL elapses")
 	}
+	// Just under the ~30min fallback TTL: still valid. The wall clock has
+	// barely moved, so a wall-clock cache would also read valid here - the
+	// divergence is proven by the next step.
 	mu.Lock()
-	now = now.Add(61 * time.Second)
+	now = now.Add(assetURLFallbackTTL - time.Minute)
+	mu.Unlock()
+	if _, ok := c.cachedAssetURL(11); !ok {
+		t.Fatal("fallback entry must remain valid until its ~30min TTL elapses")
+	}
+	// Past the fallback TTL: expired. Only the governor clock (started 10min
+	// behind the wall clock) has advanced this far, so this fails if the
+	// cache ever checks expiry against wall time.
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
 	mu.Unlock()
 	if _, ok := c.cachedAssetURL(11); ok {
-		t.Fatal("fallback entry must expire 60s after store on the governor clock")
+		t.Fatal("fallback entry must expire ~30min after store on the governor clock")
 	}
 }
 

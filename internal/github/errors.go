@@ -69,6 +69,13 @@ func (e *APIError) IsValidationIssue(code, field string) bool {
 	return false
 }
 
+// StatusSignedURLExpired is GitHub's non-standard status from
+// release-assets.githubusercontent.com meaning the front-door JWT on a signed
+// asset URL has expired ("618 jwt:expired"). It is a credential event, not
+// server trouble: the correct recovery is to re-resolve a fresh signed URL
+// (see isCDNRejection), never to blind-retry the same dead URL.
+const StatusSignedURLExpired = 618
+
 // CDNError reports a failed range fetch against a signed asset URL. The
 // status is carried structurally so callers can distinguish transient
 // server trouble (retryable) from permanent conditions without parsing
@@ -81,12 +88,22 @@ func (e *CDNError) Error() string {
 	return fmt.Sprintf("cdn range fetch: unexpected status %d", e.StatusCode)
 }
 
-// Transient reports whether the CDN rejection is worth retrying: server
-// trouble and throttling clear on their own, while 4xx client errors
-// (expired signature aside, which triggers re-resolution instead) will
-// repeat identically.
+// Transient reports whether the CDN rejection is worth another attempt after
+// backoff. Throttling and genuine 5xx server trouble clear on their own. A 618
+// is recoverable only by re-resolution, which the transport layer already
+// performs; if one still escapes (a freshly minted URL rejected at once, e.g.
+// clock skew), a backed-off retry is a reasonable last resort. Other 4xx and
+// unknown 6xx statuses are terminal.
 func (e *CDNError) Transient() bool {
-	return e != nil && (e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
+	if e == nil {
+		return false
+	}
+	switch e.StatusCode {
+	case http.StatusTooManyRequests, StatusSignedURLExpired:
+		return true
+	default:
+		return e.StatusCode >= 500 && e.StatusCode <= 599
+	}
 }
 
 // BodySnippet returns up to the first kilobyte of the response body for

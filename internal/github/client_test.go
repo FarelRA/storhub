@@ -3,6 +3,8 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -355,6 +357,48 @@ func TestDownloadAssetStreamReresolvesRejectedURL(t *testing.T) {
 	}
 }
 
+// TestDownloadAssetStreamReresolvesOn618 proves the reactive recovery for
+// GitHub's non-standard 618 "jwt:expired": a cached signed URL whose front-door
+// token has lapsed must be dropped and re-resolved through the API, then the
+// range served from the fresh URL - not retried against the dead one.
+func TestDownloadAssetStreamReresolvesOn618(t *testing.T) {
+	var apiHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
+		if apiHits.Add(1) == 1 {
+			http.Redirect(w, r, "/jwt-expired/7", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/fresh/7", http.StatusFound)
+	})
+	mux.HandleFunc("/jwt-expired/7", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(StatusSignedURLExpired)
+	})
+	mux.HandleFunc("/fresh/7", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte("fresh"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	c := NewClient("t", retryTaxonomyConfig(server, nil))
+
+	body, _, err := c.DownloadAssetStream(context.Background(), "o", "p", 7, 0, 4)
+	if err != nil {
+		t.Fatalf("download after 618: %v", err)
+	}
+	data, _ := io.ReadAll(body)
+	_ = body.Close()
+	if string(data) != "fresh" {
+		t.Fatalf("body=%q, want fresh", data)
+	}
+	if apiHits.Load() != 2 {
+		t.Fatalf("618 must force exactly one re-resolve, api hits=%d", apiHits.Load())
+	}
+}
+
 func TestDownloadAssetStreamDirect200Legacy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Range") != "bytes=0-4" {
@@ -446,6 +490,118 @@ func TestStoreAssetURLFallbackKeepsUnknownSchemesCovered(t *testing.T) {
 	_, ok := c.cachedAssetURL(11)
 	if !ok {
 		t.Fatal("unknown-scheme URL must stay cached under the fallback")
+	}
+}
+
+// testJWT builds an unsigned compact JWS whose payload carries exp, so the
+// client's expiry parser sees a realistic front-door token. Only the payload
+// matters; the signature is a placeholder (never verified).
+func testJWT(t *testing.T, exp time.Time) string {
+	t.Helper()
+	enc := func(obj any) string {
+		b, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
+		enc(map[string]int64{"exp": exp.Unix()}) + ".sig"
+}
+
+// testSignedAssetURL assembles a release-assets URL carrying whichever of the
+// two real expiries (front-door JWT 'jwt', backing SAS 'se') the caller sets.
+func testSignedAssetURL(t *testing.T, jwtExp, sasExp time.Time) string {
+	t.Helper()
+	q := url.Values{}
+	if !jwtExp.IsZero() {
+		q.Set("jwt", testJWT(t, jwtExp))
+	}
+	if !sasExp.IsZero() {
+		q.Set("se", sasExp.UTC().Format(time.RFC3339))
+	}
+	return "https://release-assets.githubusercontent.com/github-production-release-asset/42/abc?" + q.Encode()
+}
+
+// TestStoreAssetURLHonorsEarliestExpiry is the regression for the 618 storm:
+// a release-assets URL carries BOTH a ~30min front-door JWT and a longer
+// backing SAS 'se'. The JWT governs usability (exceeding it yields 618), so
+// the cache must lapse at the EARLIER expiry, not the SAS. Trusting 'se'
+// alone kept a JWT-dead URL cached for ~10 minutes, guaranteeing 618s.
+func TestStoreAssetURLHonorsEarliestExpiry(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	jwtExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	sasExp := jwtExp.Add(10 * time.Minute) // SAS outlives the JWT by 10 min
+	c.storeAssetURL(21, testSignedAssetURL(t, jwtExp, sasExp))
+	got, ok := c.cachedAssetURL(21)
+	if !ok {
+		t.Fatal("URL must stay cached")
+	}
+	if want := jwtExp.Add(-30 * time.Second); !got.expires.Equal(want) {
+		t.Fatalf("expiry %v, want JWT %v minus margin (must NOT trust the later SAS %v)", got.expires, jwtExp, sasExp)
+	}
+}
+
+// TestStoreAssetURLHonorsSASWhenEarlier pins the min() symmetry: when the
+// backing SAS expires before the JWT, the SAS is the binding constraint.
+func TestStoreAssetURLHonorsSASWhenEarlier(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	sasExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	jwtExp := sasExp.Add(10 * time.Minute)
+	c.storeAssetURL(22, testSignedAssetURL(t, jwtExp, sasExp))
+	got, ok := c.cachedAssetURL(22)
+	if !ok {
+		t.Fatal("URL must stay cached")
+	}
+	if want := sasExp.Add(-30 * time.Second); !got.expires.Equal(want) {
+		t.Fatalf("expiry %v, want SAS %v minus margin", got.expires, sasExp)
+	}
+}
+
+// TestStoreAssetURLMalformedJWTFallsBackToSAS proves a non-decodable token
+// never poisons the cache: the SAS expiry is still honored, no panic.
+func TestStoreAssetURLMalformedJWTFallsBackToSAS(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	sasExp := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	raw := "https://release-assets.githubusercontent.com/x?jwt=aaa.bbb.ccc&se=" +
+		url.QueryEscape(sasExp.Format(time.RFC3339))
+	c.storeAssetURL(23, raw)
+	got, ok := c.cachedAssetURL(23)
+	if !ok {
+		t.Fatal("URL must stay cached")
+	}
+	if want := sasExp.Add(-30 * time.Second); !got.expires.Equal(want) {
+		t.Fatalf("expiry %v, want SAS %v minus margin (malformed JWT must be ignored)", got.expires, sasExp)
+	}
+}
+
+// TestStoreAssetURLFallbackIsThirtyMinutes pins the no-expiry default: assume
+// GitHub's ~30min front-door token and re-resolve 30s before it lapses.
+func TestStoreAssetURLFallbackIsThirtyMinutes(t *testing.T) {
+	c := NewClient("t", storcfg.Default())
+	c.storeAssetURL(24, "https://cdn.example.com/x?sig=opaque")
+	got, ok := c.cachedAssetURL(24)
+	if !ok {
+		t.Fatal("URL must stay cached")
+	}
+	want := time.Now().Add(30*time.Minute - 30*time.Second)
+	if d := got.expires.Sub(want); d > 5*time.Second || d < -5*time.Second {
+		t.Fatalf("fallback expiry %v, want ~%v (30min - 30s)", got.expires, want)
+	}
+}
+
+// TestIsCDNRejectionIncludesSignedURLExpiry pins that GitHub's non-standard
+// 618 (jwt:expired) routes to re-resolution like the other dead-URL statuses.
+func TestIsCDNRejectionIncludesSignedURLExpiry(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusBadRequest, http.StatusGone, StatusSignedURLExpired} {
+		if !isCDNRejection(status) {
+			t.Errorf("status %d must trigger re-resolution", status)
+		}
+	}
+	for _, status := range []int{http.StatusInternalServerError, http.StatusTooManyRequests, 600} {
+		if isCDNRejection(status) {
+			t.Errorf("status %d must NOT be treated as a dead signed URL", status)
+		}
 	}
 }
 

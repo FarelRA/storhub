@@ -23,6 +23,8 @@ func TestIsRetryableDownloadError(t *testing.T) {
 		{"cdn bad gateway", &ghapi.CDNError{StatusCode: 502}, true},
 		{"cdn forbidden", &ghapi.CDNError{StatusCode: 403}, false},
 		{"cdn not found", &ghapi.CDNError{StatusCode: 404}, false},
+		{"cdn signed url expired", &ghapi.CDNError{StatusCode: ghapi.StatusSignedURLExpired}, true},
+		{"cdn unknown 6xx is terminal", &ghapi.CDNError{StatusCode: 600}, false},
 		{"wrapped cdn transient", fmt.Errorf("download asset 5: %w", &ghapi.CDNError{StatusCode: 500}), true},
 		{"unexpected eof", io.ErrUnexpectedEOF, true},
 		{"connection reset", syscall.ECONNRESET, true},

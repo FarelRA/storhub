@@ -509,10 +509,13 @@ func isAssetRedirect(status int) bool {
 }
 
 // isCDNRejection reports whether a CDN status indicates the signed URL is
-// no longer usable and should be re-resolved through the API.
+// no longer usable and should be re-resolved through the API. That includes
+// the usual 4xx (forbidden / not found / bad request / gone) and GitHub's
+// non-standard 618, which means the front-door JWT on the URL has expired.
 func isCDNRejection(status int) bool {
 	return status == http.StatusForbidden || status == http.StatusNotFound ||
-		status == http.StatusBadRequest || status == http.StatusGone
+		status == http.StatusBadRequest || status == http.StatusGone ||
+		status == StatusSignedURLExpired
 }
 
 func (c *Client) cachedAssetURL(assetID int64) (cachedAssetURL, bool) {
@@ -533,25 +536,86 @@ func (c *Client) now() time.Time {
 	return time.Now()
 }
 
+const (
+	// assetURLSafetyMargin is subtracted from a signed URL's authoritative
+	// expiry so the cache lapses just before the token does, forcing a
+	// proactive re-resolution instead of a reactive 618.
+	assetURLSafetyMargin = 30 * time.Second
+	// assetURLFallbackTTL is assumed when a signed URL carries no parseable
+	// expiry. GitHub's front-door token is ~30 minutes, so re-resolve just
+	// before that; a too-long guess still self-heals via the 618 re-resolution
+	// path.
+	assetURLFallbackTTL = 30*time.Minute - assetURLSafetyMargin
+)
+
 func (c *Client) storeAssetURL(assetID int64, rawURL string) {
-	parsed, err := url.Parse(rawURL)
-	expires := c.now().Add(60 * time.Second)
-	if err == nil {
-		// GitHub release assets redirect to Azure blob storage whose SAS
-		// token carries the expiry in 'se' (RFC3339). Honoring it avoids
-		// re-resolving an hour-valid URL every minute under the fixed-60s
-		// fallback, which remains the safety net for any future scheme:
-		// a too-long guess dies against a rejection status and triggers
-		// exactly one API re-resolution.
-		if se := parsed.Query().Get("se"); se != "" {
-			if exp, seErr := time.Parse(time.RFC3339, se); seErr == nil {
-				expires = exp.Add(-30 * time.Second)
-			}
+	expires := c.now().Add(assetURLFallbackTTL)
+	if parsed, err := url.Parse(rawURL); err == nil {
+		// A release-assets URL carries TWO independent expiries: the front-door
+		// JWT (validated by release-assets.githubusercontent.com; exceeding it
+		// yields the non-standard 618 "jwt:expired") and the backing Azure SAS
+		// 'se'. They differ — the JWT is ~30 min while 'se' can run ~10 min
+		// longer — so the EARLIER one governs whether the URL still works.
+		// Trusting 'se' alone kept a JWT-dead URL cached for minutes,
+		// guaranteeing a 618 storm on deep reads.
+		if exp, ok := signedURLExpiry(parsed); ok {
+			expires = exp.Add(-assetURLSafetyMargin)
 		}
 	}
 	c.assetMu.Lock()
 	defer c.assetMu.Unlock()
 	c.assetURLs[assetID] = cachedAssetURL{url: rawURL, expires: expires}
+}
+
+// signedURLExpiry returns the earliest authoritative expiry carried by a
+// signed asset URL: the minimum of the front-door JWT's 'exp' claim and the
+// backing Azure SAS 'se' parameter. ok is false when neither is parseable.
+func signedURLExpiry(parsed *url.URL) (time.Time, bool) {
+	values := parsed.Query()
+	var earliest time.Time
+	found := false
+	consider := func(t time.Time, ok bool) {
+		if ok && (!found || t.Before(earliest)) {
+			earliest, found = t, true
+		}
+	}
+	consider(jwtExpiry(values.Get("jwt")))
+	consider(sasExpiry(values.Get("se")))
+	return earliest, found
+}
+
+// sasExpiry parses the Azure SAS 'se' expiry (RFC3339).
+func sasExpiry(se string) (time.Time, bool) {
+	if se == "" {
+		return time.Time{}, false
+	}
+	exp, err := time.Parse(time.RFC3339, se)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return exp, true
+}
+
+// jwtExpiry decodes the 'exp' claim from a compact JWS (header.payload.sig)
+// WITHOUT verifying the signature: the payload is base64url JSON and the
+// expiry is public metadata, not a bearer secret. Returns ok=false for any
+// malformed token or a missing/non-positive exp, so callers fall back safely.
+func jwtExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
 func (c *Client) invalidateAssetURL(assetID int64) {
