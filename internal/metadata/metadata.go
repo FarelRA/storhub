@@ -1,12 +1,16 @@
 package metadata
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -103,12 +107,73 @@ type RepoMetadata struct {
 
 	// NextInode/NextChunkID are persisted so deleting the highest-numbered
 	// entry cannot silently reuse identifiers across reloads.
-	NextInode    uint64              `json:"ni,omitempty"`
-	NextChunkID  int64               `json:"nc,omitempty"`
-	filesByInode map[uint64][]string `json:"-"`
-	childDirs    map[string][]string `json:"-"`
-	childFiles   map[string][]string `json:"-"`
+	NextInode   uint64 `json:"ni,omitempty"`
+	NextChunkID int64  `json:"nc,omitempty"`
+
+	// derived carries the lazily maintained indexes (filesByInode,
+	// childDirs, childFiles) and the incremental serialized-size cache.
+	// The state itself is per-tree (its fingerprint must pin THIS tree's
+	// maps), but a clean set of index MAPS is shared with Clones: Clone
+	// marks the maps shared and the clone's state references them, so
+	// snapshot reads never rebuild. The first tracked mutation on either
+	// side sees the shared flag and drops to a dirty state instead of
+	// writing into the shared maps.
+	derived *derivedState `json:"-"`
 }
+
+// derivedState bundles the index maps, their structural fingerprint, and the
+// per-map serialized-size sections. The struct is owned by exactly one
+// RepoMetadata; only its index maps may be shared (with clones), guarded by
+// mapsShared. It is NOT safe for concurrent use, exactly like RepoMetadata
+// itself (the storage layer serializes access via its per-project mutex);
+// only mapsShared is atomic so concurrent Clones of the same tree cannot
+// race.
+type derivedState struct {
+	idxDirty bool
+	// owner is the tree that may mutate this state's index maps in place.
+	// A plain value copy of a RepoMetadata (t := *m, not Clone) shares the
+	// state pointer WITHOUT marking anything: when the state's owner is
+	// not the tree mutating it, the mutation replaces the state with a
+	// private dirty one instead of writing into maps the original tree
+	// still reads. owner is nil for states handed to a Clone (whose final
+	// address the builder cannot know).
+	owner        *RepoMetadata
+	mapsShared   atomic.Bool
+	filesByInode map[uint64][]string
+	childDirs    map[string][]string
+	childFiles   map[string][]string
+	// Fingerprint of the flat maps the indexes were last consistent with.
+	// The refs pin the map headers so a pointer match cannot alias a
+	// reallocated (GC'd) map.
+	dirsRef  map[string]DirMeta
+	dirsLen  int
+	filesRef map[string]FileMeta
+	filesLen int
+
+	// sections caches the JSON byte contribution of each stored map so
+	// SerializedSize can answer without marshalling the whole tree.
+	sections [4]sectionSize
+}
+
+// sectionSize tracks the serialized size of one stored map: sum is
+// Σ(len(quoted key)+1+len(value)) over its entries; the map's own braces and
+// inter-entry commas are added by the caller. ok=false means the section is
+// stale and must be recomputed before use.
+type sectionSize struct {
+	ok  bool
+	ref any
+	ptr uintptr
+	n   int
+	sum int64
+}
+
+// Size-cache section indices, ordered as the JSON struct fields.
+const (
+	secDirs = iota
+	secFiles
+	secChunks
+	secReleases
+)
 
 type MetadataRevision struct {
 	CommitSHA   string `json:"commit_sha"`
@@ -135,6 +200,22 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	}
 }
 
+// Clone produces an independent snapshot of the tree. The four stored maps
+// are copied (so entry insert/remove/replace on either side is invisible to
+// the other), but the ENTRY VALUES are shared: a stored FileMeta/DirMeta is
+// treated as immutable once written - every in-package mutation replaces the
+// map entry with a fresh value (UpsertFile clones its input; Normalize and
+// the identity helpers never mutate a stored Chunks backing array or XAttrs
+// map in place). Callers that want to mutate an entry obtained from a map
+// must FileMeta.Clone/DirMeta.Clone it first, which every existing caller
+// already does. Only Root is deep-copied (it is a single value, and callers
+// mutate its XAttrs through the returned pointer).
+//
+// A clean derived index is SHARED (the read-only maps are referenced, not
+// rebuilt) with the source: reads on the snapshot (DirectoryChildren,
+// NLink, ...) hit the shared index with zero rebuild, and the first tracked
+// mutation on either side drops to a dirty state instead of writing into
+// shared maps. This is what makes a per-operation snapshot cheap.
 func (m RepoMetadata) Clone() RepoMetadata {
 	clone := m
 	clone.Dirs = cloneDirMetaMap(m.Dirs)
@@ -142,30 +223,50 @@ func (m RepoMetadata) Clone() RepoMetadata {
 	clone.Chunks = cloneChunkInfoMap(m.Chunks)
 	clone.Releases = cloneReleaseRefMap(m.Releases)
 	clone.Root = m.Root.Clone()
-	clone.filesByInode = nil
-	clone.childDirs = nil
-	clone.childFiles = nil
+	if d := m.derived; d != nil {
+		cd := &derivedState{
+			idxDirty: d.idxDirty,
+			sections: d.sections,
+		}
+		if !d.idxDirty {
+			// Publish the shared maps read-only: mark them shared on BOTH
+			// sides (so neither ever mutates them in place again) and
+			// reference them.
+			d.mapsShared.Store(true)
+			cd.mapsShared.Store(true)
+			cd.filesByInode = d.filesByInode
+			cd.childDirs = d.childDirs
+			cd.childFiles = d.childFiles
+		}
+		cd.dirsRef, cd.dirsLen = clone.Dirs, len(clone.Dirs)
+		cd.filesRef, cd.filesLen = clone.Files, len(clone.Files)
+		clone.derived = cd
+	}
 	return clone
 }
 
+// cloneDirMetaMap copies the map; DirMeta values are copied by struct and
+// share their (immutable-by-contract) XAttrs maps.
 func cloneDirMetaMap(src map[string]DirMeta) map[string]DirMeta {
 	if src == nil {
 		return nil
 	}
 	dst := make(map[string]DirMeta, len(src))
 	for k, v := range src {
-		dst[k] = v.Clone()
+		dst[k] = v
 	}
 	return dst
 }
 
+// cloneFileMetaMap copies the map; FileMeta values are copied by struct and
+// share their (immutable-by-contract) Chunks backing array and XAttrs map.
 func cloneFileMetaMap(src map[string]FileMeta) map[string]FileMeta {
 	if src == nil {
 		return nil
 	}
 	dst := make(map[string]FileMeta, len(src))
 	for k, v := range src {
-		dst[k] = v.Clone()
+		dst[k] = v
 	}
 	return dst
 }
@@ -326,26 +427,41 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 	if m.Releases == nil {
 		m.Releases = make(map[string]ReleaseRef)
 	}
+	// Entry loops write back ONLY when normalization actually changed the
+	// value: an already-normalized tree (the common per-transaction case)
+	// then leaves the derived indexes and the size cache untouched, so no
+	// rebuild or re-marshalling happens here.
 	for path, dir := range m.Dirs {
+		original := dir
 		dir.Normalize(now)
-		m.Dirs[path] = dir
+		if !dirMetaEqual(original, dir) {
+			m.Dirs[path] = dir
+			m.sizePutDir(path, original, true, dir)
+		}
 	}
 	for path, file := range m.Files {
+		original := file
 		file.Normalize(now)
-		m.Files[path] = file
+		if !fileMetaEqual(original, file) {
+			m.Files[path] = file
+			m.sizePutFile(path, original, true, file)
+		}
 	}
 	m.sortFileChunksByOffset()
 	for tag, ref := range m.Releases {
 		if ref.CreatedAt == 0 {
+			original := ref
 			ref.CreatedAt = now
 			m.Releases[tag] = ref
+			m.sizePutRelease(tag, original, true, ref)
 		}
 	}
 	m.RecomputeStats()
 	if m.LastMod == 0 {
 		m.LastMod = now
 	}
-	m.RebuildIndexes()
+	// RecomputeStats already rebuilt the indexes; a second full rebuild
+	// here was pure duplicated O((F+D) log) work.
 }
 
 // sortFileChunksByOffset enforces the stored-order invariant every reader
@@ -356,13 +472,34 @@ func (m *RepoMetadata) sortFileChunksByOffset() {
 		if len(file.Chunks) < 2 {
 			continue
 		}
+		if chunksOffsetSorted(m.Chunks, file.Chunks) {
+			continue
+		}
+		original := file
 		sorted := append([]int64(nil), file.Chunks...)
 		sort.SliceStable(sorted, func(i, j int) bool {
 			return m.Chunks[sorted[i]].Offset < m.Chunks[sorted[j]].Offset
 		})
 		file.Chunks = sorted
 		m.Files[path] = file
+		m.sizePutFile(path, original, true, file)
 	}
+}
+
+// chunksOffsetSorted reports whether the chunk ids are already ordered by
+// data offset (the comparator sort.SliceStable applies is a no-op on such a
+// sequence, including when a referenced chunk is missing and resolves to the
+// zero offset).
+func chunksOffsetSorted(chunks map[int64]ChunkInfo, ids []int64) bool {
+	var prev int64 = -1
+	for _, id := range ids {
+		offset := chunks[id].Offset
+		if offset < prev {
+			return false
+		}
+		prev = offset
+	}
+	return true
 }
 
 func (m *RepoMetadata) RecomputeStats() {
@@ -384,8 +521,12 @@ func (m *RepoMetadata) RecomputeStats() {
 
 	for tag := range m.Releases {
 		ref := m.Releases[tag]
-		ref.AssetCount = assetCounts[tag]
-		m.Releases[tag] = ref
+		if ref.AssetCount != assetCounts[tag] {
+			original := ref
+			ref.AssetCount = assetCounts[tag]
+			m.Releases[tag] = ref
+			m.sizePutRelease(tag, original, true, ref)
+		}
 	}
 
 	m.TotalFiles = totalFiles
@@ -417,6 +558,9 @@ func (m *RepoMetadata) PruneUnreferencedChunks() int {
 			delete(m.Chunks, id)
 			removed++
 		}
+	}
+	if removed > 0 {
+		m.markSectionStale(secChunks)
 	}
 	return removed
 }
@@ -493,32 +637,43 @@ func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 		m.EnsureDirectory(parent, now)
 	}
 	uid, gid := defaultOwnerIDs()
-	m.Dirs[path] = DirMeta{
+	dir := DirMeta{
 		CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
 		Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode(),
 	}
-	m.invalidateIndexes()
+	m.Dirs[path] = dir
+	m.trackDirPut(path, DirMeta{}, false, dir)
 }
 
 func (m *RepoMetadata) RemoveDirectory(path string) bool {
 	path = normalizeStoredPath(path)
-	if _, ok := m.Dirs[path]; !ok {
+	old, ok := m.Dirs[path]
+	if !ok {
 		return false
 	}
 	delete(m.Dirs, path)
-	m.invalidateIndexes()
+	m.trackDirRemove(path, old)
 	return true
 }
 
 func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	path = normalizeStoredPath(path)
-	// Deliberately eager: structural map writes also happen OUTSIDE this
-	// package (fs rename swaps Dirs entries directly; posix patch copies
-	// do the same), so a lazily invalidated index cache would silently go
-	// stale. Rebuilding here keeps every read correct at O(entries) per
-	// call - readdir frequencies make that the right trade.
-	m.RebuildIndexes()
-	return m.childDirs[path], m.childFiles[path]
+	// Lazily rebuilt: every tracked mutation maintains the child lists
+	// incrementally, invalidateIndexes marks them stale, and the structural
+	// fingerprint (map identity + length) catches entries written directly
+	// into Dirs/Files outside this package (a wholesale map swap or a
+	// key add/remove changes the fingerprint). External writers that mutate
+	// map CONTENT in place under the same keys (e.g. a chmod writing
+	// repo.Dirs[p] = *dir) do not affect these indexes at all; if such a
+	// write ever changes a file's inode it must go through
+	// WriteFileDirect/ReplaceFile, or call InvalidateIndexes.
+	//
+	// The returned slices are copies: the cached lists are shared state and
+	// a caller appending to them must not reach into the index's backing
+	// array.
+	m.ensureIndexes()
+	d := m.derived
+	return cloneStrings(d.childDirs[path]), cloneStrings(d.childFiles[path])
 }
 
 func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
@@ -531,6 +686,7 @@ func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
 	}
 	m.Releases[tag] = ReleaseRef{CreatedAt: createdAt}
 	ref := m.Releases[tag]
+	m.sizePutRelease(tag, ReleaseRef{}, false, ref)
 	return &ref
 }
 
@@ -542,7 +698,8 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	if parent := parentPath(name); parent != "" {
 		m.EnsureDirectory(parent, createdAt)
 	}
-	if existing, ok := m.Files[name]; ok {
+	existing, existed := m.Files[name]
+	if existed {
 		if (file.Symlink == "") != (existing.Symlink == "") {
 			// Type change (regular file <-> symlink): the old node identity
 			// is discarded and a fresh one allocated, mirroring replacement.
@@ -554,7 +711,7 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
 	m.Files[name] = file
-	m.invalidateIndexes()
+	m.trackFilePut(name, existing, existed, file)
 }
 
 // FindFile returns a SNAPSHOT of the entry: the pointer targets a copy of
@@ -576,8 +733,10 @@ func (m *RepoMetadata) FindFile(name string) *FileMeta {
 func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
 	name = normalizeStoredPath(name)
 	if file, ok := m.Files[name]; ok {
+		original := file
 		file.AccessedAt = atime
 		m.Files[name] = file
+		m.sizePutFile(name, original, true, file)
 		return true
 	}
 	return false
@@ -588,16 +747,18 @@ func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
 func (m *RepoMetadata) SetDirAtime(path string, atime int64) bool {
 	path = normalizeStoredPath(path)
 	if dir, ok := m.Dirs[path]; ok {
+		original := dir
 		dir.AccessedAt = atime
 		m.Dirs[path] = dir
+		m.sizePutDir(path, original, true, dir)
 		return true
 	}
 	return false
 }
 
 func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
-	m.RebuildIndexes()
-	names := m.filesByInode[inode]
+	m.ensureIndexes()
+	names := m.derived.filesByInode[inode]
 	out := make([]string, len(names))
 	copy(out, names)
 	return out
@@ -606,27 +767,34 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 // WriteFileDirect stores an entry verbatim - no creation defaults, no
 // identity repair. It exists for family updates that must preserve every
 // field exactly (including authoritative epoch zeros) while bypassing the
-// new-node path of UpsertFile.
+// new-node path of UpsertFile. The stored value is treated as immutable
+// from here on (callers pass a private clone); the derived indexes and size
+// cache are maintained incrementally for the replacement.
 func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
-	m.Files[normalizeStoredPath(name)] = file
-	m.invalidateIndexes()
+	name = normalizeStoredPath(name)
+	existing, existed := m.Files[name]
+	m.Files[name] = file
+	m.trackFilePut(name, existing, existed, file)
 }
 
 // WriteDirDirect stores a directory entry verbatim, mirroring
 // WriteFileDirect for op replay and family updates that must preserve
 // every field exactly.
 func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
-	m.Dirs[normalizeStoredPath(path)] = dir
-	m.invalidateIndexes()
+	path = normalizeStoredPath(path)
+	existing, existed := m.Dirs[path]
+	m.Dirs[path] = dir
+	m.trackDirPut(path, existing, existed, dir)
 }
 
 func (m *RepoMetadata) RemoveFile(name string) bool {
 	name = normalizeStoredPath(name)
-	if _, ok := m.Files[name]; !ok {
+	old, ok := m.Files[name]
+	if !ok {
 		return false
 	}
 	delete(m.Files, name)
-	m.invalidateIndexes()
+	m.trackFileRemove(name, old)
 	return true
 }
 
@@ -667,11 +835,37 @@ func ParseNumericReleaseTag(tag string) (int, bool) {
 }
 
 func (m *RepoMetadata) RemoveRelease(tag string) bool {
-	if _, ok := m.Releases[tag]; !ok {
+	old, ok := m.Releases[tag]
+	if !ok {
 		return false
 	}
 	delete(m.Releases, tag)
-	m.invalidateIndexes()
+	// Releases are not part of the derived indexes; only the size cache
+	// needs the removal.
+	m.sizeRemoveRelease(tag, old)
+	return true
+}
+
+// PutChunk stores a chunk record verbatim, maintaining the serialized-size
+// cache incrementally. Direct `meta.Chunks[id] = info` writes bypass the
+// size accounting when they overwrite an existing id (a new id is still
+// caught by the length fingerprint), so tracked writers should use this.
+// The stored ChunkInfo is a pure value type; no cloning is needed.
+func (m *RepoMetadata) PutChunk(id int64, info ChunkInfo) {
+	old, existed := m.Chunks[id]
+	m.Chunks[id] = info
+	sizeApplySection(&m.ensureDerived().sections[secChunks], m.Chunks, id, old, existed, info, true)
+}
+
+// DeleteChunk removes a chunk record, maintaining the serialized-size cache
+// incrementally (the mirror of PutChunk for tracked deletions).
+func (m *RepoMetadata) DeleteChunk(id int64) bool {
+	old, ok := m.Chunks[id]
+	if !ok {
+		return false
+	}
+	delete(m.Chunks, id)
+	sizeApplySection(&m.ensureDerived().sections[secChunks], m.Chunks, id, old, true, ChunkInfo{}, false)
 	return true
 }
 
@@ -713,10 +907,8 @@ func (m *RepoMetadata) DirNLink(path string) int {
 			return 0
 		}
 	}
-	if m.childDirs == nil {
-		m.RebuildIndexes()
-	}
-	return 2 + len(m.childDirs[path])
+	m.ensureIndexes()
+	return 2 + len(m.derived.childDirs[path])
 }
 
 func (m *RepoMetadata) FileNLink(name string) int {
@@ -727,39 +919,479 @@ func (m *RepoMetadata) FileNLink(name string) int {
 	return m.NLink(file.Inode)
 }
 
+// invalidateIndexes marks the derived indexes stale without rebuilding them;
+// the next index-dependent read pays one rebuild.
 func (m *RepoMetadata) invalidateIndexes() {
-	m.filesByInode = nil
-	m.childDirs = nil
-	m.childFiles = nil
+	m.ensureDerived().idxDirty = true
 }
 
+// InvalidateIndexes marks the derived indexes AND the serialized-size cache
+// stale. Exported for callers that write into Dirs/Files/Chunks/Releases
+// directly (bypassing UpsertFile/WriteFileDirect/...): a wholesale map swap
+// or a key add/remove is caught by the structural fingerprint anyway, but an
+// in-place value write under an unchanged key (notably a file inode change)
+// is invisible to it, so such writers must invalidate explicitly. Prefer the
+// tracked mutators (WriteFileDirect, WriteDirDirect, ReplaceFile, PutChunk,
+// ...) over calling this: they keep the caches warm instead of forcing a
+// rebuild.
+func (m *RepoMetadata) InvalidateIndexes() {
+	d := m.ensureDerived()
+	d.idxDirty = true
+	for i := range d.sections {
+		d.sections[i].ok = false
+	}
+}
+
+// ensureDerived returns the tree's derived state, creating a dirty one when
+// the tree never had any. A state reached through a plain value copy (its
+// owner is not this tree) is replaced by a private dirty one first: every
+// write path (index maintenance, size deltas, invalidation) goes through
+// here, so no tree ever mutates a state another tree owns. Read paths check
+// the fingerprint directly and never call this.
+func (m *RepoMetadata) ensureDerived() *derivedState {
+	d := m.derived
+	if d == nil {
+		m.derived = &derivedState{idxDirty: true, owner: m}
+		return m.derived
+	}
+	if d.owner != m {
+		m.derived = &derivedState{idxDirty: true, owner: m, sections: d.sections}
+		return m.derived
+	}
+	return d
+}
+
+// indexForIncremental returns the derived state when an O(log) list update
+// can keep it exact (clean and with maps exclusively owned by this state),
+// or nil when the index is stale or shares its maps with a Clone - in the
+// latter case the state is marked dirty (and the shared maps dropped) so
+// the next read rebuilds a private set.
+func (m *RepoMetadata) indexForIncremental() *derivedState {
+	d := m.ensureDerived()
+	if d.idxDirty {
+		return nil
+	}
+	if d.mapsShared.Load() {
+		d.idxDirty = true
+		d.filesByInode = nil
+		d.childDirs = nil
+		d.childFiles = nil
+		return nil
+	}
+	return d
+}
+
+// syncIndexFingerprint records the flat-map identity the indexes currently
+// reflect after a successful incremental update.
+func (m *RepoMetadata) syncIndexFingerprint(d *derivedState) {
+	d.dirsRef = m.Dirs
+	d.dirsLen = len(m.Dirs)
+	d.filesRef = m.Files
+	d.filesLen = len(m.Files)
+}
+
+// indexFresh reports whether the derived indexes currently reflect m.Dirs
+// and m.Files. Besides the dirty flag it checks a structural fingerprint:
+// map identity (pinned by the stored ref, so a pointer match cannot alias a
+// freed map) and length. That catches entries added/removed by direct map
+// writes outside this package; in-place value writes cannot change the
+// index keys, and inode-changing value writes must go through the tracked
+// mutators (see InvalidateIndexes).
+func (m *RepoMetadata) indexFresh() bool {
+	d := m.derived
+	return d != nil && !d.idxDirty &&
+		sameMap(d.dirsRef, m.Dirs) && d.dirsLen == len(m.Dirs) &&
+		sameMap(d.filesRef, m.Files) && d.filesLen == len(m.Files)
+}
+
+// ensureIndexes rebuilds the derived indexes only when they are stale.
+func (m *RepoMetadata) ensureIndexes() {
+	if !m.indexFresh() {
+		m.RebuildIndexes()
+	}
+}
+
+// RebuildIndexes performs a FULL rebuild of the derived indexes. Incremental
+// maintenance keeps the indexes fresh across tracked mutations, so this is
+// only needed after untracked structural writes or an explicit
+// invalidation; it stays exported because load/repair paths call it.
 func (m *RepoMetadata) RebuildIndexes() {
-	m.filesByInode = make(map[uint64][]string, len(m.Files))
-	m.childDirs = make(map[string][]string, len(m.Dirs)+1)
-	m.childFiles = make(map[string][]string, len(m.Files)+1)
+	d := &derivedState{owner: m}
+	if m.derived != nil {
+		d.sections = m.derived.sections
+	}
+	d.filesByInode = make(map[uint64][]string, len(m.Files))
+	d.childDirs = make(map[string][]string, len(m.Dirs)+1)
+	d.childFiles = make(map[string][]string, len(m.Files)+1)
 
 	for path := range m.Dirs {
 		parent := parentPath(path)
-		m.childDirs[parent] = append(m.childDirs[parent], path)
+		d.childDirs[parent] = append(d.childDirs[parent], path)
 	}
 	for path, file := range m.Files {
-		m.filesByInode[file.Inode] = append(m.filesByInode[file.Inode], path)
+		d.filesByInode[file.Inode] = append(d.filesByInode[file.Inode], path)
 		parent := parentPath(path)
-		m.childFiles[parent] = append(m.childFiles[parent], path)
+		d.childFiles[parent] = append(d.childFiles[parent], path)
 	}
-	for parent := range m.childDirs {
-		stableSortStrings(m.childDirs[parent])
+	for parent := range d.childDirs {
+		stableSortStrings(d.childDirs[parent])
 	}
-	for parent := range m.childFiles {
-		stableSortStrings(m.childFiles[parent])
+	for parent := range d.childFiles {
+		stableSortStrings(d.childFiles[parent])
 	}
+	// Sort the inode families too: incremental maintenance keeps them in
+	// path order (binary insert), so the full rebuild must match exactly,
+	// not just as a set.
+	for ino := range d.filesByInode {
+		stableSortStrings(d.filesByInode[ino])
+	}
+
+	d.idxDirty = false
+	m.syncIndexFingerprint(d)
+	m.derived = d
 }
 
 func (m *RepoMetadata) NLink(inode uint64) int {
-	if m.filesByInode == nil {
-		m.RebuildIndexes()
+	m.ensureIndexes()
+	return len(m.derived.filesByInode[inode])
+}
+
+// --- incremental index maintenance -------------------------------------
+
+// trackDirPut maintains the childDirs index and the dirs size section after
+// m.Dirs[path] was set to cur (hadOld reports whether an entry was
+// replaced). Call AFTER the map write.
+func (m *RepoMetadata) trackDirPut(path string, old DirMeta, hadOld bool, cur DirMeta) {
+	m.sizePutDir(path, old, hadOld, cur)
+	if d := m.indexForIncremental(); d != nil && !hadOld {
+		parent := parentPath(path)
+		d.childDirs[parent] = insertSortedString(d.childDirs[parent], path)
+		m.syncIndexFingerprint(d)
 	}
-	return len(m.filesByInode[inode])
+}
+
+// trackDirRemove maintains the indexes after m.Dirs[path] was deleted
+// (old is the removed value). Call AFTER the map delete.
+func (m *RepoMetadata) trackDirRemove(path string, old DirMeta) {
+	m.sizeRemoveDir(path, old)
+	if d := m.indexForIncremental(); d != nil {
+		parent := parentPath(path)
+		list := removeSortedString(d.childDirs[parent], path)
+		if len(list) == 0 {
+			delete(d.childDirs, parent)
+		} else {
+			d.childDirs[parent] = list
+		}
+		m.syncIndexFingerprint(d)
+	}
+}
+
+// trackFilePut maintains the filesByInode/childFiles indexes and the files
+// size section after m.Files[name] was set to cur (hadOld reports whether
+// an entry was replaced). Call AFTER the map write.
+func (m *RepoMetadata) trackFilePut(name string, old FileMeta, hadOld bool, cur FileMeta) {
+	m.sizePutFile(name, old, hadOld, cur)
+	d := m.indexForIncremental()
+	if d == nil {
+		return
+	}
+	if !hadOld {
+		parent := parentPath(name)
+		d.childFiles[parent] = insertSortedString(d.childFiles[parent], name)
+	} else if old.Inode != cur.Inode {
+		list := removeSortedString(d.filesByInode[old.Inode], name)
+		if len(list) == 0 {
+			delete(d.filesByInode, old.Inode)
+		} else {
+			d.filesByInode[old.Inode] = list
+		}
+	}
+	d.filesByInode[cur.Inode] = insertSortedString(d.filesByInode[cur.Inode], name)
+	m.syncIndexFingerprint(d)
+}
+
+// trackFileRemove maintains the indexes after m.Files[name] was deleted
+// (old is the removed value). Call AFTER the map delete.
+func (m *RepoMetadata) trackFileRemove(name string, old FileMeta) {
+	m.sizeRemoveFile(name, old)
+	if d := m.indexForIncremental(); d != nil {
+		parent := parentPath(name)
+		list := removeSortedString(d.childFiles[parent], name)
+		if len(list) == 0 {
+			delete(d.childFiles, parent)
+		} else {
+			d.childFiles[parent] = list
+		}
+		family := removeSortedString(d.filesByInode[old.Inode], name)
+		if len(family) == 0 {
+			delete(d.filesByInode, old.Inode)
+		} else {
+			d.filesByInode[old.Inode] = family
+		}
+		m.syncIndexFingerprint(d)
+	}
+}
+
+// insertSortedString adds name to a sorted child list in place (via one
+// shift), keeping the exact ordering a full RebuildIndexes produces.
+func insertSortedString(list []string, name string) []string {
+	i := sort.SearchStrings(list, name)
+	if i < len(list) && list[i] == name {
+		return list
+	}
+	list = append(list, "")
+	copy(list[i+1:], list[i:])
+	list[i] = name
+	return list
+}
+
+// removeSortedString drops name from a sorted child list, returning the
+// (possibly re-sliced) remainder.
+func removeSortedString(list []string, name string) []string {
+	i := sort.SearchStrings(list, name)
+	if i >= len(list) || list[i] != name {
+		return list
+	}
+	return append(list[:i], list[i+1:]...)
+}
+
+func cloneStrings(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	out := make([]string, len(src))
+	copy(out, src)
+	return out
+}
+
+// sameMap reports whether both maps are nil or are the very same map. The
+// caller pins the recorded map (the fingerprint holds a reference), so an
+// equal header pointer cannot alias a reallocated map.
+func sameMap[K comparable, V any](a, b map[K]V) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+}
+
+func mapPtr[K comparable, V any](m map[K]V) uintptr {
+	return reflect.ValueOf(m).Pointer()
+}
+
+// --- incremental serialized-size accounting -----------------------------
+
+// SerializedSize returns the exact byte length of ToJSON's output,
+// maintained incrementally: per-entry deltas are applied by the tracked
+// mutators, and only the constant-size document skeleton (scalars + root)
+// is marshalled per call. A section whose map changed outside the tracked
+// paths (fingerprint mismatch) is recomputed once, on demand. Callers
+// performing size admission can use this instead of marshalling the whole
+// tree.
+func (m *RepoMetadata) SerializedSize() (int, error) {
+	base, err := m.sizeSkeletonLen()
+	if err != nil {
+		return 0, err
+	}
+	d := m.ensureDerived()
+	total := int64(base)
+	for _, s := range []struct {
+		i     int
+		extra func(*sectionSize) (int64, error)
+	}{
+		{secDirs, func(s *sectionSize) (int64, error) { return sectionExtra(s, m.Dirs) }},
+		{secFiles, func(s *sectionSize) (int64, error) { return sectionExtra(s, m.Files) }},
+		{secChunks, func(s *sectionSize) (int64, error) { return sectionExtra(s, m.Chunks) }},
+		{secReleases, func(s *sectionSize) (int64, error) { return sectionExtra(s, m.Releases) }},
+	} {
+		extra, err := s.extra(&d.sections[s.i])
+		if err != nil {
+			return 0, err
+		}
+		total += extra
+	}
+	return int(total), nil
+}
+
+// sizeSkeletonLen marshals the document with the four stored maps emptied
+// (preserving nil vs non-nil) and returns its length: the constant overhead
+// every SerializedSize answer is built on. It mirrors ToJSON's version trim
+// exactly.
+func (m *RepoMetadata) sizeSkeletonLen() (int, error) {
+	trimmed := *m
+	if trimmed.Version > maxBlobVersion {
+		trimmed.Version = maxBlobVersion
+	}
+	if trimmed.Dirs != nil {
+		trimmed.Dirs = map[string]DirMeta{}
+	}
+	if trimmed.Files != nil {
+		trimmed.Files = map[string]FileMeta{}
+	}
+	if trimmed.Chunks != nil {
+		trimmed.Chunks = map[int64]ChunkInfo{}
+	}
+	if trimmed.Releases != nil {
+		trimmed.Releases = map[string]ReleaseRef{}
+	}
+	data, err := json.Marshal(&trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("marshal metadata skeleton: %w", err)
+	}
+	return len(data), nil
+}
+
+// sectionExtra returns the bytes the map contributes beyond its empty
+// serialization ("{}" or "null"), recomputing the section when its
+// fingerprint no longer matches the live map.
+func sectionExtra[K comparable, V any](s *sectionSize, mp map[K]V) (int64, error) {
+	if mp == nil {
+		return 0, nil
+	}
+	ptr, n := mapPtr(mp), len(mp)
+	if !s.ok || s.ptr != ptr || s.n != n {
+		sum := int64(0)
+		for k, v := range mp {
+			c, err := entryBytes(k, v)
+			if err != nil {
+				return 0, err
+			}
+			sum += int64(c)
+		}
+		s.ok, s.ref, s.ptr, s.n, s.sum = true, mp, ptr, n, sum
+	}
+	extra := s.sum
+	if n > 1 {
+		extra += int64(n - 1)
+	}
+	return extra, nil
+}
+
+// entryBytes is the exact byte cost of one map entry inside its parent
+// object: quoted key + colon + value (the inter-entry comma is accounted
+// per-section, not per-entry).
+func entryBytes[K comparable, V any](key K, val V) (int, error) {
+	kb, err := json.Marshal(key)
+	if err != nil {
+		return 0, err
+	}
+	klen := len(kb)
+	if _, isString := any(key).(string); !isString {
+		// Numeric map keys are quoted in JSON objects.
+		klen += 2
+	}
+	vb, err := json.Marshal(val)
+	if err != nil {
+		return 0, err
+	}
+	return klen + 1 + len(vb), nil
+}
+
+// sizeApplySection adjusts one section for a single key transition
+// (old, present iff hadOld) -> (cur, present iff hasCur) on the map mp,
+// which must already reflect the change. A section that no longer matches
+// the map (external swap, or a length the delta cannot explain) is marked
+// stale for on-demand recompute instead of being silently wrong.
+func sizeApplySection[K comparable, V any](s *sectionSize, mp map[K]V, key K, old V, hadOld bool, cur V, hasCur bool) {
+	ptr, n := mapPtr(mp), len(mp)
+	oldN := n
+	if hasCur {
+		oldN--
+	}
+	if hadOld {
+		oldN++
+	}
+	if !s.ok || s.ptr != ptr || s.n != oldN {
+		s.ok = false
+		return
+	}
+	if hadOld {
+		c, err := entryBytes(key, old)
+		if err != nil {
+			s.ok = false
+			return
+		}
+		s.sum -= int64(c)
+	}
+	if hasCur {
+		c, err := entryBytes(key, cur)
+		if err != nil {
+			s.ok = false
+			return
+		}
+		s.sum += int64(c)
+	}
+	s.n = n
+}
+
+func (m *RepoMetadata) sizePutDir(path string, old DirMeta, hadOld bool, cur DirMeta) {
+	sizeApplySection(&m.ensureDerived().sections[secDirs], m.Dirs, path, old, hadOld, cur, true)
+}
+
+func (m *RepoMetadata) sizeRemoveDir(path string, old DirMeta) {
+	sizeApplySection(&m.ensureDerived().sections[secDirs], m.Dirs, path, old, true, DirMeta{}, false)
+}
+
+func (m *RepoMetadata) sizePutFile(name string, old FileMeta, hadOld bool, cur FileMeta) {
+	sizeApplySection(&m.ensureDerived().sections[secFiles], m.Files, name, old, hadOld, cur, true)
+}
+
+func (m *RepoMetadata) sizeRemoveFile(name string, old FileMeta) {
+	sizeApplySection(&m.ensureDerived().sections[secFiles], m.Files, name, old, true, FileMeta{}, false)
+}
+
+func (m *RepoMetadata) sizePutRelease(tag string, old ReleaseRef, hadOld bool, cur ReleaseRef) {
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.Releases, tag, old, hadOld, cur, true)
+}
+
+func (m *RepoMetadata) sizeRemoveRelease(tag string, old ReleaseRef) {
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.Releases, tag, old, true, ReleaseRef{}, false)
+}
+
+func (m *RepoMetadata) markSectionStale(i int) {
+	m.ensureDerived().sections[i].ok = false
+}
+
+// --- value equality helpers ----------------------------------------------
+
+// xAttrsEqual is strict about nil vs empty so callers that write back
+// normalized values cannot skip the nil-collapse Normalize guarantees.
+func xAttrsEqual(a, b XAttrMap) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil && len(a) == len(b)
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		bv, ok := b[k]
+		if !ok || !bytes.Equal(v, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+func dirMetaEqual(a, b DirMeta) bool {
+	return a.CreatedAt == b.CreatedAt && a.ModifiedAt == b.ModifiedAt &&
+		a.AccessedAt == b.AccessedAt && a.ChangedAt == b.ChangedAt &&
+		a.Mode == b.Mode && a.UID == b.UID && a.GID == b.GID &&
+		a.Inode == b.Inode && xAttrsEqual(a.XAttrs, b.XAttrs)
+}
+
+func fileMetaEqual(a, b FileMeta) bool {
+	if a.Size != b.Size || a.Symlink != b.Symlink || a.UploadedAt != b.UploadedAt ||
+		a.ModifiedAt != b.ModifiedAt || a.AccessedAt != b.AccessedAt ||
+		a.ChangedAt != b.ChangedAt || a.Mode != b.Mode || a.UID != b.UID ||
+		a.GID != b.GID || a.Inode != b.Inode {
+		return false
+	}
+	if (a.Chunks == nil) != (b.Chunks == nil) {
+		return false
+	}
+	if !slices.Equal(a.Chunks, b.Chunks) {
+		return false
+	}
+	return xAttrsEqual(a.XAttrs, b.XAttrs)
 }
 
 func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
@@ -943,6 +1575,9 @@ func (m *RepoMetadata) Validate() error {
 
 	totalFiles := 0
 	totalSize := int64(0)
+	// One scratch map for every file's duplicate-chunk-reference check:
+	// cleared per file instead of allocated per file.
+	seenChunk := make(map[int64]struct{})
 	for path, file := range m.Files {
 		if path == "" {
 			return fmt.Errorf("file entry with empty path")
@@ -977,7 +1612,7 @@ func (m *RepoMetadata) Validate() error {
 			totalFiles++
 			totalSize += file.Size
 		}
-		seenChunk := map[int64]struct{}{}
+		clear(seenChunk)
 		var prevOffset int64 = -1
 		var prevEnd int64 = -1
 		for _, id := range file.Chunks {
@@ -1345,9 +1980,12 @@ func chooseNonEmpty(values ...string) string {
 // UpsertFile for create/update flows where identity carries over.
 func (m *RepoMetadata) ReplaceFile(name string, file FileMeta) bool {
 	name = normalizeStoredPath(name)
-	if _, ok := m.Files[name]; !ok {
+	existing, ok := m.Files[name]
+	if !ok {
 		return false
 	}
-	m.Files[name] = file.Clone()
+	replacement := file.Clone()
+	m.Files[name] = replacement
+	m.trackFilePut(name, existing, true, replacement)
 	return true
 }

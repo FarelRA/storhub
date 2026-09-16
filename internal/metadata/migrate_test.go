@@ -45,6 +45,7 @@ func mustMigrateAll(t *testing.T, data []byte) []byte {
 }
 
 func TestDetectVersionRejectsVersionless(t *testing.T) {
+	t.Parallel()
 	if _, err := detectVersion([]byte(`{"p":"x"}`)); err == nil {
 		t.Fatal("versionless payload must be rejected")
 	}
@@ -57,6 +58,7 @@ func TestDetectVersionRejectsVersionless(t *testing.T) {
 }
 
 func TestMigrateRejectsNewerAndInvalid(t *testing.T) {
+	t.Parallel()
 	if _, _, err := Migrate([]byte(`{"v":99}`)); err == nil {
 		t.Fatal("newer version must be refused")
 	}
@@ -68,6 +70,7 @@ func TestMigrateRejectsNewerAndInvalid(t *testing.T) {
 // Identity: a current document passes through byte-for-byte. ToJSON emits
 // the blob layout (maxBlobVersion): v5 is manifest-only.
 func TestMigrateIdentityOnCurrent(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123)
 	blob, err := m.ToJSON()
@@ -86,6 +89,7 @@ func TestMigrateIdentityOnCurrent(t *testing.T) {
 // Per-step goldens: each era decodes into its typed document and the next
 // step emits exactly the documented transformations.
 func TestStepV1ToV2(t *testing.T) {
+	t.Parallel()
 	out, version, err := Migrate([]byte(v1Fixture))
 	if err != nil {
 		t.Fatalf("chain: %v", err)
@@ -120,6 +124,7 @@ func TestStepV1ToV2(t *testing.T) {
 }
 
 func TestStepV2ToV3(t *testing.T) {
+	t.Parallel()
 	v2 := `{"v":2,"p":"demo","f":{"a.txt":{"s":1,"i":7,"ua":50}},"c":{"9":{"s":1,"r":"v1","a":3}}}`
 	v3, err := migrators[2]([]byte(v2))
 	if err != nil {
@@ -145,6 +150,7 @@ func TestStepV2ToV3(t *testing.T) {
 }
 
 func TestStepV3ToV4(t *testing.T) {
+	t.Parallel()
 	v3 := `{"v":3,"p":"demo","lm":900,` +
 		`"f":{"legacy.bin":{"s":2,"ua":0,"ma":0,"aa":0,"ca":0},"marked.bin":{"s":2,"tsx":true,"ua":0}},` +
 		`"r":{"v1":{"ac":1,"ca":5}}}`
@@ -180,6 +186,7 @@ func TestStepV3ToV4(t *testing.T) {
 
 // Full chain from the v1 fixture lands on a loadable current document.
 func TestFullChainV1ToCurrent(t *testing.T) {
+	t.Parallel()
 	out := mustMigrateAll(t, []byte(v1Fixture))
 	var m RepoMetadata
 	if err := m.FromJSON(out); err != nil {
@@ -204,6 +211,7 @@ func TestFullChainV1ToCurrent(t *testing.T) {
 // (and the bytes it claimed) so the migrated document actually passes
 // Validate instead of keeping a reference to a record the migration dropped.
 func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
+	t.Parallel()
 	v3 := `{"v":3,"p":"demo","tf":2,"ts":14,"lm":900,` +
 		`"rt":{"ca":100,"ma":101,"i":1},` +
 		`"f":{"gone.bin":{"s":10,"cs":[7],"ua":300,"ma":301,"i":5},` +
@@ -241,6 +249,7 @@ func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
 
 // Owner materialization in the v2->v3 migration must cover GID, not just UID.
 func TestStepV2ToV3MaterializesGID(t *testing.T) {
+	t.Parallel()
 	_, gid := defaultOwnerIDs()
 	if gid == 0 {
 		t.Skip("running as root group: materialization is a no-op by design")
@@ -269,6 +278,7 @@ func TestStepV2ToV3MaterializesGID(t *testing.T) {
 // loop, the type itself refuses - no silent empty trees from ignored
 // unknown fields. Through FromJSON the same payload migrates correctly.
 func TestParserIsCurrentOnly(t *testing.T) {
+	t.Parallel()
 	rawV3 := `{"v":3,"rt":{"ca":1},"f":{"a":{"s":1,"ua":1,"ca":2}},"r":{"t":{"ac":1,"ca":3}}}`
 	for name, payload := range map[string]string{"v1": v1Fixture, "v3": rawV3} {
 		var m RepoMetadata

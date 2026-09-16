@@ -9,6 +9,7 @@ import (
 // wrapper: every input the conformance suite covers must normalize
 // identically; only escaping paths gain a context-rich error.
 func TestNormalizeStoredPathErrParity(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{
 		"", " ", "/", "//", "docs", "/docs", " docs ", "docs/",
 		"a/b/c", "./a", "a//b", "/a/b/../c", " .hidden ", "...",
@@ -37,6 +38,7 @@ func TestNormalizeStoredPathErrParity(t *testing.T) {
 // TestParentPathMatchesTotal pins parentPath outputs while it is reimplemented
 // on the checked constructor: root stays root, files map to parents.
 func TestParentPathMatchesTotal(t *testing.T) {
+	t.Parallel()
 	if got := parentPath("docs/guide.txt"); got != "docs" {
 		t.Errorf("parentPath = %q, want docs", got)
 	}

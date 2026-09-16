@@ -61,6 +61,7 @@ func manifestFrom(t *testing.T, m *RepoMetadata, res *TreeResult) *Manifest {
 }
 
 func TestMerkleRoundTripIdentity(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	res, err := BuildTree(m)
 	if err != nil {
@@ -91,6 +92,7 @@ func TestMerkleRoundTripIdentity(t *testing.T) {
 }
 
 func TestMerkleDedupIdenticalSubtrees(t *testing.T) {
+	t.Parallel()
 	now := int64(500)
 	m := NewRepoMetadata("demo")
 	// Two structurally identical directories (same file names, same sizes,
@@ -130,6 +132,7 @@ func looksLikeTreeNode(data []byte) bool {
 }
 
 func TestMerkleMutationRewritesOnlyChain(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	before, err := BuildTree(m)
 	if err != nil {
@@ -193,6 +196,7 @@ func collectNodeShas(t *testing.T, m *RepoMetadata, res *TreeResult, out map[str
 }
 
 func TestMerkleChunkBucketsByIndex(t *testing.T) {
+	t.Parallel()
 	now := int64(700)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", now)
@@ -245,6 +249,7 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 // BuildTree must not silently drop entries whose parent directory is
 // missing from Dirs - the round-trip identity would be broken without a word.
 func TestBuildTreeRejectsOrphanEntries(t *testing.T) {
+	t.Parallel()
 	orphanFile := NewRepoMetadata("demo")
 	orphanFile.Files["ghost/f"] = FileMeta{Inode: 5, Size: 0}
 	if _, err := BuildTree(orphanFile); err == nil {
@@ -266,6 +271,7 @@ func TestBuildTreeRejectsOrphanEntries(t *testing.T) {
 // loaded; a stale manifest must not yield a tree whose counters sit behind
 // live ids (callers like loadIndexTreeAtRef never Normalize).
 func TestLoadTreeReconcilesCounters(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	res, err := BuildTree(m)
 	if err != nil {
@@ -324,6 +330,7 @@ func TestLoadTreeReconcilesCounters(t *testing.T) {
 // anything that is not 64-char lowercase hex before ObjectPath builds repo
 // paths out of arbitrary text.
 func TestParseManifestValidatesSHAShape(t *testing.T) {
+	t.Parallel()
 	good := &Manifest{
 		Version: CurrentVersion, Project: "demo",
 		TreeRoot: strings.Repeat("a", 64), Releases: strings.Repeat("b", 64),
@@ -358,6 +365,7 @@ func TestParseManifestValidatesSHAShape(t *testing.T) {
 // LoadTree must reject an object whose bytes no longer hash to the sha it
 // was referenced by (bit-rot in the caller's cache must not poison the tree).
 func TestLoadTreeVerifiesContentAddresses(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	res, err := BuildTree(m)
 	if err != nil {
@@ -382,6 +390,7 @@ func TestLoadTreeVerifiesContentAddresses(t *testing.T) {
 }
 
 func TestObjectAddressing(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"hello":"world"}`)
 	sha := ObjectSHA(data)
 	if len(sha) != 64 {
@@ -406,6 +415,7 @@ func TestObjectAddressing(t *testing.T) {
 }
 
 func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.Normalize("demo", 42)
 	res, err := BuildTree(m)

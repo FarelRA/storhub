@@ -18,6 +18,7 @@ func buildTree(t *testing.T, mutate func(m *RepoMetadata)) *RepoMetadata {
 func clonePtr(m *RepoMetadata) *RepoMetadata { c := m.Clone(); return &c }
 
 func TestRevertFileRestoresHistoricalContent(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
 		m.Chunks[1] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11}
@@ -48,6 +49,7 @@ func TestRevertFileRestoresHistoricalContent(t *testing.T) {
 }
 
 func TestRevertRestoresDeletedFileAndParent(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("keep", 100)
 		m.EnsureDirectory("gone", 100)
@@ -76,6 +78,7 @@ func TestRevertRestoresDeletedFileAndParent(t *testing.T) {
 }
 
 func TestRevertDirectorySubtree(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("tree", 100)
 		m.EnsureDirectory("tree/sub", 100)
@@ -106,6 +109,7 @@ func TestRevertDirectorySubtree(t *testing.T) {
 }
 
 func TestRevertRemovesPathAbsentInHistory(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
 	})
@@ -125,6 +129,7 @@ func TestRevertRemovesPathAbsentInHistory(t *testing.T) {
 }
 
 func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.Chunks[5] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
@@ -176,6 +181,7 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 }
 
 func TestRevertRestoresMissingRelease(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.EnsureRelease("v9", 100)
@@ -198,6 +204,7 @@ func TestRevertRestoresMissingRelease(t *testing.T) {
 // covers counter regression: a revision whose persisted ni/nc sit behind the
 // ids revert restores.
 func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.Chunks[500] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
@@ -243,6 +250,7 @@ func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
 // when the colliding live path shares that inode in src too - the sibling is
 // related, not unrelated live data.
 func TestRevertKeepsHardlinkFamilyIntact(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
@@ -281,6 +289,7 @@ func TestRevertKeepsHardlinkFamilyIntact(t *testing.T) {
 // A colliding holder that is NOT family in src (unrelated
 // live data) must still force a remap.
 func TestRevertRemapsInodeForUnrelatedHolder(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
@@ -314,6 +323,7 @@ func TestRevertRemapsInodeForUnrelatedHolder(t *testing.T) {
 // copy aliases src's XAttrs map (and its values) into dst, so a preview
 // mutation leaks into the source tree the commit reverts from.
 func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("x", 100)
 		xd := m.Dirs["x"]
@@ -348,6 +358,7 @@ func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
 // Dropping a dangling source chunk reference must not leave the restored
 // file declaring bytes it can no longer serve.
 func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
@@ -376,6 +387,7 @@ func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
 }
 
 func TestRevertRejectsRoot(t *testing.T) {
+	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {})
 	cur := buildTree(t, func(m *RepoMetadata) {})
 	if err := RevertSubtree(cur, hist, "", 300); err == nil {

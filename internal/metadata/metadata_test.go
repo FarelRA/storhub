@@ -32,6 +32,7 @@ var (
 )
 
 func TestHelpersAndPOSIXUtilities(t *testing.T) {
+	t.Parallel()
 	// Whitespace is significant: the leading-space component is part of
 	// the name (mirrors internal/fs, codified there since round 1).
 	if normalizeStoredPath(" /docs/specs/../guide.txt ") != " /docs/guide.txt " {
@@ -66,6 +67,7 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 }
 
 func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
+	t.Parallel()
 	now := int64(100)
 	repo := NewRepoMetadata("demo")
 
@@ -139,6 +141,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 }
 
 func TestRepoMetadataMutationFlows(t *testing.T) {
+	t.Parallel()
 	now := int64(200)
 	repo := NewRepoMetadata("mutations")
 	repo.EnsureDirectory("docs/specs", now)
@@ -194,6 +197,7 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 // decoding an empty v5 tree that a later commit would publish over the real
 // index (silent total data loss).
 func TestV5DocumentWithoutTreeRootIsRejected(t *testing.T) {
+	t.Parallel()
 	probe := []byte(`{"v":5,"p":"proj","d":{},"f":{},"c":{},"r":{}}`)
 	if IsManifest(probe) {
 		t.Fatal("probe: shape detector must not call a tr-less document a manifest")
@@ -232,6 +236,7 @@ func TestV5DocumentWithoutTreeRootIsRejected(t *testing.T) {
 // layout, which tops out at maxBlobVersion; a version-5 tree migrates to the
 // split layout on write, so a v5 blob document can never legitimately exist.
 func TestToJSONEmitsBlobVersion(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123)
 	blob, err := m.ToJSON()
@@ -256,6 +261,7 @@ func TestToJSONEmitsBlobVersion(t *testing.T) {
 // Validate must reject map keys the split round-trip would canonicalize
 // (mutating or clobbering entries on the way).
 func TestValidateRejectsNonCanonicalKeys(t *testing.T) {
+	t.Parallel()
 	for _, key := range []string{"a/", "a//b", "a/./b", "./a"} {
 		m := NewRepoMetadata("demo")
 		m.EnsureDirectory("a", 1)
@@ -281,6 +287,7 @@ func TestValidateRejectsNonCanonicalKeys(t *testing.T) {
 // (or duplicate-offset) chunk ranges, which make offset binary search
 // ambiguous.
 func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
+	t.Parallel()
 	// Overflow: Offset+Size wraps int64 negative and slips past a naive
 	// `offset+size > fileSize` comparison.
 	over := NewRepoMetadata("demo")
@@ -331,6 +338,7 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 // One path must name one node; a file and a directory sharing a key make
 // the FS view ambiguous even though the maps round-trip.
 func TestValidateRejectsFileDirPathCollision(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", 1)
 	m.Dirs["x"] = DirMeta{Inode: 10, CreatedAt: 1, ModifiedAt: 1}
@@ -343,6 +351,7 @@ func TestValidateRejectsFileDirPathCollision(t *testing.T) {
 
 // Symlinks must default to the symlink mode, not the regular-file mode.
 func TestSymlinkModeDefaults(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("lnk", FileMeta{Symlink: "target"}, 100)
 	got := m.FindFile("lnk")
@@ -364,6 +373,7 @@ func TestSymlinkModeDefaults(t *testing.T) {
 
 // Read-side lookups must canonicalize keys like the write path does.
 func TestReadLookupsNormalizeKeys(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("a/b", 1)
 	m.UpsertFile("a/b/f.txt", FileMeta{Size: 0, Inode: 9}, 1)
@@ -385,6 +395,7 @@ func TestReadLookupsNormalizeKeys(t *testing.T) {
 // FileMeta.Normalize must not reorder chunks by ID - the stored-order
 // invariant is offset order, enforced by RepoMetadata.Normalize.
 func TestFileMetaNormalizeKeepsChunkOrder(t *testing.T) {
+	t.Parallel()
 	f := FileMeta{Size: 6, Chunks: []int64{2, 1}}
 	f.Normalize(100)
 	if len(f.Chunks) != 2 || f.Chunks[0] != 2 || f.Chunks[1] != 1 {
@@ -393,6 +404,7 @@ func TestFileMetaNormalizeKeepsChunkOrder(t *testing.T) {
 }
 
 func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
+	t.Parallel()
 	now := int64(300)
 	repo := NewRepoMetadata("validate")
 	InitializeNewFileIdentity(repo, &FileMeta{}, now)
@@ -418,6 +430,7 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 }
 
 func TestMigrateV1ChunkNameCollision(t *testing.T) {
+	t.Parallel()
 	v1JSON := `{
 		"version": 1,
 		"project": "demo",
@@ -541,6 +554,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 }
 
 func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	link := FileMeta{Symlink: "target", Size: 6, Inode: 7, Mode: 0o120777, UID: 1, GID: 1}
 	m.UpsertFile("link", link, 100)
@@ -570,6 +584,7 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 }
 
 func TestUpsertSymlinkRefreshKeepsIdentity(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	link := FileMeta{Symlink: "old-target", Inode: 9, Mode: 0o120777, UID: 5, GID: 5, UploadedAt: 100, ModifiedAt: 100, AccessedAt: 100, ChangedAt: 100}
 	m.UpsertFile("lnk", link, 100)
@@ -587,6 +602,7 @@ func TestUpsertSymlinkRefreshKeepsIdentity(t *testing.T) {
 }
 
 func TestFromJSONRejectsCorruptAndFutureVersions(t *testing.T) {
+	t.Parallel()
 	var corrupt RepoMetadata
 	if err := corrupt.FromJSON([]byte(`{"p":"demo"}`)); err == nil || !strings.Contains(err.Error(), "no version") {
 		t.Fatalf("expected loud rejection of versionless payload, got %v", err)
@@ -598,6 +614,7 @@ func TestFromJSONRejectsCorruptAndFutureVersions(t *testing.T) {
 }
 
 func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
+	t.Parallel()
 	v2JSON := `{"v":2,"p":"demo","f":{"a.txt":{"s":0,"i":5,"ua":100,"x":{"user.bin":"aGVsbG8=","user.txt":"cGxhaW4="}}}}`
 	var m RepoMetadata
 	if err := m.FromJSON([]byte(v2JSON)); err != nil {
@@ -616,6 +633,7 @@ func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
 }
 
 func TestCountersPersistAcrossReload(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureRelease("v1", 1)
 	m.Chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
@@ -648,6 +666,7 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 }
 
 func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureRelease("v1", 1)
 	m.Chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
@@ -674,6 +693,7 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 }
 
 func TestDirNLinkCountsEachSubdirectoryOnce(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("docs/a", 1)
 	m.EnsureDirectory("docs/b", 1)
@@ -691,6 +711,7 @@ func TestDirNLinkCountsEachSubdirectoryOnce(t *testing.T) {
 }
 
 func TestZeroOwnerSurvivesNormalize(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("rooted", 1)
 	dir := m.Dirs["rooted"]
@@ -704,6 +725,7 @@ func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 }
 
 func TestPruneUnreferencedChunks(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100)
 	m.Chunks[10] = ChunkInfo{Offset: 0, Size: 4}
@@ -739,6 +761,7 @@ func TestPruneUnreferencedChunks(t *testing.T) {
 }
 
 func TestMigrateV1RejectsDuplicatePathsAndSynthesizesParents(t *testing.T) {
+	t.Parallel()
 	// Duplicate file entries are corruption: refuse to guess.
 	dup := []byte(`{"version":1,"project":"demo","last_modified":"2024-01-01T00:00:00Z",
 		"root":{"inode":1,"mode":493,"created_at":"2024-01-01T00:00:00Z","modified_at":"2024-01-01T00:00:00Z"},
@@ -773,6 +796,7 @@ func TestMigrateV1RejectsDuplicatePathsAndSynthesizesParents(t *testing.T) {
 }
 
 func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
+	t.Parallel()
 	if _, ok := parseNumericReleaseTag("v-1"); ok {
 		t.Fatal("v-1 must not parse as numeric tag")
 	}
@@ -792,6 +816,7 @@ func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
 // zero is a real epoch value, not a gap. Legacy completion belongs to the
 // stacked migrator (migrate.go), not to the parser or normalizer.
 func TestNormalizePreservesAuthoritativeZeros(t *testing.T) {
+	t.Parallel()
 	f := &FileMeta{}
 	f.Normalize(1700000000)
 	if f.UploadedAt != 0 || f.ModifiedAt != 0 || f.AccessedAt != 0 || f.ChangedAt != 0 {
@@ -813,6 +838,7 @@ func TestNormalizePreservesAuthoritativeZeros(t *testing.T) {
 }
 
 func TestPathNormalizerConformance(t *testing.T) {
+	t.Parallel()
 	fsNormalize := func(v string) string {
 		cleaned, err := fsNormalizeForTest(v)
 		if err != nil {
@@ -845,6 +871,7 @@ func TestPathNormalizerConformance(t *testing.T) {
 }
 
 func TestSchemaV4KeysRoundTrip(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", 1)
 	m.UpsertFile("d/f.txt", FileMeta{Size: 1, Chunks: []int64{7}, UploadedAt: 5, ModifiedAt: 6, AccessedAt: 7, ChangedAt: 8, Inode: 9}, 1)
@@ -880,6 +907,7 @@ func TestSchemaV4KeysRoundTrip(t *testing.T) {
 }
 
 func TestV3PayloadMigratesTimestamps(t *testing.T) {
+	t.Parallel()
 	v3 := `{
 	  "v":3,"p":"demo","tf":1,"ts":1,"lm":10,
 	  "rt":{"ca":100,"ma":101,"aa":102,"cha":103,"i":1},
