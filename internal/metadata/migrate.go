@@ -185,21 +185,21 @@ func migrateV1ToV2(data []byte) ([]byte, error) {
 		V: 2, Project: m.Project,
 		TotalFiles: m.TotalFiles, TotalSize: m.TotalSize, LastMod: m.LastMod,
 		Root:     dirToV2(m.Root),
-		Dirs:     make(map[string]docDirV2, len(m.Dirs)),
-		Files:    make(map[string]docFileV2, len(m.Files)),
-		Chunks:   make(map[int64]docChunk, len(m.Chunks)),
-		Releases: make(map[string]docRelease, len(m.Releases)),
+		Dirs:     make(map[string]docDirV2, len(m.dirs)),
+		Files:    make(map[string]docFileV2, len(m.files)),
+		Chunks:   make(map[int64]docChunk, len(m.chunks)),
+		Releases: make(map[string]docRelease, len(m.releases)),
 	}
-	for path, d := range m.Dirs {
+	for path, d := range m.dirs {
 		out.Dirs[path] = dirToV2(d)
 	}
-	for path, f := range m.Files {
+	for path, f := range m.files {
 		out.Files[path] = fileToV2(f)
 	}
-	for id, c := range m.Chunks {
+	for id, c := range m.chunks {
 		out.Chunks[id] = chunkToDoc(c)
 	}
-	for tag, r := range m.Releases {
+	for tag, r := range m.releases {
 		out.Releases[tag] = docRelease(r)
 	}
 	return json.Marshal(out)
@@ -207,10 +207,10 @@ func migrateV1ToV2(data []byte) ([]byte, error) {
 
 func newBareRepoMetadata() *RepoMetadata {
 	m := &RepoMetadata{}
-	m.Dirs = make(map[string]DirMeta)
-	m.Files = make(map[string]FileMeta)
-	m.Chunks = make(map[int64]ChunkInfo)
-	m.Releases = make(map[string]ReleaseRef)
+	m.dirs = make(map[string]DirMeta)
+	m.files = make(map[string]FileMeta)
+	m.chunks = make(map[int64]ChunkInfo)
+	m.releases = make(map[string]ReleaseRef)
 	return m
 }
 
@@ -323,7 +323,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 	m.LastMod = in.LastMod
 	m.Root = dirV3ToV4(in.Root, in.LastMod)
 	for path, d := range in.Dirs {
-		m.Dirs[path] = dirV3ToV4(d, in.LastMod)
+		m.dirs[path] = dirV3ToV4(d, in.LastMod)
 	}
 	for path, f := range in.Files {
 		fv4 := fileV3ToV4(f, in.LastMod)
@@ -342,7 +342,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 				}
 				kept = append(kept, id)
 				// Digest deliberately dropped: it left the schema at v4.
-				m.Chunks[id] = ChunkInfo{Size: c.Size, Offset: c.Offset,
+				m.chunks[id] = ChunkInfo{Size: c.Size, Offset: c.Offset,
 					Release: c.Release, AssetOffset: c.AssetOffset, AssetID: c.AssetID}
 				if e := c.Offset + c.Size; e > end {
 					end = e
@@ -359,10 +359,10 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 				}
 			}
 		}
-		m.Files[path] = fv4
+		m.files[path] = fv4
 	}
 	for tag, r := range in.Releases {
-		m.Releases[tag] = ReleaseRef(r)
+		m.releases[tag] = ReleaseRef(r)
 	}
 	m.NextInode = in.NextInode
 	m.NextChunkID = in.NextChunkID

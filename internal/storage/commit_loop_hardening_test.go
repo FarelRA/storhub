@@ -30,7 +30,7 @@ func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 		t.Fatalf("flush seed: %v", err)
 	}
 	meta := NewRepoMetadata("project-snap-missing")
-	meta.Files["ghost.txt"] = FileMeta{
+	meta.Files()["ghost.txt"] = FileMeta{
 		Size:   1,
 		Mode:   0o644,
 		Inode:  meta.AllocateInode(),
@@ -66,7 +66,7 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	if file == nil || len(file.Chunks) == 0 {
 		t.Fatalf("seed file has no chunks: %+v", file)
 	}
-	assetID := repoMeta.Chunks[file.Chunks[0]].AssetID
+	assetID := repoMeta.Chunks()[file.Chunks[0]].AssetID
 	revisions, err := hub.ListMetadataRevisionsContext(ctx, "project-snap-toctou")
 	if err != nil || len(revisions) == 0 {
 		t.Fatalf("revisions: %v %d", err, len(revisions))
@@ -106,7 +106,7 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	pm.meta.UpsertFile("tiny.txt", FileMeta{Size: 0, Mode: 0o644}, 1700000000)
 	pm.meta.LastMod = 12345
 	sharedChunk := pm.meta.AllocateChunkID()
-	pm.meta.Chunks[sharedChunk] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 1}
+	pm.meta.Chunks()[sharedChunk] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 1}
 	pad := strings.Repeat("x", 600)
 	for i := 0; i < 13000; i++ {
 		name := strings.Repeat("x", 8) + itoa(i) + pad
@@ -307,7 +307,7 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	if fileMeta == nil || len(fileMeta.Chunks) == 0 {
 		t.Fatalf("seed file has no chunks: %+v", fileMeta)
 	}
-	initialTag := repoMeta.Chunks[fileMeta.Chunks[0]].Release
+	initialTag := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-patch-tag", initialTag, 999)
 	newChunks, actualTag, err := hub.buildPatchedChunks(ctx, "project-patch-tag", repoMeta, *fileMeta, "p.txt", 0, 1, []byte("Z"))
 	if err != nil {
@@ -376,7 +376,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 		t.Fatalf("upload f1: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(ctx, proj)
-	fullRelease := repoMeta.Chunks[meta1.Chunks[0]].Release
+	fullRelease := repoMeta.Chunks()[meta1.Chunks[0]].Release
 	// Server truth is exactly 1000 (full), but the truncated embedded view
 	// shows only embedCap entries.
 	backend.addAssetsToRelease(t, proj, fullRelease, 999)

@@ -2335,7 +2335,7 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	}
 
 	for _, chunkName := range fileMeta.Chunks {
-		chunk, ok := repoMeta.Chunks[chunkName]
+		chunk, ok := repoMeta.Chunks()[chunkName]
 		if !ok {
 			return fmt.Errorf("chunk %d not found", chunkName)
 		}
@@ -2385,8 +2385,8 @@ func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (resu
 	if err != nil {
 		return nil, err
 	}
-	result = make([]metadata.ReleaseRef, 0, len(repoMeta.Releases))
-	for _, ref := range repoMeta.Releases {
+	result = make([]metadata.ReleaseRef, 0, len(repoMeta.Releases()))
+	for _, ref := range repoMeta.Releases() {
 		result = append(result, ref.Clone())
 	}
 	return result, nil
@@ -3116,7 +3116,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if end > file.Size {
 		end = file.Size
 	}
-	segments := overlappingFileSegments(file, repo.Chunks, offset, end)
+	segments := overlappingFileSegments(file, repo.Chunks(), offset, end)
 	for _, segment := range segments {
 		if err := h.fillAssetRange(ctx, project, segment.chunk, result[segment.start:segment.end]); err != nil {
 			return 0, err

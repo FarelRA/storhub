@@ -121,7 +121,7 @@ func TestJournalReplayOnColdStart(t *testing.T) {
 		t.Fatalf("load after crash: %v", err)
 	}
 	if !meta.HasDirectory("docs") || meta.FindFile("docs/hello.txt") == nil {
-		t.Fatalf("expected replayed mutations after cold start, got files %+v dirs %+v", meta.Files, meta.Dirs)
+		t.Fatalf("expected replayed mutations after cold start, got files %+v dirs %+v", meta.Files(), meta.Dirs())
 	}
 	// The replayed ops are pending (dirty) and the journal survives until
 	// a commit lands them.

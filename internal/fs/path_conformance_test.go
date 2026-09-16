@@ -144,7 +144,7 @@ func TestConformanceAbsoluteLinkParentChainStillGuarded(t *testing.T) {
 	// below the directory's own owner and silently pass the check.
 	dir.UID = 0
 	dir.GID = 0
-	backend.repo.Dirs["a"] = *dir
+	backend.repo.Dirs()["a"] = *dir
 	attacker := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1001, Groups: []uint32{1001}})
 	if _, err := svc.ReadFileAtContext(attacker, "demo", "a/abs", 0, 3); !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("read through absolute link inside a 0700 dir must be EACCES, got %v", err)

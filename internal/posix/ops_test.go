@@ -299,7 +299,7 @@ func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
 	dir.Mode = 0o777
-	backend.repo.Dirs["docs"] = *dir
+	backend.repo.Dirs()["docs"] = *dir
 	base := backend.seedFile("docs/base.txt")
 	base.UID = 1000
 	base.GID = 1000

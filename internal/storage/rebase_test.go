@@ -95,7 +95,7 @@ func TestRebaseOlderLocalWriteLosesToNewerUpstream(t *testing.T) {
 	// Rival wrote v2 at t=300 and committed first.
 	upstream := base.Clone()
 	rivalChunk := upstream.AllocateChunkID()
-	upstream.Chunks[rivalChunk] = ChunkInfo{Size: 42, Offset: 0, Release: "v1", AssetID: 42}
+	upstream.Chunks()[rivalChunk] = ChunkInfo{Size: 42, Offset: 0, Release: "v1", AssetID: 42}
 	rival := FileMeta{Size: 42, Mode: 0o644, Inode: upstream.AllocateInode(), Chunks: []int64{rivalChunk}, UploadedAt: 1700000300, ModifiedAt: 1700000300, AccessedAt: 1700000300, ChangedAt: 1700000300}
 	upstream.UpsertFile("a.txt", rival, 1700000300)
 
@@ -180,7 +180,7 @@ func TestRebaseChunkIDCollisionRemapped(t *testing.T) {
 	// corrupting either file's data.
 	upstream := base.Clone()
 	rivalChunk := upstream.AllocateChunkID() // id 1
-	upstream.Chunks[rivalChunk] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 100}
+	upstream.Chunks()[rivalChunk] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 100}
 	rivalFile := FileMeta{Size: 5, Mode: 0o644, Inode: upstream.AllocateInode(), Chunks: []int64{rivalChunk}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
 	upstream.UpsertFile("rival.txt", rivalFile, 1700000100)
 
@@ -204,11 +204,11 @@ func TestRebaseChunkIDCollisionRemapped(t *testing.T) {
 	if ourID == rivalChunk {
 		t.Fatal("expected our colliding chunk id to be remapped")
 	}
-	rec, ok := rebased.Chunks[ourID]
+	rec, ok := rebased.Chunks()[ourID]
 	if !ok || rec.AssetID != 200 {
 		t.Fatalf("expected our chunk record preserved under the remapped id, got %+v", rec)
 	}
-	if rec := rebased.Chunks[rivalChunk]; rec.AssetID != 100 {
+	if rec := rebased.Chunks()[rivalChunk]; rec.AssetID != 100 {
 		t.Fatalf("expected rival chunk record untouched, got %+v", rec)
 	}
 	if rival := rebased.FindFile("rival.txt"); rival == nil || len(rival.Chunks) != 1 || rival.Chunks[0] != rivalChunk {
@@ -234,7 +234,7 @@ func TestRebaseInodeDirCollisionRemapped(t *testing.T) {
 	upstream.EnsureDirectory("rivaldir", 1700000100)
 	dir := upstream.GetDirectory("rivaldir")
 	dir.Inode = 7
-	upstream.Dirs["rivaldir"] = *dir
+	upstream.Dirs()["rivaldir"] = *dir
 	// Keep the counter honest.
 	for upstream.NextInode <= 7 {
 		upstream.AllocateInode()

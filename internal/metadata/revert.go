@@ -53,13 +53,13 @@ func RevertSubtree(dst, src *RepoMetadata, path string, now int64) error {
 // buildChildIndexes maps each directory to its immediate child paths in one
 // pass (sorted, matching DirectoryChildren's output).
 func buildChildIndexes(m *RepoMetadata) (childDirs, childFiles map[string][]string) {
-	childDirs = make(map[string][]string, len(m.Dirs))
-	childFiles = make(map[string][]string, len(m.Files))
-	for p := range m.Dirs {
+	childDirs = make(map[string][]string, len(m.dirs))
+	childFiles = make(map[string][]string, len(m.files))
+	for p := range m.dirs {
 		parent := parentPath(p)
 		childDirs[parent] = append(childDirs[parent], p)
 	}
-	for p := range m.Files {
+	for p := range m.files {
 		parent := parentPath(p)
 		childFiles[parent] = append(childFiles[parent], p)
 	}
@@ -82,7 +82,7 @@ func removeSubtree(m *RepoMetadata, path string) {
 
 func removeSubtreeWith(m *RepoMetadata, path string, childDirs, childFiles map[string][]string) {
 	m.RemoveFile(path)
-	if _, ok := m.Dirs[path]; !ok {
+	if _, ok := m.dirs[path]; !ok {
 		return
 	}
 	for _, f := range childFiles[path] {
@@ -139,7 +139,7 @@ func copyFile(dst, src *RepoMetadata, path string, now int64) error {
 	if dropped && clone.Symlink == "" {
 		// Dangling source references were dropped; the declared size must
 		// not keep counting bytes the restored file can no longer serve.
-		clone.Size = chunksCoveredSize(dst.Chunks, ids)
+		clone.Size = chunksCoveredSize(dst.chunks, ids)
 	}
 	if inodeFreeFor(dst, clone.Inode, path) || hardlinkFamilyHolds(dst, src, clone.Inode, path) {
 		bumpInodePast(dst, clone.Inode)
@@ -186,7 +186,7 @@ func remapChunks(dst, src *RepoMetadata, ids []int64) ([]int64, bool) {
 	out := make([]int64, 0, len(ids))
 	dropped := false
 	for _, id := range ids {
-		record, ok := src.Chunks[id]
+		record, ok := src.chunks[id]
 		if !ok {
 			// Dangling reference in the source; drop it rather than invent
 			// a record. Validate would reject a file pointing at a missing
@@ -194,19 +194,19 @@ func remapChunks(dst, src *RepoMetadata, ids []int64) ([]int64, bool) {
 			dropped = true
 			continue
 		}
-		if existing, taken := dst.Chunks[id]; taken && existing != record {
+		if existing, taken := dst.chunks[id]; taken && existing != record {
 			newID := dst.AllocateChunkID()
-			dst.Chunks[newID] = record
+			dst.chunks[newID] = record
 			out = append(out, newID)
 		} else {
-			dst.Chunks[id] = record
+			dst.chunks[id] = record
 			bumpChunkPast(dst, id)
 			out = append(out, id)
 		}
 		if record.Release != "" {
-			if _, have := dst.Releases[record.Release]; !have {
-				if ref, ok := src.Releases[record.Release]; ok {
-					dst.Releases[record.Release] = ref
+			if _, have := dst.releases[record.Release]; !have {
+				if ref, ok := src.releases[record.Release]; ok {
+					dst.releases[record.Release] = ref
 				} else {
 					dst.EnsureRelease(record.Release, 0)
 				}
@@ -255,12 +255,12 @@ func inodeFreeFor(m *RepoMetadata, inode uint64, path string) bool {
 	if inode == 0 {
 		return false
 	}
-	for p, f := range m.Files {
+	for p, f := range m.files {
 		if f.Inode == inode && p != path {
 			return false
 		}
 	}
-	for dp, d := range m.Dirs {
+	for dp, d := range m.dirs {
 		if d.Inode == inode && dp != path {
 			return false
 		}
@@ -279,7 +279,7 @@ func hardlinkFamilyHolds(dst, src *RepoMetadata, inode uint64, path string) bool
 		return false
 	}
 	holders := 0
-	for p, f := range dst.Files {
+	for p, f := range dst.files {
 		if f.Inode != inode || p == path {
 			continue
 		}
@@ -288,7 +288,7 @@ func hardlinkFamilyHolds(dst, src *RepoMetadata, inode uint64, path string) bool
 			return false
 		}
 	}
-	for dp, d := range dst.Dirs {
+	for dp, d := range dst.dirs {
 		if d.Inode == inode && dp != path {
 			return false
 		}

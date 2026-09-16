@@ -151,11 +151,11 @@ func (b *testBackend) storeFile(file *meta.FileMeta, data []byte) {
 	}
 	release := "v1"
 	if len(file.Chunks) > 0 {
-		if c, ok := b.repo.Chunks[file.Chunks[0]]; ok {
+		if c, ok := b.repo.Chunks()[file.Chunks[0]]; ok {
 			release = c.Release
 		}
 	}
-	b.repo.Chunks[assetID] = meta.ChunkInfo{Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: release}
+	b.repo.Chunks()[assetID] = meta.ChunkInfo{Offset: 0, Size: int64(len(data)), AssetID: assetID, Release: release}
 	file.Chunks = []int64{assetID}
 }
 
@@ -164,7 +164,7 @@ func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {
 		return nil, nil
 	}
 	chunkName := file.Chunks[0]
-	chunk, ok := b.repo.Chunks[chunkName]
+	chunk, ok := b.repo.Chunks()[chunkName]
 	if !ok {
 		return nil, io.EOF
 	}
@@ -315,7 +315,7 @@ func TestServicePermissionEnforcement(t *testing.T) {
 	dir.Mode = 0o750
 	dir.UID = 11
 	dir.GID = 22
-	backend.repo.Dirs["private"] = *dir
+	backend.repo.Dirs()["private"] = *dir
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 30, GID: 40, Groups: []uint32{40}})
@@ -345,7 +345,7 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 	parent.GID = 60
 	parent.ModifiedAt = now - 3600
 	parent.ChangedAt = now - 3600
-	backend.repo.Dirs["shared"] = *parent
+	backend.repo.Dirs()["shared"] = *parent
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 70, GID: 80, Groups: []uint32{80, 60}})
@@ -375,7 +375,7 @@ func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
 	dir.Mode = 0o777
-	backend.repo.Dirs["docs"] = *dir
+	backend.repo.Dirs()["docs"] = *dir
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 986, GID: 986, Groups: []uint32{986}})
 	file, err := svc.CreateFileContext(ctx, "demo", "docs/file.txt")
@@ -411,7 +411,7 @@ func TestCreateFileRejectsExistingDirectory(t *testing.T) {
 	if _, err := svc.CreateFileContext(context.Background(), "demo", "sub"); !errors.Is(err, ErrIsDirectory) {
 		t.Fatalf("expected ErrIsDirectory, got %v", err)
 	}
-	if _, shadowed := backend.repo.Files["sub"]; shadowed {
+	if _, shadowed := backend.repo.Files()["sub"]; shadowed {
 		t.Fatal("directory was silently shadowed by a file entry")
 	}
 }
@@ -645,11 +645,11 @@ func TestCopyRequiresSourceReadAccess(t *testing.T) {
 	backend.repo.UpsertFile("mine/secret.txt", *file, backend.now)
 	dir := backend.repo.GetDirectory("mine")
 	dir.Mode = 0o755
-	backend.repo.Dirs["mine"] = *dir
+	backend.repo.Dirs()["mine"] = *dir
 	backend.seedDir("theirs")
 	theirs := backend.repo.GetDirectory("theirs")
 	theirs.Mode = 0o777
-	backend.repo.Dirs["theirs"] = *theirs
+	backend.repo.Dirs()["theirs"] = *theirs
 	backend.repo.RebuildIndexes()
 	svc := NewService(backend)
 	attacker := WithIdentity(context.Background(), Identity{UID: 30, GID: 40, Groups: []uint32{40}})

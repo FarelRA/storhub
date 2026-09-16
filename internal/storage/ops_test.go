@@ -229,18 +229,18 @@ func TestApplyOpsRoundTrip(t *testing.T) {
 	base := newTestMeta("p")
 	base.EnsureDirectory("docs", 1700000000)
 	chunkID := base.AllocateChunkID()
-	base.Chunks[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+	base.Chunks()[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
 	file := FileMeta{Size: 4, Mode: 0o644, Inode: base.AllocateInode(), Chunks: []int64{chunkID}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	base.UpsertFile("docs/a.txt", file, 1700000000)
 
 	stack := &opStack{}
 	// put a new file with a chunk record
 	newChunk := base.AllocateChunkID()
-	base.Chunks[newChunk] = ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 12}
+	base.Chunks()[newChunk] = ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 12}
 	newFile := FileMeta{Size: 3, Mode: 0o600, Inode: base.AllocateInode(), Chunks: []int64{newChunk}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
 	stack.append(Op{
 		Type: OpPutFile, Paths: []string{"docs/b.txt"}, Cause: "upload", Timestamp: 1700000100,
-		File: &newFile, Chunks: map[int64]ChunkInfo{newChunk: base.Chunks[newChunk]},
+		File: &newFile, Chunks: map[int64]ChunkInfo{newChunk: base.Chunks()[newChunk]},
 	})
 	// delete the first file
 	stack.append(Op{Type: OpDeleteFile, Paths: []string{"docs/a.txt"}, Cause: "unlink", Timestamp: 1700000200, FreedChunks: 1})
@@ -268,7 +268,7 @@ func TestApplyOpsRoundTrip(t *testing.T) {
 	if got.Size != 3 || got.Mode != 0o600 {
 		t.Fatalf("unexpected replayed file state: %+v", got)
 	}
-	if _, ok := replayed.Chunks[newChunk]; !ok {
+	if _, ok := replayed.Chunks()[newChunk]; !ok {
 		t.Fatal("expected replayed chunk record present")
 	}
 	if !replayed.HasDirectory("archive") {
@@ -374,7 +374,7 @@ func TestSynthesizeDiffOps(t *testing.T) {
 	before := newTestMeta("p")
 	before.EnsureDirectory("docs", 1700000000)
 	cid := before.AllocateChunkID()
-	before.Chunks[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
+	before.Chunks()[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
 	src := FileMeta{Size: 2, Mode: 0o644, Inode: before.AllocateInode(), Chunks: []int64{cid}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	before.UpsertFile("docs/new.txt", src, 1700000000)
 
@@ -383,13 +383,13 @@ func TestSynthesizeDiffOps(t *testing.T) {
 	after.EnsureDirectory("tmp", 1700000100)
 	// create another file
 	cid2 := after.AllocateChunkID()
-	after.Chunks[cid2] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 10}
+	after.Chunks()[cid2] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 10}
 	other := FileMeta{Size: 5, Mode: 0o644, Inode: after.AllocateInode(), Chunks: []int64{cid2}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
 	after.UpsertFile("docs/other.txt", other, 1700000100)
 	// chmod existing dir
 	dir := after.GetDirectory("docs")
 	dir.Mode = 0o700
-	after.Dirs["docs"] = *dir
+	after.Dirs()["docs"] = *dir
 	// rename new.txt -> renamed.txt (same entry identity)
 	renamed := after.FindFile("docs/new.txt").Clone()
 	after.RemoveFile("docs/new.txt")
@@ -426,7 +426,7 @@ func TestSynthesizeDiffOpsDelete(t *testing.T) {
 	t.Parallel()
 	before := newTestMeta("p")
 	cid := before.AllocateChunkID()
-	before.Chunks[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
+	before.Chunks()[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
 	f := FileMeta{Size: 2, Mode: 0o644, Inode: before.AllocateInode(), Chunks: []int64{cid}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	before.UpsertFile("gone.txt", f, 1700000000)
 
@@ -448,21 +448,21 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 	before.EnsureDirectory("olddir", 1700000000)
 	before.EnsureDirectory("olddir/sub", 1700000000)
 	cid := before.AllocateChunkID()
-	before.Chunks[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
+	before.Chunks()[cid] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 9}
 	f := FileMeta{Size: 2, Mode: 0o644, Inode: before.AllocateInode(), Chunks: []int64{cid}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
 	before.UpsertFile("olddir/sub/f.txt", f, 1700000000)
 
 	after := before.Clone()
 	// Mirror fs.RenameContext: remap the subtree, bump dir/file times.
 	remapSubtree(&after, "olddir", "newdir")
-	for path, dir := range after.Dirs {
+	for path, dir := range after.Dirs() {
 		dir.ModifiedAt = 1700000500
 		dir.ChangedAt = 1700000500
-		after.Dirs[path] = dir
+		after.Dirs()[path] = dir
 	}
-	file := after.Files["newdir/sub/f.txt"]
+	file := after.Files()["newdir/sub/f.txt"]
 	file.ChangedAt = 1700000500
-	after.Files["newdir/sub/f.txt"] = file
+	after.Files()["newdir/sub/f.txt"] = file
 
 	ops := synthesizeOpsFromDiff(before, &after, "rename", 1700000500)
 	renames := 0
@@ -491,7 +491,7 @@ func TestSynthesizeDiffOpsDirRename(t *testing.T) {
 	}
 	replayed.Normalize("p", 1700000600)
 	if replayed.FindFile("newdir/sub/f.txt") == nil || replayed.FindFile("olddir/sub/f.txt") != nil {
-		t.Fatalf("expected subtree moved, got files %+v", replayed.Files)
+		t.Fatalf("expected subtree moved, got files %+v", replayed.Files())
 	}
 	if err := replayed.Validate(); err != nil {
 		t.Fatalf("replayed metadata invalid: %v", err)
@@ -508,13 +508,13 @@ func TestSynthesizeDiffBulkSubtreeRenamePerf(t *testing.T) {
 	}
 	after := before.Clone()
 	remapSubtree(&after, "src", "dst")
-	for path, dir := range after.Dirs {
+	for path, dir := range after.Dirs() {
 		dir.ChangedAt = 1700000500
-		after.Dirs[path] = dir
+		after.Dirs()[path] = dir
 	}
-	for path, file := range after.Files {
+	for path, file := range after.Files() {
 		file.ChangedAt = 1700000500
-		after.Files[path] = file
+		after.Files()[path] = file
 	}
 
 	started := time.Now()

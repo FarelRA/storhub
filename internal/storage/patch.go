@@ -36,7 +36,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 
 	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
 	for _, name := range fileMeta.Chunks {
-		if chunk, ok := repoMeta.Chunks[name]; ok {
+		if chunk, ok := repoMeta.Chunks()[name]; ok {
 			resolved = append(resolved, chunk)
 		}
 	}
@@ -172,7 +172,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 			assembled = append(assembled, uploaded...)
 			continue
 		}
-		reused, err := h.referenceFileRangeChunks(ctx, project, repoMeta.Chunks, file, segment.start, segment.end)
+		reused, err := h.referenceFileRangeChunks(ctx, project, repoMeta.Chunks(), file, segment.start, segment.end)
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, uploadedAll)
 			return nil, "", err
@@ -273,7 +273,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 
 	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
 	for _, name := range fileMeta.Chunks {
-		if chunk, ok := repoMeta.Chunks[name]; ok {
+		if chunk, ok := repoMeta.Chunks()[name]; ok {
 			resolved = append(resolved, chunk)
 		}
 	}

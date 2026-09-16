@@ -23,7 +23,7 @@ func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-required-slots")
-	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-required-slots", firstRelease, 998)
 	hub.invalidateReleaseCache("project-required-slots")
 	workingMeta := repoMeta.Clone()
@@ -65,7 +65,7 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
 	firstRelease := ""
-	for tag := range repoMeta.Releases {
+	for tag := range repoMeta.Releases() {
 		firstRelease = tag
 		break
 	}
@@ -122,7 +122,7 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
-	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	// Fill the release server-side WITHOUT touching the client cache,
 	// exactly like prod where embedded counts lag the true count.
 	backend.addAssetsToRelease(t, "project-rotate-full", firstRelease, 999)
@@ -132,7 +132,7 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 		t.Fatalf("upload must rotate to a new release, got: %v", err)
 	}
 	repoMeta2, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
-	if got := repoMeta2.Chunks[meta2.Chunks[0]].Release; got == firstRelease {
+	if got := repoMeta2.Chunks()[meta2.Chunks[0]].Release; got == firstRelease {
 		t.Fatalf("upload landed on full release %s, must rotate", got)
 	}
 }
@@ -152,7 +152,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-true-count")
-	fullRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	fullRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-true-count", fullRelease, 999)
 	hub.invalidateReleaseCache("project-true-count")
 	workingMeta := repoMeta.Clone()
@@ -221,7 +221,7 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-cache-lifetime")
 	firstRelease := ""
-	for tag := range repoMeta.Releases {
+	for tag := range repoMeta.Releases() {
 		firstRelease = tag
 		break
 	}
@@ -253,7 +253,7 @@ func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-race")
-	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-race", firstRelease, 999)
 	// Prime the release cache with only the (now full) first release, then
 	// let the rival create v2 out-of-band: our cache is stale by design.
@@ -286,7 +286,7 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
-	firstRelease := repoMeta.Chunks[meta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-oldest", firstRelease, 999)
 	backend.addRelease(t, "project-oldest", "v9")
 	backend.addAssetToRelease(t, "project-oldest", "v9", "elder.bin", []byte("elder"))
@@ -297,7 +297,7 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	repoMeta2, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
-	if got := repoMeta2.Chunks[meta2.Chunks[0]].Release; got != "v9" {
+	if got := repoMeta2.Chunks()[meta2.Chunks[0]].Release; got != "v9" {
 		t.Fatalf("expected oldest-with-space v9, landed %s", got)
 	}
 }
@@ -373,7 +373,7 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
-	firstRelease := repoMeta.Chunks[seedMeta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[seedMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-spread", firstRelease, 998) // 999 true, 950 embedded
 	payload := bytes.Repeat([]byte("m"), int(2*testSmallChunkSize+4))  // 3 chunks
 	input := writeTempFile(t, t.TempDir(), "spread.bin", payload)
@@ -387,13 +387,13 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
 	seen := map[string]bool{}
 	for _, id := range meta.Chunks {
-		seen[metaState.Chunks[id].Release] = true
+		seen[metaState.Chunks()[id].Release] = true
 	}
 	if len(seen) != 2 || !seen[firstRelease] {
 		t.Fatalf("expected chunks spread across %s and a new release, got %v", firstRelease, seen)
 	}
 	for tag := range seen {
-		if _, ok := metaState.Releases[tag]; !ok {
+		if _, ok := metaState.Releases()[tag]; !ok {
 			t.Fatalf("rotated release %s missing from metadata catalog", tag)
 		}
 	}

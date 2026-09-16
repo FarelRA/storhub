@@ -24,19 +24,19 @@ func sampleTree(t *testing.T) *RepoMetadata {
 		Size: 4, Mode: 0o644, UploadedAt: now, ModifiedAt: now,
 		Chunks: []int64{1}, XAttrs: XAttrMap{"user.tag": []byte("keep")},
 	}, now)
-	m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
 	m.UpsertFile("docs/2024/jan.txt", FileMeta{
 		Size: 3, Mode: 0o600, UID: 1000, GID: 1000, UploadedAt: now, ModifiedAt: now,
 		Chunks: []int64{2},
 	}, now)
-	m.Chunks[2] = ChunkInfo{Size: 3, Offset: 0, Release: "v2", AssetID: 22}
+	m.chunks[2] = ChunkInfo{Size: 3, Offset: 0, Release: "v2", AssetID: 22}
 	m.UpsertFile("photos/link", FileMeta{
 		Symlink: "../docs/readme.md", Mode: 0o777, UploadedAt: now, ModifiedAt: now,
 	}, now)
 	m.UpsertFile("top.txt", FileMeta{
 		Size: 1, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{3},
 	}, now)
-	m.Chunks[3] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 33}
+	m.chunks[3] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 33}
 	m.Root.XAttrs = XAttrMap{"user.root": []byte("r")}
 	m.Normalize("demo", now)
 	if err := m.Validate(); err != nil {
@@ -100,10 +100,10 @@ func TestMerkleDedupIdenticalSubtrees(t *testing.T) {
 	// only by inode, so to test dedup we make the inodes equal too by hand.
 	m.EnsureDirectory("a", now)
 	m.EnsureDirectory("b", now)
-	m.Dirs["a"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
-	m.Dirs["b"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
-	m.Files["a/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
-	m.Files["b/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.dirs["a"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.dirs["b"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.files["a/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.files["b/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
 	m.Normalize("demo", now)
 
 	res, err := BuildTree(m)
@@ -143,9 +143,9 @@ func TestMerkleMutationRewritesOnlyChain(t *testing.T) {
 	collectNodeShas(t, m, before, beforeShas)
 
 	// Mutate one deep file's mode (a leaf change).
-	f := m.Files["docs/2024/jan.txt"]
+	f := m.files["docs/2024/jan.txt"]
 	f.Mode = 0o640
-	m.Files["docs/2024/jan.txt"] = f
+	m.files["docs/2024/jan.txt"] = f
 	m.Normalize("demo", m.LastMod)
 
 	after, err := BuildTree(m)
@@ -204,9 +204,9 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 	// One chunk in bucket 0, one in bucket 1, one in bucket 2.
 	ids := []int64{5, ChunkBucketSize + 7, 2*ChunkBucketSize + 9}
 	for _, id := range ids {
-		m.Chunks[id] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: id}
+		m.chunks[id] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: id}
 	}
-	m.Files["d/f"] = FileMeta{Inode: 9, Size: 3, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: ids}
+	m.files["d/f"] = FileMeta{Inode: 9, Size: 3, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: ids}
 	m.NextChunkID = 3*ChunkBucketSize + 1
 	m.Normalize("demo", now)
 
@@ -240,7 +240,7 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	for _, id := range ids {
-		if _, ok := loaded.Chunks[id]; !ok {
+		if _, ok := loaded.chunks[id]; !ok {
 			t.Fatalf("chunk %d lost in round-trip", id)
 		}
 	}
@@ -251,12 +251,12 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 func TestBuildTreeRejectsOrphanEntries(t *testing.T) {
 	t.Parallel()
 	orphanFile := NewRepoMetadata("demo")
-	orphanFile.Files["ghost/f"] = FileMeta{Inode: 5, Size: 0}
+	orphanFile.files["ghost/f"] = FileMeta{Inode: 5, Size: 0}
 	if _, err := BuildTree(orphanFile); err == nil {
 		t.Fatal("file under a missing parent directory built silently")
 	}
 	orphanDir := NewRepoMetadata("demo")
-	orphanDir.Dirs["ghost/deep"] = DirMeta{Inode: 6, CreatedAt: 1, ModifiedAt: 1}
+	orphanDir.dirs["ghost/deep"] = DirMeta{Inode: 6, CreatedAt: 1, ModifiedAt: 1}
 	if _, err := BuildTree(orphanDir); err == nil {
 		t.Fatal("directory under a missing parent built silently")
 	}
@@ -291,12 +291,12 @@ func TestLoadTreeReconcilesCounters(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	maxInode := loaded.Root.Inode
-	for _, d := range loaded.Dirs {
+	for _, d := range loaded.dirs {
 		if d.Inode > maxInode {
 			maxInode = d.Inode
 		}
 	}
-	for _, f := range loaded.Files {
+	for _, f := range loaded.files {
 		if f.Inode > maxInode {
 			maxInode = f.Inode
 		}
@@ -305,7 +305,7 @@ func TestLoadTreeReconcilesCounters(t *testing.T) {
 		t.Fatalf("NextInode %d not past max live inode %d", loaded.NextInode, maxInode)
 	}
 	maxChunk := int64(0)
-	for id := range loaded.Chunks {
+	for id := range loaded.chunks {
 		if id > maxChunk {
 			maxChunk = id
 		}
@@ -434,7 +434,7 @@ func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
 		t.Fatalf("load empty: %v", err)
 	}
 	loaded.Normalize("demo", 42)
-	if len(loaded.Files) != 0 || len(loaded.Dirs) != 0 || loaded.Root.Inode != m.Root.Inode {
+	if len(loaded.files) != 0 || len(loaded.dirs) != 0 || loaded.Root.Inode != m.Root.Inode {
 		t.Fatalf("empty round-trip lost root or gained entries: %+v", loaded)
 	}
 }

@@ -130,7 +130,7 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	if _, ok := pm.meta.Releases[tag]; !ok {
+	if _, ok := pm.meta.Releases()[tag]; !ok {
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
@@ -251,14 +251,14 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	}); err != nil {
 		return nil, err
 	}
-	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases))
+	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases()))
 	trackedAssets := make(map[int64]struct{})
-	for tag := range repoMeta.Releases {
+	for tag := range repoMeta.Releases() {
 		trackedReleases[tag] = struct{}{}
 	}
-	for _, file := range repoMeta.Files {
+	for _, file := range repoMeta.Files() {
 		for _, chunkName := range file.Chunks {
-			if chunk, ok := repoMeta.Chunks[chunkName]; ok {
+			if chunk, ok := repoMeta.Chunks()[chunkName]; ok {
 				trackedAssets[chunk.AssetID] = struct{}{}
 				// A release referenced by any live chunk is tracked even if
 				// the release catalog drifted (e.g. a crash between upload

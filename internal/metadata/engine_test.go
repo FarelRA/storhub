@@ -13,10 +13,10 @@ import (
 func compareDerived(t *testing.T, step string, a, b *RepoMetadata) {
 	t.Helper()
 	seen := map[string]bool{"": true}
-	for p := range a.Dirs {
+	for p := range a.dirs {
 		seen[p] = true
 	}
-	for p := range b.Dirs {
+	for p := range b.dirs {
 		seen[p] = true
 	}
 	for p := range seen {
@@ -30,10 +30,10 @@ func compareDerived(t *testing.T, step string, a, b *RepoMetadata) {
 		}
 	}
 	inodes := map[uint64]bool{}
-	for _, f := range a.Files {
+	for _, f := range a.files {
 		inodes[f.Inode] = true
 	}
-	for _, f := range b.Files {
+	for _, f := range b.files {
 		inodes[f.Inode] = true
 	}
 	for ino := range inodes {
@@ -45,10 +45,10 @@ func compareDerived(t *testing.T, step string, a, b *RepoMetadata) {
 		}
 	}
 	names := map[string]bool{}
-	for n := range a.Files {
+	for n := range a.files {
 		names[n] = true
 	}
-	for n := range b.Files {
+	for n := range b.files {
 		names[n] = true
 	}
 	for n := range names {
@@ -163,8 +163,8 @@ func TestCloneSharesIndexAndIsolatesMutations(t *testing.T) {
 		t.Fatalf("clone children = %v, want one file", files)
 	}
 	// Immutable entry values are shared, not deep-copied.
-	sa := m.Files["d/a"].Chunks
-	sb := c.Files["d/a"].Chunks
+	sa := m.files["d/a"].Chunks
+	sb := c.files["d/a"].Chunks
 	if len(sa) == 0 || len(sb) == 0 || &sa[0] != &sb[0] {
 		t.Fatal("clone should share immutable Chunks backing arrays")
 	}
@@ -375,11 +375,11 @@ func TestSerializedSizeMatchesToJSON(t *testing.T) {
 
 	// Wholesale map swap (the external rename pattern): the fingerprint
 	// forces a recompute and the answer stays exact.
-	swapped := make(map[string]FileMeta, len(m.Files))
-	for k, v := range m.Files {
+	swapped := make(map[string]FileMeta, len(m.files))
+	for k, v := range m.files {
 		swapped[k+".moved"] = v
 	}
-	m.Files = swapped
+	m.files = swapped
 	check("wholesale swap")
 
 	// A clone shares the size state and answers exactly.
@@ -452,14 +452,14 @@ func TestValueCopyDoesNotCorruptSourceIndex(t *testing.T) {
 	m.RebuildIndexes()
 
 	copied := *m
-	diverged := make(map[string]FileMeta, len(m.Files))
-	for k, v := range m.Files {
+	diverged := make(map[string]FileMeta, len(m.files))
+	for k, v := range m.files {
 		diverged[k] = v
 	}
 	f := diverged["d/a"]
 	f.Inode = 777
 	diverged["d/a"] = f
-	copied.Files = diverged
+	copied.files = diverged
 	copied.UpsertFile("d/a", f, now+1) // tracked mutation on the diverged copy
 
 	// The copy's inode must not leak into the source's index.

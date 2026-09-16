@@ -49,11 +49,11 @@ func hashEntry(v any) [16]byte {
 // hashPaths fingerprints the file/dir namespace (including root) of a
 // metadata tree. Keys are prefixed "f:"/"d:" so the namespace is total.
 func hashPaths(meta *RepoMetadata) map[string][16]byte {
-	out := make(map[string][16]byte, len(meta.Files)+len(meta.Dirs)+1)
-	for path, f := range meta.Files {
+	out := make(map[string][16]byte, len(meta.Files())+len(meta.Dirs())+1)
+	for path, f := range meta.Files() {
 		out["f:"+path] = hashEntry(f)
 	}
-	for path, d := range meta.Dirs {
+	for path, d := range meta.Dirs() {
 		out["d:"+path] = hashEntry(d)
 	}
 	out["d:"] = hashEntry(meta.Root)
@@ -144,7 +144,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 			upstreamHas := false
 			for _, key := range opConflictKeys(op) {
 				if strings.HasPrefix(key, "f:") {
-					if _, ok := working.Files[strings.TrimPrefix(key, "f:")]; ok {
+					if _, ok := working.Files()[strings.TrimPrefix(key, "f:")]; ok {
 						upstreamHas = true
 						break
 					}
@@ -198,7 +198,7 @@ func upstreamIsNewer(working *RepoMetadata, op Op) bool {
 	for _, key := range opConflictKeys(op) {
 		switch {
 		case strings.HasPrefix(key, "f:"):
-			if f, ok := working.Files[strings.TrimPrefix(key, "f:")]; ok && f.ChangedAt > op.Timestamp {
+			if f, ok := working.Files()[strings.TrimPrefix(key, "f:")]; ok && f.ChangedAt > op.Timestamp {
 				return true
 			}
 		case key == "d:":
@@ -206,7 +206,7 @@ func upstreamIsNewer(working *RepoMetadata, op Op) bool {
 				return true
 			}
 		case strings.HasPrefix(key, "d:"):
-			if d, ok := working.Dirs[strings.TrimPrefix(key, "d:")]; ok &&
+			if d, ok := working.Dirs()[strings.TrimPrefix(key, "d:")]; ok &&
 				max(d.ChangedAt, d.ModifiedAt) > op.Timestamp {
 				return true
 			}
@@ -302,7 +302,7 @@ func remapOpCollisions(meta *RepoMetadata, op *Op, resolutions *[]ConflictResolu
 	if op.File != nil {
 		idRemap := make(map[int64]int64)
 		for id, record := range op.Chunks {
-			if existing, ok := meta.Chunks[id]; ok && existing != record {
+			if existing, ok := meta.Chunks()[id]; ok && existing != record {
 				idRemap[id] = meta.AllocateChunkID()
 			}
 		}
@@ -349,7 +349,7 @@ func inodeCollidesWithDirFamily(meta *RepoMetadata, inode uint64) bool {
 	if inode == meta.Root.Inode {
 		return true
 	}
-	for _, d := range meta.Dirs {
+	for _, d := range meta.Dirs() {
 		if d.Inode == inode {
 			return true
 		}
@@ -365,7 +365,7 @@ func inodeTakenByAnyNode(meta *RepoMetadata, inode uint64) bool {
 	if inodeCollidesWithDirFamily(meta, inode) {
 		return true
 	}
-	for _, f := range meta.Files {
+	for _, f := range meta.Files() {
 		if f.Inode == inode {
 			return true
 		}

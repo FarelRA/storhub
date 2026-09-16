@@ -39,10 +39,10 @@ func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 	fresh := cached.Clone()
 	chunkID := fresh.NextChunkID
 	fresh.NextChunkID++
-	fresh.Chunks[chunkID] = metadata.ChunkInfo{Size: 1, Release: "v-orphan", AssetID: orphanAsset}
+	fresh.Chunks()[chunkID] = metadata.ChunkInfo{Size: 1, Release: "v-orphan", AssetID: orphanAsset}
 	inode := fresh.NextInode
 	fresh.NextInode++
-	fresh.Files["fresh.txt"] = metadata.FileMeta{Chunks: []int64{chunkID}, Size: 1, Inode: inode}
+	fresh.Files()["fresh.txt"] = metadata.FileMeta{Chunks: []int64{chunkID}, Size: 1, Inode: inode}
 	backend.setMetadata(t, project, fresh)
 
 	_, _ = hub.PurgeUntracked(project)

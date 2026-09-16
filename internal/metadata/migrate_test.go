@@ -169,18 +169,18 @@ func TestStepV3ToV4(t *testing.T) {
 	if err := json.Unmarshal(v4, &m); err != nil {
 		t.Fatal(err)
 	}
-	legacy := m.Files["legacy.bin"]
+	legacy := m.files["legacy.bin"]
 	// Deterministic completion: uploaded falls back to LastMod, the rest
 	// chain from it.
 	if legacy.UploadedAt != 900 || legacy.ModifiedAt != 900 || legacy.AccessedAt != 900 || legacy.ChangedAt != 900 {
 		t.Fatalf("completion wrong: %+v", legacy)
 	}
-	marked := m.Files["marked.bin"]
+	marked := m.files["marked.bin"]
 	if marked.UploadedAt != 0 {
 		t.Fatalf("explicit zeros must survive verbatim: %+v", marked)
 	}
-	if m.Releases["v1"].CreatedAt != 5 {
-		t.Fatalf("release key rename lost data: %+v", m.Releases)
+	if m.releases["v1"].CreatedAt != 5 {
+		t.Fatalf("release key rename lost data: %+v", m.Releases())
 	}
 }
 
@@ -202,7 +202,7 @@ func TestFullChainV1ToCurrent(t *testing.T) {
 	if f.UploadedAt == 0 || m.Root.CreatedAt == 0 {
 		t.Fatal("timestamps must be complete after migration")
 	}
-	if _, ok := m.Dirs["docs"]; !ok {
+	if _, ok := m.dirs["docs"]; !ok {
 		t.Fatal("directory lost across chain")
 	}
 }
@@ -229,11 +229,11 @@ func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Fatalf("repaired v4 document must pass Validate: %v", err)
 	}
-	gone := m.Files["gone.bin"]
+	gone := m.files["gone.bin"]
 	if len(gone.Chunks) != 0 || gone.Size != 0 {
 		t.Fatalf("fully dangling file not repaired: %+v", gone)
 	}
-	part := m.Files["partial.bin"]
+	part := m.files["partial.bin"]
 	if len(part.Chunks) != 1 || part.Chunks[0] != 1 || part.Size != 2 {
 		t.Fatalf("partially dangling file not repaired: %+v", part)
 	}
@@ -295,7 +295,7 @@ func TestParserIsCurrentOnly(t *testing.T) {
 	if err := viaFromJSON.FromJSON([]byte(rawV3)); err != nil {
 		t.Fatalf("FromJSON must migrate: %v", err)
 	}
-	if viaFromJSON.Files["a"].ChangedAt != 2 {
-		t.Fatalf("migrated ChangedAt wrong: %+v", viaFromJSON.Files["a"])
+	if viaFromJSON.files["a"].ChangedAt != 2 {
+		t.Fatalf("migrated ChangedAt wrong: %+v", viaFromJSON.files["a"])
 	}
 }

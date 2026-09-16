@@ -92,7 +92,7 @@ func TestCheckAccessResolvedConsumesTraversedChain(t *testing.T) {
 	dir.Mode = 0o700
 	dir.UID = 11
 	dir.GID = 22
-	backend.repo.Dirs["secret"] = *dir
+	backend.repo.Dirs()["secret"] = *dir
 	backend.repo.UpsertFile("secret/link", meta.FileMeta{
 		Mode: 0o777, UID: 11, GID: 22, Symlink: "/pub/x.txt",
 		UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now,

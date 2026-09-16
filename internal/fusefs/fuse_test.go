@@ -569,7 +569,7 @@ func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 	now := int64(10)
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
-	metaState.Chunks[1] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
+	metaState.Chunks()[1] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
 	metaState.EnsureRelease("v1", now)
 	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []int64{1}, Inode: 5, Mode: 0o644, UploadedAt: now}, now)
 	var renamedOld, renamedNew string

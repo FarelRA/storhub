@@ -451,12 +451,12 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 	}
 	// Collect the asset IDs the snapshot actually references, per release.
 	referenced := make(map[string]map[int64]struct{})
-	for path, file := range metadata.Files {
+	for path, file := range metadata.Files() {
 		for _, chunkName := range file.Chunks {
 			// A dangling chunk reference must fail validation outright.
 			// Skipping it here would bless a snapshot whose bytes cannot be
 			// downloaded after commit.
-			chunk, ok := metadata.Chunks[chunkName]
+			chunk, ok := metadata.Chunks()[chunkName]
 			if !ok {
 				return fmt.Errorf("rollback metadata references missing chunk %d (file %s)", chunkName, path)
 			}
@@ -630,7 +630,7 @@ func (h *StorHub) trueReleaseAssetCount(ctx context.Context, project string, r g
 
 func (h *StorHub) getNextReleaseTag(metadata *RepoMetadata, releases []ghapi.Release) (string, error) {
 	maxVersion := 0
-	for tag := range metadata.Releases {
+	for tag := range metadata.Releases() {
 		if n, ok := meta.ParseNumericReleaseTag(tag); ok && n > maxVersion {
 			maxVersion = n
 		}
@@ -1014,11 +1014,11 @@ func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, 
 		var exists bool
 		switch {
 		case op.Type == OpMkdir || (op.Type == OpSetattr && op.File == nil && op.Dir != nil):
-			if d, ok := meta.Dirs[path]; ok {
+			if d, ok := meta.Dirs()[path]; ok {
 				changedAt, exists = max(d.ChangedAt, d.ModifiedAt), true
 			}
 		case isStateClass(op.Type) || isDeleteClass(op.Type):
-			if f, ok := meta.Files[path]; ok {
+			if f, ok := meta.Files()[path]; ok {
 				changedAt, exists = f.ChangedAt, true
 			}
 		default:

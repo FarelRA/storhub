@@ -443,29 +443,41 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			}
 			repo.RemoveDirectory(newClean)
 		}
-		updatedDirs := make(map[string]meta.DirMeta, len(repo.Dirs))
-		for dirPath, dir := range repo.Dirs {
+		// Remap per entry through the tracked mutators instead of swapping
+		// whole maps: the engine maintains the derived index and size cache
+		// incrementally, and the maps are unexported so a wholesale swap is
+		// no longer possible from here.
+		type dirRemap struct {
+			from, to string
+			dir      meta.DirMeta
+		}
+		var dirRemaps []dirRemap
+		for dirPath, dir := range repo.Dirs() {
 			if IsParentOrSame(oldClean, dirPath) {
-				newPath := RemapPath(oldClean, newClean, dirPath)
 				dir.ModifiedAt = now
 				dir.ChangedAt = now
-				updatedDirs[newPath] = dir
-			} else {
-				updatedDirs[dirPath] = dir
+				dirRemaps = append(dirRemaps, dirRemap{from: dirPath, to: RemapPath(oldClean, newClean, dirPath), dir: dir})
 			}
 		}
-		repo.Dirs = updatedDirs
-		updatedFiles := make(map[string]meta.FileMeta, len(repo.Files))
-		for filePath, file := range repo.Files {
+		for _, r := range dirRemaps {
+			repo.RemoveDirectory(r.from)
+			repo.WriteDirDirect(r.to, r.dir)
+		}
+		type fileRemap struct {
+			from, to string
+			file     meta.FileMeta
+		}
+		var fileRemaps []fileRemap
+		for filePath, file := range repo.Files() {
 			if IsParentOrSame(oldClean, filePath) {
-				newPath := RemapPath(oldClean, newClean, filePath)
 				file.ChangedAt = now
-				updatedFiles[newPath] = file
-			} else {
-				updatedFiles[filePath] = file
+				fileRemaps = append(fileRemaps, fileRemap{from: filePath, to: RemapPath(oldClean, newClean, filePath), file: file})
 			}
 		}
-		repo.Files = updatedFiles
+		for _, r := range fileRemaps {
+			repo.RemoveFile(r.from)
+			repo.WriteFileDirect(r.to, r.file)
+		}
 		TouchParentDirectory(repo, oldClean, now)
 		TouchParentDirectory(repo, newClean, now)
 		repo.RecomputeStats()
@@ -589,7 +601,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 		newDir.CreatedAt = now
 		repo.WriteDirDirect(dstClean, newDir)
 		dirsToCopy := make(map[string]meta.DirMeta)
-		for p, d := range repo.Dirs {
+		for p, d := range repo.Dirs() {
 			if p == srcClean {
 				continue
 			}
@@ -613,7 +625,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			repo.WriteDirDirect(newPath, d)
 		}
 		filesToCopy := make(map[string]meta.FileMeta)
-		for p, f := range repo.Files {
+		for p, f := range repo.Files() {
 			if IsParentOrSame(srcClean, p) {
 				newPath := RemapPath(srcClean, dstClean, p)
 				if repo.HasDirectory(newPath) || repo.FindFile(newPath) != nil {
@@ -989,15 +1001,15 @@ func (s *Service) StatFSContext(ctx context.Context, project string) (result *FS
 	// tree would otherwise report stale numbers.
 	files := 0
 	var totalBytes int64
-	for _, file := range repo.Files {
+	for _, file := range repo.Files() {
 		if file.Symlink == "" {
 			files++
 			totalBytes += file.Size
 		}
 	}
-	stats := &FSStats{Files: files, Directories: len(repo.Dirs), Inodes: CountUniqueInodes(repo), Bytes: totalBytes, Releases: len(repo.Releases)}
-	assetCounts := make(map[string]int, len(repo.Chunks))
-	for _, chunk := range repo.Chunks {
+	stats := &FSStats{Files: files, Directories: len(repo.Dirs()), Inodes: CountUniqueInodes(repo), Bytes: totalBytes, Releases: len(repo.Releases())}
+	assetCounts := make(map[string]int, len(repo.Chunks()))
+	for _, chunk := range repo.Chunks() {
 		if chunk.Release != "" {
 			assetCounts[chunk.Release]++
 		}
@@ -1146,7 +1158,7 @@ func DirEntryFromFile(file meta.FileMeta, filePath string, nlink int) DirEntry {
 
 func CountUniqueInodes(repo *meta.RepoMetadata) int {
 	seen := map[uint64]struct{}{repo.Root.Inode: {}}
-	for _, dir := range repo.Dirs {
+	for _, dir := range repo.Dirs() {
 		seen[dir.Inode] = struct{}{}
 	}
 	for _, file := range repo.AllFiles() {

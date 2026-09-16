@@ -467,7 +467,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			}
 			if op.Dir != nil {
 				meta.WriteDirDirect(to, op.Dir.Clone())
-			} else if src, ok := meta.Dirs[from]; ok {
+			} else if src, ok := meta.Dirs()[from]; ok {
 				meta.WriteDirDirect(to, src)
 			} else {
 				meta.EnsureDirectory(to, now)
@@ -482,7 +482,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 		}
 	case OpChunkPrune:
 		referenced := make(map[int64]struct{})
-		for _, file := range meta.Files {
+		for _, file := range meta.Files() {
 			for _, id := range file.Chunks {
 				referenced[id] = struct{}{}
 			}
@@ -491,7 +491,7 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 			if _, ok := referenced[id]; ok {
 				continue
 			}
-			delete(meta.Chunks, id)
+			delete(meta.Chunks(), id)
 		}
 	default:
 		return fmt.Errorf("unknown op type %q", op.Type)
@@ -500,26 +500,38 @@ func applyOneOp(meta *RepoMetadata, op Op, resolutions *[]ConflictResolution) er
 }
 
 // remapSubtree moves every entry under from to its remapped path (directory
-// rename semantics). Keys are rewritten; entry bodies are untouched.
+// rename semantics). Keys are rewritten; entry bodies are untouched. Each
+// move goes through the tracked mutators (remove old, write new) so the
+// derived index and size cache stay warm incrementally.
 func remapSubtree(meta *RepoMetadata, from, to string) {
-	updatedDirs := make(map[string]DirMeta, len(meta.Dirs))
-	for path, dir := range meta.Dirs {
+	type dirMove struct {
+		from, to string
+		dir      DirMeta
+	}
+	var dirMoves []dirMove
+	for path, dir := range meta.Dirs() {
 		if shfs.IsParentOrSame(from, path) {
-			updatedDirs[shfs.RemapPath(from, to, path)] = dir
-		} else {
-			updatedDirs[path] = dir
+			dirMoves = append(dirMoves, dirMove{from: path, to: shfs.RemapPath(from, to, path), dir: dir})
 		}
 	}
-	meta.Dirs = updatedDirs
-	updatedFiles := make(map[string]FileMeta, len(meta.Files))
-	for path, file := range meta.Files {
+	for _, mv := range dirMoves {
+		meta.RemoveDirectory(mv.from)
+		meta.WriteDirDirect(mv.to, mv.dir)
+	}
+	type fileMove struct {
+		from, to string
+		file     FileMeta
+	}
+	var fileMoves []fileMove
+	for path, file := range meta.Files() {
 		if shfs.IsParentOrSame(from, path) {
-			updatedFiles[shfs.RemapPath(from, to, path)] = file
-		} else {
-			updatedFiles[path] = file
+			fileMoves = append(fileMoves, fileMove{from: path, to: shfs.RemapPath(from, to, path), file: file})
 		}
 	}
-	meta.Files = updatedFiles
+	for _, mv := range fileMoves {
+		meta.RemoveFile(mv.from)
+		meta.WriteFileDirect(mv.to, mv.file)
+	}
 }
 
 // synthesizeOpsFromDiff derives the op set for one metadata transaction by
@@ -542,18 +554,18 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 	var dirChanges []dirChange
 	addedDirs := map[string]DirMeta{}
 
-	for path, entry := range before.Files {
-		if _, ok := after.Files[path]; !ok {
+	for path, entry := range before.Files() {
+		if _, ok := after.Files()[path]; !ok {
 			removedFiles[path] = entry
 		}
 	}
-	for path, entry := range before.Dirs {
-		if _, ok := after.Dirs[path]; !ok {
+	for path, entry := range before.Dirs() {
+		if _, ok := after.Dirs()[path]; !ok {
 			removedDirs[path] = entry
 		}
 	}
-	for path, entry := range after.Dirs {
-		prev, ok := before.Dirs[path]
+	for path, entry := range after.Dirs() {
+		prev, ok := before.Dirs()[path]
 		if !ok {
 			addedDirs[path] = entry
 			continue
@@ -580,8 +592,8 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 	consumedFiles := map[string]bool{}
 	consumedDirs := map[string]bool{}
 	addedByInode := make(map[uint64][]string)
-	for path, entry := range after.Files {
-		if _, existed := before.Files[path]; !existed {
+	for path, entry := range after.Files() {
+		if _, existed := before.Files()[path]; !existed {
 			addedByInode[entry.Inode] = append(addedByInode[entry.Inode], path)
 		}
 	}
@@ -590,7 +602,7 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 			if consumedFiles[toPath] {
 				continue
 			}
-			toEntry := after.Files[toPath]
+			toEntry := after.Files()[toPath]
 			if fileRenameEquivalent(fromEntry, toEntry) {
 				entry := toEntry.Clone()
 				renames = append(renames, renamePair{from: fromPath, to: toPath, file: &entry})
@@ -669,11 +681,11 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 
 	// File creates/changes, skipping entries already consumed as rename
 	// targets.
-	for path, entry := range after.Files {
+	for path, entry := range after.Files() {
 		if consumedFiles[path] {
 			continue
 		}
-		prev, ok := before.Files[path]
+		prev, ok := before.Files()[path]
 		if ok && fileEntriesEquivalent(prev, entry) {
 			continue
 		}
@@ -691,23 +703,23 @@ func synthesizeOpsFromDiff(before, after *RepoMetadata, cause string, now int64)
 
 	// Release catalog: additions/changes and removals. AssetCount is
 	// derived (RecomputeStats rewrites it), so only CreatedAt is compared.
-	for tag, ref := range after.Releases {
-		if prev, ok := before.Releases[tag]; ok && prev.CreatedAt == ref.CreatedAt {
+	for tag, ref := range after.Releases() {
+		if prev, ok := before.Releases()[tag]; ok && prev.CreatedAt == ref.CreatedAt {
 			continue
 		}
 		clone := ref.Clone()
 		stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Release: &clone, Cause: cause, Timestamp: now})
 	}
-	for tag := range before.Releases {
-		if _, ok := after.Releases[tag]; !ok {
+	for tag := range before.Releases() {
+		if _, ok := after.Releases()[tag]; !ok {
 			stack.append(Op{Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: cause, Timestamp: now})
 		}
 	}
 
 	// Chunk catalog shrinkage (PruneUnreferencedChunks): one merged op.
 	var removedChunks []int64
-	for id := range before.Chunks {
-		if _, ok := after.Chunks[id]; !ok {
+	for id := range before.Chunks() {
+		if _, ok := after.Chunks()[id]; !ok {
 			removedChunks = append(removedChunks, id)
 		}
 	}
@@ -802,7 +814,7 @@ func chunkRecordsFor(meta *RepoMetadata, ids []int64) map[int64]ChunkInfo {
 	}
 	out := make(map[int64]ChunkInfo, len(ids))
 	for _, id := range ids {
-		if info, ok := meta.Chunks[id]; ok {
+		if info, ok := meta.Chunks()[id]; ok {
 			out[id] = info
 		}
 	}

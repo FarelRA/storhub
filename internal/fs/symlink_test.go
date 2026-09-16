@@ -71,10 +71,10 @@ func TestCheckTraverseAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
 	v.Mode = 0o700
 	v.UID = 1000
 	v.GID = 1000
-	m.Dirs["v"] = *v
+	m.Dirs()["v"] = *v
 	pub := m.GetDirectory("pub")
 	pub.Mode = 0o755
-	m.Dirs["pub"] = *pub
+	m.Dirs()["pub"] = *pub
 	m.RebuildIndexes()
 
 	attacker := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1001, Groups: []uint32{1001}})

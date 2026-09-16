@@ -156,24 +156,24 @@ func NewTreeCache() *TreeCache {
 func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter) (*TreeRefs, error) {
 	// Round-trip identity guard: every non-root entry's parent must exist,
 	// or its group would never be serialized.
-	for p := range meta.Files {
+	for p := range meta.files {
 		if parent := parentPath(p); parent != "" {
-			if _, ok := meta.Dirs[parent]; !ok {
+			if _, ok := meta.dirs[parent]; !ok {
 				return nil, fmt.Errorf("build tree: file %q has no parent directory %q", p, parent)
 			}
 		}
 	}
-	for p := range meta.Dirs {
+	for p := range meta.dirs {
 		if parent := parentPath(p); parent != "" {
-			if _, ok := meta.Dirs[parent]; !ok {
+			if _, ok := meta.dirs[parent]; !ok {
 				return nil, fmt.Errorf("build tree: directory %q has no parent directory %q", p, parent)
 			}
 		}
 	}
 
 	// Group files by parent directory (keyed by base name within the node).
-	filesByParent := make(map[string]map[string]FileMeta, len(meta.Files))
-	for p, f := range meta.Files {
+	filesByParent := make(map[string]map[string]FileMeta, len(meta.files))
+	for p, f := range meta.files {
 		parent := parentPath(p)
 		if filesByParent[parent] == nil {
 			filesByParent[parent] = make(map[string]FileMeta)
@@ -182,9 +182,9 @@ func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 	}
 
 	// Every directory (root sentinel "" plus each stored dir) becomes a node.
-	dirs := make([]string, 0, len(meta.Dirs)+1)
+	dirs := make([]string, 0, len(meta.dirs)+1)
 	dirs = append(dirs, "")
-	for p := range meta.Dirs {
+	for p := range meta.dirs {
 		dirs = append(dirs, p)
 	}
 	// Deepest-first so a node's child shas exist before the node is hashed.
@@ -193,7 +193,7 @@ func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 	subdirShas := make(map[string]map[string]string, len(dirs))
 	nodeSHA := make(map[string]string, len(dirs))
 	for _, d := range dirs {
-		nodeMeta := meta.Dirs[d]
+		nodeMeta := meta.dirs[d]
 		if d == "" {
 			nodeMeta = meta.Root
 		}
@@ -240,7 +240,7 @@ func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 		return nil, err
 	}
 
-	rel := ReleasesObject{Releases: meta.Releases}
+	rel := ReleasesObject{Releases: meta.releases}
 	if rel.Releases == nil {
 		rel.Releases = map[string]ReleaseRef{}
 	}
@@ -314,11 +314,11 @@ func stringMapEqual(a, b map[string]string) bool {
 // streamChunkBuckets builds each bucket object and emits it unless the
 // cache proves it unchanged or the caller reports its sha already known.
 func streamChunkBuckets(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter) ([]string, error) {
-	if len(meta.Chunks) == 0 {
+	if len(meta.chunks) == 0 {
 		return nil, nil
 	}
 	byBucket := make(map[int64]map[int64]ChunkInfo)
-	for id, info := range meta.Chunks {
+	for id, info := range meta.chunks {
 		idx := id / ChunkBucketSize
 		if byBucket[idx] == nil {
 			byBucket[idx] = make(map[int64]ChunkInfo)
@@ -369,7 +369,7 @@ func streamReleases(rel ReleasesObject, cache *TreeCache, known func(sha string)
 	}
 	sha := ObjectSHA(data)
 	if cache != nil {
-		// Copy: rel.Releases aliases the live meta.Releases map, which the
+		// Copy: rel.releases aliases the live meta.releases map, which the
 		// caller keeps mutating; the cache must hold a snapshot.
 		cache.releases = &cachedReleases{releases: maps.Clone(rel.Releases), sha: sha}
 	}
@@ -507,10 +507,10 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		NextInode:   manifest.NextInode,
 		NextChunkID: manifest.NextChunkID,
 		LastMod:     manifest.LastMod,
-		Dirs:        make(map[string]DirMeta),
-		Files:       make(map[string]FileMeta),
-		Chunks:      make(map[int64]ChunkInfo),
-		Releases:    make(map[string]ReleaseRef),
+		dirs:        make(map[string]DirMeta),
+		files:       make(map[string]FileMeta),
+		chunks:      make(map[int64]ChunkInfo),
+		releases:    make(map[string]ReleaseRef),
 	}
 	if err := loadNode(meta, "", manifest.TreeRoot, getObject, map[string]bool{}); err != nil {
 		return nil, err
@@ -528,7 +528,7 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 			return nil, fmt.Errorf("decode chunk bucket %s: %w", shortObj(sha), err)
 		}
 		for id, info := range b.Chunks {
-			meta.Chunks[id] = info
+			meta.chunks[id] = info
 		}
 	}
 	if manifest.Releases != "" {
@@ -544,7 +544,7 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 			return nil, fmt.Errorf("decode releases: %w", err)
 		}
 		for tag, ref := range rel.Releases {
-			meta.Releases[tag] = ref
+			meta.releases[tag] = ref
 		}
 	}
 	meta.RecomputeStats()
@@ -579,10 +579,10 @@ func loadNode(meta *RepoMetadata, dirPath, sha string, getObject func(string) ([
 	if dirPath == "" {
 		meta.Root = node.Meta
 	} else {
-		meta.Dirs[dirPath] = node.Meta
+		meta.dirs[dirPath] = node.Meta
 	}
 	for name, f := range node.Files {
-		meta.Files[joinStored(dirPath, name)] = f
+		meta.files[joinStored(dirPath, name)] = f
 	}
 	for name, child := range node.Subdirs {
 		if err := loadNode(meta, joinStored(dirPath, name), child, getObject, seen); err != nil {

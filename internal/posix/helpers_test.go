@@ -42,7 +42,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	repo.EnsureDirectory("docs", now)
 
 	chunk1 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
-	repo.Chunks[1] = chunk1
+	repo.Chunks()[1] = chunk1
 	base := meta.FileMeta{Size: 1, Chunks: []int64{1}}
 	repo.UpsertFile("docs/a.txt", base, now)
 	first := repo.FindFile("docs/a.txt")
@@ -50,7 +50,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	repo.UpsertFile("docs/b.txt", clone, now)
 
 	chunk2 := meta.ChunkInfo{Offset: 0, Size: 1, Release: "v2", AssetID: 2}
-	repo.Chunks[2] = chunk2
+	repo.Chunks()[2] = chunk2
 	updated := first.Clone()
 	updated.Chunks = []int64{2}
 	ReplaceInodeFamily(repo, "docs/a.txt", first, updated, now+60)

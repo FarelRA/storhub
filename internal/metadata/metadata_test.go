@@ -73,13 +73,13 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 
 	repo.EnsureDirectory("docs", now)
 	repo.EnsureDirectory("docs/sub", now)
-	repo.Dirs["docs"] = DirMeta{Inode: 2, CreatedAt: now, ModifiedAt: now}
-	repo.Dirs["docs/sub"] = DirMeta{Inode: 3, XAttrs: XAttrMap{"user.dir": []byte("1")}, CreatedAt: now, ModifiedAt: now}
+	repo.dirs["docs"] = DirMeta{Inode: 2, CreatedAt: now, ModifiedAt: now}
+	repo.dirs["docs/sub"] = DirMeta{Inode: 3, XAttrs: XAttrMap{"user.dir": []byte("1")}, CreatedAt: now, ModifiedAt: now}
 
 	repo.EnsureRelease("v2", now)
 	repo.UpsertFile("docs/sub/file.txt", FileMeta{Size: 3, Inode: 5, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{2, 1}}, now)
-	repo.Chunks[1] = ChunkInfo{Offset: 0, Size: 2, AssetID: 1}
-	repo.Chunks[2] = ChunkInfo{Offset: 2, Size: 1, AssetID: 2}
+	repo.chunks[1] = ChunkInfo{Offset: 0, Size: 2, AssetID: 1}
+	repo.chunks[2] = ChunkInfo{Offset: 2, Size: 1, AssetID: 2}
 	repo.UpsertFile("docs/sub/link", FileMeta{Inode: 4, Mode: 0o777, Symlink: "target", UploadedAt: now, ModifiedAt: now}, now)
 
 	repo.Normalize("demo", now)
@@ -157,7 +157,7 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 		t.Fatalf("unexpected release: %+v", release)
 	}
 	fileMeta := FileMeta{Size: 3, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{1}}
-	repo.Chunks[1] = ChunkInfo{Offset: 0, Size: 3, AssetID: 1}
+	repo.chunks[1] = ChunkInfo{Offset: 0, Size: 3, AssetID: 1}
 	repo.UpsertFile("docs/specs/readme.txt", fileMeta, now)
 	first := repo.FindFile("docs/specs/readme.txt")
 	if first == nil || first.Inode == 0 {
@@ -167,7 +167,7 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 		t.Fatalf("expected nlink=1, got %d", n)
 	}
 	repo.UpsertFile("docs/specs/readme.txt", FileMeta{Size: 4, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{2}}, now+60)
-	repo.Chunks[2] = ChunkInfo{Offset: 0, Size: 4, AssetID: 2}
+	repo.chunks[2] = ChunkInfo{Offset: 0, Size: 4, AssetID: 2}
 	updated := repo.FindFile("docs/specs/readme.txt")
 	if updated == nil || updated.Inode != first.Inode || updated.Size != 4 {
 		t.Fatalf("expected identity preserved on upsert: first=%+v updated=%+v", first, updated)
@@ -266,7 +266,7 @@ func TestValidateRejectsNonCanonicalKeys(t *testing.T) {
 		m := NewRepoMetadata("demo")
 		m.EnsureDirectory("a", 1)
 		m.EnsureDirectory("a/b", 1)
-		m.Files[key] = FileMeta{Inode: 50, Size: 0}
+		m.files[key] = FileMeta{Inode: 50, Size: 0}
 		m.TotalFiles = 1
 		if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "canonical") {
 			t.Fatalf("key %q not rejected as non-canonical: %v", key, err)
@@ -291,8 +291,8 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 	// Overflow: Offset+Size wraps int64 negative and slips past a naive
 	// `offset+size > fileSize` comparison.
 	over := NewRepoMetadata("demo")
-	over.Chunks[1] = ChunkInfo{Offset: 1 << 62, Size: 1 << 62}
-	over.Files["f"] = FileMeta{Inode: 2, Size: 1 << 62, Chunks: []int64{1}}
+	over.chunks[1] = ChunkInfo{Offset: 1 << 62, Size: 1 << 62}
+	over.files["f"] = FileMeta{Inode: 2, Size: 1 << 62, Chunks: []int64{1}}
 	over.TotalFiles = 1
 	over.TotalSize = 1 << 62
 	if err := over.Validate(); err == nil || !strings.Contains(err.Error(), "beyond file size") {
@@ -301,9 +301,9 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 
 	// Overlap: A [0,100) and B [50,60) share bytes.
 	dup := NewRepoMetadata("demo")
-	dup.Chunks[1] = ChunkInfo{Offset: 0, Size: 100}
-	dup.Chunks[2] = ChunkInfo{Offset: 50, Size: 10}
-	dup.Files["f"] = FileMeta{Inode: 2, Size: 100, Chunks: []int64{1, 2}}
+	dup.chunks[1] = ChunkInfo{Offset: 0, Size: 100}
+	dup.chunks[2] = ChunkInfo{Offset: 50, Size: 10}
+	dup.files["f"] = FileMeta{Inode: 2, Size: 100, Chunks: []int64{1, 2}}
 	dup.TotalFiles = 1
 	dup.TotalSize = 100
 	if err := dup.Validate(); err == nil || !strings.Contains(err.Error(), "overlap") {
@@ -312,9 +312,9 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 
 	// Same start offset, both nonzero size: ambiguous reader target.
 	same := NewRepoMetadata("demo")
-	same.Chunks[1] = ChunkInfo{Offset: 0, Size: 10}
-	same.Chunks[2] = ChunkInfo{Offset: 0, Size: 5}
-	same.Files["f"] = FileMeta{Inode: 2, Size: 10, Chunks: []int64{1, 2}}
+	same.chunks[1] = ChunkInfo{Offset: 0, Size: 10}
+	same.chunks[2] = ChunkInfo{Offset: 0, Size: 5}
+	same.files["f"] = FileMeta{Inode: 2, Size: 10, Chunks: []int64{1, 2}}
 	same.TotalFiles = 1
 	same.TotalSize = 10
 	if err := same.Validate(); err == nil || !strings.Contains(err.Error(), "overlap") {
@@ -324,10 +324,10 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 	// Disjoint ranges (including a zero-size chunk at a shared boundary)
 	// stay legal.
 	ok := NewRepoMetadata("demo")
-	ok.Chunks[1] = ChunkInfo{Offset: 0, Size: 10}
-	ok.Chunks[2] = ChunkInfo{Offset: 10, Size: 0}
-	ok.Chunks[3] = ChunkInfo{Offset: 10, Size: 5}
-	ok.Files["f"] = FileMeta{Inode: 2, Size: 15, Chunks: []int64{1, 2, 3}}
+	ok.chunks[1] = ChunkInfo{Offset: 0, Size: 10}
+	ok.chunks[2] = ChunkInfo{Offset: 10, Size: 0}
+	ok.chunks[3] = ChunkInfo{Offset: 10, Size: 5}
+	ok.files["f"] = FileMeta{Inode: 2, Size: 15, Chunks: []int64{1, 2, 3}}
 	ok.TotalFiles = 1
 	ok.TotalSize = 15
 	if err := ok.Validate(); err != nil {
@@ -341,8 +341,8 @@ func TestValidateRejectsFileDirPathCollision(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", 1)
-	m.Dirs["x"] = DirMeta{Inode: 10, CreatedAt: 1, ModifiedAt: 1}
-	m.Files["x"] = FileMeta{Inode: 11, Size: 0}
+	m.dirs["x"] = DirMeta{Inode: 10, CreatedAt: 1, ModifiedAt: 1}
+	m.files["x"] = FileMeta{Inode: 11, Size: 0}
 	m.TotalFiles = 1
 	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "both") {
 		t.Fatalf("file/dir path collision accepted: %v", err)
@@ -511,7 +511,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 		t.Fatalf("unexpected small.txt chunks: %v", smallFile.Chunks)
 	}
 
-	bigShared, ok := meta.Chunks[1]
+	bigShared, ok := meta.chunks[1]
 	if !ok {
 		t.Fatal("expected chunk 1 in meta.Chunks")
 	}
@@ -519,7 +519,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 		t.Fatalf("bigfile shared chunk has wrong data: %+v", bigShared)
 	}
 
-	bigUnique, ok := meta.Chunks[2]
+	bigUnique, ok := meta.chunks[2]
 	if !ok {
 		t.Fatal("expected chunk 2 in meta.Chunks")
 	}
@@ -527,7 +527,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 		t.Fatalf("bigfile unique chunk has wrong data: %+v", bigUnique)
 	}
 
-	smallChunk, ok := meta.Chunks[3]
+	smallChunk, ok := meta.chunks[3]
 	if !ok {
 		t.Fatal("expected chunk 3 in meta.Chunks")
 	}
@@ -535,7 +535,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 		t.Fatalf("small.txt chunk has wrong data: %+v", smallChunk)
 	}
 
-	if meta.Chunks[1].AssetID == meta.Chunks[3].AssetID {
+	if meta.chunks[1].AssetID == meta.chunks[3].AssetID {
 		t.Fatal("expected distinct asset IDs for same-named chunks")
 	}
 
@@ -559,7 +559,7 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 	link := FileMeta{Symlink: "target", Size: 6, Inode: 7, Mode: 0o120777, UID: 1, GID: 1}
 	m.UpsertFile("link", link, 100)
 	m.EnsureRelease("v1", 100)
-	m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 
 	file := FileMeta{Size: 4, Chunks: []int64{1}, Mode: 0o100644}
 	m.UpsertFile("link", file, 200)
@@ -636,7 +636,7 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureRelease("v1", 1)
-	m.Chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
+	m.chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
 	m.UpsertFile("a.txt", FileMeta{Size: 1, Chunks: []int64{1}}, 1)
 	m.Normalize("demo", 1)
 	nextChunk := m.NextChunkID
@@ -647,8 +647,8 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 		t.Fatalf("tojson: %v", err)
 	}
 	// Drop the highest entries, reload, and verify identifiers are not reused.
-	delete(m.Files, "a.txt")
-	delete(m.Chunks, 1)
+	delete(m.files, "a.txt")
+	delete(m.chunks, 1)
 	var reloaded RepoMetadata
 	if err := reloaded.FromJSON(encoded); err != nil {
 		t.Fatalf("fromjson: %v", err)
@@ -669,8 +669,8 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureRelease("v1", 1)
-	m.Chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
-	m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+	m.chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
+	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 	m.UpsertFile("f.bin", FileMeta{Size: 6, Chunks: []int64{2, 1}, Inode: 9}, 1)
 	m.Normalize("demo", 1)
 	if err := m.Validate(); err != nil {
@@ -684,8 +684,8 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 	// Out-of-order stored chunks must fail validation loudly.
 	bad := NewRepoMetadata("demo")
 	bad.EnsureRelease("v1", 1)
-	bad.Chunks[1] = ChunkInfo{Size: 4, Offset: 4, Release: "v1"}
-	bad.Chunks[2] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
+	bad.chunks[1] = ChunkInfo{Size: 4, Offset: 4, Release: "v1"}
+	bad.chunks[2] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 	bad.UpsertFile("g.bin", FileMeta{Size: 8, Chunks: []int64{1, 2}, Inode: 9}, 1)
 	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "offset order") {
 		t.Fatalf("expected offset-order violation, got %v", err)
@@ -714,13 +714,13 @@ func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("rooted", 1)
-	dir := m.Dirs["rooted"]
+	dir := m.dirs["rooted"]
 	dir.UID = 0
 	dir.GID = 0
-	m.Dirs["rooted"] = dir
+	m.dirs["rooted"] = dir
 	m.Normalize("demo", 1)
-	if m.Dirs["rooted"].UID != 0 || m.Dirs["rooted"].GID != 0 {
-		t.Fatalf("zero owner was clobbered by normalize: %+v", m.Dirs["rooted"])
+	if m.dirs["rooted"].UID != 0 || m.dirs["rooted"].GID != 0 {
+		t.Fatalf("zero owner was clobbered by normalize: %+v", m.dirs["rooted"])
 	}
 }
 
@@ -728,19 +728,19 @@ func TestPruneUnreferencedChunks(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100)
-	m.Chunks[10] = ChunkInfo{Offset: 0, Size: 4}
-	m.Chunks[11] = ChunkInfo{Offset: 4, Size: 4}
+	m.chunks[10] = ChunkInfo{Offset: 0, Size: 4}
+	m.chunks[11] = ChunkInfo{Offset: 4, Size: 4}
 	// Stale entries from an overwrite and a deleted file.
-	m.Chunks[12] = ChunkInfo{Offset: 0, Size: 8}
+	m.chunks[12] = ChunkInfo{Offset: 0, Size: 8}
 
 	if removed := m.PruneUnreferencedChunks(); removed != 1 {
 		t.Fatalf("expected 1 pruned chunk, got %d", removed)
 	}
-	if _, ok := m.Chunks[12]; ok {
+	if _, ok := m.chunks[12]; ok {
 		t.Fatal("unreferenced chunk survived pruning")
 	}
 	for _, id := range []int64{10, 11} {
-		if _, ok := m.Chunks[id]; !ok {
+		if _, ok := m.chunks[id]; !ok {
 			t.Fatalf("referenced chunk %d was pruned", id)
 		}
 	}
@@ -751,12 +751,12 @@ func TestPruneUnreferencedChunks(t *testing.T) {
 	}
 
 	// Deleting the last file frees every chunk.
-	m.Files = map[string]FileMeta{}
+	m.files = map[string]FileMeta{}
 	if removed := m.PruneUnreferencedChunks(); removed != 2 {
 		t.Fatalf("expected all chunks pruned after file deletion, got %d", removed)
 	}
-	if len(m.Chunks) != 0 {
-		t.Fatalf("expected empty chunk catalog, got %d entries", len(m.Chunks))
+	if len(m.chunks) != 0 {
+		t.Fatalf("expected empty chunk catalog, got %d entries", len(m.chunks))
 	}
 }
 
@@ -786,7 +786,7 @@ func TestMigrateV1RejectsDuplicatePathsAndSynthesizesParents(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	for _, dir := range []string{"deeply", "deeply/nested"} {
-		if _, ok := m.Dirs[dir]; !ok {
+		if _, ok := m.dirs[dir]; !ok {
 			t.Fatalf("parent %q was not synthesized", dir)
 		}
 	}
@@ -901,7 +901,7 @@ func TestSchemaV4KeysRoundTrip(t *testing.T) {
 	if f.ChangedAt != 8 || f.ModifiedAt != 6 || f.AccessedAt != 7 {
 		t.Fatalf("file timestamps lost in round trip: %+v", f)
 	}
-	if d, ok := back.Dirs["d"]; !ok || d.CreatedAt <= 0 || d.ChangedAt <= 0 {
+	if d, ok := back.dirs["d"]; !ok || d.CreatedAt <= 0 || d.ChangedAt <= 0 {
 		t.Fatalf("dir timestamps lost in round trip: %+v", d)
 	}
 }
@@ -926,15 +926,15 @@ func TestV3PayloadMigratesTimestamps(t *testing.T) {
 	if m.Root.CreatedAt != 100 || m.Root.ChangedAt != 103 {
 		t.Fatalf("root legacy keys unmapped: %+v", m.Root)
 	}
-	d := m.Dirs["olddir"]
+	d := m.dirs["olddir"]
 	if d.CreatedAt != 200 || d.ChangedAt != 202 {
 		t.Fatalf("dir legacy keys unmapped: %+v", d)
 	}
-	f, ok := m.Files["old.txt"]
+	f, ok := m.files["old.txt"]
 	if !ok || f.ChangedAt != 303 || f.ModifiedAt != 301 {
 		t.Fatalf("file legacy ca (ChangedAt) unmapped: %+v", f)
 	}
-	r := m.Releases["v1"]
+	r := m.releases["v1"]
 	if r.CreatedAt != 400 {
 		t.Fatalf("release legacy key unmapped: %+v", r)
 	}

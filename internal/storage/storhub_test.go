@@ -520,7 +520,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 
 	repo := backend.repo("project-history")
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-history")
-	firstChunkInfo := repoMeta.Chunks[first.Chunks[0]]
+	firstChunkInfo := repoMeta.Chunks()[first.Chunks[0]]
 	if repo == nil || repo.releasesByTag[firstChunkInfo.Release] == nil {
 		t.Fatalf("expected immutable release to remain")
 	}
@@ -564,10 +564,10 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 		t.Fatalf("expected three logical chunks after patch, got %+v", patched.Chunks)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-patch")
-	patchedChunks0 := repoMeta.Chunks[patched.Chunks[0]]
-	patchedChunks2 := repoMeta.Chunks[patched.Chunks[2]]
-	metaChunks0 := repoMeta.Chunks[meta.Chunks[0]]
-	patchedChunks1 := repoMeta.Chunks[patched.Chunks[1]]
+	patchedChunks0 := repoMeta.Chunks()[patched.Chunks[0]]
+	patchedChunks2 := repoMeta.Chunks()[patched.Chunks[2]]
+	metaChunks0 := repoMeta.Chunks()[meta.Chunks[0]]
+	patchedChunks1 := repoMeta.Chunks()[patched.Chunks[1]]
 	if patchedChunks0.AssetID != metaChunks0.AssetID || patchedChunks2.AssetID != metaChunks0.AssetID {
 		t.Fatalf("expected unchanged data to reuse original asset, got %+v", patched.Chunks)
 	}
@@ -655,8 +655,8 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	}
 	assertFileContent(t, output, append(append(append([]byte(nil), original[:3]...), patchedBytes...), original[50:]...))
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-exact-ranges")
-	metaChunk0 := repoMeta.Chunks[meta.Chunks[0]]
-	patchedChunk1 := repoMeta.Chunks[patched.Chunks[1]]
+	metaChunk0 := repoMeta.Chunks()[meta.Chunks[0]]
+	patchedChunk1 := repoMeta.Chunks()[patched.Chunks[1]]
 	for assetID := range rangeByAsset {
 		sort.Strings(rangeByAsset[assetID])
 	}
@@ -684,7 +684,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-multi-release-patch")
-	firstRelease := metaState.Chunks[fileMeta.Chunks[0]].Release
+	firstRelease := metaState.Chunks()[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-multi-release-patch", firstRelease, 999)
 	hub.invalidateReleaseCache("project-multi-release-patch")
 	patched, err := hub.PatchFile("project-multi-release-patch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
@@ -698,7 +698,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 	seenOld := false
 	seenNew := false
 	for _, chunkName := range patched.Chunks {
-		chunk := metaState.Chunks[chunkName]
+		chunk := metaState.Chunks()[chunkName]
 		if chunk.Release == firstRelease {
 			seenOld = true
 		} else {
@@ -837,7 +837,7 @@ func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-release")
-	firstRelease := repoMeta.Chunks[fileMeta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
 	if err := hub.DeleteRelease("project-release", firstRelease); err != nil {
 		t.Fatalf("delete release: %v", err)
 	}
@@ -923,7 +923,7 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	}
 
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge")
-	trackedRelease := repoMeta.Chunks[tracked.Chunks[0]].Release
+	trackedRelease := repoMeta.Chunks()[tracked.Chunks[0]].Release
 	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush metadata after second upload: %v", err)
 	}
@@ -979,7 +979,7 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("fetch revision %s: %v", rev.CommitSHA, err)
 		}
-		if _, ok := snap.Files["orphan.txt"]; ok {
+		if _, ok := snap.Files()["orphan.txt"]; ok {
 			orphanRevision = rev.CommitSHA
 			break
 		}
@@ -1015,7 +1015,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	}
 
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-missing-data")
-	firstChunk := repoMeta.Chunks[fileMeta.Chunks[0]]
+	firstChunk := repoMeta.Chunks()[fileMeta.Chunks[0]]
 	backend.removeAsset(t, "project-missing-data", firstChunk.AssetID)
 	// Get the oldest metadata revision to test rollback failure when data is missing
 	revisions, err := hub.ListMetadataRevisions("project-missing-data")
@@ -1041,7 +1041,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-capacity")
-	firstRelease := repoMeta.Chunks[fileMeta.Chunks[0]].Release
+	firstRelease := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-capacity", firstRelease, 999)
 	hub.invalidateReleaseCache("project-capacity")
 	inputB := writeTempFile(t, t.TempDir(), "second.txt", []byte("beta"))
@@ -1050,7 +1050,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 		t.Fatalf("replace file: %v", err)
 	}
 	repoMeta, _, _ = hub.loadRepoMetadata(context.Background(), "project-capacity")
-	replacedRelease := repoMeta.Chunks[replaced.Chunks[0]].Release
+	replacedRelease := repoMeta.Chunks()[replaced.Chunks[0]].Release
 	if replacedRelease == firstRelease {
 		t.Fatalf("expected replacement to avoid full release")
 	}
@@ -1152,7 +1152,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-download-retry")
-	assetID := repoMeta.Chunks[fileMeta.Chunks[0]].AssetID
+	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", assetID)) || failures.Load() != 0 {
@@ -1479,7 +1479,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-range-read")
-	assetID := repoMeta.Chunks[fileMeta.Chunks[0]].AssetID
+	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", assetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
@@ -1523,7 +1523,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-patch-range-retry")
-	assetID := repoMeta.Chunks[fileMeta.Chunks[0]].AssetID
+	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", assetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
@@ -1836,11 +1836,11 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 	}
 	meta := mustLoadMetadata(t, backend.repo("project-invalid-metadata"))
 	// corrupt a chunk offset to create invalid metadata
-	for _, file := range meta.Files {
+	for _, file := range meta.Files() {
 		if len(file.Chunks) > 0 {
-			chunk := meta.Chunks[file.Chunks[0]]
+			chunk := meta.Chunks()[file.Chunks[0]]
 			chunk.Offset = 99
-			meta.Chunks[file.Chunks[0]] = chunk
+			meta.Chunks()[file.Chunks[0]] = chunk
 			break
 		}
 	}
@@ -4262,7 +4262,7 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatalf("upload file: %v", err)
 	}
 	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge-spill")
-	firstRelease := metaState.Chunks[fileMeta.Chunks[0]].Release
+	firstRelease := metaState.Chunks()[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-purge-spill", firstRelease, 999)
 	hub.invalidateReleaseCache("project-purge-spill")
 
@@ -4280,7 +4280,7 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 	}
 	spillTag := ""
 	for _, id := range patched.Chunks {
-		if chunk := metaState.Chunks[id]; chunk.Release != firstRelease {
+		if chunk := metaState.Chunks()[id]; chunk.Release != firstRelease {
 			spillTag = chunk.Release
 		}
 	}
@@ -4353,7 +4353,7 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 	}
 
 	before, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
-	totalBefore := len(before.Chunks)
+	totalBefore := len(before.Chunks())
 	if totalBefore < 2 {
 		t.Fatalf("expected stale chunk records before purge, got %d", totalBefore)
 	}
@@ -4364,18 +4364,18 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 
 	after, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
 	referenced := make(map[int64]bool)
-	for _, file := range after.Files {
+	for _, file := range after.Files() {
 		for _, id := range file.Chunks {
 			referenced[id] = true
 		}
 	}
-	for id := range after.Chunks {
+	for id := range after.Chunks() {
 		if !referenced[id] {
 			t.Fatalf("chunk %d survived purge despite no live references", id)
 		}
 	}
-	if len(after.Chunks) >= totalBefore {
-		t.Fatalf("expected chunk catalog to shrink from %d, got %d", totalBefore, len(after.Chunks))
+	if len(after.Chunks()) >= totalBefore {
+		t.Fatalf("expected chunk catalog to shrink from %d, got %d", totalBefore, len(after.Chunks()))
 	}
 
 	output := filepath.Join(t.TempDir(), "out.txt")

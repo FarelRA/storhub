@@ -1510,7 +1510,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		chunks: make(map[int64]metadata.ChunkInfo, len(file.Chunks)),
 	}
 	for _, id := range file.Chunks {
-		if chunk, ok := repoMeta.Chunks[id]; ok {
+		if chunk, ok := repoMeta.Chunks()[id]; ok {
 			pin.chunks[id] = chunk
 		}
 	}

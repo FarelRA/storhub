@@ -21,7 +21,7 @@ func TestCheckStickyDelete(t *testing.T) {
 	dir.Mode = 0o1777
 	dir.UID = 1
 	dir.GID = 2
-	repo.Dirs["tmp"] = *dir
+	repo.Dirs()["tmp"] = *dir
 	file := meta.FileMeta{Mode: 0o644, UID: 11, GID: 12, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
 	repo.UpsertFile("tmp/note.txt", file, now)
 	ctx := WithIdentity(context.Background(), Identity{UID: 22, GID: 22, Groups: []uint32{22}})

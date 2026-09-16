@@ -464,7 +464,7 @@ func TestRollbackAsRevertV2(t *testing.T) {
 		t.Fatalf("reload after rollback: %v", err)
 	}
 	names := map[string]bool{}
-	for p := range m.Files {
+	for p := range m.Files() {
 		names[p] = true
 	}
 	if !names["docs/keep.txt"] {
@@ -493,9 +493,9 @@ func TestPruneAssetsWiresPurge(t *testing.T) {
 	backend.addRelease(t, "pa", "v1")
 	assetID := backend.addAssetToRelease(t, "pa", "v1", "tracked.bin", []byte("x"))
 	if _, err := hub.UpdateRepoMetadataContext(ctx, "pa", func(m *RepoMetadata) error {
-		c := m.Chunks[1]
+		c := m.Chunks()[1]
 		c.AssetID = assetID
-		m.Chunks[1] = c
+		m.Chunks()[1] = c
 		return nil
 	}, "storhub: repoint chunk asset"); err != nil {
 		t.Fatalf("repoint: %v", err)

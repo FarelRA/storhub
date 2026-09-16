@@ -20,7 +20,7 @@ func seedMeta(t *testing.T, hub *StorHub, project, dir, file string, chunkID int
 	}
 	_, err := hub.UpdateRepoMetadataContext(ctx, project, func(m *RepoMetadata) error {
 		m.EnsureDirectory(dir, 1700000000)
-		m.Chunks[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
+		m.Chunks()[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
 		m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
 		m.EnsureRelease("v1", 1700000000)
 		return nil
@@ -44,7 +44,7 @@ func seedLegacyBlob(t *testing.T, hub *StorHub, project, dir, file string, chunk
 	}
 	m := NewRepoMetadata(project)
 	m.EnsureDirectory(dir, 1700000000)
-	m.Chunks[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
+	m.Chunks()[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
 	m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
 	m.EnsureRelease("v1", 1700000000)
 	m.Normalize(project, 1700000000)
@@ -184,8 +184,8 @@ func TestSplitIndexLegacyRevisionReadableAfterMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read legacy revision across migration boundary: %v", err)
 	}
-	if _, ok := m.Files["docs/old.txt"]; !ok {
-		t.Fatalf("legacy revision lost its content: %+v", m.Files)
+	if _, ok := m.Files()["docs/old.txt"]; !ok {
+		t.Fatalf("legacy revision lost its content: %+v", m.Files())
 	}
 }
 
@@ -316,7 +316,7 @@ func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
 	}
 	_, err := hub.UpdateRepoMetadataContext(ctx, "rt", func(m *RepoMetadata) error {
 		m.EnsureDirectory("x", 1700000000)
-		m.Chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 7}
+		m.Chunks()[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 7}
 		m.UpsertFile("x/f", FileMeta{Size: 2, Mode: 0o600, UID: 42, GID: 43, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{1}, XAttrs: meta.XAttrMap{"user.k": []byte("v")}}, 1700000000)
 		m.EnsureRelease("v1", 1700000000)
 		return nil

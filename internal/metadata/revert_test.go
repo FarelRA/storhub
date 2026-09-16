@@ -21,13 +21,13 @@ func TestRevertFileRestoresHistoricalContent(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
-		m.Chunks[1] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("docs/a.txt", FileMeta{Size: 5, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
 	cur := clonePtr(hist)
 	// Current diverges: a.txt overwritten with a new chunk.
-	cur.Chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
+	cur.chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
 	cur.UpsertFile("docs/a.txt", FileMeta{Size: 9, Mode: 0o644, UploadedAt: 200, ModifiedAt: 200, Chunks: []int64{2}}, 200)
 	cur.Normalize("demo", 200)
 
@@ -43,7 +43,7 @@ func TestRevertFileRestoresHistoricalContent(t *testing.T) {
 	if len(f.Chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %v", f.Chunks)
 	}
-	if c := cur.Chunks[f.Chunks[0]]; c.AssetID != 11 {
+	if c := cur.chunks[f.Chunks[0]]; c.AssetID != 11 {
 		t.Fatalf("reverted chunk lost its asset: %+v", c)
 	}
 }
@@ -53,7 +53,7 @@ func TestRevertRestoresDeletedFileAndParent(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("keep", 100)
 		m.EnsureDirectory("gone", 100)
-		m.Chunks[1] = ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("gone/x.txt", FileMeta{Size: 3, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
@@ -82,7 +82,7 @@ func TestRevertDirectorySubtree(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("tree", 100)
 		m.EnsureDirectory("tree/sub", 100)
-		m.Chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("tree/a", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.UpsertFile("tree/sub/b", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.EnsureRelease("v1", 100)
@@ -101,7 +101,7 @@ func TestRevertDirectorySubtree(t *testing.T) {
 	}
 	cur.Normalize("demo", 300)
 	if cur.FindFile("tree/a") == nil || cur.FindFile("tree/sub/b") == nil {
-		t.Fatalf("subtree not fully restored: %v", cur.Files)
+		t.Fatalf("subtree not fully restored: %v", cur.Files())
 	}
 	if cur.FindFile("unrelated") == nil {
 		t.Fatal("revert must not touch paths outside the subtree")
@@ -115,7 +115,7 @@ func TestRevertRemovesPathAbsentInHistory(t *testing.T) {
 	})
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
-		m.Chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("docs/new", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 200, ModifiedAt: 200, Chunks: []int64{1}}, 200)
 		m.EnsureRelease("v1", 100)
 	})
@@ -132,7 +132,7 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[5] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
+		m.chunks[5] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
 		m.UpsertFile("d/target", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{5}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
@@ -140,7 +140,7 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 	// d/target under another path (collision).
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[5] = ChunkInfo{Size: 77, Offset: 0, Release: "v1", AssetID: 999}
+		m.chunks[5] = ChunkInfo{Size: 77, Offset: 0, Release: "v1", AssetID: 999}
 		m.UpsertFile("d/other", FileMeta{Size: 77, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{5}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
@@ -163,7 +163,7 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 		t.Fatal("revert clobbered the colliding inode instead of remapping")
 	}
 	// And its chunk must point at the historical asset (55), not 999.
-	if c := cur.Chunks[tf.Chunks[0]]; c.AssetID != 55 {
+	if c := cur.chunks[tf.Chunks[0]]; c.AssetID != 55 {
 		t.Fatalf("reverted chunk not remapped: %+v", c)
 	}
 	// d/other must be untouched, INCLUDING its chunk record (the collision
@@ -175,7 +175,7 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 	if len(other.Chunks) != 1 {
 		t.Fatalf("d/other chunk list changed: %v", other.Chunks)
 	}
-	if c := cur.Chunks[other.Chunks[0]]; c.AssetID != 999 {
+	if c := cur.chunks[other.Chunks[0]]; c.AssetID != 999 {
 		t.Fatalf("revert clobbered the colliding live chunk: %+v", c)
 	}
 }
@@ -185,7 +185,7 @@ func TestRevertRestoresMissingRelease(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 		m.EnsureRelease("v9", 100)
-		m.Chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v9", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v9", AssetID: 11}
 		m.UpsertFile("d/f", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 	})
 	cur := buildTree(t, func(m *RepoMetadata) {
@@ -194,7 +194,7 @@ func TestRevertRestoresMissingRelease(t *testing.T) {
 	if err := RevertSubtree(cur, hist, "d/f", 300); err != nil {
 		t.Fatalf("revert: %v", err)
 	}
-	if _, ok := cur.Releases["v9"]; !ok {
+	if _, ok := cur.releases["v9"]; !ok {
 		t.Fatal("revert must restore the release a reverted chunk references")
 	}
 }
@@ -207,7 +207,7 @@ func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[500] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
+		m.chunks[500] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
 		m.UpsertFile("d/f", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{500}}, 100)
 		f := *m.FindFile("d/f")
 		f.Inode = 400
@@ -224,7 +224,7 @@ func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
 	if err := RevertSubtree(cur, hist, "d/f", 300); err != nil {
 		t.Fatalf("revert: %v", err)
 	}
-	if _, live := cur.Chunks[500]; !live {
+	if _, live := cur.chunks[500]; !live {
 		t.Fatal("fixture: historical chunk 500 not restored")
 	}
 	if cur.NextChunkID <= 500 {
@@ -253,7 +253,7 @@ func TestRevertKeepsHardlinkFamilyIntact(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.UpsertFile("d/b", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		// Hardlink: d/b shares d/a's inode in history.
@@ -292,14 +292,14 @@ func TestRevertRemapsInodeForUnrelatedHolder(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
 	familyInode := hist.FindFile("d/a").Inode
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
+		m.chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
 		m.UpsertFile("d/b", FileMeta{Size: 9, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{2}}, 100)
 		// d/b is unrelated in src but squats on the historical inode.
 		b := *m.FindFile("d/b")
@@ -326,10 +326,10 @@ func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("x", 100)
-		xd := m.Dirs["x"]
+		xd := m.dirs["x"]
 		xd.XAttrs = XAttrMap{"user.a": []byte("1")}
-		m.Dirs["x"] = xd
-		m.Chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 11}
+		m.dirs["x"] = xd
+		m.chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 11}
 		m.UpsertFile("x/f", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
@@ -341,16 +341,16 @@ func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
 	if err := RevertSubtree(cur, hist, "x/f", 300); err != nil {
 		t.Fatalf("revert: %v", err)
 	}
-	xd, ok := cur.Dirs["x"]
+	xd, ok := cur.dirs["x"]
 	if !ok {
 		t.Fatal("ancestor x not restored")
 	}
 	xd.XAttrs["user.new"] = []byte("v")
-	if _, aliased := hist.Dirs["x"].XAttrs["user.new"]; aliased {
+	if _, aliased := hist.dirs["x"].XAttrs["user.new"]; aliased {
 		t.Fatal("dst mutation leaked into src: XAttrs map aliased")
 	}
 	xd.XAttrs["user.a"] = []byte("mutated")
-	if string(hist.Dirs["x"].XAttrs["user.a"]) != "1" {
+	if string(hist.dirs["x"].XAttrs["user.a"]) != "1" {
 		t.Fatal("dst mutation leaked into src: XAttrs value aliased")
 	}
 }
@@ -361,13 +361,13 @@ func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.Chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
-		m.Chunks[2] = ChunkInfo{Size: 4, Offset: 4, Release: "v1", AssetID: 12}
+		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		m.chunks[2] = ChunkInfo{Size: 4, Offset: 4, Release: "v1", AssetID: 12}
 		m.UpsertFile("d/f", FileMeta{Size: 8, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1, 2}}, 100)
 		m.EnsureRelease("v1", 100)
 	})
 	// Corrupt history: chunk 2's record is gone while the file still lists it.
-	delete(hist.Chunks, 2)
+	delete(hist.chunks, 2)
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
 	})
