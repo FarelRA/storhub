@@ -176,6 +176,7 @@ func (b *testBackend) fileData(file *meta.FileMeta) ([]byte, error) {
 }
 
 func TestServiceWorkflowAndHelpers(t *testing.T) {
+	t.Parallel()
 	// The workflow runs as an explicitly identified root caller; absent
 	// identities fail closed to the process user and own nothing here.
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
@@ -249,6 +250,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 }
 
 func TestServiceErrors(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(200)
 	svc := NewService(backend)
 	backend.seedDir("docs")
@@ -301,6 +303,7 @@ func TestServiceErrors(t *testing.T) {
 }
 
 func TestServicePermissionEnforcement(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(250)
 	backend.seedDir("private")
 	file := backend.seedFile("private/note.txt", []byte("secret"))
@@ -332,6 +335,7 @@ func TestServicePermissionEnforcement(t *testing.T) {
 }
 
 func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
+	t.Parallel()
 	now := int64(260)
 	backend := newTestBackend(now)
 	backend.seedDir("shared")
@@ -366,6 +370,7 @@ func TestCreateAndMkdirInheritSetgidAndTouchParent(t *testing.T) {
 }
 
 func TestCreateAndMkdirUseCallerOwnership(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(265)
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
@@ -397,6 +402,7 @@ func returnFail(t *testing.T, label string, err error, value any) {
 }
 
 func TestCreateFileRejectsExistingDirectory(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(100)
 	svc := NewService(backend)
 	if err := svc.MkdirContext(context.Background(), "demo", "sub"); err != nil {
@@ -411,6 +417,7 @@ func TestCreateFileRejectsExistingDirectory(t *testing.T) {
 }
 
 func TestRenamePOSIXReplaceSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(100)
 	svc := NewService(backend)
 	ctx := context.Background()
@@ -465,6 +472,7 @@ func TestRenamePOSIXReplaceSemantics(t *testing.T) {
 }
 
 func TestWhitespaceNamesEndToEnd(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(100)
 	svc := NewService(backend)
 	ctx := context.Background()
@@ -514,6 +522,7 @@ func TestWhitespaceNamesEndToEnd(t *testing.T) {
 // A REST-supplied length near MaxInt64 must not overflow the
 // offset+length addition into a make() panic.
 func TestReadFileAtOverflowLengthClamped(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(700)
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
@@ -535,6 +544,7 @@ func TestReadFileAtOverflowLengthClamped(t *testing.T) {
 // directory. Until the metadata store stops collapsing such names to the
 // root key (cross-file), the fs layer rejects them loudly.
 func TestWhitespaceOnlyNameIsNotRoot(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(710)
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
@@ -560,6 +570,7 @@ func TestWhitespaceOnlyNameIsNotRoot(t *testing.T) {
 // materializing the whole hole in RAM. The observable contract is the
 // resulting content; the memory bound is structural (chunked loop).
 func TestTruncateExtensionStreamsZeros(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(720)
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
@@ -593,6 +604,7 @@ func TestTruncateExtensionStreamsZeros(t *testing.T) {
 // WithNoReplace must reject an existing destination inside the
 // update transaction, not via a pre-stat the caller could race.
 func TestRenameNoReplaceInTransaction(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(730)
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
@@ -623,6 +635,7 @@ func TestRenameNoReplaceInTransaction(t *testing.T) {
 // CopyContext must check read access on the source, not just
 // traversal, or unreadable 0600 files can be duplicated by strangers.
 func TestCopyRequiresSourceReadAccess(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(740)
 	backend.seedDir("mine")
 	file := backend.seedFile("mine/secret.txt", []byte("hush"))
@@ -655,6 +668,7 @@ func TestCopyRequiresSourceReadAccess(t *testing.T) {
 // The file owner keeps the POSIX chgrp right (into a group they
 // belong to) but may not hand the file away.
 func TestCanChownOwnerRights(t *testing.T) {
+	t.Parallel()
 	entry := &EntryInfo{Path: "f", UID: 1000, GID: 100, Mode: 0o644}
 	owner := WithIdentity(context.Background(), Identity{UID: 1000, GID: 100, Groups: []uint32{100, 200}})
 	if err := CanChown(owner, entry, entry.UID, 200); err != nil {
@@ -678,6 +692,7 @@ func TestCanChownOwnerRights(t *testing.T) {
 
 // Nits: a truncate to the current size must still bump mtime/ctime.
 func TestTruncateSameSizeTouchesTimestamps(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(750)
 	svc := NewService(backend)
 	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})

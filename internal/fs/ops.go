@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,8 +44,66 @@ func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
 
+// projectState carries the per-(backend, project) derived state that must
+// outlive individual Service values: the hub constructs a fresh Service for
+// every verb call (storage.StorHub.fsService), so caches that live on the
+// struct would be discarded before the next operation could reuse them.
+type projectState struct {
+	mu        sync.Mutex
+	logger    *slog.Logger
+	mutations uint64
+	statfs    *FSStats
+	statfsSha string
+	statfsGen uint64
+	statfsAt  time.Time
+}
+
+type projectStateKey struct {
+	backend Backend
+	project string
+}
+
+// projectStates is keyed by the backend's identity (the hub pointer), so
+// two hubs - or two embedders - can never share cached state under a
+// colliding project name.
+var projectStates sync.Map // projectStateKey -> *projectState
+
+// statfsCacheTTL bounds how long cached StatFS aggregates may serve even
+// when neither the commit SHA nor the local mutation counter moved: verbs
+// that mutate metadata outside this Service (xattr/symlink/chmod on the
+// hub) bump neither key, so staleness is capped by time as well.
+const statfsCacheTTL = 2 * time.Second
+
+func (s *Service) state(project string) *projectState {
+	key := projectStateKey{backend: s.backend, project: project}
+	if cached, ok := projectStates.Load(key); ok {
+		return cached.(*projectState)
+	}
+	state := &projectState{}
+	actual, _ := projectStates.LoadOrStore(key, state)
+	return actual.(*projectState)
+}
+
+// logger returns the per-project fs logger, built once per project. The
+// previous form allocated two slog loggers (WithComponent -> With) on
+// every call, i.e. on every FS operation.
 func (s *Service) logger(project string) *slog.Logger {
-	return logging.WithComponent(s.backend.Logger(), "fs").With("project", project)
+	state := s.state(project)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.logger == nil {
+		state.logger = logging.WithComponent(s.backend.Logger(), "fs").With("project", project)
+	}
+	return state.logger
+}
+
+// bumpMutations records that a metadata-mutating operation succeeded, so
+// any cached StatFS aggregate for the project is stale from now on.
+func (s *Service) bumpMutations(project string) {
+	state := s.state(project)
+	state.mu.Lock()
+	state.mutations++
+	state.mu.Unlock()
 }
 
 func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
@@ -54,13 +113,21 @@ func (s *Service) logFinish(project, op string, started time.Time, err error, ar
 		logging.Error(s.logger(project), op+" failed", args...)
 		return
 	}
-	logging.Info(s.logger(project), op+" complete", args...)
+	// Debug, not Info: per-op completion lines are a steady-state fire
+	// hose on a mount (every stat/read/write), and the default level no
+	// longer wants them.
+	logging.Debug(s.logger(project), op+" complete", args...)
 }
 
 func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "create-file start", "path", filePath)
-	defer func() { s.logFinish(project, "create-file", started, err, "path", filePath) }()
+	logging.Debug(s.logger(project), "create-file start", "path", filePath)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "create-file", started, err, "path", filePath)
+	}()
 	// Create addresses the new node itself (O_CREAT|O_EXCL never follows a
 	// final symlink), so followFinal is false; intermediate symlink
 	// components are still resolved physically.
@@ -87,7 +154,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	if err := CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
-	if err := CheckParentWrite(ctx, repoMeta, cleanPath); err != nil {
+	if err := CheckParentWriteResolved(ctx, repoMeta, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	if err := RequireParentDirectory(repoMeta, cleanPath); err != nil {
@@ -118,7 +185,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		if err := CheckTraversal(ctx, repo, traversed); err != nil {
 			return err
 		}
-		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, cleanPath, traversed); err != nil {
 			return err
 		}
 		if err := RequireParentDirectory(repo, cleanPath); err != nil {
@@ -144,8 +211,13 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 
 func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "mkdir start", "path", dirPath)
-	defer func() { s.logFinish(project, "mkdir", started, err, "path", dirPath) }()
+	logging.Debug(s.logger(project), "mkdir start", "path", dirPath)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "mkdir", started, err, "path", dirPath)
+	}()
 	// mkdir never creates through a final symlink (EEXIST on the link
 	// itself), so followFinal is false; intermediate components resolve
 	// physically.
@@ -175,7 +247,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		if err := CheckTraversal(ctx, repo, traversed); err != nil {
 			return err
 		}
-		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, cleanPath, traversed); err != nil {
 			return err
 		}
 		if repo.HasDirectory(cleanPath) {
@@ -202,8 +274,13 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 
 func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "rmdir start", "path", dirPath)
-	defer func() { s.logFinish(project, "rmdir", started, err, "path", dirPath) }()
+	logging.Debug(s.logger(project), "rmdir start", "path", dirPath)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "rmdir", started, err, "path", dirPath)
+	}()
 	// rmdir removes the final component itself; a symlink there must not be
 	// followed (POSIX rmdir on a symlink is ENOTDIR), so followFinal is
 	// false.
@@ -227,7 +304,7 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 		if err := CheckTraversal(ctx, repo, traversed); err != nil {
 			return err
 		}
-		if err := CheckParentWrite(ctx, repo, cleanPath); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, cleanPath, traversed); err != nil {
 			return err
 		}
 		if err := CheckStickyDelete(ctx, repo, ParentPath(cleanPath), cleanPath); err != nil {
@@ -252,8 +329,13 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 
 func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...MutateOption) (err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "rename start", "old_path", oldPath, "new_path", newPath)
-	defer func() { s.logFinish(project, "rename", started, err, "old_path", oldPath, "new_path", newPath) }()
+	logging.Debug(s.logger(project), "rename start", "old_path", oldPath, "new_path", newPath)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "rename", started, err, "old_path", oldPath, "new_path", newPath)
+	}()
 	mutate := ApplyMutateOptions(opts)
 	// rename(2) renames the final component itself: a symlink endpoint is
 	// moved, never followed, so followFinal is false on both endpoints
@@ -295,10 +377,10 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		if srcFile == nil && !srcIsDir {
 			return NotFound(oldClean)
 		}
-		if err := CheckParentWrite(ctx, repo, oldClean); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, oldClean, oldTraversed); err != nil {
 			return err
 		}
-		if err := CheckParentWrite(ctx, repo, newClean); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, newClean, newTraversed); err != nil {
 			return err
 		}
 		if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
@@ -397,8 +479,13 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 
 func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath string) (err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "copy start", "src", srcPath, "dst", dstPath)
-	defer func() { s.logFinish(project, "copy", started, err, "src", srcPath, "dst", dstPath) }()
+	logging.Debug(s.logger(project), "copy start", "src", srcPath, "dst", dstPath)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "copy", started, err, "src", srcPath, "dst", dstPath)
+	}()
 	// cp follows symlinks at both endpoints: the source is read through
 	// (stat semantics) and the destination is written through (open
 	// semantics), so followFinal is true on both.
@@ -443,15 +530,15 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 		// unreadable 0600 files (content refs, sizes, symlink targets)
 		// into their own directory.
 		if srcFile != nil {
-			if err := CheckReadAccess(ctx, repo, srcClean); err != nil {
+			if err := CheckReadAccessResolved(ctx, repo, srcClean, srcTraversed); err != nil {
 				return err
 			}
 		} else {
-			if err := CheckListDirAccess(ctx, repo, srcClean); err != nil {
+			if err := CheckListDirAccessResolved(ctx, repo, srcClean, srcTraversed); err != nil {
 				return err
 			}
 		}
-		if err := CheckParentWrite(ctx, repo, dstClean); err != nil {
+		if err := CheckParentWriteResolved(ctx, repo, dstClean, dstTraversed); err != nil {
 			return err
 		}
 		if parent := ParentPath(dstClean); parent != "" && !repo.HasDirectory(parent) {
@@ -559,8 +646,13 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 
 func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "truncate start", "path", filePath, "size", size)
-	defer func() { s.logFinish(project, "truncate", started, err, "path", filePath, "size", size) }()
+	logging.Debug(s.logger(project), "truncate start", "path", filePath, "size", size)
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "truncate", started, err, "path", filePath, "size", size)
+	}()
 	// truncate(2) has open() semantics: a final symlink is followed to its
 	// target.
 	if err := ValidateAccessPathShape(filePath); err != nil {
@@ -584,7 +676,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
-	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+	if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	if size == file.Size {
@@ -594,7 +686,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 			if err := CheckTraversal(ctx, repo, traversed); err != nil {
 				return err
 			}
-			if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+			if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 				return err
 			}
 			current := repo.FindFile(cleanPath)
@@ -646,7 +738,7 @@ func (s *Service) zeroExtendFile(ctx context.Context, project, cleanPath string,
 		if err := CheckTraversal(ctx, repo, traversed); err != nil {
 			return nil, err
 		}
-		if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+		if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 			return nil, err
 		}
 		if file.Size >= targetSize {
@@ -664,8 +756,13 @@ func (s *Service) zeroExtendFile(ctx context.Context, project, cleanPath string,
 
 func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "append start", "path", filePath, "bytes", len(data))
-	defer func() { s.logFinish(project, "append", started, err, "path", filePath, "bytes", len(data)) }()
+	logging.Debug(s.logger(project), "append start", "path", filePath, "bytes", len(data))
+	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
+		s.logFinish(project, "append", started, err, "path", filePath, "bytes", len(data))
+	}()
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
@@ -685,7 +782,7 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
-	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+	if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, data)
@@ -694,8 +791,11 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 
 func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMeta, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "write-at start", "path", filePath, "offset", offset, "bytes", len(data))
+	logging.Debug(s.logger(project), "write-at start", "path", filePath, "offset", offset, "bytes", len(data))
 	defer func() {
+		if err == nil {
+			s.bumpMutations(project)
+		}
 		s.logFinish(project, "write-at", started, err, "path", filePath, "offset", offset, "bytes", len(data))
 	}()
 	// pwrite has open() semantics: a final symlink is followed.
@@ -717,7 +817,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
-	if err := CheckWriteAccess(ctx, repo, cleanPath); err != nil {
+	if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	if offset < 0 {
@@ -755,7 +855,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 
 func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) (result []byte, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "read-at start", "path", filePath, "offset", offset, "length", length)
+	logging.Debug(s.logger(project), "read-at start", "path", filePath, "offset", offset, "length", length)
 	defer func() {
 		s.logFinish(project, "read-at", started, err, "path", filePath, "offset", offset, "length", length)
 	}()
@@ -781,7 +881,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	if file == nil {
 		return nil, s.backend.FileNotFound(cleanPath)
 	}
-	if err := CheckReadAccess(ctx, repo, cleanPath); err != nil {
+	if err := CheckReadAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	if offset >= file.Size {
@@ -830,7 +930,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 
 func (s *Service) StatPathContext(ctx context.Context, project, targetPath string) (result *EntryInfo, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "stat-path start", "path", targetPath)
+	logging.Debug(s.logger(project), "stat-path start", "path", targetPath)
 	defer func() { s.logFinish(project, "stat-path", started, err, "path", targetPath) }()
 	// lstat semantics: the final symlink is NOT followed (followFinal
 	// false); intermediate symlink components are resolved physically.
@@ -871,15 +971,25 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 
 func (s *Service) StatFSContext(ctx context.Context, project string) (result *FSStats, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "statfs start")
+	logging.Debug(s.logger(project), "statfs start")
 	defer func() { s.logFinish(project, "statfs", started, err) }()
-	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+	repo, sha, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	// Aggregate live instead of trusting cached counters: those only
-	// refresh during metadata commits, so a freshly mutated tree would
-	// otherwise report stale numbers.
+	// Cache the O(files+chunks) aggregation per project, invalidated by
+	// (commit SHA, local mutation counter) plus a short TTL backstop. The
+	// old code re-scanned the whole tree on every df; monitoring loops
+	// turned that into a permanent background burn.
+	state := s.state(project)
+	now := time.Now()
+	if cached, ok := state.cachedStatFS(sha, now); ok {
+		result = cached
+		return result, nil
+	}
+	// Aggregate live instead of trusting the repo's own cached counters:
+	// those only refresh during metadata commits, so a freshly mutated
+	// tree would otherwise report stale numbers.
 	files := 0
 	var totalBytes int64
 	for _, file := range repo.Files {
@@ -898,13 +1008,40 @@ func (s *Service) StatFSContext(ctx context.Context, project string) (result *FS
 	for _, count := range assetCounts {
 		stats.Assets += count
 	}
+	state.storeStatFS(sha, stats)
 	result = stats
 	return result, nil
 }
 
+// cachedStatFS returns a fresh copy of the cached aggregate when it still
+// matches the commit SHA, the local mutation counter, and the TTL.
+func (p *projectState) cachedStatFS(sha string, now time.Time) (*FSStats, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.statfs == nil || p.statfsSha != sha || p.statfsGen != p.mutations || now.Sub(p.statfsAt) >= statfsCacheTTL {
+		return nil, false
+	}
+	copied := *p.statfs
+	return &copied, true
+}
+
+// storeStatFS records the aggregate together with the invalidation keys
+// observed at computation time. A mutation that landed during the scan
+// bumps the counter afterwards, so the next read recomputes (the stored
+// numbers are then merely redundant, never stale).
+func (p *projectState) storeStatFS(sha string, stats *FSStats) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	copied := *stats
+	p.statfs = &copied
+	p.statfsSha = sha
+	p.statfsGen = p.mutations
+	p.statfsAt = time.Now()
+}
+
 func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (result []DirEntry, err error) {
 	started := time.Now().UTC()
-	logging.Info(s.logger(project), "readdir start", "path", dirPath)
+	logging.Debug(s.logger(project), "readdir start", "path", dirPath)
 	defer func() { s.logFinish(project, "readdir", started, err, "path", dirPath) }()
 	// opendir follows a final symlink to a directory, so followFinal is
 	// true.
@@ -921,10 +1058,9 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckTraversal(ctx, repo, traversed); err != nil {
-		return nil, err
-	}
-	if err := CheckListDirAccess(ctx, repo, cleanPath); err != nil {
+	// CheckListDirAccessResolved consumes the walk's traversed chain
+	// itself: no separate CheckTraversal pass (and no re-resolution) here.
+	if err := CheckListDirAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 		return nil, err
 	}
 	if cleanPath != "" && repo.FindFile(cleanPath) != nil {
@@ -998,11 +1134,17 @@ func EntryInfoFromDirectory(dir *meta.DirMeta, path string, nlink int) *EntryInf
 }
 
 func DirEntryFromDirectory(dir meta.DirMeta, dirPath string, nlink int) DirEntry {
-	return DirEntry{Name: path.Base(dirPath), Path: dirPath, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: uint32(nlink)}
+	return DirEntry{Name: path.Base(dirPath), Path: dirPath, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: uint32(nlink), UID: dir.UID, GID: dir.GID, CreatedAt: dir.CreatedAt, ModifiedAt: dir.ModifiedAt, AccessedAt: dir.AccessedAt, ChangedAt: dir.ChangedAt}
 }
 
 func DirEntryFromFile(file meta.FileMeta, filePath string, nlink int) DirEntry {
-	return DirEntry{Name: path.Base(filePath), Path: filePath, IsSymlink: file.Symlink != "", Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: uint32(nlink)}
+	entry := DirEntry{Name: path.Base(filePath), Path: filePath, IsSymlink: file.Symlink != "", Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: uint32(nlink), UID: file.UID, GID: file.GID, CreatedAt: file.UploadedAt, ModifiedAt: file.ModifiedAt, AccessedAt: file.AccessedAt, ChangedAt: file.ChangedAt}
+	if file.Symlink != "" {
+		entry.Kind = meta.NodeKindSymlink
+	} else {
+		entry.Kind = meta.NodeKindFile
+	}
+	return entry
 }
 
 func CountUniqueInodes(repo *meta.RepoMetadata) int {

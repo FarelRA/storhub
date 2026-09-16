@@ -73,7 +73,14 @@ func main() {
 	case <-ctx.Done():
 		stop()
 		unmountWithRetry(fsys, mountPoint)
-		<-waitDone
+		// Bound the join: fsys.Wait() only returns after a successful
+		// unmount, so if the mount is wedged (a held-open file) an
+		// unbounded <-waitDone hangs the process forever.
+		select {
+		case <-waitDone:
+		case <-time.After(10 * time.Second):
+			log.Fatalf("unmount did not complete; giving up waiting for the FUSE server")
+		}
 	}
 }
 

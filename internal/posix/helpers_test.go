@@ -7,6 +7,7 @@ import (
 )
 
 func TestApplyUploadAndUpdateIdentity(t *testing.T) {
+	t.Parallel()
 	now := int64(100)
 	file := &meta.FileMeta{Chunks: []int64{}}
 	ApplyUploadIdentity("docs/file.txt", nil, file, now)
@@ -35,6 +36,7 @@ func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 }
 
 func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
+	t.Parallel()
 	now := int64(200)
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureDirectory("docs", now)

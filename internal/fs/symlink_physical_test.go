@@ -37,6 +37,7 @@ func physicalRepo() *meta.RepoMetadata {
 }
 
 func TestResolvePathPhysicalDotDotThroughSymlink(t *testing.T) {
+	t.Parallel()
 	m := physicalRepo()
 	cases := []struct {
 		in   string
@@ -73,6 +74,7 @@ func TestResolvePathPhysicalDotDotThroughSymlink(t *testing.T) {
 }
 
 func TestResolvePathDotDotEscapeContract(t *testing.T) {
+	t.Parallel()
 	m := physicalRepo()
 	for _, in := range []string{"../x", "a/../..", "a/link/../../../../x"} {
 		_, err := ResolvePath(m, in, true)
@@ -88,6 +90,7 @@ func TestResolvePathDotDotEscapeContract(t *testing.T) {
 }
 
 func TestResolvePathSymlinkLoopStillELOOP(t *testing.T) {
+	t.Parallel()
 	m := physicalRepo()
 	if _, err := ResolvePath(m, "loop-a", true); !errors.Is(err, syscall.ELOOP) {
 		t.Fatalf("expected ELOOP for cyclic links, got %v", err)
@@ -101,6 +104,7 @@ func TestResolvePathSymlinkLoopStillELOOP(t *testing.T) {
 // property: for symlink-free inputs the repo-aware resolver must agree
 // with the pure canonicalizer NormalizePath on both value and error.
 func TestResolvePathMatchesNormalizeForPlainPaths(t *testing.T) {
+	t.Parallel()
 	m := physicalRepo()
 	inputs := []string{
 		"a", "a/b", "a/b/c", "a/b/c/f.txt",
@@ -133,6 +137,7 @@ func TestResolvePathMatchesNormalizeForPlainPaths(t *testing.T) {
 }
 
 func TestResolvePathShapeValidation(t *testing.T) {
+	t.Parallel()
 	m := physicalRepo()
 	// Whitespace-only is rejected exactly like NormalizePath rejects it.
 	_, normErr := NormalizePath("   ")

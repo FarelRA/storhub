@@ -9,6 +9,7 @@ import (
 // TestKindLabelVocabulary pins the single display vocabulary shared by every
 // renderer: directory/symlink/file, decided by the IsDir/IsSymlink flags.
 func TestKindLabelVocabulary(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		info EntryInfo
@@ -41,6 +42,7 @@ func TestKindLabelVocabulary(t *testing.T) {
 // TestKindJSONWireFormatUnchanged pins the wire format: the unified helpers
 // add methods only, so marshaled documents must carry exactly the old keys.
 func TestKindJSONWireFormatUnchanged(t *testing.T) {
+	t.Parallel()
 	blob, err := json.Marshal(EntryInfo{Path: "a", IsDir: true, Size: 3})
 	if err != nil {
 		t.Fatal(err)

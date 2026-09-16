@@ -24,6 +24,7 @@ import (
 // Flush must push dirty overlay data (writeback cache is enabled), not
 // return success while dropping bytes on the floor.
 func TestRecoveryFlushCommitsDirtyOverlay(t *testing.T) {
+	t.Parallel()
 	var replaceCalls int
 	var replaced []byte
 	hub := &stubHub{
@@ -74,6 +75,7 @@ func TestRecoveryFlushCommitsDirtyOverlay(t *testing.T) {
 
 // Flush must surface backend failures instead of swallowing them.
 func TestRecoveryFlushReportsCommitFailure(t *testing.T) {
+	t.Parallel()
 	hub := &stubHub{
 		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
 			return nil, errors.New("network down")
@@ -101,6 +103,7 @@ func TestRecoveryFlushReportsCommitFailure(t *testing.T) {
 // post-patch truncate fails, the dirty ranges must stay dirty so the retry
 // replays patch+truncate instead of declaring victory on half-applied state.
 func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
+	t.Parallel()
 	truncateCalls := 0
 	failTruncate := true
 	hub := &stubHub{
@@ -179,6 +182,7 @@ func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
 // path, so a crash can never leave metadata pointing at data that never
 // arrived.
 func TestRecoveryCommitOrdersDataBeforeMetadata(t *testing.T) {
+	t.Parallel()
 	var order []string
 	hub := &stubHub{
 		chunkSize: 4,
@@ -237,6 +241,7 @@ func TestRecoveryCommitOrdersDataBeforeMetadata(t *testing.T) {
 // O_TRUNC must serialize on the inode operation lock, not slip in
 // beside an in-flight commit that already captured its plan.
 func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -252,15 +257,18 @@ func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
 	ws := h.writeState
 	ws.opMu.Lock()
 	done := make(chan error, 1)
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		_, err := fsys.newHandle(context.Background(), 7, "trunc.bin", syscall.O_WRONLY|syscall.O_TRUNC, nil)
 		done <- err
 	}()
+	<-started
 	select {
 	case <-done:
 		ws.opMu.Unlock()
 		t.Fatal("O_TRUNC open ran without holding opMu; it can interleave with a commit")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(20 * time.Millisecond):
 	}
 	ws.opMu.Unlock()
 	select {
@@ -283,6 +291,7 @@ func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
 // lock; otherwise a read straddling the commit's unlocked network window
 // observes half-old, half-new state.
 func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -298,15 +307,18 @@ func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
 	ws := h.writeState
 	ws.opMu.Lock()
 	done := make(chan struct{})
+	started := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(started)
 		_, _ = h.Read(context.Background(), make([]byte, 10), 0)
 	}()
+	<-started
 	select {
 	case <-done:
 		ws.opMu.Unlock()
 		t.Fatal("read ran without holding opMu; it can tear against a concurrent commit")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(20 * time.Millisecond):
 	}
 	ws.opMu.Unlock()
 	select {
@@ -327,6 +339,7 @@ func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
 // Every mutation must invalidate the kernel's entry/attr caches,
 // otherwise the 60s timeouts serve stale metadata for a full minute.
 func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
+	t.Parallel()
 	now := int64(77)
 	renames := 0
 	hub := &stubHub{
@@ -412,6 +425,7 @@ func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
 // errCorruptedErrno constant, so this file also compiles under
 // GOOS=darwin where syscall.EUCLEAN does not exist).
 func TestRecoveryErrnoMappingGaps(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -438,6 +452,7 @@ func TestRecoveryErrnoMappingGaps(t *testing.T) {
 // Quarantine must be crash-safe (fsync + manifest) and the next mount
 // must replay the inventory instead of hiding it.
 func TestRecoveryQuarantineWritesManifestAndSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{
 		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
@@ -520,6 +535,7 @@ func TestRecoveryQuarantineWritesManifestAndSurvivesRestart(t *testing.T) {
 // Stale overlay temps from a crashed mount are quarantined with
 // manifests so nothing is silently lost or untraceable.
 func TestRecoveryStartupSweepWritesManifests(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	for name, content := range map[string]string{"inode-aaa": "dirty-inode", "handle-bbb": "dirty-handle"} {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), []byte(content), 0o600); err != nil {

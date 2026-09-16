@@ -3,6 +3,7 @@ package fs
 import "testing"
 
 func TestPathHelpers(t *testing.T) {
+	t.Parallel()
 	// Whitespace is significant: it is part of the filename.
 	if got, err := NormalizePath(" docs/guide.txt "); err != nil || got != " docs/guide.txt " {
 		t.Fatalf("expected whitespace to be preserved, got %q %v", got, err)

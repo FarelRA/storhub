@@ -8,6 +8,9 @@ import (
 )
 
 func TestMainRequiresToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runFuseHelper(t, nil)
 	if !strings.Contains(out, "GITHUB_TOKEN environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)
@@ -15,6 +18,9 @@ func TestMainRequiresToken(t *testing.T) {
 }
 
 func TestMainRequiresMountPoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runFuseHelper(t, []string{"GITHUB_TOKEN=test-token"})
 	if !strings.Contains(out, "STORHUB_MOUNT_POINT environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)
@@ -22,6 +28,9 @@ func TestMainRequiresMountPoint(t *testing.T) {
 }
 
 func TestMainRequiresProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
+	}
 	out := runFuseHelper(t, []string{"GITHUB_TOKEN=test-token", "STORHUB_MOUNT_POINT=/tmp/demo"})
 	if !strings.Contains(out, "STORHUB_PROJECT environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)

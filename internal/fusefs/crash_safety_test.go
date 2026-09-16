@@ -14,6 +14,7 @@ import (
 
 // Startup sweep must quarantine leftovers, not delete them.
 func TestStartupSweepQuarantinesLeftovers(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cacheDir, "inode-aaa"), []byte("dirty-inode"), 0o600); err != nil {
 		t.Fatal(err)
@@ -67,6 +68,7 @@ func TestStartupSweepQuarantinesLeftovers(t *testing.T) {
 // succeeds (data lives in the temp overlay until Release discards it,
 // link count zero). See TestFUSEHandleRenameAndUnlinkSemantics.
 func TestCommitDeletedHandleKeepsPosixSemantics(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
@@ -96,6 +98,7 @@ func TestCommitDeletedHandleKeepsPosixSemantics(t *testing.T) {
 
 // Read-only opens must not attach to another writer's writeState.
 func TestReadOnlyOpenDoesNotAttachWriteState(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
@@ -149,6 +152,7 @@ func TestReadOnlyOpenDoesNotAttachWriteState(t *testing.T) {
 // Setlkw must not hold s.mu while taking handle.mu (ABBA vs Release):
 // hammer grant + release concurrently; any lock-order inversion deadlocks.
 func TestSetlkwReleaseNoDeadlock(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {

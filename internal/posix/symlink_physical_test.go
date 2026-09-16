@@ -26,6 +26,7 @@ func posixConformanceService(t *testing.T) (*Service, *testBackend) {
 }
 
 func TestPosixConformanceChmodThroughSymlinkedDir(t *testing.T) {
+	t.Parallel()
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	svc, backend := posixConformanceService(t)
 	if err := svc.ChmodContext(ctx, "demo", "a/link/f.txt", 0o600); err != nil {
@@ -45,6 +46,7 @@ func TestPosixConformanceChmodThroughSymlinkedDir(t *testing.T) {
 }
 
 func TestPosixConformanceReadlinkAndCreateThroughSymlinkedDir(t *testing.T) {
+	t.Parallel()
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	svc, backend := posixConformanceService(t)
 	// readlink resolves intermediate components but not the final one.
@@ -72,6 +74,7 @@ func TestPosixConformanceReadlinkAndCreateThroughSymlinkedDir(t *testing.T) {
 }
 
 func TestPosixConformanceEscapeRejected(t *testing.T) {
+	t.Parallel()
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	svc, _ := posixConformanceService(t)
 	if err := svc.ChmodContext(ctx, "demo", "a/link/../../../../x", 0o600); err == nil {

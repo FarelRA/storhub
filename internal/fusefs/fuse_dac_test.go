@@ -50,6 +50,7 @@ func secretHub(extra ...func(*stubHub)) *stubHub {
 // With NullPermissions the server is the only DAC gate, so a
 // write-open must carry write permission on the file.
 func TestOpenWriteDeniedForNonOwner(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(secretHub(), "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -75,6 +76,7 @@ func TestOpenWriteDeniedForNonOwner(t *testing.T) {
 // Second DAC gate: identity at Flush time may differ from open time,
 // so commit re-checks write DAC under the flushing caller.
 func TestCommitRechecksWriteDAC(t *testing.T) {
+	t.Parallel()
 	var replaced int
 	hub := secretHub(func(s *stubHub) {
 		s.replaceFile = func(context.Context, string, string, string) (*meta.FileMeta, error) {
@@ -113,6 +115,7 @@ func TestCommitRechecksWriteDAC(t *testing.T) {
 // A Setattr without an attached handle must NOT touch another
 // writer's overlay; it delegates to the hub verbs, which enforce DAC.
 func TestSetattrWithoutHandleDelegatesToHub(t *testing.T) {
+	t.Parallel()
 	var truncates int
 	hub := secretHub(func(s *stubHub) {
 		s.truncateFile = func(_ context.Context, _, _ string, _ int64) (*meta.FileMeta, error) {
@@ -157,6 +160,7 @@ func TestSetattrWithoutHandleDelegatesToHub(t *testing.T) {
 // Overlay metadata mutations are refused when the caller identity
 // differs from the handle's opener.
 func TestSetattrOverlayCallerMismatchRejected(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(secretHub(), "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -186,6 +190,7 @@ func TestSetattrOverlayCallerMismatchRejected(t *testing.T) {
 // commits fail EIO instead of uploading zeros over remote data - and it
 // is unregistered so new opens get a fresh state.
 func TestQuarantinedWriteStateIsPoisoned(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -224,6 +229,7 @@ func TestQuarantinedWriteStateIsPoisoned(t *testing.T) {
 // A quarantine landing inside commitPatch's network window must
 // fail the commit with EIO, not panic on the nil temp.
 func TestCommitPatchSurvivesConcurrentQuarantine(t *testing.T) {
+	t.Parallel()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	hub := &stubHub{chunkSize: 4}
@@ -281,6 +287,7 @@ func TestCommitPatchSurvivesConcurrentQuarantine(t *testing.T) {
 // surviving name; the writer's data lands there instead of being
 // silently discarded.
 func TestHardlinkUnlinkRebindsWriteState(t *testing.T) {
+	t.Parallel()
 	var commits []string
 	hub := &stubHub{
 		replaceFile: func(_ context.Context, _, target, _ string) (*meta.FileMeta, error) {
@@ -329,6 +336,7 @@ func TestHardlinkUnlinkRebindsWriteState(t *testing.T) {
 // A node whose paths are all gone must report ESTALE, never
 // masquerade as the root directory.
 func TestDetachedNodeReportsESTALE(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -357,6 +365,7 @@ func TestDetachedNodeReportsESTALE(t *testing.T) {
 // A whitespace-only handle path must still commit; only the truly
 // empty (detached) path discards.
 func TestWhitespaceNameWritesCommit(t *testing.T) {
+	t.Parallel()
 	var replaceTargets []string
 	hub := &stubHub{
 		replaceFile: func(_ context.Context, _, target, _ string) (*meta.FileMeta, error) {
@@ -386,6 +395,7 @@ func TestWhitespaceNameWritesCommit(t *testing.T) {
 
 // df must never report free space exceeding the filesystem total.
 func TestStatfsAccountingConsistent(t *testing.T) {
+	t.Parallel()
 	hub := &stubHub{
 		statFS: func(context.Context, string) (*shfs.FSStats, error) {
 			return &shfs.FSStats{Inodes: 3, Bytes: 8192}, nil
@@ -411,6 +421,7 @@ func TestStatfsAccountingConsistent(t *testing.T) {
 // A hub that returns a nil entry with success must not be
 // dereferenced.
 func TestLinkNilEntryGuard(t *testing.T) {
+	t.Parallel()
 	// The default stubHub.LinkContext returns (nil, nil) with success -
 	// exactly the shape that used to panic.
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
@@ -427,6 +438,7 @@ func TestLinkNilEntryGuard(t *testing.T) {
 // FUSE requests carry no umask, so the server applies a default
 // mask to creation modes instead of minting 0666 files.
 func TestCallerContextCarriesDefaultUmask(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -447,6 +459,7 @@ func TestCallerContextCarriesDefaultUmask(t *testing.T) {
 // (EUCLEAN on linux, EIO elsewhere). Never reference syscall.EUCLEAN
 // directly in an untagged file.
 func TestErrnoCorruptedUsesPlatformConstant(t *testing.T) {
+	t.Parallel()
 	if got := errnoFromError(shfs.Corrupted("meta")); got != errCorruptedErrno {
 		t.Fatalf("corrupted mapping: got %v want %v", got, errCorruptedErrno)
 	}

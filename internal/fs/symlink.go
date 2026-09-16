@@ -62,6 +62,11 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 	}
 	queue := strings.Split(strings.TrimLeft(targetPath, "/"), "/")
 	resolved := make([]string, 0, len(queue))
+	// prefixes[i] is the storage-key prefix of resolved[:i] with a
+	// trailing slash ("" for the root), so each component's full path
+	// costs one concatenation instead of a fresh slice copy plus join per
+	// step. The invariant is len(prefixes) == len(resolved)+1.
+	prefixes := make([]string, 1, len(queue)+1)
 	traversed := []string{""}
 	hops := 0
 	for len(queue) > 0 {
@@ -75,9 +80,12 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 				return "", nil, fmt.Errorf("path escapes root: %s", targetPath)
 			}
 			resolved = resolved[:len(resolved)-1]
+			prefixes = prefixes[:len(prefixes)-1]
 			continue
 		}
-		current := joinComponents(resolved, name)
+		prefix := prefixes[len(prefixes)-1]
+		next := prefix + name + "/"
+		current := next[:len(next)-1]
 		file := repo.FindFile(current)
 		atFinal := len(queue) == 0
 		if file == nil || file.Symlink == "" || (!followFinal && atFinal) {
@@ -85,6 +93,7 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 				traversed = append(traversed, current)
 			}
 			resolved = append(resolved, name)
+			prefixes = append(prefixes, next)
 			continue
 		}
 		hops++
@@ -98,6 +107,7 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 		if strings.HasPrefix(target, "/") {
 			spliced = strings.Split(strings.TrimLeft(target, "/"), "/")
 			resolved = resolved[:0]
+			prefixes = prefixes[:1]
 		} else {
 			spliced = strings.Split(target, "/")
 		}
@@ -105,11 +115,4 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 	}
 	out := normalizeStoredPath(strings.Join(resolved, "/"))
 	return out, traversed, nil
-}
-
-func joinComponents(parts []string, last string) string {
-	if len(parts) == 0 {
-		return last
-	}
-	return strings.Join(append(append([]string{}, parts...), last), "/")
 }

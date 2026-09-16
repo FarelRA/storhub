@@ -39,7 +39,23 @@ const (
 	// Keep metadata operations responsive if slow readers fill the kernel's
 	// asynchronous FUSE request queue. go-fuse defaults this to 12.
 	mountMaxBackground = 256
+	// maxReadAheadBytes caps the kernel readahead window. ChunkSize is a
+	// transfer-alignment unit (default ~2 GiB), not a sane readahead:
+	// telling the kernel it may read ahead a whole chunk per stream asked
+	// for multi-GB page-cache pressure on big-RAM boxes. 1-4 MiB is the
+	// normal FUSE window (MaxWrite is already capped at 1 MiB).
+	maxReadAheadBytes = 4 << 20
 )
+
+// readAheadBytes returns the kernel readahead window for a given chunk
+// size: the normal FUSE cap, never more than one chunk.
+func readAheadBytes(chunkSize int64) int {
+	size := normalizedChunkSize(chunkSize)
+	if size > maxReadAheadBytes {
+		size = maxReadAheadBytes
+	}
+	return int(size)
+}
 
 var (
 	notifyEntryFunc  = func(node *storhubNode, name string) { _ = node.NotifyEntry(name) }
@@ -62,6 +78,17 @@ type Options struct {
 	AllowOther        bool
 	Debug             bool
 	Logger            *slog.Logger
+}
+
+// isReadOnly reports whether the caller configured a read-only mount by
+// passing "ro" among the extra FUSE mount options.
+func (o Options) isReadOnly() bool {
+	for _, opt := range o.ExtraMountOpts {
+		if opt == "ro" {
+			return true
+		}
+	}
+	return false
 }
 
 type Filesystem struct {
@@ -93,7 +120,35 @@ type Filesystem struct {
 	// mutation paths. Production mounts observe them as Notify
 	// calls; tests read them via Invalidations.
 	invalCount atomic.Uint64
+	// notifyQueued holds the notifications already dispatched (pending or
+	// in flight), guarded by notifyMu; a duplicate for the same target
+	// coalesces into the pending one instead of piling up at the kernel.
+	notifyMu     sync.Mutex
+	notifyQueued map[notifyKey]struct{}
+	// notifySlots bounds concurrent entry/delete notifications: each one
+	// is a synchronous write to /dev/fuse that can stall under kernel
+	// backpressure, and unbounded notify goroutines would queue faster
+	// than they drain.
+	notifySlots chan struct{}
 }
+
+// notifyKey identifies one pending entry/delete notification.
+type notifyKey struct {
+	kind uint8 // notifyKindEntry or notifyKindDelete
+	node *storhubNode
+	name string
+}
+
+const (
+	notifyKindEntry uint8 = iota
+	notifyKindDelete
+)
+
+// maxConcurrentNotifies bounds in-flight kernel cache notifications per
+// filesystem. Notifications are small, self-resolving writes; eight
+// concurrent writers is far past what the FUSE device consumes between
+// scheduling ticks, while keeping the mutation path's backpressure gentle.
+const maxConcurrentNotifies = 8
 
 type lockRecord struct {
 	owner uint64
@@ -261,6 +316,16 @@ type (
 // the embedder did not configure Options.OverlayBufferSize.
 const defaultOverlayBufferSize = 128 * 1024
 
+// readOnlyEntryTimeout/readOnlyAttrTimeout replace the 60s defaults for
+// read-only mounts: nothing changes under their own users, so the only
+// staleness source is remote updates, and a 60s revalidation wave re-walks
+// a big tree thousands of times per minute forever. Ten minutes cuts that
+// storm by 10x while bounding remote-visibility latency.
+const (
+	readOnlyEntryTimeout = 10 * time.Minute
+	readOnlyAttrTimeout  = 10 * time.Minute
+)
+
 func DefaultOptions() Options {
 	return Options{
 		EntryTimeout:      60 * time.Second,
@@ -386,6 +451,12 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		return nil, err
 	}
 	defaults := DefaultOptions()
+	// Read-only mounts get long kernel timeouts (see readOnlyEntryTimeout);
+	// an explicit Options timeout always wins.
+	if opts.isReadOnly() {
+		defaults.EntryTimeout = readOnlyEntryTimeout
+		defaults.AttrTimeout = readOnlyAttrTimeout
+	}
 	if opts.EntryTimeout <= 0 {
 		opts.EntryTimeout = defaults.EntryTimeout
 	}
@@ -402,7 +473,14 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		opts.ExtraMountOpts = append([]string(nil), defaults.ExtraMountOpts...)
 	}
 	if opts.Logger == nil {
-		opts.Logger = logging.WithComponent(logging.NewLogger(logging.Options{Level: logging.LevelDebug, Format: logging.FormatPretty, Color: true, Output: os.Stderr}), "fuse")
+		// Warn by default: a mount is a chatty process, and a debug-level
+		// default burns CPU formatting per-operation lines nobody reads.
+		// opts.Debug (--debug) is the explicit opt-in for the full trace.
+		level := logging.LevelWarn
+		if opts.Debug {
+			level = logging.LevelDebug
+		}
+		opts.Logger = logging.WithComponent(logging.NewLogger(logging.Options{Level: level, Format: logging.FormatPretty, Color: true, Output: os.Stderr}), "fuse")
 	}
 	cacheDir := opts.CacheDir
 	if strings.TrimSpace(cacheDir) == "" {
@@ -448,17 +526,19 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	// operators (and RecoveryInventory callers) see it immediately.
 	logRecoveryInventory(path.Join(cacheDir, "recovery"), opts.Logger)
 	fsys := &Filesystem{
-		hub:         hub,
-		project:     project,
-		opts:        opts,
-		nodes:       make(map[uint64]*storhubNode),
-		inodePaths:  map[uint64]map[string]struct{}{1: {"": {}}},
-		pathToInode: map[string]uint64{"": 1},
-		lockTable:   make(map[uint64][]lockRecord),
-		writeStates: make(map[uint64]*inodeWriteState),
-		handles:     make(map[uint64]*storhubHandle),
-		cacheDir:    cacheDir,
-		lockFile:    lockFile,
+		hub:          hub,
+		project:      project,
+		opts:         opts,
+		nodes:        make(map[uint64]*storhubNode),
+		inodePaths:   map[uint64]map[string]struct{}{1: {"": {}}},
+		pathToInode:  map[string]uint64{"": 1},
+		lockTable:    make(map[uint64][]lockRecord),
+		writeStates:  make(map[uint64]*inodeWriteState),
+		handles:      make(map[uint64]*storhubHandle),
+		cacheDir:     cacheDir,
+		lockFile:     lockFile,
+		notifyQueued: make(map[notifyKey]struct{}),
+		notifySlots:  make(chan struct{}, maxConcurrentNotifies),
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
@@ -480,7 +560,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.AllowOther = s.opts.AllowOther
 	options.MaxBackground = mountMaxBackground
 	options.MaxWrite = mountMaxIOSize
-	options.MaxReadAhead = int(s.hub.ChunkSize())
+	options.MaxReadAhead = readAheadBytes(s.hub.ChunkSize())
 	options.Options = append([]string(nil), s.opts.ExtraMountOpts...)
 	options.ExplicitDataCacheControl = true
 	options.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
@@ -1187,16 +1267,19 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 	return n.NewInode(ctx, child, child.stableAttr())
 }
 
-func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
-	ctx = n.fs.callerContext(ctx)
+// loadDir lists this directory once: the flat fuse.DirEntry stream for
+// READDIR plus a per-child EntryInfo snapshot that READDIRPLUS answers
+// EntryOut fills from, so `ls -l` costs one hub listing instead of one
+// stat per child.
+func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]*shfs.EntryInfo, syscall.Errno) {
 	dirPath, stale := n.safePath()
 	if stale != 0 {
-		return nil, stale
+		return nil, nil, stale
 	}
 	n.fs.debugf("readdir path=%s", dirPath)
 	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, dirPath)
 	if err != nil {
-		return nil, errnoFromError(err)
+		return nil, nil, errnoFromError(err)
 	}
 	result := make([]fuse.DirEntry, 0, len(entries)+2)
 	result = append(result, fuse.DirEntry{Name: ".", Ino: n.inode, Mode: syscall.S_IFDIR})
@@ -1207,16 +1290,138 @@ func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.
 		}
 	}
 	result = append(result, fuse.DirEntry{Name: "..", Ino: parentIno, Mode: syscall.S_IFDIR})
+	infos := make(map[string]*shfs.EntryInfo, len(entries))
 	for _, entry := range entries {
 		mode := uint32(syscall.S_IFREG)
-		if entry.IsDir {
+		switch {
+		case entry.IsDir:
 			mode = syscall.S_IFDIR
-		} else if entry.IsSymlink {
+		case entry.IsSymlink:
 			mode = syscall.S_IFLNK
 		}
 		result = append(result, fuse.DirEntry{Name: entry.Name, Ino: entry.Inode, Mode: mode})
+		infos[entry.Name] = dirEntryToEntryInfo(entry, path.Join(dirPath, entry.Name))
+	}
+	return result, infos, 0
+}
+
+// dirEntryToEntryInfo lifts a listing row into the full attribute view the
+// kernel's entry cache wants. The listing already carries mode, owner,
+// link count and timestamps (see shfs.DirEntry), so no re-stat is needed.
+func dirEntryToEntryInfo(e shfs.DirEntry, childPath string) *shfs.EntryInfo {
+	return &shfs.EntryInfo{
+		Path:       childPath,
+		Kind:       e.Kind,
+		IsDir:      e.IsDir,
+		IsSymlink:  e.IsSymlink,
+		Size:       e.Size,
+		Inode:      e.Inode,
+		Mode:       e.Mode,
+		UID:        e.UID,
+		GID:        e.GID,
+		NLink:      e.NLink,
+		CreatedAt:  e.CreatedAt,
+		ModifiedAt: e.ModifiedAt,
+		AccessedAt: e.AccessedAt,
+		ChangedAt:  e.ChangedAt,
+	}
+}
+
+func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
+	result, _, errno := n.loadDir(ctx)
+	if errno != 0 {
+		return nil, errno
 	}
 	return gofusefs.NewListDirStream(result), 0
+}
+
+// storhubDirHandle is the directory FileHandle returned by OpendirHandle.
+// go-fuse routes READDIRPLUS through FileLookuper on the handle, so
+// answering it from the listing snapshot fills the kernel's per-child
+// entry cache in one round-trip instead of a Lookup storm.
+type storhubDirHandle struct {
+	n       *storhubNode
+	entries []fuse.DirEntry
+	infos   map[string]*shfs.EntryInfo
+	idx     int
+	loaded  bool
+}
+
+func (n *storhubNode) OpendirHandle(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
+	_ = ctx
+	_ = flags
+	// The listing is taken lazily on the first read (mirroring go-fuse's
+	// own dirStreamAsFile): opendir stays cheap and each stream sees the
+	// tree as of its first readdir.
+	return &storhubDirHandle{n: n}, 0, 0
+}
+
+func (d *storhubDirHandle) ensureLoaded(ctx context.Context) syscall.Errno {
+	if d.loaded {
+		return 0
+	}
+	entries, infos, errno := d.n.loadDir(d.n.fs.callerContext(ctx))
+	if errno != 0 {
+		return errno
+	}
+	d.entries, d.infos, d.loaded = entries, infos, true
+	return 0
+}
+
+// Readdirent implements gofusefs.FileReaddirenter.
+func (d *storhubDirHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.Errno) {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return nil, errno
+	}
+	if d.idx >= len(d.entries) {
+		return nil, 0
+	}
+	entry := d.entries[d.idx]
+	d.idx++
+	entry.Off = uint64(d.idx)
+	return &entry, 0
+}
+
+// Seekdir implements gofusefs.FileSeekdirer: the kernel may replay from an
+// opaque offset after an interrupted read.
+func (d *storhubDirHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return errno
+	}
+	if off > uint64(len(d.entries)) {
+		return syscall.EINVAL
+	}
+	d.idx = int(off)
+	return 0
+}
+
+// Releasedir implements gofusefs.FileReleasedirer.
+func (d *storhubDirHandle) Releasedir(ctx context.Context, releaseFlags uint32) {}
+
+// Lookup implements gofusefs.FileLookuper: READDIRPLUS asks the directory
+// handle, not the node, to fill each child's EntryOut. The snapshot
+// already carries the attributes, so the fill is a map hit instead of a
+// hub stat; a name newer than the snapshot falls back to the live Lookup.
+func (d *storhubDirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return nil, errno
+	}
+	entry := d.infos[name]
+	if entry == nil {
+		return d.n.Lookup(ctx, name, out)
+	}
+	n := d.n
+	n.fs.applyPendingSize(entry)
+	child := n.fs.ensureNode(ctx, entry)
+	ino := n.attachChild(ctx, child)
+	if ino == nil {
+		// The bridge adds the returned inode to the tree unconditionally;
+		// a nil child would panic there. Report the failure instead.
+		return nil, syscall.EIO
+	}
+	fillEntryOut(out, entry, n.fs.opts)
+	return ino, 0
 }
 
 func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -2245,6 +2450,10 @@ func (w *inodeWriteState) refreshBaseSnapshotLocked() error {
 	return nil
 }
 
+// markDirtyLocked records [start,end) as dirty, merging with touching or
+// overlapping ranges. The dirty set stays sorted and disjoint. The merge
+// reuses the existing slice (the old form allocated a fresh range slice on
+// every single write).
 func (w *inodeWriteState) markDirtyLocked(start, end int64) {
 	if start < 0 {
 		start = 0
@@ -2252,32 +2461,30 @@ func (w *inodeWriteState) markDirtyLocked(start, end int64) {
 	if end <= start {
 		return
 	}
-	merged := make([]ByteRange, 0, len(w.dirtyRanges)+1)
-	inserted := false
-	for _, existing := range w.dirtyRanges {
-		if existing.End < start {
-			merged = append(merged, existing)
-			continue
-		}
-		if end < existing.Start {
-			if !inserted {
-				merged = append(merged, ByteRange{Start: start, End: end})
-				inserted = true
-			}
-			merged = append(merged, existing)
-			continue
-		}
-		if existing.Start < start {
-			start = existing.Start
-		}
-		if existing.End > end {
-			end = existing.End
-		}
+	// i: first range that touches or overlaps [start,end); everything
+	// before it is untouched. j: one past the last touching range.
+	i := 0
+	for i < len(w.dirtyRanges) && w.dirtyRanges[i].End < start {
+		i++
 	}
-	if !inserted {
-		merged = append(merged, ByteRange{Start: start, End: end})
+	j := len(w.dirtyRanges)
+	for j > i && w.dirtyRanges[j-1].Start > end {
+		j--
 	}
-	w.dirtyRanges = merged
+	if i == j {
+		w.dirtyRanges = append(w.dirtyRanges, ByteRange{})
+		copy(w.dirtyRanges[i+1:], w.dirtyRanges[i:])
+		w.dirtyRanges[i] = ByteRange{Start: start, End: end}
+		return
+	}
+	if w.dirtyRanges[i].Start < start {
+		start = w.dirtyRanges[i].Start
+	}
+	if w.dirtyRanges[j-1].End > end {
+		end = w.dirtyRanges[j-1].End
+	}
+	w.dirtyRanges[i] = ByteRange{Start: start, End: end}
+	w.dirtyRanges = append(w.dirtyRanges[:i+1], w.dirtyRanges[j:]...)
 }
 
 func (w *inodeWriteState) truncateDirtyRangesLocked(size int64) {
@@ -2906,25 +3113,26 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		if writeState.poisoned {
 			return nil, syscall.EIO
 		}
-		buf := make([]byte, len(dest))
-		n, err := writeState.readIntoLocked(ctx, buf, off)
+		// Fill the kernel's own payload buffer directly: dest is the
+		// request's outPayload, and go-fuse marshals ReadResultData from
+		// the returned slice, so the old per-read copy was pure GC churn.
+		n, err := writeState.readIntoLocked(ctx, dest, off)
 		if err != nil {
 			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
-		return fuse.ReadResultData(buf[:n]), 0
+		return fuse.ReadResultData(dest[:n]), 0
 	}
 	h.mu.Lock()
 	temp := h.temp
 	h.mu.Unlock()
 	if temp != nil {
-		buf := make([]byte, len(dest))
-		n, err := temp.ReadAt(buf, off)
+		n, err := temp.ReadAt(dest, off)
 		if err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, io.EOF) {
 			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
-		return fuse.ReadResultData(buf[:n]), 0
+		return fuse.ReadResultData(dest[:n]), 0
 	}
 	data, err := h.readFromPinned(ctx, off, int64(len(dest)))
 	if err != nil {
@@ -3564,11 +3772,20 @@ func (h *storhubHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileL
 		// handler serializes it against the check-then-Wait sequence
 		// (Wait atomically releases s.mu, so the handler only runs while
 		// we are either checking or already queued).
-		context.AfterFunc(ctx, func() {
+		//
+		// Capturing the stop-func is mandatory, not hygiene: go-fuse's
+		// per-request context is closed only on INTERRUPT or mount death,
+		// never on normal completion, so an AfterFunc registered against
+		// it would otherwise park a goroutine - and pin this Filesystem
+		// through the closure, even after unmount - for every successful
+		// blocking lock. The wake-up is only needed while parked in the
+		// lockCond.Wait() loop below; deregister on exit.
+		stop := context.AfterFunc(ctx, func() {
 			s.lockCond.L.Lock()
 			s.lockCond.Broadcast()
 			s.lockCond.L.Unlock()
 		})
+		defer stop()
 	}
 	s.lockCond.L.Lock()
 	for {
@@ -3764,11 +3981,50 @@ func safeNotifyContent(node *storhubNode) {
 	_ = node.NotifyContent(0, 0)
 }
 
+// beginNotify marks a notification pending and takes a concurrency slot.
+// It reports false when an identical notification is already queued: the
+// duplicate coalesces into the pending one (post-commit invalidation
+// storms collapse). The slot is taken synchronously so the mutation path
+// feels kernel backpressure instead of piling up unbounded notify
+// goroutines. A nil filesystem (test seam driving detached nodes) skips
+// both bookkeeping and the bound.
+func (s *Filesystem) beginNotify(key notifyKey) bool {
+	if s == nil {
+		return true
+	}
+	s.notifyMu.Lock()
+	if _, pending := s.notifyQueued[key]; pending {
+		s.notifyMu.Unlock()
+		return false
+	}
+	s.notifyQueued[key] = struct{}{}
+	s.notifyMu.Unlock()
+	s.notifySlots <- struct{}{}
+	return true
+}
+
+// endNotify clears the pending mark. It runs before the notification is
+// issued, so a mutation landing during the kernel write still enqueues
+// its own invalidation instead of being swallowed by the in-flight one.
+func (s *Filesystem) endNotify(key notifyKey) {
+	if s == nil {
+		return
+	}
+	s.notifyMu.Lock()
+	delete(s.notifyQueued, key)
+	s.notifyMu.Unlock()
+}
+
 func safeNotifyEntry(node *storhubNode, name string) {
 	if node == nil || !fsConnected(node.fs) {
 		return
 	}
 	entryFn := notifyEntryFunc
+	fs := node.fs
+	key := notifyKey{kind: notifyKindEntry, node: node, name: name}
+	if !fs.beginNotify(key) {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -3776,7 +4032,11 @@ func safeNotifyEntry(node *storhubNode, name string) {
 				n := runtime.Stack(buf, false)
 				logging.Error(nil, "panic in NotifyEntry", "panic", r, "stack", string(buf[:n]))
 			}
+			if fs != nil {
+				<-fs.notifySlots
+			}
 		}()
+		fs.endNotify(key)
 		entryFn(node, name)
 	}()
 }
@@ -3787,6 +4047,11 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	}
 	entryFn := notifyEntryFunc
 	deleteFn := notifyDeleteFunc
+	fs := parent.fs
+	key := notifyKey{kind: notifyKindDelete, node: parent, name: name}
+	if !fs.beginNotify(key) {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -3794,7 +4059,11 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 				n := runtime.Stack(buf, false)
 				logging.Error(nil, "panic in NotifyDelete", "panic", r, "stack", string(buf[:n]))
 			}
+			if fs != nil {
+				<-fs.notifySlots
+			}
 		}()
+		fs.endNotify(key)
 		if child == nil {
 			entryFn(parent, name)
 			return

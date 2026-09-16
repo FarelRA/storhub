@@ -12,6 +12,7 @@ import (
 )
 
 func TestCheckStickyDelete(t *testing.T) {
+	t.Parallel()
 	now := int64(280)
 	repo := meta.NewRepoMetadata("demo")
 	repo.EnsureRelease("v1", now)
@@ -34,6 +35,7 @@ func TestCheckStickyDelete(t *testing.T) {
 }
 
 func TestShouldUpdateAtimePolicy(t *testing.T) {
+	t.Parallel()
 	now := int64(1000)
 	old := now - 172800
 	recent := now - 3600
@@ -52,6 +54,7 @@ func TestShouldUpdateAtimePolicy(t *testing.T) {
 }
 
 func TestIdentityFromContextFailsClosed(t *testing.T) {
+	t.Parallel()
 	// An absent identity must never masquerade as anonymous root: it
 	// resolves to the local process user, and only a process that genuinely
 	// runs as root normalizes to Admin.

@@ -140,6 +140,57 @@ func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath st
 	return checkAccess(IdentityFromContext(ctx), attrs, accessRead|accessExec)
 }
 
+// CheckReadAccessResolved is CheckReadAccess for a path that
+// ResolveAccessPath already turned into a concrete key: the DAC consumes
+// the walk's traversed chain instead of re-resolving the key component by
+// component. Callers that resolved a user path must prefer these
+// *Resolved variants; the plain forms remain for callers holding only a
+// user path.
+func CheckReadAccessResolved(ctx context.Context, repo *meta.RepoMetadata, cleanPath string, traversed []string) error {
+	return checkPathAccessResolved(ctx, repo, cleanPath, traversed, accessRead)
+}
+
+// CheckWriteAccessResolved is CheckWriteAccess for an already-resolved
+// concrete key (see CheckReadAccessResolved).
+func CheckWriteAccessResolved(ctx context.Context, repo *meta.RepoMetadata, cleanPath string, traversed []string) error {
+	return checkPathAccessResolved(ctx, repo, cleanPath, traversed, accessWrite)
+}
+
+// CheckListDirAccessResolved is CheckListDirAccess for an already-resolved
+// concrete directory key (see CheckReadAccessResolved).
+func CheckListDirAccessResolved(ctx context.Context, repo *meta.RepoMetadata, dirPath string, traversed []string) error {
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+		return err
+	}
+	attrs, err := lookupNode(repo, dirPath)
+	if err != nil {
+		return err
+	}
+	if !attrs.IsDir {
+		return syscall.ENOTDIR
+	}
+	return checkAccess(IdentityFromContext(ctx), attrs, accessRead|accessExec)
+}
+
+// CheckParentWriteResolved is CheckParentWrite for an already-resolved
+// concrete key (see CheckReadAccessResolved). The parent is a directory
+// the resolution walk descended into, so its execute bit is covered by
+// the traversed chain and only the write check needs the parent node.
+func CheckParentWriteResolved(ctx context.Context, repo *meta.RepoMetadata, targetPath string, traversed []string) error {
+	parent := ParentPath(targetPath)
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+		return err
+	}
+	attrs, err := lookupNode(repo, parent)
+	if err != nil {
+		return err
+	}
+	if !attrs.IsDir {
+		return syscall.ENOTDIR
+	}
+	return checkAccess(IdentityFromContext(ctx), attrs, accessWrite|accessExec)
+}
+
 func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
 	// Symlink components are followed before checking ancestors: POSIX
 	// traversal permission applies to the directories actually walked, in
@@ -366,6 +417,22 @@ func checkPathAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath st
 	return checkAccess(IdentityFromContext(ctx), attrs, need)
 }
 
+// checkPathAccessResolved is checkPathAccess without the second
+// resolution: cleanPath is a concrete key and traversed is the chain the
+// original walk descended, which covers every ancestor of the key (in
+// walk order) plus the symlink chains a re-resolution of the key alone
+// would miss.
+func checkPathAccessResolved(ctx context.Context, repo *meta.RepoMetadata, cleanPath string, traversed []string, need int) error {
+	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+		return err
+	}
+	attrs, err := lookupNode(repo, cleanPath)
+	if err != nil {
+		return err
+	}
+	return checkAccess(IdentityFromContext(ctx), attrs, need)
+}
+
 func lookupNode(repo *meta.RepoMetadata, targetPath string) (nodeAttrs, error) {
 	clean := normalizeStoredPath(targetPath)
 	if clean == "" {
@@ -430,12 +497,37 @@ func nodeAttrsFromEntry(entry *EntryInfo) nodeAttrs {
 // normalizeIdentity canonicalizes group membership only. The Admin bit is
 // decided where an identity is *asserted* (WithIdentity), never here: a
 // uid-0 value that merely flowed through a check must not self-promote.
+//
+// The fast path matters: every DAC check re-normalizes the context
+// identity, and WithIdentity already stores a normalized one, so the hot
+// path must not clone+sort the group slice per check.
 func normalizeIdentity(id Identity) Identity {
+	if identityGroupsNormalized(id) {
+		return id
+	}
 	id.Groups = uniqueGIDs(append([]uint32(nil), id.Groups...))
 	if id.GID != 0 {
 		id.Groups = uniqueGIDs(append(id.Groups, id.GID))
 	}
 	return id
+}
+
+// identityGroupsNormalized reports whether Groups already has exactly the
+// shape normalizeIdentity produces: sorted, deduplicated, and (when the
+// primary GID is nonzero) containing it.
+func identityGroupsNormalized(id Identity) bool {
+	if !slices.IsSorted(id.Groups) {
+		return false
+	}
+	for i := 1; i < len(id.Groups); i++ {
+		if id.Groups[i] == id.Groups[i-1] {
+			return false
+		}
+	}
+	if id.GID != 0 && !slices.Contains(id.Groups, id.GID) {
+		return false
+	}
+	return true
 }
 
 func uniqueGIDs(groups []uint32) []uint32 {

@@ -1133,8 +1133,29 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 		// again force-quits instead of queueing more polite unmounts.
 		stop()
 		unmountWithRetry(fsys, args[1], a.stderr)
-		<-waitDone
+		// fsys.Wait() only returns after a SUCCESSFUL unmount. When the
+		// retry budget gave up, an unbounded join here would hang the CLI
+		// forever instead of exiting; bound it and report failure loudly.
+		if !joinWithin(waitDone, unmountJoinTimeout) {
+			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, args[1])
+			return fmt.Errorf("unmount of %s did not complete; giving up on the mount session", args[1])
+		}
 		return nil
+	}
+}
+
+// joinWithin waits for done to close, giving up after timeout. It reports
+// whether the join completed. Teardown joins must never be unbounded: a
+// wedged FUSE server or listener goroutine would otherwise turn a failed
+// unmount into a hung process.
+func joinWithin(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -1168,6 +1189,15 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 var (
 	unmountRetryBaseDelay = time.Second
 	unmountRetryBudget    = 30 * time.Second
+)
+
+// Teardown join bounds. After unmountWithRetry returns (success or giving
+// up), the session goroutines must end promptly; if they do not, the
+// mount/listener is wedged and the process must exit non-zero instead of
+// hanging on an unbounded channel receive.
+const (
+	unmountJoinTimeout = 10 * time.Second
+	restJoinTimeout    = 5 * time.Second
 )
 
 func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
@@ -1331,7 +1361,10 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	abort := func(err error) error {
 		stop()
 		unmountWithRetry(fsys, args[1], a.stderr)
-		<-fsDone
+		if !joinWithin(fsDone, unmountJoinTimeout) {
+			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, args[1])
+			return errors.Join(err, fmt.Errorf("unmount of %s did not complete", args[1]))
+		}
 		return err
 	}
 	server, opts, err := a.setupServeREST(cmd, hub, args[0], listen)
@@ -1438,12 +1471,23 @@ func (a *App) joinServe(ctx context.Context, stop context.CancelFunc, fsys fuseM
 	if !fsDown {
 		unmountWithRetry(fsys, mountPoint, a.stderr)
 	}
-	<-fsDone
+	// Both joins are bounded: fsys.Wait() only returns after a successful
+	// unmount, and a wedged listener goroutine must not turn shutdown into
+	// a hang. On timeout the process exits non-zero (loudly) instead of
+	// blocking forever with the mount retained.
+	var joinErr error
+	if !joinWithin(fsDone, unmountJoinTimeout) {
+		_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, mountPoint)
+		joinErr = errors.Join(joinErr, fmt.Errorf("unmount of %s did not complete", mountPoint))
+	}
 	// Join the listener goroutine so nothing outlives this function.
-	<-errDone
+	if !joinWithin(errDone, restJoinTimeout) {
+		_, _ = fmt.Fprintf(a.stderr, "REST listener did not stop within %s; abandoning the join\n", restJoinTimeout)
+		joinErr = errors.Join(joinErr, fmt.Errorf("REST listener did not stop within %s", restJoinTimeout))
+	}
 	// Metadata draining is NOT done here: Run's shutdownHub is the single
 	// owner of hub.Shutdown for every command.
-	return serveErr
+	return errors.Join(serveErr, joinErr)
 }
 
 func shutdownRESTServer(server *http.Server, report io.Writer) {

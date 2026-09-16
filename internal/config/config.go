@@ -151,10 +151,15 @@ func Default() Config {
 		MaxConcurrentRequests: 16,
 		TransferThroughput:    1 << 20,
 		LogOutput:             os.Stderr,
-		LogLevel:              logging.LevelDebug,
-		LogFormat:             logging.FormatPretty,
-		LogColor:              true,
-		AtimePolicy:           AtimeNo,
+		// Warn, not debug: a mount performs thousands of FS operations
+		// per minute, and a debug-level default turns every one of them
+		// into formatted stderr traffic (the "looks idle but burns"
+		// component). Explicit opt-in (--log-level debug / LogLevel)
+		// still gets the full trace.
+		LogLevel:    logging.LevelWarn,
+		LogFormat:   logging.FormatPretty,
+		LogColor:    true,
+		AtimePolicy: AtimeNo,
 		// 64 entries is a generous working set for interactive use while
 		// bounding worst-case residency; embedders touching thousands of
 		// projects should size it deliberately.

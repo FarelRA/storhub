@@ -31,6 +31,7 @@ func rootTestCtx() context.Context {
 }
 
 func TestConformanceReadThroughSymlinkedDir(t *testing.T) {
+	t.Parallel()
 	svc, _ := conformanceService(t)
 	data, err := svc.ReadFileAtContext(context.Background(), "demo", "a/link/f.txt", 0, 5)
 	if err != nil || string(data) != "hello" {
@@ -55,6 +56,7 @@ func TestConformanceReadThroughSymlinkedDir(t *testing.T) {
 }
 
 func TestConformanceWriteThroughSymlinkedDir(t *testing.T) {
+	t.Parallel()
 	ctx := rootTestCtx()
 	svc, backend := conformanceService(t)
 	if _, err := svc.WriteFileAtContext(ctx, "demo", "a/link/f.txt", 0, []byte("J")); err != nil {
@@ -83,6 +85,7 @@ func TestConformanceWriteThroughSymlinkedDir(t *testing.T) {
 }
 
 func TestConformanceReadDirThroughSymlinkedDir(t *testing.T) {
+	t.Parallel()
 	svc, _ := conformanceService(t)
 	entries, err := svc.ReadDirContext(context.Background(), "demo", "a/link")
 	if err != nil {
@@ -94,6 +97,7 @@ func TestConformanceReadDirThroughSymlinkedDir(t *testing.T) {
 }
 
 func TestConformanceUnlinkAndRmdirDoNotFollowFinalSymlink(t *testing.T) {
+	t.Parallel()
 	ctx := rootTestCtx()
 	svc, backend := conformanceService(t)
 	// rmdir of a symlink-to-dir must fail ENOTDIR, not remove the target.
@@ -116,6 +120,7 @@ func TestConformanceUnlinkAndRmdirDoNotFollowFinalSymlink(t *testing.T) {
 }
 
 func TestConformanceEscapeStillRejectedThroughOps(t *testing.T) {
+	t.Parallel()
 	svc, _ := conformanceService(t)
 	for _, path := range []string{"../x", "a/link/../../../../x"} {
 		if _, err := svc.ReadFileAtContext(context.Background(), "demo", path, 0, 1); err == nil {
@@ -125,6 +130,7 @@ func TestConformanceEscapeStillRejectedThroughOps(t *testing.T) {
 }
 
 func TestConformanceAbsoluteLinkParentChainStillGuarded(t *testing.T) {
+	t.Parallel()
 	// A 0700 directory holding an absolute link must not leak the target
 	// to a caller without exec on it, through the migrated ops too.
 	svc, backend := conformanceService(t)

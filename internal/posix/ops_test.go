@@ -119,6 +119,7 @@ func (b *testBackend) seedFile(path string) *meta.FileMeta {
 }
 
 func TestServicePOSIXWorkflow(t *testing.T) {
+	t.Parallel()
 	// The workflow runs as an explicitly identified root caller; absent
 	// identities fail closed to the process user and own nothing here.
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
@@ -191,6 +192,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 }
 
 func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(int64(400))
 	backend.seedDir("docs")
 	backend.seedFile("docs/base.txt")
@@ -240,6 +242,7 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 }
 
 func TestServicePOSIXPermissionEnforcement(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(int64(500))
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
@@ -267,6 +270,7 @@ func TestServicePOSIXPermissionEnforcement(t *testing.T) {
 }
 
 func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(int64(600))
 	backend.seedDir("docs")
 	svc := NewService(backend)
@@ -290,6 +294,7 @@ func TestServicePOSIXDirectoryMetadataUpdatesPersist(t *testing.T) {
 }
 
 func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(int64(610))
 	backend.seedDir("docs")
 	dir := backend.repo.GetDirectory("docs")
@@ -322,6 +327,7 @@ func TestServicePOSIXSymlinkUsesCallerOwnershipAndHardlinkPreservesSourceOwner(t
 // values are opaque bytes, so NULs, invalid UTF-8, and empty payloads must
 // survive set/get/list unchanged.
 func TestXAttrBinaryValuesRoundTrip(t *testing.T) {
+	t.Parallel()
 	now := int64(300)
 	backend := newTestBackend(now)
 	backend.seedDir("docs")
@@ -358,6 +364,7 @@ func TestXAttrBinaryValuesRoundTrip(t *testing.T) {
 // (all-ones) leaves that owner field unchanged instead of setting it to
 // 4294967295.
 func TestChownKeepOwnerSentinel(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(500)
 	backend.seedDir("docs")
 	svc := NewService(backend)
@@ -394,6 +401,7 @@ func TestChownKeepOwnerSentinel(t *testing.T) {
 // TestChtimesExplicitSemantics pins utimensat trinary behavior: nil omits,
 // non-nil sets exactly (epoch zero included and marked authoritative).
 func TestChtimesExplicitSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(500)
 	backend.seedFile("ts.txt")
 	svc := NewService(backend)
@@ -431,6 +439,7 @@ func TestChtimesExplicitSemantics(t *testing.T) {
 // Xattr name/value size caps and symlink target caps must be
 // enforced server-side; REST-originated calls bypass the kernel's VFS.
 func TestXAttrAndSymlinkResourceLimits(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(800)
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
@@ -459,6 +468,7 @@ func TestXAttrAndSymlinkResourceLimits(t *testing.T) {
 // Create/replace semantics are decided inside the update
 // transaction, not by a racy pre-stat.
 func TestSetXAttrCreateReplaceAtomic(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(810)
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/base.txt")
@@ -486,6 +496,7 @@ func TestSetXAttrCreateReplaceAtomic(t *testing.T) {
 // Hard-linking a directory onto itself, link(x, x), must return EPERM,
 // never (nil, nil) - the FUSE layer dereferences the returned entry.
 func TestLinkSamePathDirectoryIsEPERM(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(820)
 	backend.seedDir("docs")
 	svc := NewService(backend)
@@ -497,6 +508,7 @@ func TestLinkSamePathDirectoryIsEPERM(t *testing.T) {
 
 // A write-permitted non-owner may not plant arbitrary timestamps.
 func TestChtimesWriteOnlyCannotForgeTimestamps(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(830)
 	backend.seedDir("docs")
 	base := backend.seedFile("docs/w.txt")

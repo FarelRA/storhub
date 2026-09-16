@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 )
 
 func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
+	t.Parallel()
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fake := &stubHub{}
 	fsys, err := New(fake, "demo-project", Options{CacheDir: cacheDir})
@@ -51,6 +53,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 }
 
 func TestCallerContextSuppressesAtime(t *testing.T) {
+	t.Parallel()
 	fake := &stubHub{}
 	fsys, err := New(fake, "demo-project", Options{CacheDir: t.TempDir()})
 	if err != nil {
@@ -70,6 +73,7 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 }
 
 func TestWriteStateAndRangeHelpers(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -128,6 +132,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 }
 
 func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -173,6 +178,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 }
 
 func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -211,6 +217,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 }
 
 func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -250,6 +257,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 }
 
 func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -288,6 +296,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 }
 
 func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
 	if err != nil {
@@ -323,6 +332,7 @@ func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.
 }
 
 func TestReadFromHubReadsWithinChunks(t *testing.T) {
+	t.Parallel()
 	var lengths []int64
 	fsys, err := New(&stubHub{
 		chunkSize: 16,
@@ -361,6 +371,7 @@ func TestReadFromHubReadsWithinChunks(t *testing.T) {
 }
 
 func TestSequentialWriteCommitReplacesFile(t *testing.T) {
+	t.Parallel()
 	var replacedPath string
 	var replacedBytes []byte
 	fsys, err := New(&stubHub{
@@ -400,6 +411,7 @@ func TestSequentialWriteCommitReplacesFile(t *testing.T) {
 }
 
 func TestLockAndErrorHelpers(t *testing.T) {
+	t.Parallel()
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
@@ -453,6 +465,7 @@ func TestLockAndErrorHelpers(t *testing.T) {
 }
 
 func TestFillAndNodeAttributeHelpers(t *testing.T) {
+	t.Parallel()
 	now := int64(20)
 	entry := &shfs.EntryInfo{Path: "docs/file.txt", Inode: 4, Size: 7, UID: 1, GID: 2, NLink: 3, Mode: 0o640, ModifiedAt: now, AccessedAt: now, ChangedAt: now, IsSymlink: true}
 	var attr fuse.Attr
@@ -552,6 +565,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 }
 
 func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
+	t.Parallel()
 	now := int64(10)
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
@@ -618,6 +632,7 @@ func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 }
 
 func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
+	t.Parallel()
 	now := int64(30)
 	var replacedPath string
 	var replacedBytes []byte
@@ -684,6 +699,7 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 }
 
 func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
+	t.Parallel()
 	now := int64(31)
 	chmodCalled := false
 	fake := &stubHub{
@@ -737,6 +753,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 }
 
 func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
+	t.Parallel()
 	now := int64(32)
 	var seenIdentity shfs.Identity
 	var seenMode uint32
@@ -781,6 +798,7 @@ func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
 }
 
 func TestAccessChecksCallerPermissions(t *testing.T) {
+	t.Parallel()
 	now := int64(33)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
@@ -807,6 +825,7 @@ func TestAccessChecksCallerPermissions(t *testing.T) {
 }
 
 func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
+	t.Parallel()
 	now := int64(34)
 	fake := &stubHub{
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
@@ -829,6 +848,7 @@ func TestMknodRejectsUnsupportedSpecialFiles(t *testing.T) {
 }
 
 func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
+	t.Parallel()
 	now := int64(35)
 	patchCalls := 0
 	chmodCalls := 0
@@ -893,6 +913,7 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 // TestOpenReturnsKernelCachedFlags pins that opens hand the kernel
 // page-cached IO (zero FOPEN flags); direct IO would bypass our overlay.
 func TestOpenReturnsKernelCachedFlags(t *testing.T) {
+	t.Parallel()
 	now := int64(36)
 	fake := &stubHub{
 		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
@@ -1015,14 +1036,22 @@ func TestSafeNotifySkipsWhenFilesystemUnmounted(t *testing.T) {
 	safeNotifyEntry(node, "swap")
 	safeNotifyDelete(node, "swap", nil)
 
+	// The unmounted guard short-circuits before any dispatch goroutine is
+	// spawned. If one had been spawned it would be runnable immediately,
+	// and its send is buffered and non-blocking, so repeated yields give
+	// it ample scheduling windows - no wall-clock wait needed.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+	}
 	select {
 	case <-dispatched:
 		t.Fatal("notification dispatched without a FUSE connection")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
 func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -1043,6 +1072,7 @@ func TestReadIntoLockedFailsOnZeroProgressBaseRead(t *testing.T) {
 // The overlay is honored only for a handle attached to the write
 // state. A truncate through the open handle stays local until commit.
 func TestSetattrWithAttachedHandleUsesActiveWriteState(t *testing.T) {
+	t.Parallel()
 	now := int64(40)
 	var truncates int
 	var replaced []byte
@@ -1369,6 +1399,7 @@ func (s *stubHub) ChunkSize() int64 {
 }
 
 func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys, err := New(&stubHub{
 		replaceFile: func(context.Context, string, string, string) (*meta.FileMeta, error) {
@@ -1424,6 +1455,7 @@ func TestReleaseQuarantinesOverlayWhenCommitFails(t *testing.T) {
 }
 
 func TestCloseQuarantinesDirtyWriteStates(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	var failOnce atomic.Bool
 	failOnce.Store(true)
@@ -1502,6 +1534,7 @@ func newMountedStubFS(t *testing.T, cacheDir string, hub Hub) *Filesystem {
 // (unlink) materializes a private snapshot that the handle itself removes
 // on Release.
 func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
+	t.Parallel()
 	now := int64(60)
 	cacheDir := t.TempDir()
 	hub := &stubHub{}
@@ -1553,6 +1586,7 @@ func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
 // a displaced write handle is owned by the write state and removed when
 // the last reference releases.
 func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
+	t.Parallel()
 	now := int64(61)
 	cacheDir := t.TempDir()
 	hub := &stubHub{}
@@ -1595,6 +1629,7 @@ func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
 // temp does not cover the whole file stages a commit snapshot, uploads it,
 // and removes it on every exit path of the commit frame.
 func TestPartialReplaceCommitCleansCommitSnapshot(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var replaced []byte
 	base := []byte("ABCDEFGHIJKLMNOP")
@@ -1637,6 +1672,7 @@ func TestPartialReplaceCommitCleansCommitSnapshot(t *testing.T) {
 // range snapshot, hands it to the backend, and removes it even though the
 // commit frame released state.mu in between.
 func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var rewrittenInput string
 	hub := &stubHub{chunkSize: 4}
@@ -1721,7 +1757,7 @@ func spawnFlockHolder(t *testing.T, lockPath string) int {
 		if time.Now().After(deadline) {
 			t.Fatal("foreign holder never acquired the mount lock")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -1738,6 +1774,7 @@ func exitedProcessPid(t *testing.T) int {
 }
 
 func TestMountLockRejectsSecondLiveMount(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	lockPath := filepath.Join(cacheDir, mountLockFileName)
 	holder := spawnFlockHolder(t, lockPath)
@@ -1758,6 +1795,7 @@ func TestMountLockRejectsSecondLiveMount(t *testing.T) {
 }
 
 func TestMountLockReleasedOnCloseAllowsRemount(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
@@ -1782,6 +1820,7 @@ func TestMountLockReleasedOnCloseAllowsRemount(t *testing.T) {
 // mounts inside a single process - exactly where a pid heuristic would
 // have waved the collision through.
 func TestMountLockRejectsSameProcessRemount(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
 	if err != nil {
@@ -1802,6 +1841,7 @@ func TestMountLockRejectsSameProcessRemount(t *testing.T) {
 }
 
 func TestMountLockTakesOverStaleClaim(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	dead := exitedProcessPid(t)
 	lockPath := filepath.Join(cacheDir, mountLockFileName)
@@ -1829,6 +1869,7 @@ func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 // Shrinking then regrowing must serve zeros for the regrown region, never
 // stale bytes from before the shrink.
 func TestSetSizeRegrowServesZeros(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: t.TempDir(), OverlayBufferSize: 4})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -1865,6 +1906,7 @@ func TestSetSizeRegrowServesZeros(t *testing.T) {
 }
 
 func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -1905,6 +1947,7 @@ func TestOnForgetEvictsNodeBookkeeping(t *testing.T) {
 }
 
 func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -1970,6 +2013,7 @@ func newPatchTestHandle(fsys *Filesystem, inode uint64, state *inodeWriteState) 
 // EVERY range dirty and the retry replays the identical batch - no range
 // can be half-applied, and nothing duplicates.
 func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var batches [][]shfs.RangeEdit
 	failFirst := true
@@ -2067,6 +2111,7 @@ func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
 // retains the dirty set: the next Fsync/Release retries from where the
 // cancellation hit.
 func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	hub := &stubHub{chunkSize: 4}
 	hub.patchRanges = func(_ []shfs.RangeEdit) (*meta.FileMeta, error) {
@@ -2100,6 +2145,7 @@ func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
 // shared inodeWriteState: writes serialize on opMu, both land in the overlay,
 // and the final commit uploads the merged content exactly once.
 func TestConcurrentFDsShareWriteState(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var patched []struct {
 		off    int64
@@ -2194,6 +2240,7 @@ func TestConcurrentFDsShareWriteState(t *testing.T) {
 }
 
 func TestFallocateExtendsAndCommitsZeros(t *testing.T) {
+	t.Parallel()
 	var replacedBytes []byte
 	fsys, err := New(&stubHub{
 		replaceFile: func(_ context.Context, _ string, _ string, inputPath string) (*meta.FileMeta, error) {
@@ -2230,6 +2277,7 @@ func TestFallocateExtendsAndCommitsZeros(t *testing.T) {
 }
 
 func TestFallocateKeepSizeLeavesLogicalSize(t *testing.T) {
+	t.Parallel()
 	var replacedBytes []byte
 	fsys, err := New(&stubHub{
 		replaceFile: func(_ context.Context, _ string, _ string, inputPath string) (*meta.FileMeta, error) {
@@ -2264,6 +2312,7 @@ func TestFallocateKeepSizeLeavesLogicalSize(t *testing.T) {
 }
 
 func TestFallocateInsideExistingSizeKeepsContent(t *testing.T) {
+	t.Parallel()
 	var replacedBytes []byte
 	fsys, err := New(&stubHub{
 		replaceFile: func(_ context.Context, _ string, _ string, inputPath string) (*meta.FileMeta, error) {
@@ -2298,6 +2347,7 @@ func TestFallocateInsideExistingSizeKeepsContent(t *testing.T) {
 }
 
 func TestFallocateReadOnlyHandleReturnsEBADF(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -2310,6 +2360,7 @@ func TestFallocateReadOnlyHandleReturnsEBADF(t *testing.T) {
 }
 
 func TestFallocateRejectsUnsupportedModes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		off  uint64
@@ -2348,6 +2399,7 @@ func TestFallocateRejectsUnsupportedModes(t *testing.T) {
 // garbage (construction owns all future temps), while recovery/ holds
 // quarantined data and must survive untouched.
 func TestNewSweepsStaleOverlayTemps(t *testing.T) {
+	t.Parallel()
 	cacheDir := t.TempDir()
 	stale := []string{
 		filepath.Join(cacheDir, "handle-1234"),
@@ -2388,6 +2440,7 @@ func TestNewSweepsStaleOverlayTemps(t *testing.T) {
 // layout. Full-file materialization is reserved for destructive-path
 // snapshots (unlink/rename-over), never for reading.
 func TestReadonlyOpenServesPinnedRangesWithoutFullDownload(t *testing.T) {
+	t.Parallel()
 	now := int64(50)
 	hub := &stubHub{chunkSize: 64}
 	hub.loadReadonly = func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {

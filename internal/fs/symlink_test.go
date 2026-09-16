@@ -11,6 +11,7 @@ import (
 )
 
 func TestSymlinkResolution(t *testing.T) {
+	t.Parallel()
 	m := meta.NewRepoMetadata("demo")
 	m.EnsureDirectory("docs", 1)
 	m.EnsureDirectory("target", 1)
@@ -60,6 +61,7 @@ func TestSymlinkResolution(t *testing.T) {
 // directory containing "link -> /pub/x" must not leak the link's existence
 // or target to a caller with no permission on the directory.
 func TestCheckTraverseAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
+	t.Parallel()
 	m := meta.NewRepoMetadata("demo")
 	m.EnsureDirectory("v", 1)
 	m.EnsureDirectory("pub", 1)
@@ -91,6 +93,7 @@ func TestCheckTraverseAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
 // The hop budget must match Linux's SYMLOOP_MAX (40); legitimate
 // deep chains get spurious ELOOP below it.
 func TestResolvePathDeepChainWithinLinuxSymlinkLimit(t *testing.T) {
+	t.Parallel()
 	m := meta.NewRepoMetadata("demo")
 	m.UpsertFile("leaf", meta.FileMeta{Size: 1, Inode: 2}, 1)
 	for i := 0; i < 30; i++ {

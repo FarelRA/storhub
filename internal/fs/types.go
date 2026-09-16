@@ -124,6 +124,14 @@ type DirEntry struct {
 	Inode     uint64            `json:"inode,omitempty"`
 	Mode      uint32            `json:"mode,omitempty"`
 	NLink     uint32            `json:"nlink,omitempty"`
+	UID       uint32            `json:"uid,omitempty"`
+	GID       uint32            `json:"gid,omitempty"`
+	// Timestamps complete the attribute view so a listing can answer
+	// stat-style queries (FUSE READDIRPLUS) without a per-child re-stat.
+	CreatedAt  int64 `json:"created_at,omitempty"`
+	ModifiedAt int64 `json:"modified_at,omitempty"`
+	AccessedAt int64 `json:"accessed_at,omitempty"`
+	ChangedAt  int64 `json:"changed_at,omitempty"`
 }
 
 type FSStats struct {
