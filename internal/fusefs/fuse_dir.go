@@ -1,0 +1,312 @@
+package fusefs
+
+import (
+	"context"
+	"path"
+	"syscall"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
+	gofusefs "github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
+)
+
+// loadDir lists this directory once: the flat fuse.DirEntry stream for
+// READDIR plus a per-child EntryInfo snapshot that READDIRPLUS answers
+// EntryOut fills from, so `ls -l` costs one hub listing instead of one
+// stat per child.
+func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]*shfs.EntryInfo, syscall.Errno) {
+	dirPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, nil, stale
+	}
+	n.fs.debugf("readdir path=%s", dirPath)
+	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, dirPath)
+	if err != nil {
+		return nil, nil, errnoFromError(err)
+	}
+	result := make([]fuse.DirEntry, 0, len(entries)+2)
+	result = append(result, fuse.DirEntry{Name: ".", Ino: n.inode, Mode: syscall.S_IFDIR})
+	parentIno := uint64(1)
+	if _, parent := n.Parent(); parent != nil {
+		if ino := parent.StableAttr().Ino; ino != 0 {
+			parentIno = ino
+		}
+	}
+	result = append(result, fuse.DirEntry{Name: "..", Ino: parentIno, Mode: syscall.S_IFDIR})
+	infos := make(map[string]*shfs.EntryInfo, len(entries))
+	for _, entry := range entries {
+		mode := uint32(syscall.S_IFREG)
+		switch {
+		case entry.IsDir:
+			mode = syscall.S_IFDIR
+		case entry.IsSymlink:
+			mode = syscall.S_IFLNK
+		}
+		result = append(result, fuse.DirEntry{Name: entry.Name, Ino: entry.Inode, Mode: mode})
+		infos[entry.Name] = dirEntryToEntryInfo(entry, path.Join(dirPath, entry.Name))
+	}
+	return result, infos, 0
+}
+
+// dirEntryToEntryInfo lifts a listing row into the full attribute view the
+// kernel's entry cache wants. The listing already carries mode, owner,
+// link count and timestamps (see shfs.DirEntry), so no re-stat is needed.
+func dirEntryToEntryInfo(e shfs.DirEntry, childPath string) *shfs.EntryInfo {
+	return &shfs.EntryInfo{
+		Path:       childPath,
+		Kind:       e.Kind,
+		IsDir:      e.IsDir,
+		IsSymlink:  e.IsSymlink,
+		Size:       e.Size,
+		Inode:      e.Inode,
+		Mode:       e.Mode,
+		UID:        e.UID,
+		GID:        e.GID,
+		NLink:      e.NLink,
+		CreatedAt:  e.CreatedAt,
+		ModifiedAt: e.ModifiedAt,
+		AccessedAt: e.AccessedAt,
+		ChangedAt:  e.ChangedAt,
+	}
+}
+
+func (n *storhubNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
+	ctx = n.fs.callerContext(ctx)
+	result, _, errno := n.loadDir(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
+	return gofusefs.NewListDirStream(result), 0
+}
+
+// storhubDirHandle is the directory FileHandle returned by OpendirHandle.
+// go-fuse routes READDIRPLUS through FileLookuper on the handle, so
+// answering it from the listing snapshot fills the kernel's per-child
+// entry cache in one round-trip instead of a Lookup storm.
+type storhubDirHandle struct {
+	n       *storhubNode
+	entries []fuse.DirEntry
+	infos   map[string]*shfs.EntryInfo
+	idx     int
+	loaded  bool
+}
+
+func (n *storhubNode) OpendirHandle(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
+	_ = ctx
+	_ = flags
+	// The listing is taken lazily on the first read (mirroring go-fuse's
+	// own dirStreamAsFile): opendir stays cheap and each stream sees the
+	// tree as of its first readdir.
+	return &storhubDirHandle{n: n}, 0, 0
+}
+
+func (d *storhubDirHandle) ensureLoaded(ctx context.Context) syscall.Errno {
+	if d.loaded {
+		return 0
+	}
+	entries, infos, errno := d.n.loadDir(d.n.fs.callerContext(ctx))
+	if errno != 0 {
+		return errno
+	}
+	d.entries, d.infos, d.loaded = entries, infos, true
+	return 0
+}
+
+// Readdirent implements gofusefs.FileReaddirenter.
+func (d *storhubDirHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.Errno) {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return nil, errno
+	}
+	if d.idx >= len(d.entries) {
+		return nil, 0
+	}
+	entry := d.entries[d.idx]
+	d.idx++
+	entry.Off = uint64(d.idx)
+	return &entry, 0
+}
+
+// Seekdir implements gofusefs.FileSeekdirer: the kernel may replay from an
+// opaque offset after an interrupted read.
+func (d *storhubDirHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return errno
+	}
+	if off > uint64(len(d.entries)) {
+		return syscall.EINVAL
+	}
+	d.idx = int(off)
+	return 0
+}
+
+// Releasedir implements gofusefs.FileReleasedirer.
+func (d *storhubDirHandle) Releasedir(ctx context.Context, releaseFlags uint32) {}
+
+// Lookup implements gofusefs.FileLookuper: READDIRPLUS asks the directory
+// handle, not the node, to fill each child's EntryOut. The snapshot
+// already carries the attributes, so the fill is a map hit instead of a
+// hub stat; a name newer than the snapshot falls back to the live Lookup.
+func (d *storhubDirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	if errno := d.ensureLoaded(ctx); errno != 0 {
+		return nil, errno
+	}
+	entry := d.infos[name]
+	if entry == nil {
+		return d.n.Lookup(ctx, name, out)
+	}
+	n := d.n
+	n.fs.applyPendingSize(entry)
+	child := n.fs.ensureNode(ctx, entry)
+	ino := n.attachChild(ctx, child)
+	if ino == nil {
+		// The bridge adds the returned inode to the tree unconditionally;
+		// a nil child would panic there. Report the failure instead.
+		return nil, syscall.EIO
+	}
+	fillEntryOut(out, entry, n.fs.opts)
+	return ino, 0
+}
+
+func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
+	ctx = shfs.WithCreateMode(n.fs.callerContext(ctx), mode)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return nil, stale
+	}
+	childPath := path.Join(parentPath, name)
+	if err := n.fs.hub.MkdirContext(ctx, n.fs.project, childPath); err != nil {
+		return nil, errnoFromError(err)
+	}
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
+	if err != nil {
+		return nil, errnoFromError(err)
+	}
+	child := n.fs.ensureNode(ctx, entry)
+	ino := n.attachChild(ctx, child)
+	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.notifyEntryForPath(parentPath, name)
+	n.fs.debugf("mkdir path=%s mode=%#o", childPath, mode)
+	return ino, 0
+}
+
+func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	childPath := path.Join(parentPath, name)
+	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
+	if entry != nil {
+		if err := n.fs.materializeHandlesForPath(ctx, entry.Inode, childPath); err != nil {
+			return errnoFromError(err)
+		}
+	}
+	if err := n.fs.hub.UnlinkContext(ctx, n.fs.project, childPath); err != nil {
+		return errnoFromError(err)
+	}
+	if entry != nil {
+		remaining := n.fs.dropPath(entry.Inode, childPath)
+		n.fs.rebindHandlesAfterPathChange(entry.Inode, childPath, remaining)
+		n.notifyDelete(name, entry.Inode)
+	} else {
+		n.notifyEntry(name)
+	}
+	n.fs.debugf("unlink path=%s", childPath)
+	return 0
+}
+
+func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
+	parentPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	childPath := path.Join(parentPath, name)
+	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
+	if err := n.fs.hub.RmdirContext(ctx, n.fs.project, childPath); err != nil {
+		return errnoFromError(err)
+	}
+	if entry != nil {
+		n.fs.dropPath(entry.Inode, childPath)
+		n.notifyDelete(name, entry.Inode)
+	} else {
+		n.notifyEntry(name)
+	}
+	n.fs.debugf("rmdir path=%s", childPath)
+	return 0
+}
+
+func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusefs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	ctx = n.fs.callerContext(ctx)
+	oldDirPath, stale := n.safePath()
+	if stale != 0 {
+		return stale
+	}
+	parentNode, ok := newParent.(*storhubNode)
+	if !ok {
+		return syscall.EINVAL
+	}
+	newDirPath, stale := parentNode.safePath()
+	if stale != 0 {
+		return stale
+	}
+	oldPath := path.Join(oldDirPath, name)
+	newPath := path.Join(newDirPath, newName)
+	if flags&renameExchange != 0 || flags&renameWhiteout != 0 {
+		return syscall.EINVAL
+	}
+	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
+	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
+	// The pre-stat is only a fast path; the authoritative no-replace
+	// decision is enforced inside RenameContext's transaction via
+	// shfs.WithNoReplace, so a target created between this stat and the
+	// transaction still fails with EEXIST instead of being clobbered.
+	var renameOpts []shfs.MutateOption
+	if flags&renameNoReplace != 0 {
+		if newEntry != nil {
+			return syscall.EEXIST
+		}
+		renameOpts = append(renameOpts, shfs.WithNoReplace())
+	}
+	// A handle open on the replaced target must keep serving its own
+	// snapshot: materialize before the metadata swap removes the path.
+	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
+		if err := n.fs.materializeHandlesForPath(ctx, newEntry.Inode, newPath); err != nil {
+			return errnoFromError(err)
+		}
+	}
+	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath, renameOpts...); err != nil {
+		return errnoFromError(err)
+	}
+	if oldEntry != nil {
+		n.fs.remapPaths(oldPath, newPath)
+	}
+	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
+		remaining := n.fs.dropPath(newEntry.Inode, newPath)
+		n.fs.rebindHandlesAfterPathChange(newEntry.Inode, newPath, remaining)
+	}
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
+	if err == nil {
+		n.fs.rememberPath(entry.Inode, newPath)
+	} else {
+		// The mapping for newPath was just dropped above; if the
+		// re-stat fails the renamed node has no path left. Swallowing the
+		// error silently loses the mapping - report it,
+		// and re-register from the entry we already know when possible.
+		n.fs.errorf("rename post-stat failed path=%s err=%v", newPath, err)
+		if oldEntry != nil {
+			n.fs.rememberPath(oldEntry.Inode, newPath)
+		}
+	}
+	// Both parents cached the old namespace; evict both or lookups serve
+	// the pre-rename tree until EntryTimeout expires.
+	oldDir, oldBase := shfs.ParentPath(oldPath), path.Base(oldPath)
+	newDir, newBase := shfs.ParentPath(newPath), path.Base(newPath)
+	n.fs.notifyEntryForPath(oldDir, oldBase)
+	if newDir != oldDir || newBase != oldBase {
+		n.fs.notifyEntryForPath(newDir, newBase)
+	}
+	n.fs.debugf("rename old=%s new=%s flags=%#x", oldPath, newPath, flags)
+	return 0
+}

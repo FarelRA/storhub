@@ -1,0 +1,816 @@
+package rest
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
+	metadata "github.com/FarelRA/storhub/internal/metadata"
+	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// restrictedClient wraps a Client and restricts access to a specific project and path
+// readOnlyShare supplies every mutating Client method as a denial. It is
+// embedded by restrictedClient so the read-only-share policy lives in
+// exactly ONE place: a future Client method cannot silently delegate to the
+// underlying client, because the compiler forces a decision here - either a
+// new denial lands in this struct (policy stays centralized) or an explicit,
+// reviewed override is written on restrictedClient itself.
+type readOnlyShare struct{}
+
+func errReadOnly() error { return errForbidden("access denied: read-only share") }
+
+func (readOnlyShare) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) MkdirContext(ctx context.Context, project, dirPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) error {
+	return errReadOnly()
+}
+
+// Compile-time proof that the auth wrappers implement the FULL Client
+// interface: a Client method added without a corresponding gate in either
+// wrapper fails the build here instead of silently falling through to the
+// raw client at runtime (clientFor fails closed, but a missing method on a
+// wrapper that still satisfies Client via embedding would delegate by
+// accident).
+var (
+	_ Client = (*restrictedClient)(nil)
+)
+
+// restrictedClient wraps a Client and restricts access to a specific project
+// and path. Read methods enforce the shared-prefix check then delegate;
+// every mutation is denied by the embedded readOnlyShare.
+type restrictedClient struct {
+	readOnlyShare
+	underlying     Client
+	allowedProject string
+	allowedPath    string
+}
+
+func newRestrictedClient(underlying Client, project, path string) *restrictedClient {
+	allowedPath, err := canonicalSharePath(path)
+	if err != nil {
+		allowedPath = strings.Trim(strings.TrimSpace(path), "/")
+	}
+	return &restrictedClient{
+		underlying:     underlying,
+		allowedProject: project,
+		allowedPath:    allowedPath,
+	}
+}
+
+func (c *restrictedClient) checkAccess(project, targetPath string) error {
+	if project != c.allowedProject {
+		return errForbidden("access denied: project not shared")
+	}
+	canonicalTargetPath, err := canonicalSharePath(targetPath)
+	if err != nil {
+		return errForbidden("access denied: path not shared")
+	}
+	if hasPathPrefix(canonicalTargetPath, c.allowedPath) {
+		return nil
+	}
+	return errForbidden("access denied: path not shared")
+}
+
+func (c *restrictedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
+	if err := c.checkAccess(project, filePath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ReadFileAtContext(ctx, project, filePath, offset, length)
+}
+
+func (c *restrictedClient) StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.StatPathContext(ctx, project, targetPath)
+}
+
+func (c *restrictedClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
+	if err := c.checkAccess(project, dirPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ReadDirContext(ctx, project, dirPath)
+}
+
+// StatFS and revision listing are denied with share-specific messages:
+// aggregate stats and history leak information beyond the shared subtree.
+func (c *restrictedClient) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
+	return nil, errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
+	return nil, errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+// Share visitors never learn the project's revision: like stats and
+// history, it is metadata beyond the shared subtree.
+func (c *restrictedClient) RevisionContext(ctx context.Context, project string) (string, error) {
+	return "", errForbidden("access denied: share metadata is limited to the shared path")
+}
+
+func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
+	if err := c.checkAccess(project, linkPath); err != nil {
+		return "", err
+	}
+	return c.underlying.ReadlinkContext(ctx, project, linkPath)
+}
+
+func (c *restrictedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.GetXAttrContext(ctx, project, targetPath, attr)
+}
+
+func (c *restrictedClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return nil, err
+	}
+	return c.underlying.ListXAttrContext(ctx, project, targetPath)
+}
+
+type shareRequest struct {
+	Path string `json:"path"`
+	// ExpiresInSeconds expresses the lifetime in plain seconds.
+	ExpiresInSeconds int64 `json:"expires_in_seconds,omitempty"`
+}
+
+type shareResponse struct {
+	ID          string `json:"id"`
+	Project     string `json:"project"`
+	Path        string `json:"path"`
+	URL         string `json:"url"`
+	DownloadURL string `json:"download_url,omitempty"`
+	// Token is the signed share JWT, returned ONLY on creation (programmatic
+	// bearer use); listings never carry it so capabilities do not leak
+	// through read endpoints.
+	Token     string `json:"token,omitempty"`
+	ExpiresAt string `json:"expires_at"`
+	IsDir     bool   `json:"is_dir"`
+}
+
+type shareClaims struct {
+	jwt.RegisteredClaims
+	ID      string `json:"id"`
+	Project string `json:"prj"`
+	Path    string `json:"pth"`
+	IsDir   bool   `json:"dir"`
+}
+
+type sharesResponse struct {
+	Project string          `json:"project"`
+	Shares  []shareResponse `json:"shares"`
+}
+
+// Share redemption follows ONE pathway: the signed JWT is the credential
+// and the source of truth. GET /shares/{token} verifies it statelessly and
+// answers from claims - no registry lookup, so links survive restarts (the
+// {id} segment here IS the token; the short registry ID only addresses the
+// management plane under /projects/{p}/shares). Revocation: DELETE marks
+// the share ID revoked in the handler's own registry (checked by the auth
+// middleware and the redemption routes), killing the link immediately for
+// this handler; revocation is per-handler by design - permanent revocation
+// is key rotation.
+func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
+	segment := chi.URLParam(r, "id")
+	claims, err := h.parseShareToken(segment)
+	if err != nil || strings.TrimSpace(claims.Path) == "" || strings.TrimSpace(claims.Project) == "" {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	if h.isRevoked(claims.ID) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, shareResponse{
+		ID:        claims.ID,
+		Project:   claims.Project,
+		Path:      claims.Path,
+		URL:       "/?share=" + url.QueryEscape(segment),
+		Token:     segment,
+		ExpiresAt: claims.ExpiresAt.Time.UTC().Format(time.RFC3339),
+		IsDir:     claims.IsDir,
+	})
+}
+
+func (h *restHandler) handleProjectShares(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	switch r.Method {
+	case http.MethodGet:
+		h.listProjectShares(w, r, project)
+	case http.MethodPost:
+		h.createProjectShare(w, r, project)
+	default:
+		h.methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (h *restHandler) handleProjectShare(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	shareID := chi.URLParam(r, "shareID")
+	switch r.Method {
+	case http.MethodDelete:
+		h.deleteProjectShare(w, r, project, shareID)
+	case http.MethodGet:
+		h.getProjectShare(w, r, project, shareID)
+	default:
+		h.methodNotAllowed(w, http.MethodGet, http.MethodDelete)
+	}
+}
+
+func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request, project string) {
+	var req shareRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	sharePath, err := canonicalSharePath(req.Path)
+	if err != nil {
+		h.writeMappedError(w, errBadRequest("invalid share path"))
+		return
+	}
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, sharePath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	expiresIn := time.Duration(0)
+	if req.ExpiresInSeconds > 0 {
+		expiresIn = time.Duration(req.ExpiresInSeconds) * time.Second
+	}
+	if expiresIn <= 0 {
+		expiresIn = h.opts.ShareTTL
+	}
+	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
+		expiresIn = max
+	}
+	// Ownership gate: remember who minted the share so
+	// list/get/delete can be restricted to creator ∪ admin. The identity is
+	// the one attached by the auth middleware (process identity under
+	// AllowAnonymous, where every caller is the operator anyway).
+	creator := shfs.IdentityFromContext(r.Context())
+	record, err := h.newShareRecord(project, sharePath, entry.IsDir, expiresIn, creator.UID, creator.Admin)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	// 201 with Location: a new resource was created and is addressable at
+	// the project-shares collection, consistent with REST creation
+	// semantics everywhere else in this API.
+	w.Header().Set("Location", path.Join(h.opts.BasePath, "projects", url.PathEscape(project), "shares", record.ID))
+	created := h.shareResponse(record)
+	created.Token = record.Token
+	h.writeJSON(w, http.StatusCreated, created)
+}
+
+func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	creator := shfs.IdentityFromContext(r.Context())
+	shares := h.projectShareResponses(project, creator.UID, creator.Admin)
+	h.writeJSON(w, http.StatusOK, sharesResponse{Project: project, Shares: shares})
+}
+
+// canManageShare is the ownership gate for the share management plane:
+// only the creator of a share (or an admin) may list, read, or revoke it.
+func canManageShare(record *shareRecord, callerUID uint32, callerAdmin bool) bool {
+	return callerAdmin || callerUID == record.CreatorUID
+}
+
+func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	record, ok := h.lookupShare(shareID)
+	if !ok || record.Project != project {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	caller := shfs.IdentityFromContext(r.Context())
+	if !canManageShare(record, caller.UID, caller.Admin) {
+		// 404, not 403: do not leak which share IDs exist in this project.
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	// The single-get endpoint is a read surface: like the listing, it must
+	// never re-expose the signed token (or mint credential-bearing URLs).
+	record.Token = ""
+	h.writeJSON(w, http.StatusOK, h.shareResponse(record))
+}
+
+func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	record, ok := h.lookupShare(shareID)
+	if !ok || record.Project != project {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	caller := shfs.IdentityFromContext(r.Context())
+	if !canManageShare(record, caller.UID, caller.Admin) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	h.removeShare(record.ID)
+	h.revokeShare(record.ID, record.ExpiresAt) // stateless redemption stops immediately
+	h.sweepExpiredShares()
+	// 204 like every other successful delete in this API (nodes, projects).
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// shareRedemptionContext mirrors what authMiddleware does for a share token
+// used as a Bearer credential: the redemption routes run as the
+// unauthenticated "nobody" visitor, scoped to the shared path. Without this
+// the fs layer falls back to the SERVER PROCESS identity (and UID 0
+// normalizes to admin), so a share would grant more than "what path
+// permissions grant" - the exact drift this policy exists to prevent.
+func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaims) context.Context {
+	identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
+	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
+}
+
+// ---- Signed single-file download links -------------------------------------
+//
+// One mechanism reused, not a second token system: these are shareClaims
+// JWTs (dl=true, pth=exact file, 5-minute life) verified by parseShareToken.
+// Stateless by construction - no registry, self-expiring, valid across
+// restarts within their window - and they delegate streaming to
+// handleContentRead so Range/206 resume, ETag and HEAD come for free.
+
+func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
+	// Same single pathway as info: the token (query here) is the credential.
+	// Shares are always download-capable after normalization; no dl flag check.
+	claims, err := h.parseShareToken(r.URL.Query().Get("token"))
+	if err != nil || h.isRevoked(claims.ID) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	targetPath, err := h.resolveSharePath(claims, r.URL.Query().Get("path"))
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	r = r.WithContext(h.shareRedemptionContext(r, claims))
+	h.serveDownloadPath(w, r, claims.Project, targetPath)
+}
+
+func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
+	parentToken := r.URL.Query().Get("token")
+	if parentToken == "" {
+		parentToken = requestBearerToken(r)
+	}
+	claims, err := h.parseShareToken(parentToken)
+	if err != nil || h.isRevoked(claims.ID) {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	// Only the share's own ID can derive children: URL id must match token jti
+	// when present, but allow mismatch for query-token alias? Enforce exact match.
+	urlID := chi.URLParam(r, "id")
+	if urlID != "" && urlID != claims.ID {
+		h.writeError(w, http.StatusForbidden, "forbidden", "share id mismatch")
+		return
+	}
+	// Derivation reads through the same nobody-identity, path-scoped client
+	// as redemption: the visitor's DAC, not the server's.
+	r = r.WithContext(h.shareRedemptionContext(r, claims))
+	var req shareRequest
+	if err := h.decodeJSON(r, &req); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	// Target path defaults to parent path when empty (derive same file).
+	targetRaw := strings.TrimSpace(req.Path)
+	if targetRaw == "" {
+		targetRaw = claims.Path
+	}
+	sharePath, err := canonicalSharePath(targetRaw)
+	if err != nil {
+		h.writeMappedError(w, errBadRequest("invalid share path"))
+		return
+	}
+	if !hasPathPrefix(sharePath, claims.Path) {
+		h.writeMappedError(w, errForbidden("access denied: path not shared"))
+		return
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if remaining <= 0 {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	expiresIn := remaining
+	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
+		expiresIn = max
+	}
+	// Stat to learn IsDir for new record (scoped + nobody identity, above).
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), claims.Project, sharePath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	// A derived share is a sub-capability of its parent: ownership follows
+	// the parent record when it is still in the registry, so the original
+	// sharer keeps management rights. Unknown parents (e.g. after a
+	// restart) belong to the redeeming visitor - the nobody identity.
+	creatorUID, creatorAdmin := nobodyUID, false
+	if parent, known := h.lookupShare(claims.ID); known {
+		creatorUID, creatorAdmin = parent.CreatorUID, parent.CreatorAdmin
+	}
+	record, err := h.newShareRecord(claims.Project, sharePath, entry.IsDir, expiresIn, creatorUID, creatorAdmin)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	w.Header().Set("Location", h.opts.BasePath+"/shares/"+url.PathEscape(record.ID))
+	created := h.shareResponse(record)
+	created.Token = record.Token
+	h.writeJSON(w, http.StatusCreated, created)
+}
+
+func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (string, error) {
+	targetPath := claims.Path
+	if strings.TrimSpace(rawPath) != "" {
+		canonicalPath, err := canonicalSharePath(rawPath)
+		if err != nil {
+			return "", err
+		}
+		targetPath = canonicalPath
+	}
+	if !hasPathPrefix(targetPath, claims.Path) {
+		return "", errForbidden("access denied: path not shared")
+	}
+	return targetPath, nil
+}
+
+func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, project, targetPath string) {
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if entry.IsDir {
+		h.writeError(w, http.StatusNotImplemented, "directory_download", "directory download not yet implemented")
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if entry.IsSymlink {
+		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, targetPath)
+		if readErr != nil {
+			h.writeMappedError(w, readErr)
+			return
+		}
+		w.Header().Set("Content-Type", "application/symlink-target")
+		w.Header().Set("Content-Length", strconv.Itoa(len(target)))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = io.WriteString(w, target)
+		return
+	}
+	eTag := restEntryETag(entry)
+	w.Header().Set("ETag", eTag)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Type", detectContentType(targetPath))
+	start, end, partial, rangeErr := parseByteRange(r.Header.Get("Range"), entry.Size)
+	if rangeErr != nil {
+		if strings.TrimSpace(r.Header.Get("Range")) != "" {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
+			h.writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable", rangeErr.Error())
+			return
+		}
+		start, end = 0, entry.Size
+	}
+	status := http.StatusOK
+	if partial {
+		status = http.StatusPartialContent
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, entry.Size))
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start, 10))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(status)
+		return
+	}
+	w.WriteHeader(status)
+	sent := int64(0)
+	for offset := start; offset < end; {
+		readLen := h.opts.StreamChunkSize
+		if remaining := end - offset; remaining < readLen {
+			readLen = remaining
+		}
+		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, targetPath, offset, readLen)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", targetPath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
+			return
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		if _, writeErr := w.Write(chunk); writeErr != nil {
+			return
+		}
+		// Advance by the bytes actually read: short reads must not skip
+		// data.
+		offset += int64(len(chunk))
+		sent += int64(len(chunk))
+	}
+}
+
+func hasPathPrefix(targetPath, allowedPath string) bool {
+	targetPath, err := canonicalSharePath(targetPath)
+	if err != nil {
+		return false
+	}
+	allowedPath, err = canonicalSharePath(allowedPath)
+	if err != nil {
+		return false
+	}
+	if allowedPath == "" {
+		return true
+	}
+	return targetPath == allowedPath || strings.HasPrefix(targetPath, allowedPath+"/")
+}
+
+// canonicalSharePath cleans a user-supplied share path relative to the
+// project root. A path that escapes the root ("../x", "a/../../b") is
+// REJECTED, not silently resolved project-relative: the old leading-slash
+// clean made the escape branch below dead code and quietly re-anchored
+// traversal attempts inside the project.
+func canonicalSharePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" {
+		if rel := path.Clean(trimmed); rel == ".." || strings.HasPrefix(rel, "../") {
+			return "", errBadRequest("path traversal is not allowed")
+		}
+	}
+	clean := path.Clean("/" + trimmed)
+	clean = strings.TrimPrefix(clean, "/")
+	if clean == "." {
+		return "", nil
+	}
+	return clean, nil
+}
+
+func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
+	if h.shareSignKey == nil {
+		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
+	}
+	uc := &unifiedClaims{}
+	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), uc, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodEd25519); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return h.shareSignKey.Public(), nil
+	}, jwt.WithIssuer(restTokenIssuer), jwt.WithAudience(restTokenAudience), jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(time.Now))
+	if err != nil || !parsed.Valid || uc.Kind != "share" || uc.Project == "" {
+		return nil, errForbidden("invalid or expired share token")
+	}
+	return &shareClaims{
+		RegisteredClaims: uc.RegisteredClaims,
+		ID:               uc.ID,
+		Project:          uc.Project,
+		Path:             uc.Path,
+		IsDir:            uc.IsDir,
+	}, nil
+}
+
+func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration, creatorUID uint32, creatorAdmin bool) (*shareRecord, error) {
+	if h.shareSignKey == nil {
+		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
+	}
+	id, err := newShareID()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(expiresIn)
+	claims := unifiedClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    restTokenIssuer,
+			Audience:  jwt.ClaimStrings{restTokenAudience},
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+		Kind:    "share",
+		ID:      id,
+		Project: project,
+		Path:    sharePath,
+		IsDir:   isDir,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	signedToken, err := token.SignedString(h.shareSignKey)
+	if err != nil {
+		return nil, err
+	}
+	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt, CreatorUID: creatorUID, CreatorAdmin: creatorAdmin}
+	h.shares.mu.Lock()
+	h.shares.items[id] = record
+	h.shares.mu.Unlock()
+	h.sweepExpiredShares()
+	return record, nil
+}
+
+func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
+	h.shares.mu.RLock()
+	record, ok := h.shares.items[shareID]
+	h.shares.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if !record.ExpiresAt.After(time.Now()) {
+		h.removeShare(shareID)
+		return nil, false
+	}
+	copy := *record
+	return &copy, true
+}
+
+// sweepExpiredShares bounds registry memory: expired records are dropped
+// whenever live-plus-expired entries exceed the threshold, so a burst of
+// short-lived shares cannot accumulate without limit even if nobody ever
+// looks them up again. Revocation entries self-expire the same way: once
+// the shadowed JWT would fail its own exp check, remembering the ID adds
+// nothing.
+const shareSweepThreshold = 128
+
+func (h *restHandler) sweepExpiredShares() {
+	now := time.Now()
+	h.shares.mu.Lock()
+	defer h.shares.mu.Unlock()
+	if len(h.shares.items) >= shareSweepThreshold {
+		for shareID, record := range h.shares.items {
+			if !record.ExpiresAt.After(now) {
+				delete(h.shares.items, shareID)
+			}
+		}
+	}
+	if len(h.shares.revoked) >= shareSweepThreshold {
+		for shareID, expiresAt := range h.shares.revoked {
+			if !expiresAt.After(now) {
+				delete(h.shares.revoked, shareID)
+			}
+		}
+	}
+}
+
+func (h *restHandler) removeShare(shareID string) {
+	h.shares.mu.Lock()
+	delete(h.shares.items, shareID)
+	h.shares.mu.Unlock()
+}
+
+// projectShareResponses lists a project's live shares, restricted to the
+// caller's management scope (creator ∪ admin). The signed token is stripped
+// before rendering: listings never carry the credential (or its URLs).
+func (h *restHandler) projectShareResponses(project string, callerUID uint32, callerAdmin bool) []shareResponse {
+	now := time.Now()
+	h.shares.mu.Lock()
+	defer h.shares.mu.Unlock()
+	shares := make([]shareResponse, 0)
+	for shareID, record := range h.shares.items {
+		if !record.ExpiresAt.After(now) {
+			delete(h.shares.items, shareID)
+			continue
+		}
+		if record.Project != project {
+			continue
+		}
+		if !callerAdmin && callerUID != record.CreatorUID {
+			continue
+		}
+		copy := *record
+		copy.Token = "" // listings never carry the credential (or its URLs)
+		shares = append(shares, h.shareResponse(&copy))
+	}
+	return shares
+}
+
+// shareResponse builds the public shape. Redemption URLs are minted ONLY
+// from the signed token (creation responses carry it; listings cannot, so
+// their URL fields stay empty - the token is the credential).
+func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
+	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), IsDir: record.IsDir}
+	if record.Token == "" {
+		return resp
+	}
+	resp.URL = "/?share=" + url.QueryEscape(record.Token)
+	if !record.IsDir {
+		resp.DownloadURL = h.opts.BasePath + "/shares/" + url.PathEscape(record.ID) + "/download?token=" + url.QueryEscape(record.Token)
+	}
+	return resp
+}
+
+func newShareID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}

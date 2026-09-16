@@ -1844,7 +1844,7 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 			break
 		}
 	}
-	backend.setMetadata(t, "project-invalid-metadata", &meta)
+	backend.setMetadata(t, "project-invalid-metadata", meta)
 	hub = backend.newClient(t, smallTransferTestConfig())
 	if _, err := hub.ListFiles("project-invalid-metadata"); err == nil {
 		t.Fatal("expected invalid metadata to be rejected")
@@ -4109,7 +4109,7 @@ func (m *mockGitHub) assertRepoStats(t *testing.T, project string, files int, si
 	}
 }
 
-func mustLoadMetadata(t *testing.T, repo *mockRepo) RepoMetadata {
+func mustLoadMetadata(t *testing.T, repo *mockRepo) *RepoMetadata {
 	t.Helper()
 	// Layout-aware: a split (version-5) project stores its index as a
 	// manifest plus content-addressed objects; a legacy project as one blob.
@@ -4130,13 +4130,13 @@ func mustLoadMetadata(t *testing.T, repo *mockRepo) RepoMetadata {
 			t.Fatalf("load split index: %v", err)
 		}
 		m.Normalize(manifest.Project, m.LastMod)
-		return *m
+		return m
 	}
 	file := repo.files[metadataFilePath]
 	if file == nil {
-		return RepoMetadata{}
+		return &RepoMetadata{}
 	}
-	var legacy RepoMetadata
+	legacy := &RepoMetadata{}
 	if err := legacy.FromJSON(file.data); err != nil {
 		t.Fatalf("parse metadata: %v", err)
 	}
