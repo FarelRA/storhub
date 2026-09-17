@@ -979,7 +979,7 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 		baseSize:    w.baseSize,
 		logicalSize: w.logicalSize,
 		pending:     w.pending,
-		hasPending:  w.pending != (shfs.MetadataPatch{}),
+		hasPending:  w.pending.HasMode || w.pending.HasOwner || w.pending.HasTimes,
 	}
 	for _, r := range w.dirtyRanges {
 		intent.ranges = append(intent.ranges, [2]int64{r.Start, r.End})
@@ -1015,7 +1015,7 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 	intent.baseSize = w.baseSize
 	intent.logicalSize = w.logicalSize
 	intent.pending = w.pending
-	intent.hasPending = w.pending != (shfs.MetadataPatch{})
+	intent.hasPending = w.pending.HasMode || w.pending.HasOwner || w.pending.HasTimes
 	// The overlay bytes just moved to recovery/, so the temp no
 	// longer exists. Clearing the dirty set and poisoning the state
 	// guarantees a late Write/commit fails EIO instead of re-materializing

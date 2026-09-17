@@ -54,6 +54,8 @@ func TestQuarantineSidecarRecordsIntent(t *testing.T) {
 		logicalSize: 5,
 		fingerprint: &targetFingerprint{Size: 5, Inode: 9, ModifiedAt: 100, ChangedAt: 101},
 	}
+	intent.hasPending = true
+	intent.pending = shfs.MetadataPatch{HasMode: true, Mode: 0o640}
 	saved := seedRecovery(t, dir, "docs/f.txt", []byte("hello"), intent)
 	entry := readSidecar(t, saved)
 	if !entry.FullImage || entry.TargetPath != "docs/f.txt" {
@@ -68,6 +70,9 @@ func TestQuarantineSidecarRecordsIntent(t *testing.T) {
 	fp := entry.Fingerprint
 	if fp == nil || *fp != *intent.fingerprint {
 		t.Fatalf("sidecar lost fingerprint: %+v", fp)
+	}
+	if entry.Pending == nil || !entry.Pending.HasMode || entry.Pending.Mode != 0o640 {
+		t.Fatalf("sidecar lost pending patch: %+v", entry.Pending)
 	}
 }
 

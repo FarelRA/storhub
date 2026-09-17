@@ -390,8 +390,14 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	logRecoveryInventory(path.Join(cacheDir, "recovery"), opts.Logger)
 	// Auto-redrive eligible overlays: full-image temps whose target is
 	// provably untouched are re-uploaded (fail-closed per entry, never
-	// fatal to the mount). See redriveRecoveryInventory.
-	redriveRecoveryInventory(context.Background(), hub, project, path.Join(cacheDir, "recovery"), opts.Logger)
+	// fatal to the mount). See redriveRecoveryInventory. The timeout
+	// bounds the whole pass (each hub call carries its own 5-minute
+	// request timeout, but a large backlog must not stall the mount
+	// indefinitely); expiry keeps every remaining entry quarantined for
+	// the next mount.
+	redriveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	redriveRecoveryInventory(redriveCtx, hub, project, path.Join(cacheDir, "recovery"), opts.Logger)
 	return newBareFilesystem(hub, project, opts, cacheDir, lockFile), nil
 }
 
@@ -953,32 +959,53 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 		logging.Warn(logger, "recovery redrive cleanup failed (data is committed; remove manually)", "target", target, "saved", saved, "err", err)
 		return
 	}
-	_ = os.Remove(saved + ".json")
+	if err := os.Remove(saved + ".json"); err != nil && !os.IsNotExist(err) {
+		// The payload is gone but its sidecar survived: the next mount
+		// inventories a manifest without data (kept, warned, never
+		// redriven — the redrive requires the payload to exist).
+		// Loud here so the orphan is removed, not wondered at.
+		logging.Warn(logger, "recovery redrive sidecar cleanup failed (payload committed; remove sidecar manually)", "target", target, "saved", saved+".json", "err", err)
+		return
+	}
 	logging.Warn(logger, "recovery redrive committed quarantined overlay", "target", target)
 }
 
 // redriveRanges replays recorded dirty spans from the saved temp through
 // the patch verb: each span's bytes are read from the temp at the recorded
-// offsets and patched over the same offsets. Spans outside the temp file
-// refuse the whole entry (a truncated temp must never redrive partial
-// ranges). Reports whether the caller may proceed to verification.
+// offsets and patched over the same offsets. Reads use ReadAt per span so
+// a huge temp never loads fully into memory for a small dirty set. Spans
+// outside the temp file refuse the whole entry (a truncated temp must
+// never redrive partial ranges). Reports whether the caller may proceed
+// to verification.
 func redriveRanges(ctx context.Context, hub Hub, project string, entry RecoveryEntry, logger *slog.Logger) bool {
 	target, saved := entry.TargetPath, entry.SavedPath
-	data, err := os.ReadFile(saved)
+	f, err := os.Open(saved)
 	if err != nil {
 		logging.Warn(logger, "recovery redrive refused: payload unreadable, keeping quarantine", "target", target, "saved", saved, "err", err)
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	var size int64
+	if info, err := f.Stat(); err == nil {
+		size = info.Size()
+	} else {
+		logging.Warn(logger, "recovery redrive refused: payload unstatable, keeping quarantine", "target", target, "saved", saved, "err", err)
 		return false
 	}
 	edits := make([]shfs.RangeEdit, 0, len(entry.Ranges))
 	for _, span := range entry.Ranges {
 		start, end := span[0], span[1]
-		if start < 0 || end < start || end > int64(len(data)) {
+		if start < 0 || end < start || end > size {
 			logging.Warn(logger, "recovery redrive refused: span outside payload, keeping quarantine",
 				"target", target, "saved", saved, "span", span)
 			return false
 		}
 		edit := make([]byte, end-start)
-		copy(edit, data[start:end])
+		if _, err := f.ReadAt(edit, start); err != nil {
+			logging.Warn(logger, "recovery redrive refused: span unreadable, keeping quarantine",
+				"target", target, "saved", saved, "span", span, "err", err)
+			return false
+		}
 		edits = append(edits, shfs.RangeEdit{Start: start, DeleteSize: end - start, Data: edit})
 	}
 	if _, err := hub.PatchFileRangesContext(ctx, project, target, edits); err != nil {

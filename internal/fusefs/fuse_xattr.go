@@ -2,11 +2,22 @@ package fusefs
 
 import (
 	"context"
+	"path"
 	"strings"
 	"syscall"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
+
+// invalidateSelf drops the kernel's cached entry (and with it the cached
+// attrs) for the node's own path: xattr writes bump ctime server-side,
+// and AttrTimeout kernels would otherwise serve the stale ctime until it
+// expires. Content notification would be the wrong cache (the bytes did
+// not change); the entry is what carries the attrs.
+func (n *storhubNode) invalidateSelf(targetPath string) {
+	dir, base := path.Split(targetPath)
+	n.fs.notifyEntryForPath(strings.TrimSuffix(dir, "/"), base)
+}
 
 func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	ctx = n.fs.callerContext(ctx)
@@ -53,11 +64,7 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 	if err := n.fs.hub.SetXAttrContext(ctx, n.fs.project, targetPath, attr, data, mode); err != nil {
 		return errnoFromError(err)
 	}
-	// The xattr write bumps the file's ctime server-side; kernels holding
-	// cached attrs (AttrTimeout) would serve the stale ctime without this.
-	// Same funnel as setattr's tail: entry/content copies elsewhere expire
-	// only via invalidation.
-	n.fs.notifyKernelContentChanged(n.inode)
+	n.invalidateSelf(targetPath)
 	return 0
 }
 
@@ -95,6 +102,6 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 		return errnoFromError(err)
 	}
 	// Same ctime-invalidation reasoning as Setxattr above.
-	n.fs.notifyKernelContentChanged(n.inode)
+	n.invalidateSelf(targetPath)
 	return 0
 }

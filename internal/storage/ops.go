@@ -591,16 +591,14 @@ func newReplayPlan(ops []Op) *replayPlan {
 		case OpRename:
 			if len(op.Paths) == 2 {
 				p.doomed[op.Paths[0]] = struct{}{}
-				p.targets[op.Paths[1]] = struct{}{}
 			}
 		case OpMkdir:
 			if len(op.Paths) > 0 {
 				p.mkdirs[op.Paths[0]] = struct{}{}
 			}
 		}
-		opTargetPath, ok := opTarget(op)
-		if ok {
-			p.targets[opTargetPath] = struct{}{}
+		for _, t := range opAssertPaths(op) {
+			p.targets[t] = struct{}{}
 		}
 		if op.File != nil {
 			if op.File.Inode != 0 {
@@ -623,40 +621,48 @@ func newReplayPlan(ops []Op) *replayPlan {
 	return p
 }
 
-// opTarget reports the path an op asserts a record for: rename-to,
+// opAssertPaths reports every path an op asserts a record for: rename-to,
 // file-state, and mkdir-with-record paths. Deletes, rmdirs, catalog ops,
 // xattrs, and record-less mkdirs assert nothing (an EnsureDirectory-only
 // mkdir keeps a live occupant, so it must not exempt it).
-func opTarget(op Op) (string, bool) {
+func opAssertPaths(op Op) []string {
 	switch op.Type {
 	case OpRename:
-		return "", false // handled explicitly (needs Paths[1])
+		if len(op.Paths) == 2 {
+			return []string{op.Paths[1]}
+		}
 	case OpPutFile, OpSetattr, OpTruncate, OpPatch:
 		if len(op.Paths) > 0 {
-			return op.Paths[0], true
+			return []string{op.Paths[0]}
 		}
 	case OpMkdir:
 		if len(op.Paths) > 0 && op.Dir != nil {
-			return op.Paths[0], true
+			return []string{op.Paths[0]}
 		}
 	}
-	return "", false
+	return nil
 }
 
 // allocInodeAvoiding mints a fresh inode that no batch op claims.
 // Collision remapping must never reissue an identifier another batch op
-// carries, or the remap trades one collision for another. Terminates: the
-// claimed set is finite and the counter strictly increases.
+// carries, or the remap trades one collision for another. The loop is
+// pigeonhole-bounded: at most len(claimed) mints can collide, so
+// len(claimed)+1 iterations always succeed — termination by counting,
+// not by faith in monotonicity.
 func (p *replayPlan) allocInodeAvoiding(meta *RepoMetadata) uint64 {
 	if p == nil {
 		return meta.AllocateInode()
 	}
-	for {
+	for i := 0; i <= len(p.claimedInodes); i++ {
 		id := meta.AllocateInode()
 		if _, bad := p.claimedInodes[id]; !bad {
 			return id
 		}
 	}
+	// Unreachable: the pigeonhole bound above guarantees a return.
+	// Panicking instead of looping forever turns a logic error into a
+	// loud crash rather than a wedged commit loop.
+	panic("allocInodeAvoiding: exhausted pigeonhole bound")
 }
 
 // allocChunkAvoiding is allocInodeAvoiding for chunk catalog ids.
@@ -664,30 +670,13 @@ func (p *replayPlan) allocChunkAvoiding(meta *RepoMetadata) int64 {
 	if p == nil {
 		return meta.AllocateChunkID()
 	}
-	for {
+	for i := 0; i <= len(p.claimedChunks); i++ {
 		id := meta.AllocateChunkID()
 		if _, bad := p.claimedChunks[id]; !bad {
 			return id
 		}
 	}
-}
-
-// batchTargetsExcept returns the plan's batch-asserted paths minus own:
-// occupants at those paths are overwritten by the batch in every delivery
-// order, so they never count as divergent allocations. The op's own path
-// stays out so a file replacing a same-inode directory still remaps (the
-// pre-existing file-branch behavior). Nil-plan safe.
-func (p *replayPlan) batchTargetsExcept(own string) map[string]struct{} {
-	if p == nil || len(p.targets) == 0 {
-		return nil
-	}
-	out := make(map[string]struct{}, len(p.targets))
-	for t := range p.targets {
-		if t != own {
-			out[t] = struct{}{}
-		}
-	}
-	return out
+	panic("allocChunkAvoiding: exhausted pigeonhole bound")
 }
 
 // untarget drops an op's asserted paths from the target set. Call it when
@@ -696,10 +685,7 @@ func (p *replayPlan) batchTargetsExcept(own string) map[string]struct{} {
 // collision checks must see them. Removing a path that was never targeted
 // is a no-op.
 func (p *replayPlan) untarget(op Op) {
-	if len(op.Paths) == 2 && op.Type == OpRename {
-		delete(p.targets, op.Paths[1])
-	}
-	if t, ok := opTarget(op); ok {
+	for _, t := range opAssertPaths(op) {
 		delete(p.targets, t)
 	}
 }
@@ -1027,11 +1013,16 @@ func (c *collisionIndex) moveSubtree(from, to string) {
 	move(c.dirs, c.dirInode)
 }
 
-// fileCollidesWithDirFamilyExcept is fileCollidesWithDirFamily ignoring
-// occupants at skip paths: entries the batch overwrites with its own
-// records (replay scaffolding or earlier batch state), never divergent
-// upstream allocations. The root always collides.
-func (c *collisionIndex) fileCollidesWithDirFamilyExcept(inode uint64, skip map[string]struct{}) bool {
+// fileCollidesWithLiveDir reports whether inode is taken by the root or a
+// directory the batch does NOT overwrite: occupants at batch-asserted
+// paths are replay scaffolding (or earlier batch state), never divergent
+// upstream allocations, so they don't count. The op's own path is never
+// exempted: a file replacing a same-inode directory keeps the pre-existing
+// remap behavior. Occupants per inode are typically one, so testing
+// membership inline is O(occupants); building a per-op copy of the target
+// set here would make file-heavy batches quadratic. The root always
+// collides. Nil-plan safe.
+func (c *collisionIndex) fileCollidesWithLiveDir(inode uint64, p *replayPlan, own string) bool {
 	if c == nil {
 		return false
 	}
@@ -1039,29 +1030,47 @@ func (c *collisionIndex) fileCollidesWithDirFamilyExcept(inode uint64, skip map[
 		return true
 	}
 	for path := range c.dirInode[inode] {
-		if _, ok := skip[path]; !ok {
-			return true
+		if path == own {
+			continue
 		}
+		if p != nil {
+			if _, ok := p.targets[path]; ok {
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }
 
-// takenByAnotherNode reports whether inode is taken by the root, any
-// directory, or any file OTHER than the entries at exceptPaths.
-func (c *collisionIndex) takenByAnotherNode(inode uint64, exceptPaths map[string]struct{}) bool {
+// takenByAnotherNodeExceptTargets is takenByAnotherNode with batch-target
+// awareness: occupants at target paths are overwritten by the batch in
+// every delivery order, so they never count as divergent allocations.
+// Membership is tested inline (O(occupants)) instead of copying the whole
+// target set per op, which would make dir-heavy batches quadratic.
+func (c *collisionIndex) takenByAnotherNodeExceptTargets(inode uint64, exceptPaths map[string]struct{}, targets map[string]struct{}) bool {
 	if c == nil {
 		return false
 	}
 	if inode == c.rootInode {
 		return true
 	}
+	occupied := func(path string) bool {
+		if _, ok := exceptPaths[path]; ok {
+			return false
+		}
+		if _, ok := targets[path]; ok {
+			return false
+		}
+		return true
+	}
 	for path := range c.dirInode[inode] {
-		if _, ok := exceptPaths[path]; !ok {
+		if occupied(path) {
 			return true
 		}
 	}
 	for path := range c.fileInode[inode] {
-		if _, ok := exceptPaths[path]; !ok {
+		if occupied(path) {
 			return true
 		}
 	}
@@ -1379,16 +1388,19 @@ func remapSubtreeMembers(meta *RepoMetadata, from, to string, members []string, 
 // subtreePopulated reports whether any file or directory lives strictly
 // under path: after a member-list rename, a populated source was
 // repopulated by another op in the batch and its dir record must be kept.
+// Walks the child index iteratively with early exit (O(subtree), not
+// O(tree)): renames are rare, but a full catalog scan per rename would
+// still be quadratic on rename-heavy batches.
 func subtreePopulated(meta *RepoMetadata, path string) bool {
-	for p := range meta.Files() {
-		if p != path && shfs.IsParentOrSame(path, p) {
+	stack := []string{path}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		dirs, files := meta.DirectoryChildren(cur)
+		if len(files) > 0 {
 			return true
 		}
-	}
-	for p := range meta.Dirs() {
-		if p != path && shfs.IsParentOrSame(path, p) {
-			return true
-		}
+		stack = append(stack, dirs...)
 	}
 	return false
 }

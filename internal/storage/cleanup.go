@@ -387,14 +387,16 @@ func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, release
 		return nil, nil, fmt.Errorf("purge re-verify: %w", err)
 	}
 	trackedReleases, trackedAssets := trackedPurgeSets(fresh)
-	keptReleases := releaseTasks[:0]
+	// Fresh slices, not in-place filters: the caller's task lists stay
+	// intact for logging/retry, and no aliasing subtlety survives.
+	var keptReleases []purgeReleaseTask
 	for _, task := range releaseTasks {
 		if _, ok := trackedReleases[task.tag]; ok {
 			continue
 		}
 		keptReleases = append(keptReleases, task)
 	}
-	keptAssets := assetTasks[:0]
+	var keptAssets []purgeAssetTask
 	for _, task := range assetTasks {
 		if _, ok := trackedAssets[task.id]; ok {
 			continue

@@ -432,7 +432,7 @@ func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, reso
 			recordResolution(resolutions, *op, opPath(*op),
 				"chunk ids remapped (divergent allocation between writers)")
 		}
-		if op.File.Inode != 0 && cidx.fileCollidesWithDirFamilyExcept(op.File.Inode, plan.batchTargetsExcept(opPath(*op))) {
+		if op.File.Inode != 0 && cidx.fileCollidesWithLiveDir(op.File.Inode, plan, opPath(*op)) {
 			op.File.Inode = plan.allocInodeAvoiding(meta)
 			recordResolution(resolutions, *op, opPath(*op),
 				"inode remapped (collides with upstream directory inode)")
@@ -465,17 +465,17 @@ func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, reso
 				except[plan.translateForward(op.Paths[0])] = struct{}{}
 			}
 		}
-		// Batch-asserted paths join the exemption: the batch overwrites
+		// Batch-asserted paths join the exemption via the targets-aware
+		// check below (not by copying the set here): the batch overwrites
 		// them with its own records in every delivery order, so a live
 		// occupant is replay scaffolding (an ensureParentFor mint for a
 		// not-yet-replayed target), not a divergent allocation. Genuine
 		// upstream occupants live off-target and still remap.
+		var targets map[string]struct{}
 		if plan != nil {
-			for t := range plan.targets {
-				except[t] = struct{}{}
-			}
+			targets = plan.targets
 		}
-		if !isRootOp && cidx.takenByAnotherNode(op.Dir.Inode, except) {
+		if !isRootOp && cidx.takenByAnotherNodeExceptTargets(op.Dir.Inode, except, targets) {
 			op.Dir.Inode = plan.allocInodeAvoiding(meta)
 			recordResolution(resolutions, *op, opPath(*op),
 				"directory inode remapped (collides with upstream node)")
