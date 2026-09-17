@@ -388,6 +388,10 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	// Startup replay: surface whatever earlier crashes quarantined so
 	// operators (and RecoveryInventory callers) see it immediately.
 	logRecoveryInventory(path.Join(cacheDir, "recovery"), opts.Logger)
+	// Auto-redrive eligible overlays: full-image temps whose target is
+	// provably untouched are re-uploaded (fail-closed per entry, never
+	// fatal to the mount). See redriveRecoveryInventory.
+	redriveRecoveryInventory(context.Background(), hub, project, path.Join(cacheDir, "recovery"), opts.Logger)
 	return newBareFilesystem(hub, project, opts, cacheDir, lockFile), nil
 }
 
@@ -610,6 +614,12 @@ func (s *Filesystem) recoveryDir() string {
 // survived a commit failure or a crashed mount. The manifest sidecar
 // (<saved>.json) records the original target path so the data can be
 // replayed or manually recovered; without it the bytes are anonymous.
+// FullImage + Fingerprint make an entry eligible for startup auto-redrive:
+// a temp proven to hold the complete file image whose target still matches
+// the recorded fingerprint is re-uploaded automatically. Anything else
+// (range fragments, unknown provenance, changed targets) stays for manual
+// recovery — redriving a partial temp as a full file, or over a changed
+// target, would destroy data instead of rescuing it.
 type RecoveryEntry struct {
 	SavedPath  string `json:"saved_path"`
 	OrigTemp   string `json:"orig_temp"`
@@ -618,6 +628,51 @@ type RecoveryEntry struct {
 	Size       int64  `json:"size"`
 	PID        int    `json:"pid"`
 	CreatedAt  int64  `json:"created_unix_nano"`
+	// FullImage reports the temp holds the complete file image
+	// (tempAuthoritative or dirty ranges covering [0, logicalSize) at
+	// quarantine time). Only full images are auto-redrive candidates.
+	FullImage bool `json:"full_image,omitempty"`
+	// Ranges records the dirty spans covered, for manual recovery
+	// context on range fragments (which are never auto-redriven).
+	Ranges [][2]int64 `json:"ranges,omitempty"`
+	// BaseSize/LogicalSize are the overlay's sizes at quarantine time,
+	// for manual recovery context.
+	BaseSize    int64 `json:"base_size,omitempty"`
+	LogicalSize int64 `json:"logical_size,omitempty"`
+	// Pending records a metadata patch (chmod/chown/utimes) that was
+	// staged alongside the data commit and never landed. Redrive applies
+	// it after the data, under the same fingerprint guard.
+	Pending *shfs.MetadataPatch `json:"pending,omitempty"`
+	// Fingerprint pins the target's identity at quarantine time. The
+	// redrive compares it against the live target and proceeds only on
+	// an exact match: any concurrent modification refuses loudly and
+	// the entry stays quarantined.
+	Fingerprint *targetFingerprint `json:"fingerprint,omitempty"`
+}
+
+// targetFingerprint is the compare-and-swap token for auto-redrive: every
+// content mutation stamps ChangedAt (and replace-family ops reassign the
+// inode), so an exact match proves the target is untouched since quarantine.
+// Same-second same-size rewrites can theoretically slip (mtime granularity);
+// the redrive logs loudly so even that case is auditable.
+type targetFingerprint struct {
+	Size       int64  `json:"size"`
+	Inode      uint64 `json:"inode"`
+	ModifiedAt int64  `json:"modified_at"`
+	ChangedAt  int64  `json:"changed_at"`
+}
+
+// quarantineIntent carries what quarantineIntoDir records in the sidecar
+// beyond the payload itself. Zero value = unknown provenance: manual
+// recovery only, never auto-redrive.
+type quarantineIntent struct {
+	fullImage   bool
+	ranges      [][2]int64
+	baseSize    int64
+	logicalSize int64
+	pending     shfs.MetadataPatch
+	hasPending  bool
+	fingerprint *targetFingerprint
 }
 
 // quarantine reasons recorded in manifests.
@@ -635,6 +690,15 @@ const (
 // It returns the saved data path, or "" when nothing could be preserved
 // (failures are logged, never fatal: the leftover stays for the next sweep).
 func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger *slog.Logger) string {
+	return quarantineIntoDirWithIntent(tempPath, recoveryDir, targetPath, reason, quarantineIntent{}, logger)
+}
+
+// quarantineIntoDirWithIntent is quarantineIntoDir plus the redrive intent
+// for the sidecar: whether the temp is a proven full image, the dirty
+// spans and sizes for manual context, and the target fingerprint for the
+// startup compare-and-swap. A zero intent records unknown provenance:
+// manual recovery only, never auto-redrive.
+func quarantineIntoDirWithIntent(tempPath, recoveryDir, targetPath, reason string, intent quarantineIntent, logger *slog.Logger) string {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -660,13 +724,22 @@ func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger 
 	stamp := time.Now().UnixNano()
 	target := path.Join(recoveryDir, fmt.Sprintf("%s.%d", path.Base(tempPath), stamp))
 	entry := RecoveryEntry{
-		SavedPath:  target,
-		OrigTemp:   tempPath,
-		TargetPath: targetPath,
-		Reason:     reason,
-		Size:       info.Size(),
-		PID:        os.Getpid(),
-		CreatedAt:  stamp,
+		SavedPath:   target,
+		OrigTemp:    tempPath,
+		TargetPath:  targetPath,
+		Reason:      reason,
+		Size:        info.Size(),
+		PID:         os.Getpid(),
+		CreatedAt:   stamp,
+		FullImage:   intent.fullImage,
+		Ranges:      intent.ranges,
+		BaseSize:    intent.baseSize,
+		LogicalSize: intent.logicalSize,
+		Fingerprint: intent.fingerprint,
+	}
+	if intent.hasPending {
+		pending := intent.pending
+		entry.Pending = &pending
 	}
 	manifest, err := json.Marshal(entry)
 	if err != nil {
@@ -738,11 +811,11 @@ func quarantinePath(tempPath string, logger *slog.Logger) {
 // holds the only copy of data the application has already written.
 // targetPath is the file the bytes belong to ("" when unknown); reason
 // records which path triggered the quarantine.
-func (s *Filesystem) quarantineFile(tempPath, targetPath, reason string) {
+func (s *Filesystem) quarantineFile(tempPath, targetPath, reason string, intent quarantineIntent) {
 	if reason == "" {
 		reason = quarantineReasonCommitFailure
 	}
-	saved := quarantineIntoDir(tempPath, s.recoveryDir(), targetPath, reason, s.opts.Logger)
+	saved := quarantineIntoDirWithIntent(tempPath, s.recoveryDir(), targetPath, reason, intent, s.opts.Logger)
 	if saved == "" {
 		s.errorf("quarantine failed; dirty overlay left in cache path=%s", tempPath)
 		return
@@ -789,6 +862,130 @@ func readRecoveryInventory(recoveryDir string) ([]RecoveryEntry, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SavedPath < out[j].SavedPath })
 	return out, nil
+}
+
+// redriveRecoveryInventory auto-redrives eligible quarantined overlays:
+// entries whose target still matches the recorded fingerprint are
+// re-uploaded (full images replace, recorded spans patch, bare size
+// changes truncate; staged metadata patches apply after the data), then
+// committed via the hub's normal path, verified, and only then removed
+// from recovery/. Replace journals the op like any acknowledged write,
+// so crash-durability past this point is the standard journal story.
+// Anything else is kept with a loud warning: range fragments without a
+// fingerprint, unknown provenance, changed targets, and any
+// upload/commit error. A failed redrive never fails the mount and
+// never deletes quarantine data — the entry simply waits for the next
+// mount or manual recovery.
+func redriveRecoveryInventory(ctx context.Context, hub Hub, project, recoveryDir string, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	inventory, err := readRecoveryInventory(recoveryDir)
+	if err != nil {
+		logging.Error(logger, "recovery redrive scan failed", "dir", recoveryDir, "err", err)
+		return
+	}
+	for _, entry := range inventory {
+		redriveRecoveryEntry(ctx, hub, project, entry, logger)
+	}
+}
+
+func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry RecoveryEntry, logger *slog.Logger) {
+	target, saved := entry.TargetPath, entry.SavedPath
+	if target == "" || entry.Fingerprint == nil {
+		return // manual recovery only; inventoried (not silent) by the caller
+	}
+	live, err := hub.StatPathContext(ctx, project, target)
+	if err != nil || live == nil {
+		logging.Warn(logger, "recovery redrive refused: target unreadable, keeping quarantine", "target", target, "saved", saved)
+		return
+	}
+	fp := entry.Fingerprint
+	if live.Size != fp.Size || live.Inode != fp.Inode || live.ModifiedAt != fp.ModifiedAt || live.ChangedAt != fp.ChangedAt {
+		logging.Warn(logger, "recovery redrive refused: target changed since quarantine, keeping quarantine",
+			"target", target, "saved", saved, "live_size", live.Size, "live_inode", live.Inode)
+		return
+	}
+	// The fingerprint matched: the target is exactly what quarantine saw.
+	// Redrive by temp kind. A full image replaces the file; recorded spans
+	// patch it; a bare size change truncates it. Anything undescribed stays
+	// manual: redriving bytes the sidecar cannot account for would invent
+	// content.
+	switch {
+	case entry.FullImage:
+		if _, err := hub.ReplaceFileContext(ctx, project, target, saved); err != nil {
+			logging.Warn(logger, "recovery redrive replace failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			return
+		}
+	case len(entry.Ranges) > 0:
+		if !redriveRanges(ctx, hub, project, entry, logger) {
+			return
+		}
+	case entry.LogicalSize != entry.BaseSize:
+		if _, err := hub.TruncateFileContext(ctx, project, target, entry.LogicalSize); err != nil {
+			logging.Warn(logger, "recovery redrive truncate failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			return
+		}
+		if _, err := hub.StatPathContext(ctx, project, target); err != nil {
+			logging.Warn(logger, "recovery redrive truncate left no target, keeping quarantine", "target", target, "saved", saved, "err", err)
+			return
+		}
+	default:
+		return // nothing described: manual recovery only
+	}
+	if entry.Pending != nil {
+		if err := hub.ApplyMetadataPatchContext(ctx, project, target, *entry.Pending); err != nil {
+			// Data landed but the metadata patch did not: keep the entry
+			// (with its payload) so the next mount retries the patch
+			// instead of declaring victory on half-applied state.
+			logging.Warn(logger, "recovery redrive data landed but metadata patch failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			return
+		}
+	}
+	// Verify before deleting: the redrive must be observable, or the
+	// quarantine data (the only copy) stays.
+	after, err := hub.StatPathContext(ctx, project, target)
+	if err != nil || after == nil {
+		logging.Warn(logger, "recovery redrive verify failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+		return
+	}
+	if err := os.Remove(saved); err != nil && !os.IsNotExist(err) {
+		logging.Warn(logger, "recovery redrive cleanup failed (data is committed; remove manually)", "target", target, "saved", saved, "err", err)
+		return
+	}
+	_ = os.Remove(saved + ".json")
+	logging.Warn(logger, "recovery redrive committed quarantined overlay", "target", target)
+}
+
+// redriveRanges replays recorded dirty spans from the saved temp through
+// the patch verb: each span's bytes are read from the temp at the recorded
+// offsets and patched over the same offsets. Spans outside the temp file
+// refuse the whole entry (a truncated temp must never redrive partial
+// ranges). Reports whether the caller may proceed to verification.
+func redriveRanges(ctx context.Context, hub Hub, project string, entry RecoveryEntry, logger *slog.Logger) bool {
+	target, saved := entry.TargetPath, entry.SavedPath
+	data, err := os.ReadFile(saved)
+	if err != nil {
+		logging.Warn(logger, "recovery redrive refused: payload unreadable, keeping quarantine", "target", target, "saved", saved, "err", err)
+		return false
+	}
+	edits := make([]shfs.RangeEdit, 0, len(entry.Ranges))
+	for _, span := range entry.Ranges {
+		start, end := span[0], span[1]
+		if start < 0 || end < start || end > int64(len(data)) {
+			logging.Warn(logger, "recovery redrive refused: span outside payload, keeping quarantine",
+				"target", target, "saved", saved, "span", span)
+			return false
+		}
+		edit := make([]byte, end-start)
+		copy(edit, data[start:end])
+		edits = append(edits, shfs.RangeEdit{Start: start, DeleteSize: end - start, Data: edit})
+	}
+	if _, err := hub.PatchFileRangesContext(ctx, project, target, edits); err != nil {
+		logging.Warn(logger, "recovery redrive patch failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+		return false
+	}
+	return true
 }
 
 // logRecoveryInventory replays quarantined state at startup: operators see

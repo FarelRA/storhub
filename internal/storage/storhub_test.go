@@ -1674,8 +1674,8 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	var failed atomic.Bool
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") && !failed.Load() {
+	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if !failed.Load() {
 			failed.Store(true)
 			w.WriteHeader(http.StatusBadGateway)
 			_, _ = w.Write([]byte(`{"message":"transient failure"}`))
@@ -1714,15 +1714,13 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	backend := newMockGitHub(t)
 	var conflicts atomic.Int32
 	var commitCount atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
-			commitCount.Add(1)
-			if commitCount.Load() == 2 && conflicts.Load() == 0 {
-				conflicts.Add(1)
-				w.WriteHeader(http.StatusConflict)
-				_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
-				return true
-			}
+	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+		commitCount.Add(1)
+		if commitCount.Load() == 2 && conflicts.Load() == 0 {
+			conflicts.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
+			return true
 		}
 		return false
 	})

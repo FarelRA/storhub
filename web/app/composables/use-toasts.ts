@@ -1,3 +1,5 @@
+import { TIMEOUTS } from '~/utils/limits'
+
 export type ToastKind = 'success' | 'error' | 'info'
 
 export interface Toast {
@@ -16,7 +18,7 @@ function dismiss(id: number) {
 function push(kind: ToastKind, text: string) {
   const toast: Toast = { id: nextId++, kind, text }
   toasts.value = [...toasts.value.slice(-4), toast]
-  setTimeout(() => dismiss(toast.id), kind === 'error' ? 8000 : 4000)
+  setTimeout(() => dismiss(toast.id), kind === 'error' ? TIMEOUTS.TOAST_ERROR_MS : TIMEOUTS.TOAST_MS)
 }
 
 export function useToasts() {

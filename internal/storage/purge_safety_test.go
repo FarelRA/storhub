@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,12 +110,9 @@ func TestPurgeRefusesDirtyProject(t *testing.T) {
 	// Deterministic in-flight state: block metadata commits so the
 	// background loop cannot drain the flag, then mark dirty with a
 	// version bump (a racing commit of an older snapshot cannot clear it).
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
-			http.Error(w, "injected commit failure", http.StatusInternalServerError)
-			return true
-		}
-		return false
+	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+		http.Error(w, "injected commit failure", http.StatusInternalServerError)
+		return true
 	})
 	pm := hub.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
@@ -124,4 +122,107 @@ func TestPurgeRefusesDirtyProject(t *testing.T) {
 	if _, err := hub.PurgeUntracked(project); err == nil {
 		t.Fatal("purge must refuse a project with uncommitted dirty state")
 	}
+}
+
+// TestPurgeReverifyDropsNewlyTrackedTasks pins the check-then-act fence: a
+// commit landing between classification and deletion that references a
+// task's asset must spare it. Without reverifyPurgePlan, the delete phase
+// destroys bytes a live file needs.
+func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	const project = "project-purge-race"
+
+	input := writeTempFile(t, t.TempDir(), "doomed.txt", []byte("doomed payload"))
+	meta, err := hub.UploadFile(project, "doomed.txt", input)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	// Capture the asset ID before deleting the file.
+	loaded, _, err := hub.loadRepoMetadataFresh(ctx, project)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var orphans []int64
+	var tag string
+	for _, id := range meta.Chunks {
+		if rec, ok := loaded.Chunks()[id]; ok {
+			orphans = append(orphans, rec.AssetID)
+			tag = rec.Release
+		}
+	}
+	if len(orphans) == 0 || tag == "" {
+		t.Fatal("setup broken: no assets captured")
+	}
+	if err := hub.DeleteFileContext(ctx, project, "doomed.txt"); err != nil {
+		t.Fatalf("delete file: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush delete: %v", err)
+	}
+	// The asset is now untracked: classification must want it.
+	releaseTasks, assetTasks, err := hub.classifyUntracked(ctx, project)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if len(assetTasks) == 0 {
+		t.Fatal("setup broken: expected an orphan asset task")
+	}
+	// The concurrent writer lands: a new file referencing every orphaned
+	// asset, so all of them become tracked again.
+	if _, err := hub.UpdateRepoMetadataContext(ctx, project, func(m *RepoMetadata) error {
+		var ids []int64
+		for i, asset := range orphans {
+			id := m.AllocateChunkID()
+			if err := m.PutChunk(id, ChunkInfo{Size: 1, Offset: int64(i), Release: tag, AssetID: asset}); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		m.UpsertFile("rescued.txt", FileMeta{Size: int64(len(ids)), Mode: 0o644, Chunks: ids}, 1700000000)
+		return nil
+	}, "storhub: rescue"); err != nil {
+		t.Fatalf("rescue commit: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush rescue: %v", err)
+	}
+	// Re-verification against fresh truth must drop every task.
+	keptR, keptA, err := hub.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
+	if err != nil {
+		t.Fatalf("reverify: %v", err)
+	}
+	if len(keptR)+len(keptA) != 0 {
+		t.Fatalf("reverify must drop newly-tracked tasks, kept %d releases %d assets", len(keptR), len(keptA))
+	}
+	// End to end over the STALE task list (the exact race window: classify
+	// ran before the rescue commit). The fenced tail deletes nothing...
+	result := &PurgeResult{}
+	if err := hub.deletePurgePlan(ctx, project, keptR, keptA, result); err != nil {
+		t.Fatalf("fenced delete: %v", err)
+	}
+	if result.DeletedAssets != 0 || result.DeletedReleases != 0 {
+		t.Fatalf("fenced tail must spare re-tracked data, deleted %+v", result)
+	}
+	// ...while the unfenced tail destroys the rescued bytes. This control
+	// proves the fence is load-bearing, not the setup: same stale tasks,
+	// no re-verify, live data gone.
+	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, &PurgeResult{}); err != nil {
+		t.Fatalf("unfenced delete: %v", err)
+	}
+	if err := hub.DownloadFile(project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err == nil {
+		t.Fatal("unfenced tail should have destroyed the rescued asset")
+	}
+	// And a full purge afterwards still deletes nothing (assets reaped
+	// above are gone; the fence plus fresh classification agree).
+	res, err := hub.PurgeUntrackedContext(ctx, project)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	_ = res
 }

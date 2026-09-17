@@ -568,7 +568,10 @@ func (h *storhubHandle) quarantineTemps() {
 		_ = temp.Close()
 	}
 	if tempPath != "" {
-		h.fs.quarantineFile(tempPath, targetPath, quarantineReasonCommitFailure)
+		// Handle temps have unknown provenance at this point (no dirty
+		// span tracking like writeState): record zero intent so the entry
+		// stays manual-recovery-only, never auto-redriven.
+		h.fs.quarantineFile(tempPath, targetPath, quarantineReasonCommitFailure, quarantineIntent{})
 	}
 }
 

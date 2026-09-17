@@ -970,6 +970,52 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 		return
 	}
 	w.closed = true
+	// Capture the redrive intent BEFORE clearing: whether this temp is a
+	// proven full image (authoritative, or dirty spans covering the whole
+	// logical file), the spans/sizes for manual context, and the target's
+	// current identity for the startup compare-and-swap.
+	intent := quarantineIntent{
+		fullImage:   w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize),
+		baseSize:    w.baseSize,
+		logicalSize: w.logicalSize,
+		pending:     w.pending,
+		hasPending:  w.pending != (shfs.MetadataPatch{}),
+	}
+	for _, r := range w.dirtyRanges {
+		intent.ranges = append(intent.ranges, [2]int64{r.Start, r.End})
+	}
+	targetPath := w.path
+	w.mu.Unlock()
+	// Fingerprint outside the state lock: the Stat is a network call and
+	// must never run under it. Best-effort (the commit just failed; the
+	// backend may be unreachable): without a fingerprint the entry stays
+	// manual-recovery-only.
+	if targetPath != "" {
+		if entry, err := w.fs.hub.StatPathContext(context.Background(), w.fs.project, targetPath); err == nil && entry != nil {
+			intent.fingerprint = &targetFingerprint{
+				Size:       entry.Size,
+				Inode:      entry.Inode,
+				ModifiedAt: entry.ModifiedAt,
+				ChangedAt:  entry.ChangedAt,
+			}
+		}
+	}
+	w.mu.Lock()
+	// Re-verify full-image under the relock: a write landing in the Stat
+	// window above changed the state the candidate was captured from. Any
+	// intervening mutation fails closed to manual recovery (a concurrent
+	// write during quarantine means the temp's provenance is no longer
+	// something auto-redrive may assert).
+	intent.fullImage = intent.fullImage &&
+		(w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize))
+	intent.ranges = nil
+	for _, r := range w.dirtyRanges {
+		intent.ranges = append(intent.ranges, [2]int64{r.Start, r.End})
+	}
+	intent.baseSize = w.baseSize
+	intent.logicalSize = w.logicalSize
+	intent.pending = w.pending
+	intent.hasPending = w.pending != (shfs.MetadataPatch{})
 	// The overlay bytes just moved to recovery/, so the temp no
 	// longer exists. Clearing the dirty set and poisoning the state
 	// guarantees a late Write/commit fails EIO instead of re-materializing
@@ -981,7 +1027,7 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 	tempPath := w.tempPath
 	baseTemp := w.baseTemp
 	baseTempPath := w.baseTempPath
-	targetPath := w.path
+	targetPath = w.path
 	w.temp = nil
 	w.tempPath = ""
 	w.baseTemp = nil
@@ -1004,7 +1050,7 @@ func (w *inodeWriteState) quarantineTempsReason(reason string) {
 		_ = temp.Close()
 	}
 	if tempPath != "" {
-		w.fs.quarantineFile(tempPath, targetPath, reason)
+		w.fs.quarantineFile(tempPath, targetPath, reason, intent)
 	}
 }
 
@@ -1167,12 +1213,18 @@ func (h *storhubHandle) checkCommitWriteAccess(ctx context.Context, targetPath s
 // before the size reconcile, and the size reconcile lands before the
 // metadata patch, so a crash can never leave metadata pointing at data
 // that never arrived. Ranges stay dirty until the whole pair succeeds, so
-// a retry replays instead of resuming mid-step. What this is NOT is
-// atomic: patch+truncate+metadata are separate backend operations, and a
-// crash between them leaves a partially applied commit the next mount
-// does not reconcile. Full atomicity (single backend transaction or a
-// write-ahead log with startup replay) is DEFERRED: it needs server-side
-// multi-op commit support that does not exist yet.
+// a retry replays instead of resuming mid-step. What this is NOT is a
+// single backend transaction: patch+truncate+metadata are separate backend
+// operations, and GitHub offers no multi-op commit primitive to fuse them
+// (full C4 atomicity is structurally impossible client-side, not merely
+// unimplemented). The degradation envelope is verified, not assumed:
+// a crash between steps leaves the prior valid state readable, orphaned
+// assets are purge-reclaimable, retries are idempotent, failed commits
+// quarantine with intent sidecars, and startup auto-redrive (C11: full
+// images replace, recorded spans patch, bare size changes truncate, all
+// under the target fingerprint CAS) recommits what the next mount can
+// prove untouched. Anything the CAS cannot prove stays quarantined for
+// manual recovery.
 func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseSize, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
 	if len(h.writeState.dirtyRanges) == 0 {
 		h.writeState.mu.Unlock()

@@ -133,8 +133,8 @@ func TestGovernorPointsWindowThrottlesWrites(t *testing.T) {
 		t.Fatalf("second write should wait, not fail: %v", err)
 	}
 	release()
-	if len(h.sleeps) != 1 || h.sleeps[0] <= 0 || h.sleeps[0] > secondaryWindow {
-		t.Fatalf("expected one sub-minute wait, got %v", h.sleeps)
+	if len(h.sleeps) != 1 || h.sleeps[0] <= 0 || h.sleeps[0] > secondaryWindow+secondaryWindow/4 {
+		t.Fatalf("expected one sub-minute wait (+25%% jitter headroom), got %v", h.sleeps)
 	}
 }
 
@@ -176,5 +176,25 @@ func TestGovernorDormantWithoutServerBudget(t *testing.T) {
 	}
 	if len(h.sleeps) != 0 {
 		t.Fatalf("hourly gating must stay dormant until headers arrive, got sleeps %v", h.sleeps)
+	}
+}
+
+// TestThrottleJitterBounds pins the jitter contract: additive-only (never
+// below the budgeted wait, so pacing never overspends), capped at +25%,
+// and zero-safe. Bounds are on rand.Int63n's range, so they hold with
+// probability 1 — no flake window.
+func TestThrottleJitterBounds(t *testing.T) {
+	t.Parallel()
+	if got := throttleJitter(0); got != 0 {
+		t.Fatalf("zero wait must stay zero, got %v", got)
+	}
+	if got := throttleJitter(-time.Second); got != -time.Second {
+		t.Fatalf("negative wait must pass through, got %v", got)
+	}
+	const d = 40 * time.Second
+	for i := 0; i < 1000; i++ {
+		if got := throttleJitter(d); got < d || got > d+d/4 {
+			t.Fatalf("jitter out of [d, 1.25d]: got %v", got)
+		}
 	}
 }

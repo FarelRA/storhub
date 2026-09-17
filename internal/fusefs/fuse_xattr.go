@@ -53,6 +53,11 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 	if err := n.fs.hub.SetXAttrContext(ctx, n.fs.project, targetPath, attr, data, mode); err != nil {
 		return errnoFromError(err)
 	}
+	// The xattr write bumps the file's ctime server-side; kernels holding
+	// cached attrs (AttrTimeout) would serve the stale ctime without this.
+	// Same funnel as setattr's tail: entry/content copies elsewhere expire
+	// only via invalidation.
+	n.fs.notifyKernelContentChanged(n.inode)
 	return 0
 }
 
@@ -89,5 +94,7 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 	if err := n.fs.hub.RemoveXAttrContext(ctx, n.fs.project, targetPath, attr); err != nil {
 		return errnoFromError(err)
 	}
+	// Same ctime-invalidation reasoning as Setxattr above.
+	n.fs.notifyKernelContentChanged(n.inode)
 	return 0
 }

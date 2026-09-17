@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"sync"
@@ -235,7 +236,7 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 			break
 		}
 		logging.Warn(g.logger, "rate limit throttle", "wait", wait.Round(time.Millisecond), "cost", cost, "class", class.String())
-		if err := g.sleep(ctx, wait); err != nil {
+		if err := g.sleep(ctx, throttleJitter(wait)); err != nil {
 			return nil, err
 		}
 	}
@@ -249,6 +250,23 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 		return nil, ctx.Err()
 	}
 	return func() { <-g.inflight }, nil
+}
+
+// throttleJitter spreads client-side pacing waits to keep fleets of
+// StorHub processes from waking in lockstep against the same budget
+// reset: +0-25%, additive only. Additive (never subtractive) so a wait
+// never dips below what the budget accounting requires — pacing slower
+// is always safe, pacing faster is not. Server-dictated waits (hourly
+// reset, rate-limit Retry-After/Reset) stay exact: the server owns the
+// resume instant, and fuzzing it would either arrive early (wasted call)
+// or sleep past maxWait incorrectly. maxWait denial is evaluated on the
+// unjittered wait inside reserve; the jittered sleep may overshoot
+// maxWait by up to 25%, which is bounded and ctx-cancellable. Zero-safe.
+func throttleJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Int63n(int64(d)/4+1))
 }
 
 // rollback undoes a committed zero-wait reservation whose request never

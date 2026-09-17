@@ -265,6 +265,12 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	if err != nil {
 		return nil, err
 	}
+	// Optimistic fence against concurrent writers landing between
+	// classification and deletion (audit: purge check-then-act race).
+	releaseTasks, assetTasks, err = h.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
+	if err != nil {
+		return nil, err
+	}
 	result := &PurgeResult{}
 	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, result); err != nil {
 		return nil, err
@@ -303,25 +309,7 @@ func (h *StorHub) classifyUntracked(ctx context.Context, project string) (releas
 	}); err != nil {
 		return nil, nil, err
 	}
-	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases()))
-	trackedAssets := make(map[int64]struct{})
-	for tag := range repoMeta.Releases() {
-		trackedReleases[tag] = struct{}{}
-	}
-	for _, file := range repoMeta.Files() {
-		for _, chunkName := range file.Chunks {
-			if chunk, ok := repoMeta.Chunks()[chunkName]; ok {
-				trackedAssets[chunk.AssetID] = struct{}{}
-				// A release referenced by any live chunk is tracked even if
-				// the release catalog drifted (e.g. a crash between upload
-				// and metadata commit); deleting it would cascade-delete
-				// assets the file still needs.
-				if chunk.Release != "" {
-					trackedReleases[chunk.Release] = struct{}{}
-				}
-			}
-		}
-	}
+	trackedReleases, trackedAssets := trackedPurgeSets(repoMeta)
 	for _, release := range releases {
 		if _, ok := trackedReleases[release.TagName]; !ok {
 			// An empty release holds no orphaned storage, so there is
@@ -352,6 +340,72 @@ func (h *StorHub) classifyUntracked(ctx context.Context, project string) (releas
 		}
 	}
 	return releaseTasks, assetTasks, nil
+}
+
+// trackedPurgeSets computes the tracked release tags and asset IDs from
+// fresh metadata truth: the single definition of "live" shared by
+// classification and re-verification, so the two can never disagree on
+// what counts as referenced.
+func trackedPurgeSets(repoMeta *RepoMetadata) (trackedReleases map[string]struct{}, trackedAssets map[int64]struct{}) {
+	trackedReleases = make(map[string]struct{}, len(repoMeta.Releases()))
+	trackedAssets = make(map[int64]struct{})
+	for tag := range repoMeta.Releases() {
+		trackedReleases[tag] = struct{}{}
+	}
+	for _, file := range repoMeta.Files() {
+		for _, chunkName := range file.Chunks {
+			if chunk, ok := repoMeta.Chunks()[chunkName]; ok {
+				trackedAssets[chunk.AssetID] = struct{}{}
+				// A release referenced by any live chunk is tracked even if
+				// the release catalog drifted (e.g. a crash between upload
+				// and metadata commit); deleting it would cascade-delete
+				// assets the file still needs.
+				if chunk.Release != "" {
+					trackedReleases[chunk.Release] = struct{}{}
+				}
+			}
+		}
+	}
+	return trackedReleases, trackedAssets
+}
+
+// reverifyPurgePlan closes the classify-to-delete race: a commit landing
+// between classification and deletion can reference a task's release or
+// asset (crash-recovery uploads finishing late, concurrent writers),
+// turning a correct classification into data loss. Reload fresh truth and
+// drop tasks that became tracked; fail closed (abort the purge) when the
+// reload itself fails rather than deleting on stale classification. The
+// residual window (re-verify to DELETE call) is milliseconds of network,
+// not seconds of classification — GitHub offers no CAS on releases or
+// assets to close it fully, which is documented here, not solved.
+func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask) ([]purgeReleaseTask, []purgeAssetTask, error) {
+	if len(releaseTasks) == 0 && len(assetTasks) == 0 {
+		return nil, nil, nil
+	}
+	fresh, _, err := h.loadRepoMetadataFresh(ctx, project)
+	if err != nil {
+		return nil, nil, fmt.Errorf("purge re-verify: %w", err)
+	}
+	trackedReleases, trackedAssets := trackedPurgeSets(fresh)
+	keptReleases := releaseTasks[:0]
+	for _, task := range releaseTasks {
+		if _, ok := trackedReleases[task.tag]; ok {
+			continue
+		}
+		keptReleases = append(keptReleases, task)
+	}
+	keptAssets := assetTasks[:0]
+	for _, task := range assetTasks {
+		if _, ok := trackedAssets[task.id]; ok {
+			continue
+		}
+		keptAssets = append(keptAssets, task)
+	}
+	if dropped := len(releaseTasks) - len(keptReleases) + len(assetTasks) - len(keptAssets); dropped > 0 {
+		logging.Warn(h.projectLogger(project), "purge re-verify dropped newly-tracked tasks",
+			"dropped_releases", len(releaseTasks)-len(keptReleases), "dropped_assets", len(assetTasks)-len(keptAssets))
+	}
+	return keptReleases, keptAssets, nil
 }
 
 // deletePurgePlan executes the classified deletes and records the counts.
