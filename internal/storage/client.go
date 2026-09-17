@@ -86,6 +86,12 @@ type StorHub struct {
 	metaMu    sync.RWMutex
 	metaCache map[string]*projectMetadata
 
+	// In-flight fresh metadata loads, one per project. Concurrent cold-
+	// cache misses join the owner's flight instead of each paying a full
+	// remote reload (see loadRepoMetadataFresh).
+	flightMu sync.Mutex
+	flights  map[string]*loadFlight
+
 	// Release list cache to avoid per-upload ListReleases (secondary rate limit)
 	releaseMu    sync.RWMutex
 	releaseCache map[string]releaseCacheEntry
@@ -269,6 +275,7 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 		config:       cfg,
 		repoState:    make(map[string]bool),
 		metaCache:    make(map[string]*projectMetadata),
+		flights:      make(map[string]*loadFlight),
 		releaseCache: make(map[string]releaseCacheEntry),
 		gitRepos:     make(map[string]*gitRepo),
 		objCaches:    make(map[string]*objectCache),

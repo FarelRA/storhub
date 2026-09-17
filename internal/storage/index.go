@@ -144,7 +144,7 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 	if ferr != nil {
 		return nil, 0, ferr
 	}
-	loaded, err := meta.LoadTree(manifest, fetched)
+	loaded, err := meta.LoadTreeParallel(manifest, fetched)
 	if err != nil {
 		return nil, 0, fmt.Errorf("load split index: %w", err)
 	}

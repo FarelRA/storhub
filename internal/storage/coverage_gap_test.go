@@ -625,3 +625,99 @@ func TestDeepTreeUploadStatRoundTrip(t *testing.T) {
 		t.Fatalf("read deep path: %q %v", data, err)
 	}
 }
+
+// RevisionContext serves the cached revision on a warm cache. The
+// X-StorHub-Revision header rides every read, so a fresh remote load per
+// call turned each GET into a full metadata reload (production: seconds
+// per request for a 323-byte manifest).
+func TestRevisionContextServesCachedRevision(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	project := "project-revision-cached"
+
+	seed := writeTempFile(t, t.TempDir(), "base.txt", []byte("base content"))
+	if _, err := hub.UploadFileContext(ctx, project, "base.txt", seed); err != nil {
+		t.Fatalf("upload base: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush base: %v", err)
+	}
+	rev, err := hub.RevisionContext(ctx, project)
+	if err != nil || rev == "" {
+		t.Fatalf("revision: %q %v", rev, err)
+	}
+	var apiCalls atomic.Int64
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		apiCalls.Add(1)
+		return false
+	})
+	again, err := hub.RevisionContext(ctx, project)
+	if err != nil {
+		t.Fatalf("cached revision: %v", err)
+	}
+	if again != rev {
+		t.Fatalf("cached revision mismatch: %q vs %q", rev, again)
+	}
+	if got := apiCalls.Load(); got != 0 {
+		t.Fatalf("warm RevisionContext issued %d API calls, want 0", got)
+	}
+}
+
+// Concurrent cold-cache reads coalesce onto one remote load. Without
+// single-flight, N requests arriving together each paid a full metadata
+// reload (production: N parallel multi-second GitHub fetches).
+func TestConcurrentColdReadsShareOneLoad(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	project := "project-cold-singleflight"
+
+	seed := writeTempFile(t, t.TempDir(), "base.txt", []byte("base content"))
+	if _, err := hub.UploadFileContext(ctx, project, "base.txt", seed); err != nil {
+		t.Fatalf("upload base: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush base: %v", err)
+	}
+	var contentGets atomic.Int64
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/") {
+			contentGets.Add(1)
+		}
+		return false
+	})
+	// Baseline: GETs for exactly one cold load (manifest + objects).
+	hub.invalidateRepoMetadata(project)
+	if _, _, err := hub.LoadRepoMetadataReadonlyContext(ctx, project); err != nil {
+		t.Fatalf("baseline load: %v", err)
+	}
+	baseline := contentGets.Load()
+	if baseline == 0 {
+		t.Fatal("baseline cold load issued no contents GETs")
+	}
+	// Eight readers missing together must cost exactly one load.
+	hub.invalidateRepoMetadata(project)
+	contentGets.Store(0)
+	const readers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, readers)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, errs[i] = hub.LoadRepoMetadataReadonlyContext(ctx, project)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("reader %d: %v", i, err)
+		}
+	}
+	if got := contentGets.Load(); got != baseline {
+		t.Fatalf("8 concurrent cold reads issued %d contents GETs, want one load (%d)", got, baseline)
+	}
+}

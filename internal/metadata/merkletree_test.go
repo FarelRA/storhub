@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // sampleTree builds a normalized metadata tree with nested dirs, files with
@@ -442,5 +444,150 @@ func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
 	loaded.Normalize("demo", 42)
 	if len(loaded.files) != 0 || len(loaded.dirs) != 0 || loaded.Root.Inode != m.Root.Inode {
 		t.Fatalf("empty round-trip lost root or gained entries: %+v", loaded)
+	}
+}
+
+// LoadTree must load deduped subtrees: BuildTree stores structurally
+// identical directories as ONE object referenced from two paths, and the
+// loader used to mistake that sharing for a cycle (unloadable project).
+func TestLoadTreeLoadsDedupedSubtrees(t *testing.T) {
+	t.Parallel()
+	now := int64(500)
+	m := NewRepoMetadata("demo")
+	m.EnsureDirectory("a", now)
+	m.EnsureDirectory("b", now)
+	m.dirs["a"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.dirs["b"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.files["a/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.files["b/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.Normalize("demo", now)
+
+	res, err := BuildTree(m)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	loaded, err := LoadTree(manifestFrom(t, m, res), func(sha string) ([]byte, error) {
+		data, ok := res.Objects[sha]
+		if !ok {
+			return nil, fmt.Errorf("missing object %s", sha)
+		}
+		return data, nil
+	})
+	if err != nil {
+		t.Fatalf("load deduped tree: %v", err)
+	}
+	loaded.Normalize("demo", m.LastMod)
+	a, _ := json.Marshal(m)
+	b, _ := json.Marshal(loaded)
+	if string(a) != string(b) {
+		t.Fatalf("deduped round-trip not identity:\n want %s\n  got %s", a, b)
+	}
+}
+
+// The ancestor-chain cycle guard itself is intentionally untested at the
+// object level: with content addressing, a genuine cycle (X contains
+// sha(Y), Y contains sha(X)) is a sha256-preimage problem, and any
+// non-conforming store is already rejected by verifyObject before
+// recursion. The only reachable trigger was dedup sharing - pinned above.
+func TestLoadTreeCycleGuardDocumented(t *testing.T) {
+	t.Parallel()
+}
+
+// LoadTreeParallel loads the identical tree as LoadTree while fetching
+// independent objects concurrently. Sequential per-object GETs made every
+// cold metadata load pay one network round trip per tree node, chunk
+// bucket, and catalog.
+func TestLoadTreeParallelMatchesSequential(t *testing.T) {
+	t.Parallel()
+	m := sampleTree(t)
+	res, err := BuildTree(m)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := manifestFrom(t, m, res)
+	fetch := func(sha string) ([]byte, error) {
+		// One scheduling quantum per object: overlap is then certain for
+		// a parallel loader and impossible for a sequential one.
+		time.Sleep(5 * time.Millisecond)
+		data, ok := res.Objects[sha]
+		if !ok {
+			return nil, fmt.Errorf("missing object %s", sha)
+		}
+		return data, nil
+	}
+	seqFetches := 0
+	seq, err := LoadTree(manifest, func(sha string) ([]byte, error) {
+		seqFetches++
+		return fetch(sha)
+	})
+	if err != nil {
+		t.Fatalf("sequential load: %v", err)
+	}
+	var mu sync.Mutex
+	parFetches := 0
+	inflight, maxInflight := 0, 0
+	par, err := LoadTreeParallel(manifest, func(sha string) ([]byte, error) {
+		mu.Lock()
+		parFetches++
+		inflight++
+		if inflight > maxInflight {
+			maxInflight = inflight
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inflight--
+			mu.Unlock()
+		}()
+		return fetch(sha)
+	})
+	if err != nil {
+		t.Fatalf("parallel load: %v", err)
+	}
+	a, _ := json.Marshal(seq)
+	b, _ := json.Marshal(par)
+	if string(a) != string(b) {
+		t.Fatalf("parallel load differs:\n seq %s\n par %s", a, b)
+	}
+	if maxInflight < 2 {
+		t.Fatalf("no fetch overlap observed (max inflight %d)", maxInflight)
+	}
+	if parFetches != seqFetches {
+		t.Fatalf("parallel fetched %d objects, sequential %d", parFetches, seqFetches)
+	}
+}
+
+// LoadTreeParallel applies deduped subtrees once per path like the fixed
+// sequential loader.
+func TestLoadTreeParallelLoadsDedupedSubtrees(t *testing.T) {
+	t.Parallel()
+	now := int64(500)
+	m := NewRepoMetadata("demo")
+	m.EnsureDirectory("a", now)
+	m.EnsureDirectory("b", now)
+	m.dirs["a"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.dirs["b"] = DirMeta{Inode: 10, CreatedAt: now, ModifiedAt: now, Mode: 0o755}
+	m.files["a/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.files["b/x"] = FileMeta{Inode: 20, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{}}
+	m.Normalize("demo", now)
+	res, err := BuildTree(m)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	loaded, err := LoadTreeParallel(manifestFrom(t, m, res), func(sha string) ([]byte, error) {
+		data, ok := res.Objects[sha]
+		if !ok {
+			return nil, fmt.Errorf("missing object %s", sha)
+		}
+		return data, nil
+	})
+	if err != nil {
+		t.Fatalf("parallel load deduped tree: %v", err)
+	}
+	loaded.Normalize("demo", m.LastMod)
+	a, _ := json.Marshal(m)
+	b, _ := json.Marshal(loaded)
+	if string(a) != string(b) {
+		t.Fatalf("deduped parallel round-trip not identity:\n want %s\n  got %s", a, b)
 	}
 }

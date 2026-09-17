@@ -7,15 +7,21 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
-// RevisionContext returns the project's current remote metadata revision
-// (the content SHA of the latest committed metadata.json). Clients pass it
-// to WithExpectedRevision on a later mutation to assert nothing else
-// advanced the project in between.
+// RevisionContext returns the project's current metadata revision: the
+// content SHA of the latest committed metadata the cache holds. It serves
+// the cached snapshot (loading fresh only on a cold miss), so the token a
+// client receives always describes the tree the reads just served - the
+// X-StorHub-Revision header rides every read, and a fresh remote load per
+// call turned each GET into a full metadata reload. Snapshot coherence
+// over remote exactness: an external writer may advance HEAD past the
+// cached token, but that direction fails closed - enforceExpectedRevision
+// still re-verifies against remote HEAD at apply time, so a stale token
+// yields 409/412, never a silent overwrite.
 func (h *StorHub) RevisionContext(ctx context.Context, project string) (string, error) {
 	if err := validateProject(project); err != nil {
 		return "", err
 	}
-	_, sha, err := h.loadRepoMetadataFresh(ctx, project)
+	_, sha, err := h.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
 		return "", err
 	}

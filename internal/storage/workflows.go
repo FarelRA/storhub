@@ -185,6 +185,45 @@ func (h *StorHub) loadRepoMetadataReadonly(ctx context.Context, project string) 
 }
 
 func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*RepoMetadata, string, error) {
+	// Single-flight: concurrent cold-cache misses for one project join
+	// the owner's remote load instead of each paying it. Fresh loads are
+	// the only uncached remote reads left on hot paths (validation
+	// probes, hydration, rollback pins), and without coalescing a burst
+	// of N arrivals costs N full reloads. A canceled waiter stops
+	// waiting; the flight continues for the rest.
+	h.flightMu.Lock()
+	if f, ok := h.flights[project]; ok {
+		h.flightMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-f.done:
+			return f.meta, f.sha, f.err
+		}
+	}
+	f := &loadFlight{done: make(chan struct{})}
+	h.flights[project] = f
+	h.flightMu.Unlock()
+
+	f.meta, f.sha, f.err = h.loadRepoMetadataFreshUnshared(ctx, project)
+
+	h.flightMu.Lock()
+	delete(h.flights, project)
+	h.flightMu.Unlock()
+	close(f.done)
+	return f.meta, f.sha, f.err
+}
+
+// loadFlight is one in-flight fresh metadata load shared by every
+// goroutine that missed the cache for the project while it ran.
+type loadFlight struct {
+	done chan struct{}
+	meta *RepoMetadata
+	sha  string
+	err  error
+}
+
+func (h *StorHub) loadRepoMetadataFreshUnshared(ctx context.Context, project string) (*RepoMetadata, string, error) {
 	started := h.config.Now().UTC()
 	logging.Debug(h.projectLogger(project), "load metadata start")
 	data, sha, found, err := h.readIndexHead(ctx, project)
@@ -374,7 +413,7 @@ func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, d
 		return nil, 0, err
 	}
 	fetched := func(sha string) ([]byte, error) { return h.fetchObjectAtRef(ctx, project, ref, sha) }
-	loaded, err := meta.LoadTree(manifest, fetched)
+	loaded, err := meta.LoadTreeParallel(manifest, fetched)
 	if err != nil {
 		return nil, 0, err
 	}
