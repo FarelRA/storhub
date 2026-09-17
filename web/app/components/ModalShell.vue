@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useFocusTrap } from '~/composables/use-focus-trap'
+
 const props = defineProps<{
   open: boolean
   title: string
@@ -6,45 +8,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: []; submit: [] }>()
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
-}
-
-watch(
-  () => props.open,
-  (open) => {
-    if (import.meta.client) {
-      if (open) window.addEventListener('keydown', onKeydown)
-      else window.removeEventListener('keydown', onKeydown)
-    }
-  },
-)
-
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+useEscape(() => {
+  if (props.open) emit('close')
+})
 
 const panel = ref<HTMLElement | null>(null)
+const trapTab = useFocusTrap(panel)
 let trigger: HTMLElement | null = null
-
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-
-function trapTab(event: KeyboardEvent) {
-  if (event.key !== 'Tab' || !panel.value) return
-  const focusable = [...panel.value.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
-    (el) => el.offsetParent !== null,
-  )
-  if (!focusable.length) return
-  const first = focusable[0]
-  const last = focusable.at(-1)
-  if (!first || !last) return
-  const active = document.activeElement
-  if (event.shiftKey && (active === first || !panel.value.contains(active))) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && active === last) {
-    event.preventDefault()
-    first.focus()
-  }
-}
 
 watch(
   () => props.open,

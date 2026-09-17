@@ -23,7 +23,9 @@ type testBackend struct {
 
 func newTestBackend(now int64) *testBackend {
 	repo := meta.NewRepoMetadata("demo")
-	repo.EnsureRelease("v1", now)
+	if _, err := repo.EnsureRelease("v1", now); err != nil {
+		panic(fmt.Sprintf("test seed release must be valid: %v", err))
+	}
 	return &testBackend{repo: repo, now: now, nextAsset: 1, assetBytes: map[int64][]byte{}}
 }
 
@@ -58,20 +60,20 @@ func (b *testBackend) UpdateRepoMetadataContext(_ context.Context, _ string, fn 
 }
 
 func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64) {
+	// Write back through the tracked setters (SetFileAtime/SetDirAtime):
+	// GetDirectory/FindFile return copy-pointers, so mutating their
+	// results drops the write. Root ("") is a value field, not a copy,
+	// so its direct write lands.
 	_, _ = b.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 		if isDir {
 			if targetPath == "" {
 				repo.Root.AccessedAt = now
 				return nil
 			}
-			if dir := repo.GetDirectory(targetPath); dir != nil {
-				dir.AccessedAt = now
-			}
+			repo.SetDirAtime(targetPath, now)
 			return nil
 		}
-		if file := repo.FindFile(targetPath); file != nil {
-			file.AccessedAt = now
-		}
+		repo.SetFileAtime(targetPath, now)
 		return nil
 	}, "test atime")
 }
@@ -79,7 +81,9 @@ func (b *testBackend) QueueAtimeUpdateContext(ctx context.Context, project, targ
 func (b *testBackend) Logger() *slog.Logger { return nil }
 
 func (b *testBackend) GetOrCreateUploadReleaseContext(_ context.Context, _ string, repoMeta *meta.RepoMetadata, _ int) (string, string, error) {
-	repoMeta.EnsureRelease("v1", b.now)
+	if _, err := repoMeta.EnsureRelease("v1", b.now); err != nil {
+		panic(fmt.Sprintf("test seed release must be valid: %v", err))
+	}
 	return "v1", "upload", nil
 }
 

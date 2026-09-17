@@ -15,8 +15,9 @@ export class ApiError extends Error {
 
 /**
  * Wire mirror of `shfs.DirEntry` (internal/fs/types.go): the row shape
- * returned by GET /children. It carries NO uid/gid/timestamps/symlink_target;
- * those exist only on EntryInfo (GET /nodes).
+ * returned by GET /children. Extra attrs may be present via omitempty
+ * (uid, gid, created_at, modified_at, accessed_at, changed_at);
+ * EntryInfo remains authoritative for stat-grade detail.
  */
 export interface DirEntry {
   name: string
@@ -27,7 +28,13 @@ export interface DirEntry {
   size: number
   inode?: number
   mode?: number
+  uid?: number
+  gid?: number
   nlink?: number
+  created_at?: number
+  modified_at?: number
+  accessed_at?: number
+  changed_at?: number
 }
 
 export interface EntryInfo {

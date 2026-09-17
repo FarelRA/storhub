@@ -63,10 +63,11 @@ func TestOpenWriteDeniedForNonOwner(t *testing.T) {
 	if _, _, errno := node.Open(callerCtx(1001, 1001), syscall.O_RDWR); errno != syscall.EACCES {
 		t.Fatalf("stranger rdwr write-open must be EACCES, got %v", errno)
 	}
-	// Read-opens are not DAC-gated here: the read path enforces
-	// CheckReadAccess at the hub (fs.ReadFileAtContext).
-	if _, _, errno := node.Open(callerCtx(1001, 1001), syscall.O_RDONLY); errno != 0 {
-		t.Fatalf("read-open must not be rejected by the write gate, got %v", errno)
+	// Read-opens are DAC-gated at Open (Open-ONLY gate): a stranger gets
+	// EACCES on O_RDONLY without paying a per-read check, and the hub
+	// read path stays fast on the pinned snapshot.
+	if _, _, errno := node.Open(callerCtx(1001, 1001), syscall.O_RDONLY); errno != syscall.EACCES {
+		t.Fatalf("stranger read-open must be EACCES, got %v", errno)
 	}
 	if _, _, errno := node.Open(callerCtx(1000, 1000), syscall.O_WRONLY); errno != 0 {
 		t.Fatalf("owner write-open: %v", errno)

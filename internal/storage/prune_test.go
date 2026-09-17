@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	meta "github.com/FarelRA/storhub/internal/metadata"
@@ -658,4 +659,51 @@ func TestPruneRefusesDirtyProject(t *testing.T) {
 		}
 	}
 	backend.intercept.Store(func(http.ResponseWriter, *http.Request) bool { return false })
+}
+
+// A wide fanout directory (900 objects under one .storhub/objects shard)
+// must enumerate with exactly 1+N ListDir calls (root + shard) and return
+// every object: the regression that catches an O(n) dirEntriesLocked
+// scan or a dropped index entry at scale. All 900 share the "ab" shard so
+// the request count is deterministic.
+func TestPruneEnumeratesWideShardWithTwoListDirs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	if err := hub.EnsureRepoContext(ctx, "wide"); err != nil {
+		t.Fatalf("ensure repo: %v", err)
+	}
+	const objects = 900
+	injected := 0
+	for i := 0; injected < objects; i++ {
+		data := []byte(fmt.Sprintf("wide-object-%d", i))
+		if !strings.HasPrefix(meta.ObjectSHA(data), "ab") {
+			continue
+		}
+		if err := hub.ensureOwner(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := hub.gh.PutFileContent(ctx, hub.owner, "wide", objectRepoPath(meta.ObjectSHA(data)), data, "", "wide"); err != nil {
+			t.Fatalf("inject wide object: %v", err)
+		}
+		injected++
+	}
+	var listDirs atomic.Int32
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/objects") {
+			listDirs.Add(1)
+		}
+		return false
+	})
+	refs, err := hub.listRepoObjects(ctx, "wide")
+	if err != nil {
+		t.Fatalf("enumerate wide shard: %v", err)
+	}
+	if len(refs) != objects {
+		t.Fatalf("enumeration must return all %d objects, got %d", objects, len(refs))
+	}
+	if listDirs.Load() != 2 {
+		t.Fatalf("1+N enumeration must take exactly 2 ListDirs (root + shard), took %d", listDirs.Load())
+	}
 }

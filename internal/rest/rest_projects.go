@@ -12,23 +12,24 @@ type projectResponse struct {
 	Stats   *shfs.FSStats `json:"stats"`
 }
 
-func (h *restHandler) handleProject(w http.ResponseWriter, r *http.Request) {
+// handleProjectGet serves GET /projects/{project}: filesystem stats.
+func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	switch r.Method {
-	case http.MethodGet:
-		stats, err := h.clientFor(r).StatFSContext(r.Context(), project)
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		h.writeJSON(w, http.StatusOK, projectResponse{Project: project, Stats: stats})
-	case http.MethodDelete:
-		if err := h.clientFor(r).DeleteProjectContext(r.Context(), project); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodDelete)
+	stats, err := h.clientFor(r).StatFSContext(r.Context(), project)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
 	}
+	h.setRevisionHeader(w, r, project)
+	h.writeJSON(w, http.StatusOK, projectResponse{Project: project, Stats: stats})
+}
+
+// handleProjectDelete serves DELETE /projects/{project}.
+func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	if err := h.clientFor(r).DeleteProjectContext(r.Context(), project); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})
 }

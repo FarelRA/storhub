@@ -144,7 +144,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	// danger band instead of trusting the truncated embedded list.
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	backend.embedCap = 980
+	backend.faults.embedCap = 980
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
 	meta, err := hub.UploadFile("project-true-count", "a.txt", input)
@@ -157,12 +157,25 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	hub.invalidateReleaseCache("project-true-count")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
+	// 1000 assets at per_page=100 must page 10 full pages plus the
+	// terminating empty one: the picker pays 11 list-assets calls, never a
+	// single truncated shot.
+	var apiHits atomic.Int32
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/assets") {
+			apiHits.Add(1)
+		}
+		return false
+	})
 	tag, _, err := hub.getOrCreateUploadRelease(ctx, "project-true-count", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
 	if tag == fullRelease {
 		t.Fatalf("picker trusted truncated embedded count and chose server-full %s", tag)
+	}
+	if apiHits.Load() != 11 {
+		t.Fatalf("1000-asset true count must page 10+terminator (11 hits), saw %d", apiHits.Load())
 	}
 }
 
@@ -336,7 +349,7 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	backend.collideNext = map[string]bool{"project-collide/v1": true}
+	backend.faults.collideNext = map[string]bool{"project-collide/v1": true}
 	payload := bytes.Repeat([]byte("c"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "collide.txt", payload)
 	if _, err := hub.UploadFile("project-collide", "collide.txt", input); err != nil {
@@ -365,7 +378,7 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
-	backend.embedCap = 950
+	backend.faults.embedCap = 950
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("s"))
 	seedMeta, err := hub.UploadFile("project-spread", "seed.txt", seed)

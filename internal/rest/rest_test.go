@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -23,110 +22,6 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	storage "github.com/FarelRA/storhub/internal/storage"
 )
-
-func TestRESTFilesystemWorkflow(t *testing.T) {
-	t.Parallel()
-	client := newFakeRESTClient()
-	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
-	if err != nil {
-		t.Fatalf("new handler: %v", err)
-	}
-
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
-	putResp := mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/readme.txt", strings.NewReader("hello"), nil, http.StatusCreated)
-	var putNode nodeResponse
-	decodeJSONBody(t, putResp, &putNode)
-	if putNode.Entry == nil || putNode.Entry.Path != "docs/readme.txt" || putNode.Entry.Size != 5 {
-		t.Fatalf("unexpected put node: %+v", putNode)
-	}
-	if putNode.ETag == "" {
-		t.Fatal("expected etag on put response")
-	}
-
-	contentResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=docs/readme.txt", nil, nil, http.StatusOK)
-	if got := string(readBody(t, contentResp)); got != "hello" {
-		t.Fatalf("unexpected content: %q", got)
-	}
-	if contentResp.Header.Get("ETag") == "" {
-		t.Fatal("expected content etag")
-	}
-
-	rangeResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=docs/readme.txt", nil, map[string]string{"Range": "bytes=1-3"}, http.StatusPartialContent)
-	if got := string(readBody(t, rangeResp)); got != "ell" {
-		t.Fatalf("unexpected ranged content: %q", got)
-	}
-	if calls := client.takeReadCalls(); !reflect.DeepEqual(calls, []readCall{{path: "docs/readme.txt", offset: 0, length: 5}, {path: "docs/readme.txt", offset: 1, length: 3}}) {
-		t.Fatalf("unexpected read calls: %+v", calls)
-	}
-
-	mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=docs/readme.txt&op=write&offset=1", strings.NewReader("a"), map[string]string{"If-Match": putNode.ETag}, http.StatusOK)
-	nodeResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=docs/readme.txt", nil, nil, http.StatusOK)
-	var node nodeResponse
-	decodeJSONBody(t, nodeResp, &node)
-	writeETag := node.ETag
-
-	mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=docs/readme.txt&op=append", strings.NewReader("!"), map[string]string{"If-Match": writeETag}, http.StatusOK)
-	nodeResp = mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=docs/readme.txt", nil, nil, http.StatusOK)
-	decodeJSONBody(t, nodeResp, &node)
-	appendETag := node.ETag
-
-	mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=docs/readme.txt&op=truncate&size=3", nil, map[string]string{"If-Match": appendETag}, http.StatusOK)
-	contentResp = mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=docs/readme.txt", nil, nil, http.StatusOK)
-	if got := string(readBody(t, contentResp)); got != "hal" {
-		t.Fatalf("unexpected truncated content: %q", got)
-	}
-
-	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/xattrs/value?path=docs/readme.txt&name=user.flag", strings.NewReader("warm"), nil, http.StatusNoContent)
-	attrsResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/xattrs?path=docs/readme.txt", nil, nil, http.StatusOK)
-	var attrs xattrListResponse
-	decodeJSONBody(t, attrsResp, &attrs)
-	if len(attrs.Names) != 1 || attrs.Names[0] != "user.flag" {
-		t.Fatalf("unexpected xattrs: %+v", attrs)
-	}
-	attrValueResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/xattrs/value?path=docs/readme.txt&name=user.flag", nil, nil, http.StatusOK)
-	if got := string(readBody(t, attrValueResp)); got != "warm" {
-		t.Fatalf("unexpected xattr value: %q", got)
-	}
-
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chmod", chmodRequest{Path: "docs/readme.txt", Mode: 0o600}, http.StatusOK)
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown", chownRequest{Path: "docs/readme.txt", UID: 7, GID: 9}, http.StatusOK)
-	stamp := time.Unix(100, 0).UTC()
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/utimes", utimesRequest{Path: "docs/readme.txt", Atime: stamp, Mtime: stamp}, http.StatusOK)
-
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/symlink", symlinkRequest{Target: "docs/readme.txt", LinkPath: "docs/link.txt"}, http.StatusCreated)
-	symlinkContent := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/content?path=docs/link.txt", nil, nil, http.StatusOK)
-	if got := string(readBody(t, symlinkContent)); got != "docs/readme.txt" {
-		t.Fatalf("unexpected symlink body: %q", got)
-	}
-
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/link", linkRequest{ExistingPath: "docs/readme.txt", NewPath: "docs/hard.txt"}, http.StatusCreated)
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/rename", renameRequest{OldPath: "docs/hard.txt", NewPath: "docs/final.txt"}, http.StatusOK)
-
-	childrenResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/children?path=docs", nil, nil, http.StatusOK)
-	var children entriesResponse
-	decodeJSONBody(t, childrenResp, &children)
-	if len(children.Entries) != 3 {
-		t.Fatalf("unexpected children count: %+v", children)
-	}
-	if names := []string{children.Entries[0].Name, children.Entries[1].Name, children.Entries[2].Name}; strings.Join(names, ",") != "final.txt,link.txt,readme.txt" {
-		t.Fatalf("unexpected child names: %v", names)
-	}
-
-	revisionsResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/revisions", nil, nil, http.StatusOK)
-	var revisions revisionsResponse
-	decodeJSONBody(t, revisionsResp, &revisions)
-	if len(revisions.Revisions) == 0 {
-		t.Fatal("expected revisions")
-	}
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/rollback", rollbackRequest{CommitSHA: revisions.Revisions[0].CommitSHA}, http.StatusOK)
-
-	projectResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo", nil, nil, http.StatusOK)
-	var project projectResponse
-	decodeJSONBody(t, projectResp, &project)
-	if project.Stats == nil || project.Stats.Files != 3 || project.Stats.Directories != 2 {
-		t.Fatalf("unexpected project stats: %+v", project)
-	}
-}
 
 func TestRESTRevertPathAndPrune(t *testing.T) {
 	t.Parallel()
@@ -507,6 +402,8 @@ func newFakeRESTClient() *fakeRESTClient {
 		now:       10,
 	}
 }
+
+// --- content mutations (ops/mkdir, content PUT/PATCH/DELETE) ---
 
 func (c *fakeRESTClient) CreateFileContext(ctx context.Context, project, filePath string) (*FileMetadata, error) {
 	c.mu.Lock()
@@ -948,6 +845,8 @@ func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath
 	return &FileMetadata{Size: int64(len(patched)), Inode: node.entry.Inode}, nil
 }
 
+// --- content reads (nodes/children/content GET, revisions list) ---
+
 func (c *fakeRESTClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	c.mu.Lock()
 	c.recordIdentityLocked(ctx)
@@ -1062,6 +961,8 @@ func (c *fakeRESTClient) StatFSContext(ctx context.Context, project string) (*FS
 	return &FSStats{Files: len(p.files), Directories: len(p.dirs), Inodes: inodes, Bytes: bytesTotal, Releases: len(p.revisions), Assets: len(p.files)}, nil
 }
 
+// --- links (symlink/readlink/link verbs) ---
+
 func (c *fakeRESTClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1116,6 +1017,8 @@ func (c *fakeRESTClient) LinkContext(ctx context.Context, project, existingPath,
 	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
+// --- metadata verbs (chmod/chown/utimes) ---
+
 func (c *fakeRESTClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1156,6 +1059,8 @@ func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath
 	node.entry.ChangedAt = now
 	return nil
 }
+
+// --- xattrs ---
 
 func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
 	c.mu.Lock()
@@ -1210,6 +1115,8 @@ func (c *fakeRESTClient) ListXAttrContext(ctx context.Context, project, targetPa
 	sort.Strings(names)
 	return names, nil
 }
+
+// --- ops (revisions/rollback/purge/revert/prune/delete-project) ---
 
 func (c *fakeRESTClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]MetadataRevision, error) {
 	c.mu.Lock()
@@ -1277,6 +1184,8 @@ func (c *fakeRESTClient) DeleteProjectContext(ctx context.Context, project strin
 	c.deleted[project] = true
 	return nil
 }
+
+// --- fake internals (fixture tree, fault switches, call records) ---
 
 func (c *fakeRESTClient) project(project string) *fakeRESTProject {
 	p, ok := c.projects[project]

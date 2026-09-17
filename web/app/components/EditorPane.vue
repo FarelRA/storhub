@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { formatBytes } from '~/composables/use-format'
-
-const console_ = useConsole()
-const { selectedPath, selectedEntry, canEditFile, busy, editorIsText, previewKind, previewLoading, previewMeta, editorDirty } = console_
+const consoleStore = useConsole()
+const { selectedPath, selectedEntry, canEditFile, isSaveable, busy, editorIsText, previewKind, previewLoading, previewMeta, editorDirty } = consoleStore
 
 // Right-aligned status on the PREVIEW header line.
 const meta = computed(() => {
@@ -15,14 +13,23 @@ const meta = computed(() => {
   return ''
 })
 
+// The Save button distinguishes "not text" from "text but truncated": only
+// a complete text fetch with a CAS token may be PUT back.
+const saveTitle = computed(() => {
+  if (!canEditFile.value) return 'Select a file to save'
+  if (isSaveable.value) return 'Save (Cmd/Ctrl+S)'
+  if (editorIsText.value) return 'Only complete text previews are saveable (this one is truncated)'
+  return 'Only text previews are saveable'
+})
+
 async function reload() {
   const entry = selectedEntry.value
   if (!entry || entry.is_dir || entry.is_symlink) return
   if (previewKind.value === 'text' && selectedPath.value) {
-    await console_.readFile(selectedPath.value)
+    await consoleStore.readFile(selectedPath.value)
     return
   }
-  await console_.loadPreview(entry)
+  await consoleStore.loadPreview(entry)
 }
 </script>
 
@@ -54,17 +61,18 @@ async function reload() {
       </button>
       <button
         class="btn btn-solid btn-sm ml-auto"
-        :disabled="!canEditFile || !editorIsText || busy"
-        :title="editorIsText ? 'Save (Cmd/Ctrl+S)' : 'Only text previews are saveable'"
-        @click="console_.saveFile()"
+        :disabled="!canEditFile || !isSaveable || busy"
+        :title="saveTitle"
+        @click="consoleStore.saveFile()"
       >
         Save <kbd class="hidden text-[10px] opacity-70 sm:inline">⌘S</kbd>
       </button>
     </div>
 
     <!-- Details for the selected entry -->
-    <div class="min-h-0 border-t border-hair pt-3">
+    <div class="min-h-0 space-y-4 border-t border-hair pt-3">
       <EntryDetails />
+      <XattrPanel />
     </div>
   </section>
 </template>

@@ -79,7 +79,7 @@ func TestAtimeUpdateSurvivesDeleteDuringRevival(t *testing.T) {
 	// parked in the revival critical section. The delete below then lands
 	// in the stale-pointer window deterministically - the revival's
 	// re-read cannot run before close(release) unblocks the wedged loop.
-	pollUntil(t, 3*time.Second, "atime writer to pass SetDirAtime", func() bool {
+	pollUntil(t, time.Second, "atime writer to pass SetDirAtime", func() bool {
 		pm.mu.RLock()
 		defer pm.mu.RUnlock()
 		dir := pm.meta.GetDirectory("docs")
@@ -95,7 +95,7 @@ func TestAtimeUpdateSurvivesDeleteDuringRevival(t *testing.T) {
 		if p != nil {
 			t.Fatalf("atime update panicked across the revival window: %v", p)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("atime writer never completed")
 	}
 

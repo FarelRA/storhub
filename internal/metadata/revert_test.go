@@ -17,17 +17,29 @@ func buildTree(t *testing.T, mutate func(m *RepoMetadata)) *RepoMetadata {
 
 func clonePtr(m *RepoMetadata) *RepoMetadata { c := m.Clone(); return c }
 
+// putTestChunk stores a chunk through the tracked PutChunk mutator instead
+// of a white-box map write, so fixtures exercise the same size/index/stats
+// accounting production writes use (white-box writes mask drift).
+func putTestChunk(t *testing.T, m *RepoMetadata, id int64, info ChunkInfo) {
+	t.Helper()
+	if err := m.PutChunk(id, info); err != nil {
+		t.Fatalf("put test chunk %d: %v", id, err)
+	}
+}
+
 func TestRevertFileRestoresHistoricalContent(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
-		m.chunks[1] = ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("docs/a.txt", FileMeta{Size: 5, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	cur := clonePtr(hist)
 	// Current diverges: a.txt overwritten with a new chunk.
-	cur.chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
+	putTestChunk(t, cur, 2, ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22})
 	cur.UpsertFile("docs/a.txt", FileMeta{Size: 9, Mode: 0o644, UploadedAt: 200, ModifiedAt: 200, Chunks: []int64{2}}, 200)
 	cur.Normalize("demo", 200)
 
@@ -53,9 +65,11 @@ func TestRevertRestoresDeletedFileAndParent(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("keep", 100)
 		m.EnsureDirectory("gone", 100)
-		m.chunks[1] = ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 3, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("gone/x.txt", FileMeta{Size: 3, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	cur := clonePtr(hist)
 	cur.RemoveFile("gone/x.txt")
@@ -82,10 +96,12 @@ func TestRevertDirectorySubtree(t *testing.T) {
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("tree", 100)
 		m.EnsureDirectory("tree/sub", 100)
-		m.chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("tree/a", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.UpsertFile("tree/sub/b", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	cur := clonePtr(hist)
 	// Current deleted the whole subtree and added an unrelated file.
@@ -115,9 +131,11 @@ func TestRevertRemovesPathAbsentInHistory(t *testing.T) {
 	})
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("docs", 100)
-		m.chunks[1] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("docs/new", FileMeta{Size: 1, Mode: 0o644, UploadedAt: 200, ModifiedAt: 200, Chunks: []int64{1}}, 200)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	if err := RevertSubtree(cur, hist, "docs/new", 300); err != nil {
 		t.Fatalf("revert: %v", err)
@@ -132,17 +150,21 @@ func TestRevertRemapsCollidingInodeAndChunk(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[5] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
+		putTestChunk(t, m, 5, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55})
 		m.UpsertFile("d/target", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{5}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	// Current reused chunk id 5 for DIFFERENT content and holds inode of
 	// d/target under another path (collision).
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[5] = ChunkInfo{Size: 77, Offset: 0, Release: "v1", AssetID: 999}
+		putTestChunk(t, m, 5, ChunkInfo{Size: 77, Offset: 0, Release: "v1", AssetID: 999})
 		m.UpsertFile("d/other", FileMeta{Size: 77, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{5}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	targetInode := hist.FindFile("d/target").Inode
 	// Force a collision: give d/other the same inode the historical target had.
@@ -184,8 +206,10 @@ func TestRevertRestoresMissingRelease(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.EnsureRelease("v9", 100)
-		m.chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v9", AssetID: 11}
+		if _, err := m.EnsureRelease("v9", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 2, Offset: 0, Release: "v9", AssetID: 11})
 		m.UpsertFile("d/f", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 	})
 	cur := buildTree(t, func(m *RepoMetadata) {
@@ -207,12 +231,14 @@ func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[500] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55}
+		putTestChunk(t, m, 500, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 55})
 		m.UpsertFile("d/f", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{500}}, 100)
 		f := *m.FindFile("d/f")
 		f.Inode = 400
 		m.WriteFileDirect("d/f", f)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
@@ -235,12 +261,12 @@ func TestRevertAdvancesCountersPastReusedIDs(t *testing.T) {
 	}
 	// Allocations inside the same operation must not hand out the live ids.
 	for i := 0; i < 300; i++ {
-		if id := cur.AllocateChunkID(); id <= 500 {
+		if id := cur.allocateChunkID(); id <= 500 {
 			t.Fatalf("AllocateChunkID returned %d while chunk 500 is live", id)
 		}
 	}
 	for i := 0; i < 300; i++ {
-		if ino := cur.AllocateInode(); ino <= 400 {
+		if ino := cur.allocateInode(); ino <= 400 {
 			t.Fatalf("AllocateInode returned %d while inode 400 is live", ino)
 		}
 	}
@@ -253,14 +279,16 @@ func TestRevertKeepsHardlinkFamilyIntact(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		m.UpsertFile("d/b", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
 		// Hardlink: d/b shares d/a's inode in history.
 		b := *m.FindFile("d/b")
 		b.Inode = m.FindFile("d/a").Inode
 		m.WriteFileDirect("d/b", b)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	familyInode := hist.FindFile("d/a").Inode
 	cur := clonePtr(hist)
@@ -292,20 +320,24 @@ func TestRevertRemapsInodeForUnrelatedHolder(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("d/a", FileMeta{Size: 4, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	familyInode := hist.FindFile("d/a").Inode
 	cur := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[2] = ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22}
+		putTestChunk(t, m, 2, ChunkInfo{Size: 9, Offset: 0, Release: "v1", AssetID: 22})
 		m.UpsertFile("d/b", FileMeta{Size: 9, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{2}}, 100)
 		// d/b is unrelated in src but squats on the historical inode.
 		b := *m.FindFile("d/b")
 		b.Inode = familyInode
 		m.WriteFileDirect("d/b", b)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	if err := RevertSubtree(cur, hist, "d/a", 300); err != nil {
 		t.Fatalf("revert: %v", err)
@@ -329,9 +361,11 @@ func TestEnsureAncestorsDeepClonesXAttrs(t *testing.T) {
 		xd := m.dirs["x"]
 		xd.XAttrs = XAttrMap{"user.a": []byte("1")}
 		m.dirs["x"] = xd
-		m.chunks[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 11}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 11})
 		m.UpsertFile("x/f", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	cur := clonePtr(hist)
 	cur.RemoveFile("x/f")
@@ -361,10 +395,12 @@ func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
 		m.EnsureDirectory("d", 100)
-		m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11}
-		m.chunks[2] = ChunkInfo{Size: 4, Offset: 4, Release: "v1", AssetID: 12}
+		putTestChunk(t, m, 1, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 11})
+		putTestChunk(t, m, 2, ChunkInfo{Size: 4, Offset: 4, Release: "v1", AssetID: 12})
 		m.UpsertFile("d/f", FileMeta{Size: 8, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1, 2}}, 100)
-		m.EnsureRelease("v1", 100)
+		if _, err := m.EnsureRelease("v1", 100); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 	})
 	// Corrupt history: chunk 2's record is gone while the file still lists it.
 	delete(hist.chunks, 2)

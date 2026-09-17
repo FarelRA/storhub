@@ -13,21 +13,54 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
+// preparePatchWorkspace resolves ONE upload release for a patch batch
+// against a catalog-only probe (newReleaseProbe): picking reads the release
+// set + counts, never file bytes, so the old per-builder full-tree Clone
+// (O(tree) memcpy just to RemoveFile + EnsureRelease on a throwaway) was
+// pure waste. It returns the release tag/URL plus the probe for the
+// rotation prepare closures. Partial-upload compensation stays with the
+// callers (they own sink.results).
+func (h *StorHub) preparePatchWorkspace(ctx context.Context, project string, repoMeta *RepoMetadata, filePath string, requiredSlots int) (releaseTag, uploadURL string, probe *RepoMetadata, err error) {
+	probe, err = newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	if err != nil {
+		return "", "", nil, err
+	}
+	probe.RemoveFile(filePath)
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, probe, requiredSlots)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return releaseTag, uploadURL, probe, nil
+}
+
+// finalizePlaylist orders an assembled chunk playlist by file offset. The
+// builders usually emit in order already (rewrites sweep offsets ascending;
+// single edits splice into an ordered base), so the sort runs only when a
+// linear scan finds an inversion — skipping the O(k log k) re-sort per op
+// on wide files (audit 33). The returned slice is always offset-sorted.
+func finalizePlaylist(assembled []ChunkInfo) []ChunkInfo {
+	for i := 1; i < len(assembled); i++ {
+		if assembled[i].Offset < assembled[i-1].Offset {
+			sort.SliceStable(assembled, func(a, b int) bool { return assembled[a].Offset < assembled[b].Offset })
+			return assembled
+		}
+	}
+	return assembled
+}
+
 func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
-	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(filePath)
 	finalSize := fileMeta.Size - deleteSize + int64(len(edit))
 	requiredSlots := inlineChunkCount(int64(len(edit)), h.config.ChunkSize)
 	if finalSize == 0 && requiredSlots == 0 {
 		return []ChunkInfo{}, "", nil
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
+	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
 
 	patchedChunks, actualTag, _, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit, func(remaining int) (string, string, error) {
-		return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
+		return h.getOrCreateUploadRelease(ctx, project, probe, remaining)
 	})
 	if err != nil {
 		h.compensateDeleteAssets(ctx, project, patchedChunks)
@@ -41,8 +74,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		}
 	}
 
-	assembled := spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks)
-	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
+	assembled := finalizePlaylist(spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks))
 	// Report the release that actually holds the new chunks. A
 	// release-full rotation inside the sink moves later chunks; the
 	// initial tag may no longer hold them.
@@ -89,7 +121,7 @@ func spliceEdit(chunks []ChunkInfo, patchOffset, deleteSize, insertedLen int64, 
 func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte, prepare func(remaining int) (string, string, error)) (chunks []ChunkInfo, actualTag, actualURL string, err error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, count, prepare)
-	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 	for i := 0; i < count; i++ {
 		start := int64(i) * chunkSize
 		end := start + chunkSize
@@ -103,43 +135,40 @@ func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, u
 	return sink.results, sink.releaseTag, sink.uploadURL, nil
 }
 
-func (h *StorHub) sliceChunk(ctx context.Context, project string, original ChunkInfo, newOffset, newSize int64) (ChunkInfo, error) {
+// sliceChunkView cuts a sub-view [newOffset, newOffset+newSize) of an
+// uploaded chunk: pure metadata math, no I/O, never fails. A sliced view
+// is not the whole uploaded asset, so its digest no longer applies;
+// verification is skipped for such chunks.
+func sliceChunkView(original ChunkInfo, newOffset, newSize int64) ChunkInfo {
 	segment := original
 	segment.Offset = newOffset
 	segment.Size = newSize
 	segment.AssetOffset = original.AssetOffset + (newOffset - original.Offset)
-	// A sliced view is not the whole uploaded asset, so its digest no
-	// longer applies; verification is skipped for such chunks.
-	return segment, nil
+	return segment
 }
 
 func inlineChunkCount(size, chunkSize int64) int {
-	chunkSize = normalizedChunkSize(chunkSize)
+	chunkSize = chunking.NormalizedSize(chunkSize)
 	if size == 0 {
 		return 0
 	}
 	return int((size + chunkSize - 1) / chunkSize)
 }
 
-// normalizedChunkSize delegates to the chunking package's single clamping
-// definition.
-func normalizedChunkSize(chunkSize int64) int64 {
-	return chunking.NormalizedSize(chunkSize)
-}
-
 func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
-	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(filePath)
-	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 	dirtySegments := make([]byteRange, 0, len(dirtyRanges))
 	for _, dirty := range dirtyRanges {
 		dirtySegments = mergeByteRange(dirtySegments, dirty)
 	}
+	// mergeByteRange preserves input order, not sorted order: establish the
+	// merged-sorted invariant rangeOverlapsAny's early exit depends on.
+	sort.Slice(dirtySegments, func(i, j int) bool { return dirtySegments[i].start < dirtySegments[j].start })
 	requiredSlots := 0
 	for _, dirty := range dirtySegments {
 		requiredSlots += inlineChunkCount(dirty.end-dirty.start, chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
+	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -161,7 +190,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		segment := byteRange{start: offset, end: end}
 		if rangeOverlapsAny(segment, dirtySegments) {
 			uploaded, landedTag, landedURL, err := h.uploadFileRangeChunks(ctx, project, curTag, curURL, snapshot, segment.start, segment.end, func(remaining int) (string, string, error) {
-				return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
+				return h.getOrCreateUploadRelease(ctx, project, probe, remaining)
 			})
 			if err != nil {
 				h.compensateDeleteAssets(ctx, project, append(uploadedAll, uploaded...))
@@ -179,10 +208,16 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		}
 		assembled = append(assembled, reused...)
 	}
-	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, curTag, nil
+	return finalizePlaylist(assembled), curTag, nil
 }
 
+// rangeOverlapsAny reports whether target overlaps any range.
+// INVARIANT: ranges must be merged-sorted by start (mergeByteRange output
+// re-sorted, as buildRewrittenChunks establishes). The early `return false`
+// on the first range starting past target.end is only valid under that
+// order; unsorted input can miss an overlap. Callers with unordered ranges
+// must sort first (cheap: dirty lists are tiny) rather than dropping the
+// early exit into an O(n) scan on this hot path.
 func rangeOverlapsAny(target byteRange, ranges []byteRange) bool {
 	for _, current := range ranges {
 		if current.end <= target.start {
@@ -200,7 +235,7 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	if end <= start {
 		return nil, releaseTag, uploadURL, nil
 	}
-	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, count, prepare)
 	for i := 0; i < count; i++ {
@@ -239,11 +274,7 @@ func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, 
 			assembled = append(assembled, segment)
 			continue
 		}
-		segment, err := h.sliceChunk(ctx, project, chunk, segStart, segEnd-segStart)
-		if err != nil {
-			return nil, err
-		}
-		assembled = append(assembled, segment)
+		assembled = append(assembled, sliceChunkView(chunk, segStart, segEnd-segStart))
 	}
 	return assembled, nil
 }
@@ -258,15 +289,13 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	if len(edits) == 0 {
 		return nil, "", errors.New("patch batch is empty")
 	}
-	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(filePath)
-	chunkSize := normalizedChunkSize(h.config.ChunkSize)
+	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 
 	requiredSlots := 0
 	for _, edit := range edits {
 		requiredSlots += inlineChunkCount(edit.Len(), chunkSize)
 	}
-	releaseTag, uploadURL, err := h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
+	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
 		return nil, "", err
 	}
@@ -284,7 +313,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	curTag, curURL := releaseTag, uploadURL
 	for _, edit := range edits {
 		inserted, landedTag, landedURL, err := h.uploadInlineChunks(ctx, project, curTag, curURL, edit.Start+shift, edit.Data, func(remaining int) (string, string, error) {
-			return h.getOrCreateUploadRelease(ctx, project, workingMeta, remaining)
+			return h.getOrCreateUploadRelease(ctx, project, probe, remaining)
 		})
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))
@@ -297,6 +326,5 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 		assembled = spliceEdit(assembled, edit.Start+shift, edit.DeleteSize, edit.Len(), inserted)
 		shift += edit.Len() - edit.DeleteSize
 	}
-	sort.SliceStable(assembled, func(i, j int) bool { return assembled[i].Offset < assembled[j].Offset })
-	return assembled, curTag, nil
+	return finalizePlaylist(assembled), curTag, nil
 }

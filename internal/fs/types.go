@@ -29,25 +29,24 @@ type EntryInfo struct {
 // source of truth (the Kind wire field only spans file/symlink); a set dir
 // bit wins, matching the historical renderer order. Every renderer must use
 // this instead of re-spelling the triple.
-func (e EntryInfo) KindLabel() string {
-	if e.IsDir {
+func KindLabel(isDir, isSymlink bool) string {
+	if isDir {
 		return "directory"
 	}
-	if e.IsSymlink {
+	if isSymlink {
 		return "symlink"
 	}
 	return "file"
 }
 
+// KindLabel reports this entry's display vocabulary.
+func (e EntryInfo) KindLabel() string {
+	return KindLabel(e.IsDir, e.IsSymlink)
+}
+
 // KindLabel mirrors EntryInfo.KindLabel for directory listings.
 func (e DirEntry) KindLabel() string {
-	if e.IsDir {
-		return "directory"
-	}
-	if e.IsSymlink {
-		return "symlink"
-	}
-	return "file"
+	return KindLabel(e.IsDir, e.IsSymlink)
 }
 
 // IsDirectory reports the dir flag behind one name.

@@ -268,7 +268,7 @@ func TestRecoveryOTruncSerializesOnOpMu(t *testing.T) {
 	case <-done:
 		ws.opMu.Unlock()
 		t.Fatal("O_TRUNC open ran without holding opMu; it can interleave with a commit")
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 	ws.opMu.Unlock()
 	select {
@@ -318,7 +318,7 @@ func TestRecoveryReadHoldsOpMuAcrossCommit(t *testing.T) {
 	case <-done:
 		ws.opMu.Unlock()
 		t.Fatal("read ran without holding opMu; it can tear against a concurrent commit")
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 	ws.opMu.Unlock()
 	select {

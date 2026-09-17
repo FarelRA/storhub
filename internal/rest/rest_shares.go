@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,20 +14,14 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// restrictedClient wraps a Client and restricts access to a specific project and path
-// readOnlyShare supplies every mutating Client method as a denial. It is
-// embedded by restrictedClient so the read-only-share policy lives in
-// exactly ONE place: a future Client method cannot silently delegate to the
-// underlying client, because the compiler forces a decision here - either a
-// new denial lands in this struct (policy stays centralized) or an explicit,
-// reviewed override is written on restrictedClient itself.
+// restrictedClient wraps a Client and restricts access to a specific project and path.
+// See shareRegistry for revocation lifecycle.
 type readOnlyShare struct{}
 
 func errReadOnly() error { return errForbidden("access denied: read-only share") }
@@ -135,9 +128,9 @@ var (
 	_ Client = (*restrictedClient)(nil)
 )
 
-// restrictedClient wraps a Client and restricts access to a specific project
-// and path. Read methods enforce the shared-prefix check then delegate;
-// every mutation is denied by the embedded readOnlyShare.
+// See readOnlyShare for the mutation-denial policy: every mutation is
+// denied by the embedded struct; read methods enforce the shared-prefix
+// check then delegate.
 type restrictedClient struct {
 	readOnlyShare
 	underlying     Client
@@ -265,15 +258,20 @@ type sharesResponse struct {
 // Share redemption follows ONE pathway: the signed JWT is the credential
 // and the source of truth. GET /shares/{token} verifies it statelessly and
 // answers from claims - no registry lookup, so links survive restarts (the
-// {id} segment here IS the token; the short registry ID only addresses the
+// {token} segment here IS the token; the short registry ID only addresses the
 // management plane under /projects/{p}/shares). Revocation: DELETE marks
 // the share ID revoked in the handler's own registry (checked by the auth
 // middleware and the redemption routes), killing the link immediately for
 // this handler; revocation is per-handler by design - permanent revocation
 // is key rotation.
-func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
-	segment := chi.URLParam(r, "id")
-	claims, err := h.parseShareToken(segment)
+//
+// Naming rule: handle* for JSON routes, serve* for raw-byte streams only.
+// handleShareInfo/handleShareDerive return documents; serveShareDownload
+// streams bytes.
+// handleShareInfo serves GET /shares/{token}: public share metadata.
+func (h *restHandler) handleShareInfo(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	claims, err := h.parseShareToken(token)
 	if err != nil || strings.TrimSpace(claims.Path) == "" || strings.TrimSpace(claims.Project) == "" {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
@@ -286,41 +284,34 @@ func (h *restHandler) serveShareInfo(w http.ResponseWriter, r *http.Request) {
 		ID:        claims.ID,
 		Project:   claims.Project,
 		Path:      claims.Path,
-		URL:       "/?share=" + url.QueryEscape(segment),
-		Token:     segment,
+		URL:       "/?share=" + url.QueryEscape(token),
+		Token:     token,
 		ExpiresAt: claims.ExpiresAt.Time.UTC().Format(time.RFC3339),
 		IsDir:     claims.IsDir,
 	})
 }
 
-func (h *restHandler) handleProjectShares(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	switch r.Method {
-	case http.MethodGet:
-		h.listProjectShares(w, r, project)
-	case http.MethodPost:
-		h.createProjectShare(w, r, project)
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodPost)
-	}
+// Router entry points (method-split): the router owns dispatch, so no
+// switch-on-method remains.
+func (h *restHandler) handleProjectSharesGet(w http.ResponseWriter, r *http.Request) {
+	h.listProjectShares(w, r, chi.URLParam(r, "project"))
 }
 
-func (h *restHandler) handleProjectShare(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	shareID := chi.URLParam(r, "shareID")
-	switch r.Method {
-	case http.MethodDelete:
-		h.deleteProjectShare(w, r, project, shareID)
-	case http.MethodGet:
-		h.getProjectShare(w, r, project, shareID)
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodDelete)
-	}
+func (h *restHandler) handleProjectSharesPost(w http.ResponseWriter, r *http.Request) {
+	h.createProjectShare(w, r, chi.URLParam(r, "project"))
+}
+
+func (h *restHandler) handleProjectShareGet(w http.ResponseWriter, r *http.Request) {
+	h.getProjectShare(w, r, chi.URLParam(r, "project"), chi.URLParam(r, "shareID"))
+}
+
+func (h *restHandler) handleProjectShareDelete(w http.ResponseWriter, r *http.Request) {
+	h.deleteProjectShare(w, r, chi.URLParam(r, "project"), chi.URLParam(r, "shareID"))
 }
 
 func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request, project string) {
 	var req shareRequest
-	if err := h.decodeJSON(r, &req); err != nil {
+	if err := h.decodeJSON(r, &req, false); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -332,6 +323,10 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if req.ExpiresInSeconds < 0 {
+		h.writeMappedError(w, errBadRequest("expires_in_seconds must be non-negative"))
 		return
 	}
 	expiresIn := time.Duration(0)
@@ -380,7 +375,7 @@ func canManageShare(record *shareRecord, callerUID uint32, callerAdmin bool) boo
 }
 
 func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
-	record, ok := h.lookupShare(shareID)
+	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
@@ -402,7 +397,7 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
-	record, ok := h.lookupShare(shareID)
+	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
@@ -418,7 +413,7 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 	}
 	h.removeShare(record.ID)
 	h.revokeShare(record.ID, record.ExpiresAt) // stateless redemption stops immediately
-	h.sweepExpiredShares()
+	h.sweep()
 	// 204 like every other successful delete in this API (nodes, projects).
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -437,10 +432,10 @@ func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaim
 // ---- Signed single-file download links -------------------------------------
 //
 // One mechanism reused, not a second token system: these are shareClaims
-// JWTs (dl=true, pth=exact file, 5-minute life) verified by parseShareToken.
-// Stateless by construction - no registry, self-expiring, valid across
-// restarts within their window - and they delegate streaming to
-// handleContentRead so Range/206 resume, ETag and HEAD come for free.
+// JWTs verified by parseShareToken. Stateless by construction - no registry,
+// self-expiring, valid across restarts within their window - and they
+// delegate streaming to streamFileRange so Range/206 resume, ETag and HEAD
+// come for free.
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
 	// Same single pathway as info: the token (query here) is the credential.
@@ -459,7 +454,9 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
 }
 
-func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
+// handleShareDerive serves POST /shares/{token}/derive: mint a sub-capability.
+// A handle* JSON route (not a byte stream).
+func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) {
 	parentToken := r.URL.Query().Get("token")
 	if parentToken == "" {
 		parentToken = requestBearerToken(r)
@@ -469,18 +466,18 @@ func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	// Only the share's own ID can derive children: URL id must match token jti
-	// when present, but allow mismatch for query-token alias? Enforce exact match.
-	urlID := chi.URLParam(r, "id")
-	if urlID != "" && urlID != claims.ID {
-		h.writeError(w, http.StatusForbidden, "forbidden", "share id mismatch")
+	// Only the share's own token can derive children: the {token} path
+	// segment must match the presented token's ID when present.
+	token := chi.URLParam(r, "token")
+	if token != "" && token != claims.ID {
+		h.writeMappedError(w, errForbidden("share id mismatch"))
 		return
 	}
 	// Derivation reads through the same nobody-identity, path-scoped client
 	// as redemption: the visitor's DAC, not the server's.
 	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	var req shareRequest
-	if err := h.decodeJSON(r, &req); err != nil {
+	if err := h.decodeJSON(r, &req, false); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -518,7 +515,7 @@ func (h *restHandler) serveShareDerive(w http.ResponseWriter, r *http.Request) {
 	// sharer keeps management rights. Unknown parents (e.g. after a
 	// restart) belong to the redeeming visitor - the nobody identity.
 	creatorUID, creatorAdmin := nobodyUID, false
-	if parent, known := h.lookupShare(claims.ID); known {
+	if parent, known := h.getLiveShare(claims.ID); known {
 		creatorUID, creatorAdmin = parent.CreatorUID, parent.CreatorAdmin
 	}
 	record, err := h.newShareRecord(claims.Project, sharePath, entry.IsDir, expiresIn, creatorUID, creatorAdmin)
@@ -554,7 +551,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if entry.IsDir {
-		h.writeError(w, http.StatusNotImplemented, "directory_download", "directory download not yet implemented")
+		h.writeError(w, http.StatusNotImplemented, "not_implemented", "directory download not yet implemented")
 		return
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
@@ -582,7 +579,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	if rangeErr != nil {
 		if strings.TrimSpace(r.Header.Get("Range")) != "" {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
-			h.writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable", rangeErr.Error())
+			h.writeMappedError(w, &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rangeErr.Error()})
 			return
 		}
 		start, end = 0, entry.Size
@@ -598,28 +595,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	w.WriteHeader(status)
-	sent := int64(0)
-	for offset := start; offset < end; {
-		readLen := h.opts.StreamChunkSize
-		if remaining := end - offset; remaining < readLen {
-			readLen = remaining
-		}
-		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, targetPath, offset, readLen)
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", targetPath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
-			return
-		}
-		if len(chunk) == 0 {
-			break
-		}
-		if _, writeErr := w.Write(chunk); writeErr != nil {
-			return
-		}
-		// Advance by the bytes actually read: short reads must not skip
-		// data.
-		offset += int64(len(chunk))
-		sent += int64(len(chunk))
-	}
+	h.streamFileRange(w, r, project, targetPath, start, end)
 }
 
 func hasPathPrefix(targetPath, allowedPath string) bool {
@@ -680,6 +656,17 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	}, nil
 }
 
+// maxLiveShares bounds live share records: like assetURLCacheCap (10k),
+// far-future TTLs (MaxShareTTL default 7d) must not pin unbounded JWTs.
+// shareSweepThreshold is kept as a metrics hint only (no gate).
+const maxLiveShares = 10000
+
+const shareSweepThreshold = 128
+
+func newShareRegistry() *shareRegistry {
+	return &shareRegistry{items: map[string]*shareRecord{}, revoked: map[string]time.Time{}}
+}
+
 func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration, creatorUID uint32, creatorAdmin bool) (*shareRecord, error) {
 	if h.shareSignKey == nil {
 		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
@@ -712,12 +699,29 @@ func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expi
 	record := &shareRecord{ID: id, Token: signedToken, Project: project, Path: sharePath, IsDir: isDir, CreatedAt: now, ExpiresAt: expiresAt, CreatorUID: creatorUID, CreatorAdmin: creatorAdmin}
 	h.shares.mu.Lock()
 	h.shares.items[id] = record
+	// Oldest-expiry eviction on insert: live shares are capped, so a flood
+	// of far-future shares evicts the soonest-expiring first.
+	for len(h.shares.items) > maxLiveShares {
+		oldest, oldestExp := "", time.Time{}
+		first := true
+		for sid, rec := range h.shares.items {
+			if first || rec.ExpiresAt.Before(oldestExp) {
+				oldest, oldestExp, first = sid, rec.ExpiresAt, false
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(h.shares.items, oldest)
+	}
 	h.shares.mu.Unlock()
-	h.sweepExpiredShares()
+	h.sweep()
 	return record, nil
 }
 
-func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
+// getLiveShare is the pure read path: it never mutates the registry.
+// Expired records simply miss; sweep() (on writes) reclaims them.
+func (h *restHandler) getLiveShare(shareID string) (*shareRecord, bool) {
 	h.shares.mu.RLock()
 	record, ok := h.shares.items[shareID]
 	h.shares.mu.RUnlock()
@@ -725,40 +729,35 @@ func (h *restHandler) lookupShare(shareID string) (*shareRecord, bool) {
 		return nil, false
 	}
 	if !record.ExpiresAt.After(time.Now()) {
-		h.removeShare(shareID)
 		return nil, false
 	}
-	copy := *record
-	return &copy, true
+	cp := *record
+	return &cp, true
 }
 
-// sweepExpiredShares bounds registry memory: expired records are dropped
-// whenever live-plus-expired entries exceed the threshold, so a burst of
-// short-lived shares cannot accumulate without limit even if nobody ever
-// looks them up again. Revocation entries self-expire the same way: once
-// the shadowed JWT would fail its own exp check, remembering the ID adds
-// nothing.
-const shareSweepThreshold = 128
-
-func (h *restHandler) sweepExpiredShares() {
+// sweep drops every expired share and self-expired revocation entry,
+// unconditionally. It runs on every write (create/delete); the old
+// len>=128 gate is gone (shareSweepThreshold remains only as a metrics
+// hint). Revocation entries self-expire the same way: once the shadowed
+// JWT would fail its own exp check, remembering the ID adds nothing.
+func (h *restHandler) sweep() {
 	now := time.Now()
 	h.shares.mu.Lock()
 	defer h.shares.mu.Unlock()
-	if len(h.shares.items) >= shareSweepThreshold {
-		for shareID, record := range h.shares.items {
-			if !record.ExpiresAt.After(now) {
-				delete(h.shares.items, shareID)
-			}
+	for shareID, record := range h.shares.items {
+		if !record.ExpiresAt.After(now) {
+			delete(h.shares.items, shareID)
 		}
 	}
-	if len(h.shares.revoked) >= shareSweepThreshold {
-		for shareID, expiresAt := range h.shares.revoked {
-			if !expiresAt.After(now) {
-				delete(h.shares.revoked, shareID)
-			}
+	for shareID, expiresAt := range h.shares.revoked {
+		if !expiresAt.After(now) {
+			delete(h.shares.revoked, shareID)
 		}
 	}
 }
+
+// sweepExpiredShares is kept for backward compatibility; new code uses sweep.
+func (h *restHandler) sweepExpiredShares() { h.sweep() }
 
 func (h *restHandler) removeShare(shareID string) {
 	h.shares.mu.Lock()
@@ -769,14 +768,15 @@ func (h *restHandler) removeShare(shareID string) {
 // projectShareResponses lists a project's live shares, restricted to the
 // caller's management scope (creator ∪ admin). The signed token is stripped
 // before rendering: listings never carry the credential (or its URLs).
+// Pure read: expired entries are skipped, never deleted here; sweep()
+// reclaims them on writes.
 func (h *restHandler) projectShareResponses(project string, callerUID uint32, callerAdmin bool) []shareResponse {
 	now := time.Now()
-	h.shares.mu.Lock()
-	defer h.shares.mu.Unlock()
+	h.shares.mu.RLock()
+	defer h.shares.mu.RUnlock()
 	shares := make([]shareResponse, 0)
-	for shareID, record := range h.shares.items {
+	for _, record := range h.shares.items {
 		if !record.ExpiresAt.After(now) {
-			delete(h.shares.items, shareID)
 			continue
 		}
 		if record.Project != project {
@@ -785,9 +785,9 @@ func (h *restHandler) projectShareResponses(project string, callerUID uint32, ca
 		if !callerAdmin && callerUID != record.CreatorUID {
 			continue
 		}
-		copy := *record
-		copy.Token = "" // listings never carry the credential (or its URLs)
-		shares = append(shares, h.shareResponse(&copy))
+		cp := *record
+		cp.Token = "" // listings never carry the credential (or its URLs)
+		shares = append(shares, h.shareResponse(&cp))
 	}
 	return shares
 }

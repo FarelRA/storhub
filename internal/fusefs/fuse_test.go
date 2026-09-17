@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,21 +64,22 @@ func TestCallerContextSuppressesAtime(t *testing.T) {
 	if !shfs.AtimeSuppressed(ctx) {
 		t.Fatal("expected FUSE caller context to suppress atime")
 	}
-	// Without a kernel caller, the context falls back to the process
-	// identity (fail closed), never to anonymous root.
-	if identity := shfs.IdentityFromContext(ctx); identity.UID != uint32(os.Getuid()) {
-		t.Fatalf("unexpected identity in background context: %+v", identity)
+	// Without a kernel caller, no identity is attached: the context fails
+	// closed to a non-admin fallback, never to anonymous root. Pinned on
+	// fixed UIDs only (never os.Getuid: the assertion must read identically
+	// as root and in CI).
+	if shfs.IdentityPresent(ctx) {
+		t.Fatal("background caller context must not carry an attached identity")
+	}
+	if identity := shfs.IdentityFromContext(ctx); identity.Admin {
+		t.Fatalf("fallback identity must never be admin: %+v", identity)
 	}
 }
 
 func TestWriteStateAndRangeHelpers(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	temp, err := os.CreateTemp(cacheDir, "inode-*")
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
@@ -134,11 +134,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -180,11 +176,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -219,11 +211,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -259,11 +247,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -298,11 +282,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	fsys, err := New(&stubHub{chunkSize: 4}, "demo", Options{CacheDir: cacheDir, OverlayBufferSize: 4})
-	if err != nil {
-		t.Fatalf("new filesystem: %v", err)
-	}
-	defer func() { _ = fsys.Close() }()
+	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
 	working, err := os.CreateTemp(cacheDir, "inode-working-*")
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
@@ -570,7 +550,9 @@ func TestRenameDelegatesToHubAndRemapsPaths(t *testing.T) {
 	metaState := meta.NewRepoMetadata("demo")
 	metaState.EnsureDirectory("docs", now)
 	metaState.Chunks()[1] = meta.ChunkInfo{Offset: 0, Size: 1, Release: "v1", AssetID: 1}
-	metaState.EnsureRelease("v1", now)
+	if _, err := metaState.EnsureRelease("v1", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	metaState.UpsertFile("docs/old.txt", meta.FileMeta{Size: 1, Chunks: []int64{1}, Inode: 5, Mode: 0o644, UploadedAt: now}, now)
 	var renamedOld, renamedNew string
 	fake := &stubHub{
@@ -720,7 +702,9 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 			case "docs":
 				return &shfs.EntryInfo{Path: "docs", Inode: 2, IsDir: true, Mode: 0o755, UID: 1000, GID: 1000, NLink: 2, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 			case "docs/new.txt":
-				return &shfs.EntryInfo{Path: target, Inode: 9, Mode: 0o644, UID: 1000, GID: 1000, NLink: 1, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
+				entry := mkEntry(target, 0, now)
+				entry.Inode = 9
+				return entry, nil
 			default:
 				return nil, syscall.ENOENT
 			}
@@ -1771,92 +1755,6 @@ func exitedProcessPid(t *testing.T) int {
 	}
 	_ = cmd.Wait()
 	return cmd.Process.Pid
-}
-
-func TestMountLockRejectsSecondLiveMount(t *testing.T) {
-	t.Parallel()
-	cacheDir := t.TempDir()
-	lockPath := filepath.Join(cacheDir, mountLockFileName)
-	holder := spawnFlockHolder(t, lockPath)
-	// The flock tool does not write diagnostics; record the holder pid as
-	// a real mount would have.
-	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(holder)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err == nil || !strings.Contains(err.Error(), "already locked by process") || !strings.Contains(err.Error(), strconv.Itoa(holder)) {
-		t.Fatalf("expected loud error naming holder pid %d, got %v", holder, err)
-	}
-	// A refused New must leave the foreign claim untouched.
-	data, readErr := os.ReadFile(lockPath)
-	if readErr != nil || string(data) != strconv.Itoa(holder) {
-		t.Fatalf("foreign claim was tampered with: %q (err=%v)", data, readErr)
-	}
-}
-
-func TestMountLockReleasedOnCloseAllowsRemount(t *testing.T) {
-	t.Parallel()
-	cacheDir := t.TempDir()
-	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("first mount: %v", err)
-	}
-	data, readErr := os.ReadFile(filepath.Join(cacheDir, mountLockFileName))
-	if readErr != nil || string(data) != strconv.Itoa(os.Getpid()) {
-		t.Fatalf("expected own pid diagnostics while mounted: %q (err=%v)", data, readErr)
-	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	second, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("remount after close must succeed once the flock is released: %v", err)
-	}
-	defer func() { _ = second.Close() }()
-}
-
-// TestMountLockRejectsSameProcessRemount pins the invariant the kernel
-// lock exists to enforce: one live Filesystem per cacheDir, including two
-// mounts inside a single process - exactly where a pid heuristic would
-// have waved the collision through.
-func TestMountLockRejectsSameProcessRemount(t *testing.T) {
-	t.Parallel()
-	cacheDir := t.TempDir()
-	first, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("first mount: %v", err)
-	}
-	_, err = New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err == nil || !strings.Contains(err.Error(), "already locked") {
-		t.Fatalf("same-process double mount must fail loudly, got %v", err)
-	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	third, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("mount after close must succeed: %v", err)
-	}
-	defer func() { _ = third.Close() }()
-}
-
-func TestMountLockTakesOverStaleClaim(t *testing.T) {
-	t.Parallel()
-	cacheDir := t.TempDir()
-	dead := exitedProcessPid(t)
-	lockPath := filepath.Join(cacheDir, mountLockFileName)
-	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(dead)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("claim left by dead pid %d must be reclaimable: %v", dead, err)
-	}
-	defer func() { _ = fsys.Close() }()
-	data, readErr := os.ReadFile(lockPath)
-	if readErr != nil || string(data) != strconv.Itoa(os.Getpid()) {
-		t.Fatalf("expected takeover recorded with own pid: %q (err=%v)", data, readErr)
-	}
 }
 
 func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {

@@ -139,6 +139,29 @@ func NewTreeCache() *TreeCache {
 	}
 }
 
+// Clone returns an isolated copy of the cache for one build attempt: all
+// cache writes replace whole entry pointers (never mutate in place), so
+// sharing the pointed-to entries is safe — the copy observes the same
+// baseline while the build's putNodes land only in the copy. The caller
+// swaps the copy in on commit success and drops it on failure, which is
+// what keeps "cache hit" equivalent to "already stored upstream": a failed
+// build must never poison the shared cache with objects it never uploaded.
+// Nil-safe: a nil cache clones to an empty one.
+func (c *TreeCache) Clone() *TreeCache {
+	out := NewTreeCache()
+	if c == nil {
+		return out
+	}
+	for p, n := range c.nodes {
+		out.nodes[p] = n
+	}
+	for i, b := range c.buckets {
+		out.buckets[i] = b
+	}
+	out.releases = c.releases
+	return out
+}
+
 // BuildTreeStream serializes a flat RepoMetadata into the Merkle object set
 // ONE OBJECT AT A TIME: each new or changed object is handed to emit before
 // the next is built, so the caller can upload/free it instead of holding
@@ -154,85 +177,14 @@ func NewTreeCache() *TreeCache {
 // Callers must pass a normalized tree (deterministic entry ordering), same
 // as BuildTree. Returns the manifest references.
 func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter) (*TreeRefs, error) {
-	// Round-trip identity guard: every non-root entry's parent must exist,
-	// or its group would never be serialized.
-	for p := range meta.files {
-		if parent := parentPath(p); parent != "" {
-			if _, ok := meta.dirs[parent]; !ok {
-				return nil, fmt.Errorf("build tree: file %q has no parent directory %q", p, parent)
-			}
-		}
+	if err := checkTreeParents(meta); err != nil {
+		return nil, err
 	}
-	for p := range meta.dirs {
-		if parent := parentPath(p); parent != "" {
-			if _, ok := meta.dirs[parent]; !ok {
-				return nil, fmt.Errorf("build tree: directory %q has no parent directory %q", p, parent)
-			}
-		}
-	}
-
-	// Group files by parent directory (keyed by base name within the node).
-	filesByParent := make(map[string]map[string]FileMeta, len(meta.files))
-	for p, f := range meta.files {
-		parent := parentPath(p)
-		if filesByParent[parent] == nil {
-			filesByParent[parent] = make(map[string]FileMeta)
-		}
-		filesByParent[parent][path.Base(p)] = f
-	}
-
-	// Every directory (root sentinel "" plus each stored dir) becomes a node.
-	dirs := make([]string, 0, len(meta.dirs)+1)
-	dirs = append(dirs, "")
-	for p := range meta.dirs {
-		dirs = append(dirs, p)
-	}
-	// Deepest-first so a node's child shas exist before the node is hashed.
-	sort.Slice(dirs, func(i, j int) bool { return nodeDepth(dirs[i]) > nodeDepth(dirs[j]) })
-
-	subdirShas := make(map[string]map[string]string, len(dirs))
-	nodeSHA := make(map[string]string, len(dirs))
-	for _, d := range dirs {
-		nodeMeta := meta.dirs[d]
-		if d == "" {
-			nodeMeta = meta.Root
-		}
-		files, subdirs := filesByParent[d], subdirShas[d]
-		if cached := cache.node(d); cached != nil && nodeInputsEqual(cached, nodeMeta, files, subdirs) {
-			// Byte-identical node since the cached build: already stored.
-			nodeSHA[d] = cached.sha
-			if d != "" {
-				parent := parentPath(d)
-				if subdirShas[parent] == nil {
-					subdirShas[parent] = make(map[string]string)
-				}
-				subdirShas[parent][path.Base(d)] = cached.sha
-			}
-			continue
-		}
-		node := TreeNode{Files: files, Subdirs: subdirs}
-		node.Meta = nodeMeta
-		data, err := json.Marshal(node)
-		if err != nil {
-			return nil, fmt.Errorf("marshal tree node %q: %w", d, err)
-		}
-		sha := ObjectSHA(data)
-		nodeSHA[d] = sha
-		if cache != nil {
-			cache.putNode(d, &cachedNode{meta: nodeMeta, files: files, subdirs: subdirs, sha: sha})
-		}
-		if !objectKnown(known, sha) {
-			if err := emit(sha, data); err != nil {
-				return nil, err
-			}
-		}
-		if d != "" {
-			parent := parentPath(d)
-			if subdirShas[parent] == nil {
-				subdirShas[parent] = make(map[string]string)
-			}
-			subdirShas[parent][path.Base(d)] = sha
-		}
+	filesByParent := groupTreeFiles(meta)
+	dirs := sortedTreeDirs(meta)
+	nodeSHA, err := emitTreeNodes(meta, cache, known, emit, dirs, filesByParent)
+	if err != nil {
+		return nil, err
 	}
 
 	buckets, err := streamChunkBuckets(meta, cache, known, emit)
@@ -256,8 +208,112 @@ func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 	}, nil
 }
 
-func objectKnown(known func(sha string) bool, sha string) bool {
-	return known != nil && known(sha)
+// checkTreeParents is the round-trip identity guard: every non-root entry's
+// parent must exist (or its group would never be serialized), and no path
+// may be both a file and a directory (Validate rejects this, but the build
+// must not silently emit an unloadable object set when called on an
+// unvalidated tree).
+func checkTreeParents(meta *RepoMetadata) error {
+	for p := range meta.files {
+		if parent := parentPath(p); parent != "" {
+			if _, ok := meta.dirs[parent]; !ok {
+				return fmt.Errorf("build tree: file %q has no parent directory %q", p, parent)
+			}
+		}
+	}
+	for p := range meta.dirs {
+		if parent := parentPath(p); parent != "" {
+			if _, ok := meta.dirs[parent]; !ok {
+				return fmt.Errorf("build tree: directory %q has no parent directory %q", p, parent)
+			}
+		}
+	}
+	for p := range meta.files {
+		if _, ok := meta.dirs[p]; ok {
+			return fmt.Errorf("build tree: path %q is both a file and a directory", p)
+		}
+		if p == "" {
+			return fmt.Errorf("build tree: file entry with empty path")
+		}
+	}
+	return nil
+}
+
+// groupTreeFiles buckets file entries by parent directory, keyed by base
+// name within the node.
+func groupTreeFiles(meta *RepoMetadata) map[string]map[string]FileMeta {
+	filesByParent := make(map[string]map[string]FileMeta, len(meta.files))
+	for p, f := range meta.files {
+		parent := parentPath(p)
+		if filesByParent[parent] == nil {
+			filesByParent[parent] = make(map[string]FileMeta)
+		}
+		filesByParent[parent][path.Base(p)] = f
+	}
+	return filesByParent
+}
+
+// sortedTreeDirs lists every directory (root sentinel "" plus each stored
+// dir) deepest-first, so a node's child shas exist before it is hashed.
+func sortedTreeDirs(meta *RepoMetadata) []string {
+	dirs := make([]string, 0, len(meta.dirs)+1)
+	dirs = append(dirs, "")
+	for p := range meta.dirs {
+		dirs = append(dirs, p)
+	}
+	sort.Slice(dirs, func(i, j int) bool { return nodeDepth(dirs[i]) > nodeDepth(dirs[j]) })
+	return dirs
+}
+
+// emitTreeNodes builds every directory node deepest-first, emitting new or
+// changed objects, and returns each directory's node sha.
+func emitTreeNodes(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter, dirs []string, filesByParent map[string]map[string]FileMeta) (map[string]string, error) {
+	subdirShas := make(map[string]map[string]string, len(dirs))
+	nodeSHA := make(map[string]string, len(dirs))
+	for _, d := range dirs {
+		nodeMeta := meta.dirs[d]
+		if d == "" {
+			nodeMeta = meta.Root
+		}
+		files, subdirs := filesByParent[d], subdirShas[d]
+		if cached := cache.node(d); cached != nil && nodeInputsEqual(cached, nodeMeta, files, subdirs) {
+			// Byte-identical node since the cached build: already stored.
+			nodeSHA[d] = cached.sha
+			linkChild(subdirShas, d, cached.sha)
+			continue
+		}
+		node := TreeNode{Files: files, Subdirs: subdirs}
+		node.Meta = nodeMeta
+		data, err := json.Marshal(node)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tree node %q: %w", d, err)
+		}
+		sha := ObjectSHA(data)
+		nodeSHA[d] = sha
+		if cache != nil {
+			cache.putNode(d, &cachedNode{meta: nodeMeta, files: files, subdirs: subdirs, sha: sha})
+		}
+		if known == nil || !known(sha) {
+			if err := emit(sha, data); err != nil {
+				return nil, err
+			}
+		}
+		linkChild(subdirShas, d, sha)
+	}
+	return nodeSHA, nil
+}
+
+// linkChild records dir's node sha under its parent's child map. The root
+// ("") has no parent and is never linked.
+func linkChild(subdirShas map[string]map[string]string, dir, sha string) {
+	if dir == "" {
+		return
+	}
+	parent := parentPath(dir)
+	if subdirShas[parent] == nil {
+		subdirShas[parent] = make(map[string]string)
+	}
+	subdirShas[parent][path.Base(dir)] = sha
 }
 
 func (c *TreeCache) node(dirPath string) *cachedNode {
@@ -283,32 +339,16 @@ func nodeInputsEqual(cached *cachedNode, meta DirMeta, files map[string]FileMeta
 	return stringMapEqual(cached.subdirs, subdirs)
 }
 
-// fileMapEqual is strict about nil vs empty: encoding/json omits a nil
-// map (omitempty) but writes "{}" for an empty one, so the two serialize
-// differently.
+// fileMapsEqual compares node file entries by content: nil and empty maps
+// are EQUAL. encoding/json omits both nil and len-0 maps under omitempty,
+// so the two serialize to identical bytes and distinguishing them only
+// causes spurious cache misses and re-emits.
 func fileMapEqual(a, b map[string]FileMeta) bool {
-	if len(a) != len(b) || (a == nil) != (b == nil) {
-		return false
-	}
-	for k, v := range a {
-		bv, ok := b[k]
-		if !ok || !fileMetaEqual(v, bv) {
-			return false
-		}
-	}
-	return true
+	return maps.EqualFunc(a, b, fileMetaEqual)
 }
 
 func stringMapEqual(a, b map[string]string) bool {
-	if len(a) != len(b) || (a == nil) != (b == nil) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
+	return maps.Equal(a, b)
 }
 
 // streamChunkBuckets builds each bucket object and emits it unless the
@@ -349,7 +389,7 @@ func streamChunkBuckets(meta *RepoMetadata, cache *TreeCache, known func(sha str
 		if cache != nil {
 			cache.buckets[idx] = &cachedBucket{chunks: chunks, sha: sha}
 		}
-		if !objectKnown(known, sha) {
+		if known == nil || !known(sha) {
 			if err := emit(sha, data); err != nil {
 				return nil, err
 			}
@@ -373,7 +413,7 @@ func streamReleases(rel ReleasesObject, cache *TreeCache, known func(sha string)
 		// caller keeps mutating; the cache must hold a snapshot.
 		cache.releases = &cachedReleases{releases: maps.Clone(rel.Releases), sha: sha}
 	}
-	if !objectKnown(known, sha) {
+	if known == nil || !known(sha) {
 		if err := emit(sha, data); err != nil {
 			return "", err
 		}
@@ -428,11 +468,8 @@ func ObjectPath(sha string) string {
 // (as opposed to a v1-v4 single metadata document). Detection is by shape: a
 // manifest carries the current document version and a non-empty tree root.
 func IsManifest(data []byte) bool {
-	var probe struct {
-		V        *int   `json:"v"`
-		TreeRoot string `json:"tr"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	probe, err := probeVersion(data)
+	if err != nil {
 		return false
 	}
 	return probe.V != nil && *probe.V == maxMetadataVersion && probe.TreeRoot != ""
@@ -501,17 +538,12 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 	if manifest == nil {
 		return nil, fmt.Errorf("nil manifest")
 	}
-	meta := &RepoMetadata{
-		Version:     maxMetadataVersion,
-		Project:     manifest.Project,
-		NextInode:   manifest.NextInode,
-		NextChunkID: manifest.NextChunkID,
-		LastMod:     manifest.LastMod,
-		dirs:        make(map[string]DirMeta),
-		files:       make(map[string]FileMeta),
-		chunks:      make(map[int64]ChunkInfo),
-		releases:    make(map[string]ReleaseRef),
-	}
+	meta := newBareRepoMetadata()
+	meta.Version = maxMetadataVersion
+	meta.Project = manifest.Project
+	meta.NextInode = manifest.NextInode
+	meta.NextChunkID = manifest.NextChunkID
+	meta.LastMod = manifest.LastMod
 	if err := loadNode(meta, "", manifest.TreeRoot, getObject, map[string]bool{}); err != nil {
 		return nil, err
 	}
@@ -528,6 +560,19 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 			return nil, fmt.Errorf("decode chunk bucket %s: %w", shortObj(sha), err)
 		}
 		for id, info := range b.Chunks {
+			// Buckets are content-addressed by id range: a mis-bucketed
+			// or duplicated id is corruption, not data. (Negative ids
+			// can quotient-match bucket 0 under truncating division, so
+			// they are rejected outright.)
+			if id < 0 {
+				return nil, fmt.Errorf("chunk bucket %s: negative chunk id %d", shortObj(sha), id)
+			}
+			if id/ChunkBucketSize != b.Index {
+				return nil, fmt.Errorf("chunk bucket %s: chunk id %d does not belong to bucket index %d", shortObj(sha), id, b.Index)
+			}
+			if _, dup := meta.chunks[id]; dup {
+				return nil, fmt.Errorf("chunk bucket %s: duplicate chunk id %d", shortObj(sha), id)
+			}
 			meta.chunks[id] = info
 		}
 	}

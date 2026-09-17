@@ -11,8 +11,11 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// TestUpdateRepoMetadataReturnsClone proves the returned snapshot is a copy:
-// mutating it must not leak into the hub's live in-memory metadata.
+// TestUpdateRepoMetadataReturnsSharedSnapshot pins the read-only sharing
+// contract: the returned metadata is the live tree, not a copy. Readers get
+// O(1) snapshots with zero copying; writers MUST go through
+// UpdateRepoMetadataContext - mutating the returned value directly is a
+// contract violation (COW shares backing storage with live state).
 func TestUpdateRepoMetadataReturnsClone(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
@@ -30,20 +33,22 @@ func TestUpdateRepoMetadataReturnsClone(t *testing.T) {
 		t.Fatal("expected real.txt in returned snapshot")
 	}
 
-	// Mutate the returned snapshot; live state must be unaffected.
-	first.UpsertFile("evil.txt", meta.FileMeta{Chunks: []int64{}, Size: 1, Mode: 0o644}, 1700000000)
-
+	// A no-op transaction must observe the committed state, and the
+	// returned value must be the shared live tree itself: pointer
+	// identity with the reader cache proves zero-copy sharing (the old
+	// Clone contract returned a detached copy here).
+	live, _, ok := hub.cachedRepoMetadata("clone-probe")
+	if !ok {
+		t.Fatal("expected cached metadata after update")
+	}
+	if live != first {
+		t.Fatal("UpdateRepoMetadataContext must return the shared live tree, not a Clone")
+	}
 	second, err := hub.UpdateRepoMetadataContext(ctx, "clone-probe", func(m *meta.RepoMetadata) error {
 		return nil
 	}, "storhub: noop")
 	if err != nil {
 		t.Fatalf("second update: %v", err)
-	}
-	if first == second {
-		t.Fatal("UpdateRepoMetadataContext returned the live pointer, not a Clone")
-	}
-	if second.FindFile("evil.txt") != nil {
-		t.Fatal("mutation of returned metadata leaked into live state; must return a Clone")
 	}
 	if second.FindFile("real.txt") == nil {
 		t.Fatal("committed file real.txt missing from second snapshot")

@@ -5,180 +5,70 @@ import type {
   EntryInfo,
   Principal,
   ProjectStats,
+  PruneResult,
   Revision,
   Share,
-  XattrEntry,
-  PruneResult,
 } from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
-import {
-  PREVIEW_MAX_BYTES,
-  SNIFF_BYTES,
-  classify,
-  kindFromExtension,
-  mimeForKind,
-  toHexDump,
-} from '~/utils/preview'
-import type { PreviewKind } from '~/utils/preview'
-import { directLink, SHARE_TTL_5M } from '~/utils/share-links'
+import { canDownloadWithoutToken } from '~/utils/download'
+import { directLink, SHARE_TTL_5M, SHARE_TTL_5M_LABEL } from '~/utils/share-links'
+import { sharedState } from './console-state'
+import { useSelection } from './use-selection'
+import { usePreview } from './use-preview'
+import { useUploads, clearUploadCache } from './use-uploads'
+import type { UploadItem } from './use-uploads'
+import { useModals } from './use-modals'
+import { useDeleteService } from './use-delete'
 
-export type ModalKind =
-  | 'mkdir'
-  | 'create-file'
-  | 'rename'
-  | 'move'
-  | 'copy'
-  | 'link'
-  | 'symlink'
-  | 'chmod'
-  | 'chown'
-  | 'utimes'
-  | 'xattr-set'
-  | 'xattr-remove'
-  | 'append'
-  | 'patch'
-  | 'truncate'
-
-export interface ModalForm {
-  path: string
-  newPath: string
-  target: string
-  mode: string
-  /** `v-model.number` yields '' when the input is cleared. */
-  uid: number | ''
-  gid: number | ''
-  atime: string
-  mtime: string
-  name: string
-  value: string
-  offset: number
-  deleteSize: number
-  text: string
-}
-
-const MODAL_TITLES: Record<ModalKind, string> = {
-  mkdir: 'New directory',
-  'create-file': 'New file',
-  rename: 'Rename',
-  move: 'Move',
-  copy: 'Copy',
-  link: 'New hard link',
-  symlink: 'New symlink',
-  chmod: 'Change mode',
-  chown: 'Change owner',
-  utimes: 'Update timestamps',
-  'xattr-set': 'Set extended attribute',
-  'xattr-remove': 'Remove extended attribute',
-  append: 'Append text',
-  patch: 'Patch bytes',
-  truncate: 'Truncate file',
-}
-
-// ---- Module-scoped singletons (the console is a single-page tool) ----------
-
-const project = ref('')
-const currentPath = ref('')
-const selectedPath = ref('')
-const selectedEntry = ref<EntryInfo | null>(null)
-const selectedPaths = ref<Set<string>>(new Set())
-const lastSelected = ref<string | null>(null)
-const entries = ref<DirEntry[]>([])
-const stats = ref<ProjectStats>({})
-const shares = ref<Share[]>([])
-const revisions = ref<Revision[]>([])
-const xattrs = ref<XattrEntry[]>([])
-const editorContent = ref('')
-const editorDirty = ref(false)
-// ETag of the exact bytes currently in the editor: sent as If-Match on save
-// so a concurrent server-side change fails with 412 instead of being
-// silently overwritten (lost update).
-const editorETag = ref('')
-// Preview pipeline: what the editor pane is currently showing and whether
-// its content may be PUT back (only genuine text reads are saveable).
-const previewKind = ref<PreviewKind>('text')
-const previewUrl = ref('')
-const previewHex = ref('')
-const previewMeta = ref({ shown: 0, total: 0 })
-const editorIsText = ref(true)
-const previewLoading = ref(false)
-const busy = ref(false)
 // Reference count of in-flight run() calls: busy must stay true until the
 // LAST sibling request settles, not the first.
 let inflight = 0
 
-// useState needs a Nuxt context, so it is resolved lazily inside
-// useConsole() (useState itself memoizes per key, keeping singleton semantics).
-let authState: { token: Ref<string>; principal: Ref<Principal | null> } | null = null
-function authRefs(): { token: Ref<string>; principal: Ref<Principal | null> } {
-  if (!authState) {
-    authState = {
-      token: useState<string>('auth-token', () => ''),
-      principal: useState<Principal | null>('auth-principal', () => null),
-    }
-  }
-  return authState
-}
+// Generation guard: a slow response for an older selection must never
+// overwrite a newer one.
+let inspectSeq = 0
 
-const shareRequested = ref(false)
-const shareToken = ref('')
-const shareRootPath = ref('')
-const shareId = ref('')
-
-const modalOpen = ref(false)
-const modalKind = ref<ModalKind>('mkdir')
-
-// ---- Uploads ---------------------------------------------------------------
-// Sequential (slow-network doctrine): one PUT at a time, parent directories
-// ensured once per session, progress exposed for the pane UI.
-interface UploadProgress {
-  active: boolean
-  done: number
-  failed: number
-  total: number
-  current: string
-  bytesDone: number
-  bytesTotal: number
-}
-
-const uploadProgress = ref<UploadProgress>({
-  active: false,
-  done: 0,
-  failed: 0,
-  total: 0,
-  current: '',
-  bytesDone: 0,
-  bytesTotal: 0,
-})
-const uploadedDirs = new Set<string>()
-const modalForm = ref<ModalForm>(blankForm())
-const modalError = ref('')
-
-function blankForm(): ModalForm {
-  return {
-    path: '',
-    newPath: '',
-    target: '',
-    mode: '0644',
-    uid: 0,
-    gid: 0,
-    atime: '',
-    mtime: '',
-    name: '',
-    value: '',
-    offset: 0,
-    deleteSize: 0,
-    text: '',
-  }
-}
-
-function enc(value: string): string {
+function encodeSegment(value: string): string {
   return encodeURIComponent(value)
 }
 
 export function useConsole() {
   const { config, url, getJSON, postJSON, request } = useApi()
   const toasts = useToasts()
-  const { token, principal } = authRefs()
+  const {
+    project,
+    currentPath,
+    selectedPath,
+    selectedPaths,
+    lastSelected,
+    selectedEntry,
+    entries,
+    stats,
+    shares,
+    revisions,
+    xattrs,
+    editorContent,
+    editorDirty,
+    editorETag,
+    busy,
+    token,
+    principal,
+    shareRequested,
+    shareToken,
+    shareRootPath,
+    shareId,
+    previewKind,
+    previewUrl,
+    previewHex,
+    previewMeta,
+    editorIsText,
+    previewLoading,
+    uploadProgress,
+    modalOpen,
+    modalKind,
+    modalForm,
+    modalError,
+  } = sharedState()
 
   const authEnabled = computed(() => config.authEnabled !== false)
   const sharedMode = computed(() => !!shareToken.value)
@@ -190,7 +80,7 @@ export function useConsole() {
   )
 
   function projectURL(suffix: string): string {
-    return `/projects/${enc(project.value)}${suffix}`
+    return `/projects/${encodeSegment(project.value)}${suffix}`
   }
 
   async function run<T>(label: string, fn: () => Promise<T>, quiet = false): Promise<T | null> {
@@ -221,10 +111,86 @@ export function useConsole() {
     }
   }
 
-  async function del(target: string, label: string): Promise<boolean> {
+  async function deleteResource(target: string, label: string): Promise<boolean> {
     const ok = await run(label, () => request(target, { method: 'DELETE' }))
     return ok !== null
   }
+
+  // ---- Slices (god-composable split; this module stays a thin facade) -----
+
+  const selection = useSelection()
+  const preview = usePreview({
+    run,
+    request,
+    projectURL,
+    url,
+    refreshAll,
+    canEditFile: () => canEditFile.value,
+  })
+  const uploads = useUploads({
+    postJSON,
+    projectURL,
+    url,
+    canWrite: () => canWrite.value,
+    refreshAll,
+  })
+
+  async function postOp(label: string, suffix: string, body: unknown): Promise<boolean> {
+    const ok = await run(label, () => postJSON(projectURL(`/ops/${suffix}`), body))
+    if (ok !== null) await refreshAll()
+    return ok !== null
+  }
+
+  async function patchOp(label: string, params: Record<string, string>, body?: string): Promise<boolean> {
+    const target = selectedPath.value
+    if (!target) return false
+    const ok = await run(label, () =>
+      request(url(projectURL('/content'), { path: target, ...params }), { method: 'PATCH', body }),
+    )
+    if (ok !== null) {
+      await preview.readFile(target)
+      await inspectPath(target)
+      await loadRevisions()
+    }
+    return ok !== null
+  }
+
+  async function setXattr(path: string, name: string, value: string): Promise<boolean> {
+    const ok = await run('Set xattr', () =>
+      request(url(projectURL('/xattrs/value'), { path, name }), { method: 'PUT', body: value }),
+    )
+    if (ok !== null) await loadXattrs()
+    return ok !== null
+  }
+
+  async function removeXattr(path: string, name: string): Promise<boolean> {
+    const ok = await run('Remove xattr', () =>
+      request(url(projectURL('/xattrs/value'), { path, name }), { method: 'DELETE' }),
+    )
+    if (ok !== null) await loadXattrs()
+    return ok !== null
+  }
+
+  const modals = useModals({
+    run,
+    postJSON,
+    projectURL,
+    postOp,
+    patchOp,
+    setXattr,
+    removeXattr,
+    refreshAll,
+    clearSelection: selection.clearSelection,
+  })
+  const remover = useDeleteService({
+    run,
+    getJSON,
+    postJSON,
+    projectURL,
+    url,
+    refreshAll,
+    clearSelection: selection.clearSelection,
+  })
 
   // ---- Loading -------------------------------------------------------------
 
@@ -233,7 +199,7 @@ export function useConsole() {
     if (sharedMode.value && shareRootPath.value && !withinShareRoot(nextPath)) nextPath = shareRootPath.value
     // Keep the current selection when merely re-listing the same directory
     // (refresh after a mutation); navigating elsewhere resets the panes.
-    if (nextPath !== currentPath.value) clearSelection()
+    if (nextPath !== currentPath.value) selection.clearSelection()
     currentPath.value = nextPath
     // Never leave the previous directory's rows under the new path: a failed
     // fetch must show an empty pane, not stale entries the user could act on.
@@ -272,10 +238,6 @@ export function useConsole() {
     }, true)
   }
 
-  // Generation guard: a slow response for an older selection must never
-  // overwrite a newer one.
-  let inspectSeq = 0
-
   async function inspectPath(path: string): Promise<void> {
     const seq = ++inspectSeq
     const ok = await run('Stat', async () => {
@@ -290,23 +252,6 @@ export function useConsole() {
     await loadXattrs()
   }
 
-  async function readFile(path: string): Promise<void> {
-    previewLoading.value = true
-    try {
-      await run('Read', async () => {
-        // rawBody: the bytes are file content, not an API envelope. Parsing
-        // and re-stringifying JSON here would corrupt the file on save.
-        const result = await request<string>(url(projectURL('/content'), { path }), { rawBody: true })
-        editorContent.value = result.payload
-        editorETag.value = result.etag
-        editorIsText.value = true
-        previewKind.value = 'text'
-        clearPreview()
-      })
-    } finally {
-      previewLoading.value = false
-    }
-  }
   async function loadStats(): Promise<boolean> {
     if (sharedMode.value) {
       // For shared view, stats are not available via /projects/{p} (read-only).
@@ -426,7 +371,7 @@ export function useConsole() {
     editorETag.value = ''
     xattrs.value = []
     editorIsText.value = true
-    clearPreview()
+    preview.clearPreview()
     // refreshAll reports whether the underlying loads succeeded; a typo'd
     // project must not leave the console parked on an empty phantom.
     if (!(await refreshAll())) {
@@ -438,6 +383,10 @@ export function useConsole() {
 
   async function bootstrapShare(shareParam: string): Promise<boolean> {
     shareRequested.value = true
+    // bootstrapShare overwrites the bearer with the share token below; a
+    // dead link must restore the prior session, not strand it hijacked.
+    const priorToken = token.value
+    const priorPrincipal = principal.value
     try {
       const payload = await getJSON<{
         id?: string
@@ -446,7 +395,7 @@ export function useConsole() {
         path: string
         expires_at?: string
         is_dir?: boolean
-      }>(`/shares/${enc(shareParam)}`)
+      }>(`/shares/${encodeSegment(shareParam)}`)
       // The signed token is the credential - never the short registry id
       // (which the server may echo alongside it).
       shareToken.value = payload.token ?? payload.id ?? shareParam
@@ -469,25 +418,28 @@ export function useConsole() {
       )
       const entry = statResult?.entry
       if (entry && !entry.is_dir) {
+        // Route single-file shares through the preview pipeline: media
+        // kinds render natively and oversized files hit the size cap
+        // instead of buffering the whole body as garbled text.
         currentPath.value = root
         entries.value = [{ ...entry, name: entry.path.split('/').pop() ?? entry.path }]
-        selectedPath.value = root
-        selectedEntry.value = entry
-        await readFile(root)
-        await loadXattrs()
+        const first = entries.value[0]
+        if (first) await selectEntry(first)
       } else {
         await loadDirectory(root)
       }
       return true
     } catch {
-      // A dead link must not strand the UI in shared mode: clear every piece
-      // of share state so the login card and project input come back.
+      // A dead link must not strand the UI in shared mode: reset every
+      // piece of console state, drop the share fields, and restore the
+      // prior bearer so the login card and project input come back.
+      reset()
       shareRequested.value = false
       shareToken.value = ''
       shareId.value = ''
-      token.value = ''
-      project.value = ''
       shareRootPath.value = ''
+      token.value = priorToken
+      principal.value = priorPrincipal
       toasts.error('This share link is invalid or has expired')
       return false
     }
@@ -504,77 +456,6 @@ export function useConsole() {
     void loadDirectory(parentPath(currentPath.value))
   }
 
-  function clearPreview(): void {
-    if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
-    previewUrl.value = ''
-    previewHex.value = ''
-    previewMeta.value = { shown: 0, total: 0 }
-  }
-
-  /**
-   * Decide how to preview the selected file and fetch only what that kind
-   * needs: media types get a full blob (they cannot render partially), text
-   * and binary get one ranged sniff window. Files above PREVIEW_MAX_BYTES
-   * are never fetched - the range bar covers targeted reads.
-   */
-  async function loadPreview(entry: AnyEntry): Promise<void> {
-    clearPreview()
-    editorContent.value = ''
-    editorDirty.value = false
-    editorETag.value = ''
-    editorIsText.value = false
-    previewLoading.value = true
-    try {
-      const ext = (entry.path.split('/').pop() ?? '').split('.').pop() ?? ''
-      if (entry.size > PREVIEW_MAX_BYTES) {
-        previewKind.value = 'too-large'
-        previewMeta.value = { shown: 0, total: entry.size }
-        return
-      }
-      const mediaKind = kindFromExtension(entry.path)
-      if (mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio' || mediaKind === 'pdf') {
-        try {
-          const result = await request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
-            binary: true,
-          })
-          const blob = new Blob([result.payload], { type: mimeForKind(mediaKind, ext) })
-          previewUrl.value = URL.createObjectURL(blob)
-          previewKind.value = mediaKind
-          previewMeta.value = { shown: entry.size, total: entry.size }
-        } catch (error) {
-          previewKind.value = 'error'
-          toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        return
-      }
-      // Sniff window: one ranged request, then classify by magic / UTF-8.
-      const windowLen = Math.min(entry.size, SNIFF_BYTES)
-      const end = windowLen > 0 ? windowLen - 1 : 0
-      const result = await run('Preview', () =>
-        request<ArrayBuffer>(url(projectURL('/content'), { path: entry.path }), {
-          binary: true,
-          headers: { Range: `bytes=0-${end}` },
-        }),
-      )
-      if (result === null) return
-      const bytes = new Uint8Array(result.payload)
-      previewMeta.value = { shown: bytes.byteLength, total: entry.size }
-      const kind = classify(bytes)
-      previewKind.value = kind
-      if (kind === 'text') {
-        editorContent.value = new TextDecoder().decode(bytes)
-        editorIsText.value = true
-        // Only a complete fetch is safe to PUT back; a truncated sniff
-        // window keeps no CAS token so saveFile stays honest about it.
-        if (bytes.byteLength === entry.size) editorETag.value = result.etag
-      } else if (kind === 'binary') {
-        previewHex.value = toHexDump(bytes, { maxRows: 4096 })
-      }
-    } finally {
-      previewLoading.value = false
-    }
-  }
-
   async function selectEntry(entry: AnyEntry): Promise<void> {
     await inspectPath(entry.path)
     const current = selectedEntry.value
@@ -584,178 +465,16 @@ export function useConsole() {
       return
     }
     if (current.is_symlink) return
-    await loadPreview(entry)
+    await preview.loadPreview(entry)
   }
 
-  // ---- Mutations -----------------------------------------------------------
-
-  async function saveFile(): Promise<void> {
-    // Only genuine text loads may be PUT back: saving over a file we merely
-    // hex-dumped or never fetched would destroy data.
-    const target = selectedPath.value
-    if (!canEditFile.value || !editorIsText.value || !target) return
-    const headers: Record<string, string> = {}
-    if (editorETag.value) headers['If-Match'] = editorETag.value
-    const res = await run('Save', () =>
-      request<{ etag?: string }>(url(projectURL('/content'), { path: target }), {
-        method: 'PUT',
-        headers,
-        body: editorContent.value,
-      }),
-    )
-    if (res !== null) {
-      editorDirty.value = false
-      // The PUT answers with the fresh node; chain its ETag into the next save.
-      editorETag.value = res.payload.etag ?? res.etag
-      toasts.success(`Saved ${target}`)
-      await refreshAll()
-    }
-  }
-
-  async function op(label: string, suffix: string, body: unknown): Promise<boolean> {
-    const ok = await run(label, () => postJSON(projectURL(`/ops/${suffix}`), body))
-    if (ok !== null) await refreshAll()
-    return ok !== null
-  }
-
-  async function patchOp(label: string, params: Record<string, string>, body?: string): Promise<boolean> {
-    const target = selectedPath.value
-    if (!target) return false
-    const ok = await run(label, () =>
-      request(url(projectURL('/content'), { path: target, ...params }), { method: 'PATCH', body }),
-    )
-    if (ok !== null) {
-      await readFile(target)
-      await inspectPath(target)
-      await loadRevisions()
-    }
-    return ok !== null
-  }
-
-  async function removeSelected(entry: AnyEntry): Promise<boolean> {
-    // For directories, use recursive path via removeMany
-    if (entry.is_dir) return removeMany([entry.path])
-    const done = await op(`Remove ${entry.path}`, 'unlink', { path: entry.path })
-    if (done) {
-      selectedPaths.value.delete(entry.path)
-      selectedPaths.value = new Set(selectedPaths.value)
-      if (selectedPath.value === entry.path) clearSelection()
-      if (selectedPaths.value.size === 0) clearSelection()
-    }
-    return done
-  }
-
-  async function removeRecursive(path: string): Promise<boolean> {
-    // List children and delete them first (depth-first)
-    try {
-      const payload = await getJSON<{ entries?: DirEntry[] }>(url(projectURL('/children'), { path }))
-      const kids = payload.entries ?? []
-      for (const kid of kids) {
-        const ok = await removeRecursive(kid.path)
-        if (!ok) return false
-      }
-    } catch {
-      // If we can't list, try to unlink as file
-      const res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/unlink'), { path }), true)
-      return res !== null
-    }
-    // Now the directory should be empty, try rmdir; if it fails because it's a file, try unlink
-    let res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/rmdir'), { path }), true)
-    if (res !== null) return true
-    res = await run(`Remove ${path}`, () => postJSON(projectURL('/ops/unlink'), { path }), true)
-    return res !== null
-  }
-
-  async function removeMany(paths: string[]): Promise<boolean> {
-    const results = await Promise.all(
-      paths.map(async (p) => {
-        const entry = entries.value.find((e) => e.path === p)
-        // If we know it's a dir, use recursive; otherwise try recursive which handles both
-        if (entry?.is_dir) return removeRecursive(p)
-        // For files or unknown, try direct unlink, fallback to recursive
-        const res = await run(`Remove ${p}`, () => postJSON(projectURL('/ops/unlink'), { path: p }), true)
-        if (res !== null) return true
-        return removeRecursive(p)
-      }),
-    )
-    const ok = results.every(Boolean)
-    if (!ok) toasts.error(`Failed to remove ${results.filter((v) => !v).length}/${paths.length} items`)
-    for (const p of paths) selectedPaths.value.delete(p)
-    selectedPaths.value = new Set(selectedPaths.value)
-    const remaining = [...selectedPaths.value].pop()
-    if (remaining === undefined) clearSelection()
-    else selectedPath.value = remaining
-    // refreshAll keeps the (now re-selected) path and re-inspects it, so the
-    // details pane survives the reload instead of being wiped by it.
-    await refreshAll()
-    return ok
-  }
-
-  function clearSelection(): void {
-    selectedPath.value = ''
-    selectedEntry.value = null
-    selectedPaths.value = new Set()
-    lastSelected.value = null
-    editorContent.value = ''
-    editorDirty.value = false
-    editorETag.value = ''
-    xattrs.value = []
-    editorIsText.value = true
-    clearPreview()
-  }
-
-  function isSelected(path: string): boolean {
-    return selectedPaths.value.has(path)
-  }
-
-  function selectSingle(path: string): void {
-    selectedPaths.value = new Set([path])
-    lastSelected.value = path
-    selectedPath.value = path
-  }
-
-  function toggleSelect(path: string): void {
-    const next = new Set(selectedPaths.value)
-    if (next.has(path)) next.delete(path)
-    else next.add(path)
-    selectedPaths.value = next
-    lastSelected.value = path
-    if (next.size === 1) {
-      const only = [...next][0]
-      if (only !== undefined) selectedPath.value = only
-    } else if (next.size === 0) {
-      clearSelection()
-      return
-    } else {
-      selectedPath.value = path
-    }
-  }
-
-  function selectRange(from: string, to: string): void {
-    const idxFrom = entries.value.findIndex((e) => e.path === from)
-    const idxTo = entries.value.findIndex((e) => e.path === to)
-    if (idxFrom === -1 || idxTo === -1) {
-      selectSingle(to)
-      return
-    }
-    const [a, b] = idxFrom < idxTo ? [idxFrom, idxTo] : [idxTo, idxFrom]
-    const range = entries.value.slice(a, b + 1).map((e) => e.path)
-    selectedPaths.value = new Set(range)
-    lastSelected.value = to
-    selectedPath.value = to
-  }
-
-  function selectAll(): void {
-    selectedPaths.value = new Set(entries.value.map((e) => e.path))
-    const lastEntry = entries.value.at(-1)
-    if (lastEntry) {
-      lastSelected.value = lastEntry.path
-      selectedPath.value = lastEntry.path
-    }
+  /** Select an entry non-navigatively: stat it so detail panes follow along. */
+  async function focusEntry(entry: AnyEntry): Promise<void> {
+    await inspectPath(entry.path)
   }
 
   async function deleteProject(): Promise<boolean> {
-    const done = await del(url(`/projects/${enc(project.value)}`), 'Delete project')
+    const done = await deleteResource(url(`/projects/${encodeSegment(project.value)}`), 'Delete project')
     if (done) {
       reset()
       toasts.success('Project deleted')
@@ -764,7 +483,7 @@ export function useConsole() {
   }
 
   async function rollbackRevision(sha: string): Promise<boolean> {
-    return op(`Rollback to ${sha.slice(0, 10)}`, 'rollback', { commit_sha: sha })
+    return postOp(`Rollback to ${sha.slice(0, 10)}`, 'rollback', { commit_sha: sha })
   }
 
   interface PurgeResult {
@@ -789,7 +508,7 @@ export function useConsole() {
   // Revert a single path (file or directory subtree) to a historical revision,
   // leaving the rest of the tree untouched. A revert is a new commit.
   async function revertPath(path: string, sha: string): Promise<boolean> {
-    return op(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
+    return postOp(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
   }
 
   // Granular prune: reclaim orphaned index objects, untracked assets, or
@@ -820,31 +539,15 @@ export function useConsole() {
     if (!shareId.value || !shareToken.value) return null
     return run('Derive share', async () => {
       const body: Record<string, unknown> = { path }
-      const payload = await postJSON<Share>(`/shares/${enc(shareId.value)}/derive?token=${enc(shareToken.value)}`, body)
+      const payload = await postJSON<Share>(`/shares/${encodeSegment(shareId.value)}/derive?token=${encodeSegment(shareToken.value)}`, body)
       return payload as Share
     })
   }
 
   async function deleteShare(share: Share): Promise<boolean> {
-    const done = await del(url(projectURL(`/shares/${enc(share.id)}`)), 'Delete share')
+    const done = await deleteResource(url(projectURL(`/shares/${encodeSegment(share.id)}`)), 'Delete share')
     if (done) await loadShares()
     return done
-  }
-
-  async function setXattr(path: string, name: string, value: string): Promise<boolean> {
-    const ok = await run('Set xattr', () =>
-      request(url(projectURL('/xattrs/value'), { path, name }), { method: 'PUT', body: value }),
-    )
-    if (ok !== null) await loadXattrs()
-    return ok !== null
-  }
-
-  async function removeXattr(path: string, name: string): Promise<boolean> {
-    const ok = await run('Remove xattr', () =>
-      request(url(projectURL('/xattrs/value'), { path, name }), { method: 'DELETE' }),
-    )
-    if (ok !== null) await loadXattrs()
-    return ok !== null
   }
 
   function reset(): void {
@@ -863,8 +566,8 @@ export function useConsole() {
     editorDirty.value = false
     editorETag.value = ''
     editorIsText.value = true
-    uploadedDirs.clear()
-    clearPreview()
+    clearUploadCache()
+    preview.clearPreview()
   }
 
   // Downloads fetch the bytes with the bearer header (the REST layer
@@ -876,7 +579,9 @@ export function useConsole() {
       toasts.error('Directory download not yet implemented')
       return
     }
-    if (!token.value) {
+    // Open servers and shared views serve bytes without a token; only gate
+    // when the server would actually 401.
+    if (!canDownloadWithoutToken(config.authEnabled, !!token.value, sharedMode.value)) {
       toasts.error('Not authenticated')
       return
     }
@@ -902,7 +607,8 @@ export function useConsole() {
 
   // A direct link is a share's download_url: in shared view, derive a child
   // share from the active one (the server caps its expiry to the parent's
-  // remaining time); otherwise create a fresh share valid for 5 minutes.
+  // remaining time); otherwise create a fresh 5-minute share (see
+  // share-links.ts for WHY the kebab TTL differs from the panel's).
   async function copyDirectLink(entry: AnyEntry): Promise<void> {
     if (entry.is_dir) {
       toasts.error('Directory direct links not yet implemented')
@@ -926,321 +632,11 @@ export function useConsole() {
     }
     const absolute = directLink(share)
     const ok = await copyText(absolute)
-    if (ok) toasts.success('Direct link copied (valid 5 min)')
+    if (ok) toasts.success(`Direct link copied (valid ${SHARE_TTL_5M_LABEL})`)
   }
 
-  /** Select an entry non-navigatively: stat it so detail panes follow along. */
-  async function focusEntry(entry: AnyEntry): Promise<void> {
-    await inspectPath(entry.path)
-  }
-
-  // ---- Uploads ---------------------------------------------------------------
-
-  /** mkdir -p against the REST API, memoized per project session. */
-  async function ensureDir(dir: string): Promise<boolean> {
-    const parts = normalizePath(dir).split('/').filter(Boolean)
-    let cur = ''
-    for (const part of parts) {
-      cur = cur ? `${cur}/${part}` : part
-      const key = `${project.value}/${cur}`
-      if (uploadedDirs.has(key)) continue
-      try {
-        await postJSON(projectURL('/ops/mkdir'), { path: cur })
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 409) {
-          // Already exists - treat as success for mkdir -p
-        } else {
-          return false
-        }
-      }
-      uploadedDirs.add(key)
-    }
-    return true
-  }
-
-  /**
-   * Upload one file with byte-level progress via XHR (its upload.onprogress
-   * is the only browser API reporting real bytes while keeping an explicit
-   * Content-Length, which the server's size enforcement requires).
-   */
-  function putFileWithProgress(fullPath: string, file: File, onBytes: (loaded: number) => void): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', url(projectURL('/content'), { path: fullPath }))
-      if (token.value) xhr.setRequestHeader('Authorization', `Bearer ${token.value}`)
-      // A half-open connection must not pin the progress bar forever: give
-      // the transfer a generous ceiling and fail loudly when it is hit.
-      xhr.timeout = 15 * 60_000
-      xhr.ontimeout = () => reject(new ApiError(408, 'upload timed out', null))
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) onBytes(event.loaded)
-      }
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve()
-          return
-        }
-        let message = `HTTP ${xhr.status}`
-        try {
-          const parsed = JSON.parse(xhr.responseText) as { error?: { message?: string } }
-          message = parsed.error?.message ?? message
-        } catch {
-          /* non-JSON error body */
-        }
-        reject(new ApiError(xhr.status, message, null))
-      }
-      xhr.onerror = () => reject(new ApiError(0, 'network error during upload', null))
-      xhr.send(file)
-    })
-  }
-
-  /**
-   * Upload a batch of files into baseDir. Each item carries its relative
-   * path (from drag-and-drop traversal or webkitRelativePath), so dropped
-   * folders land with their structure intact. Byte progress is cumulative
-   * across the whole batch.
-   */
-  async function uploadFiles(items: Array<{ file: File; relPath: string }>, baseDir: string): Promise<void> {
-    if (!items.length || !canWrite.value) return
-    const bytesTotal = items.reduce((sum, item) => sum + item.file.size, 0)
-    uploadProgress.value = {
-      active: true,
-      done: 0,
-      failed: 0,
-      total: items.length,
-      current: '',
-      bytesDone: 0,
-      bytesTotal,
-    }
-    let firstError = ''
-    let baseBytes = 0
-    for (const { file, relPath } of items) {
-      const cleanRel = normalizePath(relPath)
-      if (!cleanRel) continue
-      const fullPath = normalizePath(`${normalizePath(baseDir)}/${cleanRel}`)
-      uploadProgress.value = { ...uploadProgress.value, current: cleanRel }
-      const dir = parentPath(cleanRel)
-      if (dir && !(await ensureDir(`${normalizePath(baseDir)}/${dir}`))) {
-        firstError ||= `could not create ${dir}`
-        baseBytes += file.size
-        uploadProgress.value = {
-          ...uploadProgress.value,
-          bytesDone: baseBytes,
-          failed: uploadProgress.value.failed + 1,
-          done: uploadProgress.value.done + 1,
-        }
-        continue
-      }
-      try {
-        await putFileWithProgress(fullPath, file, (loaded) => {
-          uploadProgress.value = { ...uploadProgress.value, bytesDone: baseBytes + loaded }
-        })
-        baseBytes += file.size
-      } catch (error) {
-        firstError ||= error instanceof Error ? error.message : String(error)
-        uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1 }
-      }
-      uploadProgress.value = {
-        ...uploadProgress.value,
-        bytesDone: baseBytes,
-        done: uploadProgress.value.done + 1,
-      }
-    }
-    uploadProgress.value = { ...uploadProgress.value, active: false, current: '' }
-    await refreshAll()
-    const { done, failed, total } = uploadProgress.value
-    if (failed === 0) toasts.success(`Uploaded ${done}/${total} · ${formatBytes(bytesTotal)}`)
-    else toasts.error(`Uploaded ${done - failed}/${total}. ${firstError}`)
-  }
-
-  // ---- Modal ---------------------------------------------------------------
-
-  function openModal(kind: ModalKind, contextDir?: string, targetPath?: string): void {
-    const form = blankForm()
-    form.path = contextDir !== undefined
-      ? `${normalizePath(contextDir)}/`
-      : currentPath.value ? `${currentPath.value}/` : ''
-    // Symlinks: the clicked entry is the TARGET; the link is born in contextDir.
-    if (kind === 'symlink') {
-      form.target = targetPath ?? selectedPath.value ?? ''
-      form.newPath = `${normalizePath(contextDir || currentPath.value)}/`
-    } else if (kind === 'move' || kind === 'copy') {
-      const paths = [...selectedPaths.value]
-      if (paths.length > 1) {
-        // Bulk: destination is a directory, default to current dir
-        form.newPath = currentPath.value ? `${currentPath.value}/` : ''
-      } else {
-        form.newPath = selectedPath.value ?? (paths[0] ?? '')
-      }
-    } else if (kind === 'rename') {
-      form.path = selectedPath.value ?? ''
-      form.newPath = selectedPath.value ?? ''
-    } else {
-      form.newPath = selectedPath.value ?? ''
-    }
-    if (selectedEntry.value?.mode !== undefined) form.mode = formatMode(selectedEntry.value.mode)
-    form.uid = selectedEntry.value?.uid ?? 0
-    form.gid = selectedEntry.value?.gid ?? 0
-    form.atime = toDatetimeLocal(selectedEntry.value?.accessed_at ?? selectedEntry.value?.modified_at)
-    form.mtime = toDatetimeLocal(selectedEntry.value?.modified_at)
-    form.name = xattrs.value[0]?.name ?? ''
-    modalKind.value = kind
-    modalForm.value = form
-    modalError.value = ''
-    modalOpen.value = true
-  }
-
-  function closeModal(): void {
-    modalOpen.value = false
-    modalError.value = ''
-  }
-
-  async function submitModal(): Promise<void> {
-    const f = modalForm.value
-    const kind = modalKind.value
-    try {
-      switch (kind) {
-        case 'mkdir':
-          await op('mkdir', 'mkdir', { path: f.path })
-          break
-        case 'create-file':
-          await op('create file', 'create-file', { path: f.path })
-          break
-        case 'rename': {
-          const oldPath = (f.path || selectedPath.value || '').trim()
-          const newPath = f.newPath.trim()
-          if (!oldPath) throw new Error('original path is required')
-          if (!newPath) throw new Error('new path is required')
-          if (oldPath === newPath) throw new Error('new path must be different')
-          // op() already surfaces a toast on failure; keep the modal open
-          // with the user's input instead of reporting the same error twice.
-          if (!(await op('rename', 'rename', { old_path: oldPath, new_path: newPath }))) return
-          break
-        }
-        case 'move': {
-          const paths = [...selectedPaths.value]
-          const srcs = paths.length ? paths : selectedPath.value ? [selectedPath.value] : []
-          if (!srcs.length) throw new Error('no selection')
-          const dest = f.newPath.trim()
-          if (!dest) throw new Error('destination is required')
-          if (srcs.length === 1) {
-            const first = srcs[0]
-            if (first === undefined) throw new Error('no selection')
-            await op('move', 'rename', { old_path: first, new_path: dest })
-          } else {
-            const destDir = normalizePath(dest)
-            let ok = true
-            for (const src of srcs) {
-              const base = src.split('/').pop() ?? src
-              const dst = destDir ? `${destDir}/${base}` : base
-              const res = await run(`Move ${src}`, () => postJSON(projectURL('/ops/rename'), { old_path: src, new_path: dst }), true)
-              if (res === null) ok = false
-            }
-            if (!ok) throw new Error('some moves failed')
-            await refreshAll()
-            clearSelection()
-          }
-          break
-        }
-        case 'copy': {
-          const paths = [...selectedPaths.value]
-          const srcs = paths.length ? paths : selectedPath.value ? [selectedPath.value] : []
-          if (!srcs.length) throw new Error('no selection')
-          const dest = f.newPath.trim()
-          if (!dest) throw new Error('destination is required')
-          if (srcs.length === 1) {
-            const first = srcs[0]
-            if (first === undefined) throw new Error('no selection')
-            await op('copy', 'copy', { src_path: first, dst_path: dest })
-          } else {
-            const destDir = normalizePath(dest)
-            let ok = true
-            for (const src of srcs) {
-              const base = src.split('/').pop() ?? src
-              const dst = destDir ? `${destDir}/${base}` : base
-              const res = await run(`Copy ${src}`, () => postJSON(projectURL('/ops/copy'), { src_path: src, dst_path: dst }), true)
-              if (res === null) ok = false
-            }
-            if (!ok) throw new Error('some copies failed')
-            await refreshAll()
-          }
-          break
-        }
-        case 'link':
-          await op('hard link', 'link', { existing_path: selectedPath.value, new_path: f.newPath })
-          break
-        case 'symlink':
-          await op('symlink', 'symlink', { target: f.target, link_path: f.newPath })
-          break
-        case 'chmod': {
-          const mode = parseInt(f.mode, 8)
-          if (Number.isNaN(mode)) throw new Error(`invalid octal mode: ${f.mode}`)
-          await op('chmod', 'chmod', { path: selectedPath.value, mode })
-          break
-        }
-        case 'chown': {
-          // A cleared number input yields '' (v-model.number), and
-          // Number('') === 0 would silently chown the entry to root.
-          const uid = Number(f.uid)
-          const gid = Number(f.gid)
-          if (f.uid === '' || !Number.isInteger(uid) || uid < 0)
-            throw new Error('uid must be a non-negative integer')
-          if (f.gid === '' || !Number.isInteger(gid) || gid < 0)
-            throw new Error('gid must be a non-negative integer')
-          await op('chown', 'chown', { path: selectedPath.value, uid, gid })
-          break
-        }
-        case 'utimes': {
-          const atime = f.atime ? new Date(f.atime) : null
-          const mtime = f.mtime ? new Date(f.mtime) : null
-          for (const [name, date] of [['atime', atime], ['mtime', mtime]] as const) {
-            if (date && Number.isNaN(date.getTime())) throw new Error(`invalid ${name} timestamp`)
-          }
-          await op('timestamps', 'utimes', {
-            path: selectedPath.value,
-            atime: (atime ?? new Date()).toISOString(),
-            mtime: (mtime ?? new Date()).toISOString(),
-          })
-          break
-        }
-        case 'xattr-set': {
-          const target = selectedPath.value
-          if (!target) throw new Error('select an entry first')
-          if (!f.name.trim()) throw new Error('attribute name is required')
-          await setXattr(target, f.name.trim(), f.value)
-          break
-        }
-        case 'xattr-remove': {
-          const target = selectedPath.value
-          if (!target) throw new Error('select an entry first')
-          if (!f.name.trim()) throw new Error('attribute name is required')
-          await removeXattr(target, f.name.trim())
-          break
-        }
-        case 'append':
-          await patchOp('Append text', { op: 'append' }, f.text)
-          break
-        case 'patch': {
-          if (!Number.isInteger(f.offset) || f.offset < 0) throw new Error('offset must be a non-negative integer')
-          if (!Number.isInteger(f.deleteSize) || f.deleteSize < 0) throw new Error('delete size must be ≥ 0')
-          await patchOp(
-            'Patch bytes',
-            { op: 'patch', offset: String(f.offset), delete_size: String(f.deleteSize) },
-            f.text,
-          )
-          break
-        }
-        case 'truncate': {
-          if (!Number.isInteger(Number(f.text)) || Number(f.text) < 0)
-            throw new Error('size must be a non-negative integer')
-          await patchOp('Truncate', { op: 'truncate', size: f.text })
-          break
-        }
-      }
-      closeModal()
-    } catch (error) {
-      modalError.value = error instanceof Error ? error.message : String(error)
-    }
+  async function uploadFiles(items: UploadItem[], baseDir: string): Promise<void> {
+    await uploads.uploadFiles(items, baseDir)
   }
 
   // Pinned project (`storhub serve <project>`): auto-loaded, selector hidden.
@@ -1290,16 +686,17 @@ export function useConsole() {
     shareId,
     canWrite,
     canEditFile,
+    isSaveable: preview.isSaveable,
 
     // modal
     modalOpen,
     modalKind,
-    modalTitle: (kind: ModalKind) => MODAL_TITLES[kind],
+    modalTitle: modals.modalTitle,
     modalForm,
     modalError,
-    openModal,
-    closeModal,
-    submitModal,
+    openModal: modals.openModal,
+    closeModal: modals.closeModal,
+    submitModal: modals.submitModal,
     // preview
     previewKind,
     previewUrl,
@@ -1308,29 +705,29 @@ export function useConsole() {
     editorIsText,
     uploadProgress,
     previewLoading,
-    loadPreview,
-    clearPreview,
+    loadPreview: preview.loadPreview,
+    clearPreview: preview.clearPreview,
     // actions
     loadProject,
     loadDirectory,
     selectEntry,
     inspectPath,
-    readFile,
-    saveFile,
+    readFile: preview.readFile,
+    saveFile: preview.saveFile,
     refreshAll,
     login,
     logout,
     restoreSession,
     bootstrapShare,
     goUp,
-    removeSelected,
-    removeMany,
-    clearSelection,
-    isSelected,
-    selectSingle,
-    toggleSelect,
-    selectRange,
-    selectAll,
+    removeSelected: remover.removeSelected,
+    removeMany: remover.removeMany,
+    clearSelection: selection.clearSelection,
+    isSelected: selection.isSelected,
+    selectSingle: selection.selectSingle,
+    toggleSelect: selection.toggleSelect,
+    selectRange: selection.selectRange,
+    selectAll: selection.selectAll,
     deleteProject,
     rollbackRevision,
     revertPath,

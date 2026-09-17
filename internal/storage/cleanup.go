@@ -167,13 +167,24 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 	if err != nil {
 		return err
 	}
-	// The loaded tree may be the hub's shared snapshot: normalize a private
-	// copy and commit that, never the shared one.
+	// Cheap no-op check first (audit 33): the old code paid 2 clones +
+	// Normalize/RecomputeStats + 2 full ToJSON marshals just to test
+	// no-op-ness. SerializedSize is the engine's incremental counter
+	// (no encode); only when the sizes match do we pay for the marshal
+	// pair to rule out a same-size-but-different tree.
 	before := repoMeta.Clone()
 	before.Normalize(project, h.config.Now().Unix())
 	working := repoMeta.Clone()
 	working.RecomputeStats()
 	working.Normalize(project, h.config.Now().Unix())
+	beforeSize, beforeErr := before.SerializedSize()
+	afterSize, afterErr := working.SerializedSize()
+	if beforeErr == nil && afterErr == nil && beforeSize != afterSize {
+		_, _, err = h.commitRepoMetadata(ctx, project, working, repoMetaSHA, "storhub: cleanup metadata")
+		return err
+	}
+	// The loaded tree may be the hub's shared snapshot: normalize a private
+	// copy and commit that, never the shared one.
 	beforePayload, beforeErr := before.ToJSON()
 	afterPayload, afterErr := working.ToJSON()
 	if beforeErr == nil && afterErr == nil && bytes.Equal(beforePayload, afterPayload) {
@@ -220,6 +231,25 @@ func (h *StorHub) PurgeUntracked(project string) (*PurgeResult, error) {
 	return h.PurgeUntrackedContext(context.Background(), project)
 }
 
+// purge task types, hoisted so the purge tail and the prune-assets dry-run
+// share one classification (audit 18: dry-run must report would-delete
+// counts, not zeros).
+type purgeReleaseTask struct {
+	id  int64
+	tag string
+}
+
+type purgeAssetTask struct {
+	id int64
+}
+
+// purgeIsRetryable gates purge sub-ops: only APIError-marked retryables
+// (429/5xx per IsRetryable) wait out the advertised window and retry.
+func purgeIsRetryable(err error) bool {
+	var apiErr *ghapi.APIError
+	return errors.As(err, &apiErr) && apiErr.IsRetryable()
+}
+
 func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*PurgeResult, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
@@ -231,25 +261,47 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	if h.projectHasUncommittedState(project) {
 		return nil, fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
 	}
+	releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	result := &PurgeResult{}
+	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, result); err != nil {
+		return nil, err
+	}
+	// Drop chunk records and squash only when something actually changed
+	// (audit 18): the old tail ran UpdateRepoMetadataContext +
+	// commitProjectMetadata unconditionally, so a no-op purge still
+	// dirtied the tree and landed a manifest commit per run.
+	if err := h.pruneAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// classifyUntracked loads fresh truth (never the cached snapshot: files
+// committed after the local cache was populated must be visible, or purge
+// deletes releases that are live remotely) and sorts every release/asset
+// into tracked vs orphaned. No deletes happen here, so prune-assets
+// dry-run reuses it to report would-delete counts.
+func (h *StorHub) classifyUntracked(ctx context.Context, project string) (releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask, err error) {
 	var repoMeta *metadata.RepoMetadata
 	var releases []ghapi.Release
-	if err := h.purgeRetry(ctx, "load_metadata", func() error {
+	if err := h.withRetry(ctx, "purge-load_metadata", 5, purgeIsRetryable, func() error {
 		var err error
-		// Fresh read, never the cached snapshot: files committed after
-		// the local cache was populated must be visible, or purge
-		// deletes releases that are live remotely. This also refreshes
-		// the cache, so the prune/commit tail below operates on truth.
+		// This also refreshes the cache, so the prune/commit tail below
+		// operates on truth.
 		repoMeta, _, err = h.loadRepoMetadataFresh(ctx, project)
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := h.purgeRetry(ctx, "list_releases", func() error {
+	if err := h.withRetry(ctx, "purge-list_releases", 5, purgeIsRetryable, func() error {
 		var err error
 		releases, err = h.listReleases(ctx, project)
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	trackedReleases := make(map[string]struct{}, len(repoMeta.Releases()))
 	trackedAssets := make(map[int64]struct{})
@@ -270,15 +322,6 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 			}
 		}
 	}
-	type deleteRelease struct {
-		id  int64
-		tag string
-	}
-	type deleteAsset struct {
-		id int64
-	}
-	var releaseTasks []deleteRelease
-	var assetTasks []deleteAsset
 	for _, release := range releases {
 		if _, ok := trackedReleases[release.TagName]; !ok {
 			// An empty release holds no orphaned storage, so there is
@@ -298,59 +341,88 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 			if count == 0 {
 				continue
 			}
-			releaseTasks = append(releaseTasks, deleteRelease{id: release.ID, tag: release.TagName})
+			releaseTasks = append(releaseTasks, purgeReleaseTask{id: release.ID, tag: release.TagName})
 			continue
 		}
 		for _, asset := range release.Assets {
 			if _, ok := trackedAssets[asset.ID]; ok {
 				continue
 			}
-			assetTasks = append(assetTasks, deleteAsset{id: asset.ID})
+			assetTasks = append(assetTasks, purgeAssetTask{id: asset.ID})
 		}
 	}
-	result := &PurgeResult{}
+	return releaseTasks, assetTasks, nil
+}
+
+// deletePurgePlan executes the classified deletes and records the counts.
+// A delete failure aborts with the original task context (no partial
+// counts reported on error, matching the old behavior).
+func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask, result *PurgeResult) error {
 	for _, task := range releaseTasks {
-		if err := h.purgeRetry(ctx, "delete_release", func() error {
+		if err := h.withRetry(ctx, "purge-delete_release", 5, purgeIsRetryable, func() error {
 			return h.deleteReleaseByID(ctx, project, task.id)
 		}); err != nil {
-			return nil, fmt.Errorf("delete untracked release %s: %w", task.tag, err)
+			return fmt.Errorf("delete untracked release %s: %w", task.tag, err)
 		}
 	}
 	result.DeletedReleases = len(releaseTasks)
 	for _, task := range assetTasks {
-		if err := h.purgeRetry(ctx, "delete_asset", func() error {
+		if err := h.withRetry(ctx, "purge-delete_asset", 5, purgeIsRetryable, func() error {
 			return h.deleteAssetByID(ctx, project, task.id)
 		}); err != nil {
-			return nil, fmt.Errorf("delete untracked asset %d: %w", task.id, err)
+			return fmt.Errorf("delete untracked asset %d: %w", task.id, err)
 		}
 	}
 	result.DeletedAssets = len(assetTasks)
+	return nil
+}
 
-	// Drop chunk records nothing references anymore. This is only safe at
-	// this exact point: the purge above has reclaimed the remote assets of
-	// unreferenced chunks, so no retained revision can still download them
-	// (rollback across a purge is already destructive by design). Without
-	// pruning, the catalog grows monotonically until metadata hits the
-	// size ceiling and every subsequent commit fails permanently.
+// pruneAndSquashUntracked drops chunk records nothing references anymore
+// and squashes legacy history. This is only safe at this exact point: the
+// deletes above reclaimed the remote assets of unreferenced chunks, so no
+// retained revision can still download them (rollback across a purge is
+// already destructive by design). Without pruning, the catalog grows
+// monotonically until metadata hits the size ceiling and every subsequent
+// commit fails permanently.
+//
+// hadDeletes reports whether the delete phase removed anything. When it
+// did not, a read-only probe decides: UpdateRepoMetadataContext marks the
+// tree dirty unconditionally, so calling it for a zero-prune run would
+// still land a manifest commit. Skipping the Update/commit/squash tail on
+// a true no-op keeps purge side-effect free.
+func (h *StorHub) pruneAndSquashUntracked(ctx context.Context, project string, hadDeletes bool) error {
+	if !hadDeletes {
+		// Read-only no-op probe on fresh truth: a clone the Update never
+		// sees, so the shared tree stays clean when there is nothing to
+		// reclaim. (A concurrent mutation racing the probe only means the
+		// later Update finds work — never a missed delete.)
+		probeMeta, _, err := h.loadRepoMetadataFresh(ctx, project)
+		if err != nil {
+			return err
+		}
+		if probe := probeMeta.Clone(); probe.PruneUnreferencedChunks() == 0 {
+			return nil
+		}
+	}
 	var pruned int
-	if err := h.purgeRetry(ctx, "prune_chunks", func() error {
+	if err := h.withRetry(ctx, "purge-prune_chunks", 5, purgeIsRetryable, func() error {
 		_, perr := h.UpdateRepoMetadataContext(ctx, project, func(meta *metadata.RepoMetadata) error {
 			pruned = meta.PruneUnreferencedChunks()
 			return nil
 		}, "storhub: prune unreferenced chunks")
 		return perr
 	}); err != nil {
-		return nil, fmt.Errorf("prune unreferenced chunks: %w", err)
+		return fmt.Errorf("prune unreferenced chunks: %w", err)
 	}
 	if pruned > 0 {
 		logging.Info(h.projectLogger(project), "pruned unreferenced chunks", "count", pruned)
 	}
 	// Commit the prune synchronously so the squash below cannot race it and
 	// preserve a stale catalog in HEAD.
-	if err := h.purgeRetry(ctx, "commit_prune", func() error {
+	if err := h.withRetry(ctx, "purge-commit_prune", 5, purgeIsRetryable, func() error {
 		return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
 	}); err != nil {
-		return nil, fmt.Errorf("commit pruned metadata: %w", err)
+		return fmt.Errorf("commit pruned metadata: %w", err)
 	}
 
 	// Squash the entire metadata git history into a single orphan commit.
@@ -367,46 +439,13 @@ func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*P
 	pm.mu.RUnlock()
 	if repo := h.getGitRepo(project); repo != nil && legacy {
 		if err := h.ensureOwner(ctx); err != nil {
-			return nil, err
+			return err
 		}
-		if err := h.purgeRetry(ctx, "squash_history", func() error {
+		if err := h.withRetry(ctx, "purge-squash_history", 5, purgeIsRetryable, func() error {
 			return repo.squashHistory(ctx, metadataFilePath, "storhub: squash metadata history")
 		}); err != nil {
-			return nil, fmt.Errorf("squash metadata history: %w", err)
+			return fmt.Errorf("squash metadata history: %w", err)
 		}
 	}
-
-	return result, nil
-}
-
-func (h *StorHub) purgeRetry(ctx context.Context, op string, fn func() error) error {
-	const maxAttempts = 5
-	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err := fn()
-		if err == nil {
-			return nil
-		}
-		var apiErr *ghapi.APIError
-		if errors.As(err, &apiErr) && apiErr.IsRetryable() {
-			delay := h.retryDelay(attempt, apiErr)
-			if delay < 0 {
-				delay = 0
-			}
-			// Always honor the advertised window (Retry-After / RateLimitReset)
-			// for purge: wait it out and retry; only after retries are
-			// exhausted does the 429 surface to the client.
-			logging.Warn(h.projectLogger("purge"), "purge retry", "op", op, "attempt", attempt+1, "delay", delay, "err", err)
-			if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
-				return sleepErr
-			}
-			lastErr = err
-			continue
-		}
-		return err
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-	return fmt.Errorf("purge retry exhausted for %s", op)
+	return nil
 }

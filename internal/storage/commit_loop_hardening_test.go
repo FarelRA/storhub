@@ -71,10 +71,8 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	if err != nil || len(revisions) == 0 {
 		t.Fatalf("revisions: %v %d", err, len(revisions))
 	}
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
-			backend.removeAsset(t, "project-snap-toctou", assetID)
-		}
+	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+		backend.removeAsset(t, "project-snap-toctou", assetID)
 		return false
 	})
 	err = hub.RollbackMetadataContext(ctx, "project-snap-toctou", revisions[0].CommitSHA)
@@ -86,13 +84,16 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	}
 }
 
+// oversizePaddedTestEntries is sized to the 8MiB ceiling from the measured
+// ~732 bytes of JSON per 600-padded entry, plus 10% headroom: 12700 entries
+// serialize to ~9.3MB, the minimum fixture that crosses it (entry count,
+// not bytes, drives the commit-path work).
+const oversizePaddedTestEntries = 12700
+
 // A failed commit must not mutate shared state. The oversize payload is
 // staged by direct (test-only) surgery to bypass admission; LastMod is
 // the canary: pre-fix Normalize/LastMod/RecomputeStats run in place before
-// the size check. 13000 chunked files padded to ~740B each serialize to
-// ~9.6MB, safely past the 8MiB ceiling: the minimum fixture that crosses
-// it (the old 65000-entry shape proved the same invariant at 5x the
-// per-entry CPU cost; entry count, not bytes, drives the commit-path work).
+// the size check.
 func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -108,7 +109,7 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	sharedChunk := pm.meta.AllocateChunkID()
 	pm.meta.Chunks()[sharedChunk] = ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 1}
 	pad := strings.Repeat("x", 600)
-	for i := 0; i < 13000; i++ {
+	for i := 0; i < oversizePaddedTestEntries; i++ {
 		name := strings.Repeat("x", 8) + itoa(i) + pad
 		pm.meta.UpsertFile(name, FileMeta{Size: 1, Mode: 0o644, Chunks: []int64{sharedChunk}}, 1700000000)
 	}
@@ -367,7 +368,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	backend.embedCap = 2
+	backend.faults.embedCap = 2
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-placeholder-count"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
@@ -409,10 +410,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 // 8MB ceiling — fail fast, never accept-then-never-commit. An
 // UpdateRepoMetadataContext mutation whose result exceeds maxMetadataBytes
 // must be rejected at admission with a clear error, leaving shared state
-// untouched and the project still usable. 13000 plain files padded to
-// ~730B each serialize to ~9.4MB, safely past the ceiling: the minimum
-// fixture that crosses it (entry count, not bytes, drives the admission
-// path's per-entry work).
+// untouched and the project still usable (sized by oversizePaddedTestEntries).
 func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -424,7 +422,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	pad := strings.Repeat("y", 600)
 	firstName := "bulk-0-" + pad
 	_, err := hub.UpdateRepoMetadataContext(ctx, "project-ceiling", func(meta *RepoMetadata) error {
-		for i := 0; i < 13000; i++ {
+		for i := 0; i < oversizePaddedTestEntries; i++ {
 			meta.UpsertFile("bulk-"+itoa(i)+"-"+pad, FileMeta{Size: 1, Mode: 0o644}, 1700000000)
 		}
 		return nil

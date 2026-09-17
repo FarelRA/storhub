@@ -11,6 +11,7 @@ import (
 // a caller-supplied logger passes through untouched, with knobs intact for
 // Validate's single-mechanism check.
 func TestWithDefaultsPreservesSuppliedLogger(t *testing.T) {
+	t.Parallel()
 	supplied := logging.NewLogger(logging.Options{Output: os.Stderr})
 	got := Config{Logger: supplied}.WithDefaults()
 	if got.Logger != supplied {

@@ -20,15 +20,29 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 
 // appendOpLocked records one metadata mutation in the project's op stack
 // and mirrors it to the crash-recovery journal. Caller holds pm.mu. The
-// journal receives the post-coalescing op (the stack's latest state for its
-// path), so replay folds to exactly the in-memory stack.
+// journal receives the PRE-COALESCING DELTA (the op exactly as appended,
+// Times=1), so a later fold replays the identical append sequence and
+// converges to exactly the in-memory stack — including cross-transaction
+// rename chains and rename-then-delete, which post-coalescing tails cannot
+// reproduce.
+//
+// Cap behavior is drop-never: crossing the op-count or either 64MiB byte
+// bound compacts the journal to the folded survivors (even though no commit
+// succeeded) and warns; the sweeper force-retries the commit until it
+// drains. Growth pressure beyond that only warns — never fail-loud
+// backpressure, never dropped acknowledged ops.
 func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
-	pm.opStack.append(op)
-	if len(pm.opStack.ops) > 0 {
-		h.journalAppend(project, pm.opStack.ops[len(pm.opStack.ops)-1])
+	beforeBytes := pm.opStack.bytes
+	delta := pm.opStack.appendWithDelta(op)
+	h.journalAppend(project, delta)
+	if pm.opStack.bytes >= opStackMaxBytes || h.journalOverCap(project, pm.opStack.maxSeq()) {
+		h.journalRewrite(project, pm.opStack.ops)
 	}
-	if len(pm.opStack.ops) == maxPendingOpsPerProject {
+	switch {
+	case len(pm.opStack.ops) == maxPendingOpsPerProject:
 		logging.Warn(h.projectLogger(project), "pending op stack hit residency cap; commit will be force-retried until it drains", "ops", maxPendingOpsPerProject)
+	case beforeBytes < opStackMaxBytes && pm.opStack.bytes >= opStackMaxBytes:
+		logging.Warn(h.projectLogger(project), "pending op stack hit byte cap; commit will be force-retried until it drains", "bytes", pm.opStack.bytes)
 	}
 }
 
@@ -129,23 +143,65 @@ func (h *StorHub) revivalTimeout() time.Duration {
 }
 
 func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) chan struct{} {
-	if !pm.stopped {
-		markProjectDirtyLocked(pm)
-		return pm.triggerCh
+	if ch, ok := markDirtyFastPath(pm); ok {
+		return ch
 	}
 	// Capture the old loop's completion channel under pm.mu: the revival
 	// below swaps pm.stoppedCh, and reading the field after releasing the
 	// lock would race that swap.
 	stoppedCh := pm.stoppedCh
 	pm.mu.Unlock()
+	return h.reviveEvictedProject(project, pm, stoppedCh)
+}
+
+// markDirtyFastPath marks pm dirty when its commit loop is live. Caller must
+// hold pm.mu. Returns ok=false when the instance was evicted and needs the
+// revival path.
+func markDirtyFastPath(pm *projectMetadata) (chan struct{}, bool) {
+	if pm.stopped {
+		return nil, false
+	}
+	markProjectDirtyLocked(pm)
+	return pm.triggerCh, true
+}
+
+// waitCommitLoopExit blocks until the evicted commit loop fully exits. The
+// loop reads stopCh/triggerCh unsynchronized, and the eviction close(stopCh)
+// only requests exit - stoppedCh closes when it has actually returned. A
+// false return means the revival timeout fired; the caller then revives
+// without the channel swap.
+func (h *StorHub) waitCommitLoopExit(project string, stoppedCh <-chan struct{}) bool {
+	select {
+	case <-stoppedCh:
+		return true
+	case <-time.After(h.revivalTimeout()):
+		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
+		return false
+	}
+}
+
+// reviveEvictedProject re-inserts an evicted instance into the cache with
+// fresh loop channels (or marks it for the shutdown drain), so a mutation
+// acknowledged to the caller can never silently strand on a commit loop that
+// already stopped. When a fresher incarnation owns the cache slot, the stale
+// snapshot's changes cannot be applied and this fails loudly instead of
+// losing them silently.
+//
+// Entry: pm.mu NOT held (the fast path released it around the exit wait).
+// Exit: pm.mu HELD on every path, returning the trigger channel to poke
+// after releasing pm.mu (the returned value was read under the final pm.mu
+// critical section, giving callers a synchronized handle; a revival failure
+// returns the stale channel, whose poke is a harmless no-op).
+//
+// Caller must hold NO locks on entry; the lock dance below drops and
+// re-acquires around cache bookkeeping so metaMu→pm.mu ordering stays
+// consistent with getOrCreateProjectMeta.
+func (h *StorHub) reviveEvictedProject(project string, pm *projectMetadata, stoppedCh <-chan struct{}) chan struct{} {
 	// Wait for the evicted commit loop to fully exit before replacing its
 	// channels: the loop reads stopCh/triggerCh unsynchronized, and the
 	// eviction close(stopCh) only requests exit - stoppedCh closes when it
 	// has actually returned.
-	select {
-	case <-stoppedCh:
-	case <-time.After(h.revivalTimeout()):
-		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
+	if !h.waitCommitLoopExit(project, stoppedCh) {
 		// The mutation is already acknowledged. Re-insert the entry
 		// (the old loop is still alive and will exit on its closed
 		// stopCh; the shutdown drain and later revivals cover the
@@ -161,10 +217,43 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	}
 	h.metaMu.Lock()
 	pm.mu.Lock()
+	revived, live, drainOnly := h.tryReviveLocked(project, pm)
+	pm.mu.Unlock()
+	h.metaMu.Unlock()
+	if drainOnly {
+		// Shutdown began: the entry is back in the cache (or was never
+		// removed); mark it dirty and return with pm.mu held like every
+		// other path. The shutdown drain commits it.
+		pm.mu.Lock()
+		markProjectDirtyLocked(pm)
+		return pm.triggerCh
+	}
+	if revived {
+		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
+		// startCommitLoopLocked returns false if Shutdown began between the
+		// flag check in the switch above and the Add; the loop is not
+		// started, but the entry is live in the cache and the tail below
+		// marks it dirty for the drain. Either way clear the revival guard.
+		h.startCommitLoopLocked(project, pm)
+		h.metaMu.Lock()
+		pm.reviving = false
+		h.metaMu.Unlock()
+	}
+	pm.mu.Lock()
+	if revived || live {
+		markProjectDirtyLocked(pm)
+	}
+	return pm.triggerCh
+}
+
+// tryReviveLocked runs the revival state machine for an evicted instance:
+// a fresher cache incarnation (diverged or concurrently revived) wins and
+// the stale snapshot only marks dirty when it is still the live entry;
+// otherwise fresh channels are swapped in for a new commit loop (unless
+// Shutdown began, in which case the entry drains). Caller holds metaMu for
+// writing AND pm.mu; returns with both still held.
+func (h *StorHub) tryReviveLocked(project string, pm *projectMetadata) (revived, live, drainOnly bool) {
 	current, exists := h.metaCache[project]
-	revived := false
-	live := false
-	drainOnly := false
 	switch {
 	case exists && current != pm:
 		logging.Error(h.projectLogger(project),
@@ -207,32 +296,7 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 			revived = true
 		}
 	}
-	pm.mu.Unlock()
-	h.metaMu.Unlock()
-	if drainOnly {
-		// Shutdown began: the entry is back in the cache (or was never
-		// removed); mark it dirty and return with pm.mu held like every
-		// other path. The shutdown drain commits it.
-		pm.mu.Lock()
-		markProjectDirtyLocked(pm)
-		return pm.triggerCh
-	}
-	if revived {
-		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
-		// startCommitLoopLocked returns false if Shutdown began between the
-		// flag check in the switch above and the Add; the loop is not
-		// started, but the entry is live in the cache and the tail below
-		// marks it dirty for the drain. Either way clear the revival guard.
-		h.startCommitLoopLocked(project, pm)
-		h.metaMu.Lock()
-		pm.reviving = false
-		h.metaMu.Unlock()
-	}
-	pm.mu.Lock()
-	if revived || live {
-		markProjectDirtyLocked(pm)
-	}
-	return pm.triggerCh
+	return revived, live, drainOnly
 }
 
 // commitLoop commits dirty metadata when events demand it: a mutation
@@ -316,12 +380,65 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 	logging.Error(logger, "metadata commit conflicted; retaining pending ops for the next rebase", "err", err)
 }
 
-// commitProjectMetadata commits dirty metadata without holding pm.mu during GitHub I/O.
-func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm *projectMetadata) error {
-	pm.commitMu.Lock()
-	defer pm.commitMu.Unlock()
+// isSealedClean reports whether a working tree carries the SealTransaction
+// bookkeeping, meaning it was built only through tracked mutators from a
+// normalized base: touched-file chunk order is canonical and stats were
+// maintained incrementally, so the commit's full Normalize + RecomputeStats
+// walk would be a no-op and is skipped (SEAL-SKIP). A tree failing the check
+// takes the wholesale-construction path.
+//
+// Seal fields consumed (owned by the metadata agent, which guarantees
+// SealTransaction marks the seal — coordinate: the metadata agent must keep
+// stamping Project, Version, Root.Inode/Mode, and LastMod there, and every
+// mutation path must stay on tracked mutators with incremental stats):
+// Project (stamped non-empty), Version (stamped when zero), Root.Inode and
+// Root.Mode (materialized when zero). LastMod is deliberately excluded: the
+// commit stamps it unconditionally after the check.
+//
+// NOTE (residual risk, accepted per audit-33): an unsealed-but-normalized
+// tree also passes and skips the walk. That is safe exactly while every
+// mutation path goes through tracked mutators with incremental stats; a
+// future direct-write path that bypasses them must either seal or force the
+// full walk.
+func isSealedClean(working *RepoMetadata, project string) bool {
+	if working == nil {
+		return false
+	}
+	if working.Project != project {
+		return false
+	}
+	if working.Version == 0 {
+		return false
+	}
+	if working.Root.Inode == 0 || working.Root.Mode == 0 {
+		return false
+	}
+	return true
+}
 
-	started := h.config.Now().UTC()
+// commitSnapshot captures the immutable inputs one commit-attempt series
+// works from: a private working copy, the op batch the message describes,
+// the CAS token, the admission version, and the rebase baseline. Taken under
+// pm.mu; the commit then runs without holding it.
+type commitSnapshot struct {
+	working     *RepoMetadata
+	previousSHA string
+	version     uint64
+	ops         []Op
+	opSeq       uint64
+	baseTree    *RepoMetadata
+	objectCount uint64
+	headSplit   bool
+	now         int64
+}
+
+// snapshotCommitState snapshots the dirty state for one commit: a private
+// working copy plus the op batch the message describes. Only ops at or below
+// the snapshot seq may be dropped on success (mutations landing mid-commit
+// carry higher seqs and stay); recording the snapshot seq lets coalescing
+// refuse to rewrite ops in flight inside this commit. Returns nil when clean
+// (nothing to do). Exits with pm.mu released on every path.
+func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *commitSnapshot {
 	pm.mu.Lock()
 	if !pm.dirty {
 		pm.mu.Unlock()
@@ -333,37 +450,60 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// on success below. cowTree is a shallow copy over immutable entries,
 	// so the commit no longer deep-copies every Chunks/XAttrs.
 	working := cowTree(pm.meta)
-	previousSHA := pm.sha
-	version := pm.version
-	// Snapshot the op stack with the working copy: the commit message
-	// describes exactly these ops, and only they may be dropped on
-	// success (mutations landing mid-commit carry higher seqs and stay).
-	// Recording the snapshot seq lets coalescing refuse to rewrite ops
-	// that are in flight inside this commit.
-	ops := pm.opStack.snapshot()
-	opSeq := pm.opStack.maxSeq()
-	pm.opStack.noteSnapshot(opSeq)
-	baseTree := pm.baseTree
-	objectCount := pm.objectCount
+	snap := &commitSnapshot{
+		working:     working,
+		previousSHA: pm.sha,
+		version:     pm.version,
+		ops:         pm.opStack.snapshot(),
+		opSeq:       pm.opStack.maxSeq(),
+		baseTree:    pm.baseTree,
+		objectCount: pm.objectCount,
+		headSplit:   working.IsSplit(),
+		now:         h.config.Now().Unix(),
+	}
+	pm.opStack.noteSnapshot(snap.opSeq)
 	pm.mu.Unlock()
+	return snap
+}
+
+// publishWithRebase stores the snapshot's working tree with a bounded
+// commit/rebase cycle: a CAS conflict (another writer advanced the index)
+// rebases the pending ops onto upstream state instead of discarding them,
+// then retries. Returns the commit/content SHAs, the new object count, and
+// whether a rebase landed; snap.working is replaced with the rebased tree
+// when one does, and snap.previousSHA tracks the retargeted CAS token.
+// Failures are wrapped as *commitError carrying the attempted version, so
+// recovery can tell whether newer mutations arrived after the snapshot.
+func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *projectMetadata, snap *commitSnapshot, started time.Time) (commitSHA, contentSHA string, newObjectCount uint64, didRebase bool, err error) {
+	working := snap.working
+	previousSHA := snap.previousSHA
+	now := snap.now
 
 	// The split index (metadata version 5) is the default and only write
 	// layout: every commit produces a manifest plus content-addressed objects.
 	// A project still on a legacy single-blob document (version <= 4) migrates
 	// on this write; its loaded tree carries that version, so the layout is
 	// read straight from the metadata version, not a separate flag.
-	headSplit := working.IsSplit()
+	headSplit := snap.headSplit
 	working.MarkSplit()
 
-	now := h.config.Now().Unix()
-	working.Normalize(project, now)
+	// SEAL-SKIP: working trees built only from tracked mutators are already
+	// normalized (SealTransaction + incremental stats) — skip the full
+	// Normalize + RecomputeStats O(tree) walk when the seal is clean. A
+	// single-op commit (touch) otherwise pays per-op O(tree) async CPU.
+	sealed := isSealedClean(working, project)
+	if !sealed {
+		working.Normalize(project, now)
+	}
 	working.LastMod = now
-	working.RecomputeStats()
+	if !sealed {
+		working.RecomputeStats()
+	}
 
 	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "migrating", !headSplit)
 
 	if err := h.ensureOwner(ctx); err != nil {
-		return err
+		return "", "", 0, false, err
 	}
 
 	// No full-tree Validate here: it is a hot-path O(N) pass over a tree
@@ -398,10 +538,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// Commit with a bounded commit/rebase cycle: a CAS conflict (another
 	// writer advanced the index) rebases the pending ops onto upstream
 	// state instead of discarding them, then retries.
-	message := buildCommitMessage(ops, previousSHA)
-	var commitSHA, contentSHA string
-	var newObjectCount uint64
-	didRebase := false
+	message := buildCommitMessage(snap.ops, previousSHA)
 	// The rebase baseline fingerprint is computed on demand (only when a
 	// conflict actually forces a rebase) and memoized across attempts, so
 	// the common clean commit never pays the O(N) hash pass the old
@@ -416,7 +553,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 			// directly so the first attempt rebases.
 			err = &ghapi.APIError{StatusCode: http.StatusConflict, Message: "project migrated to the split layout after our base was loaded"}
 		} else {
-			commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, working, previousSHA, message, objectCount)
+			commitSHA, contentSHA, newObjectCount, err = h.publishIndex(ctx, project, working, previousSHA, message, snap.objectCount)
 			if err == nil && migrationUnconditional && previousSHA == "" {
 				// The manifest PUT carried no CAS token, so success does
 				// not prove our bytes are HEAD. Read back and compare the
@@ -440,7 +577,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 			pm.mu.Lock()
 			pm.sizeCapped = true
 			pm.mu.Unlock()
-			return &commitError{err: err, version: version}
+			return "", "", 0, false, &commitError{err: err, version: snap.version}
 		}
 		var apiErr *ghapi.APIError
 		isConflict := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
@@ -450,28 +587,54 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 			}
 			err = wrapNoSpace(h.config.GitCacheDir, err)
 			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			return &commitError{err: fmt.Errorf("commit metadata: %w", err), version: version}
+			return "", "", 0, false, &commitError{err: fmt.Errorf("commit metadata: %w", err), version: snap.version}
 		}
-		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(ops))
-		if baseFP == nil && baseTree != nil {
-			baseFP = hashPaths(baseTree)
+		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(snap.ops))
+		if baseFP == nil && snap.baseTree != nil {
+			baseFP = hashPaths(snap.baseTree)
 		}
-		rebased, upstreamSHA, resolutions, rerr := h.rebaseOntoUpstream(ctx, project, ops, baseFP)
+		rebased, upstreamSHA, resolutions, rerr := h.rebaseOntoUpstream(ctx, project, snap.ops, baseFP)
 		if rerr != nil {
 			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "rebase", "elapsed", h.config.Now().UTC().Sub(started), "err", rerr)
-			return &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: version}
+			return "", "", 0, false, &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: snap.version}
 		}
 		didRebase = true
 		working = rebased
 		working.LastMod = now
 		previousSHA = upstreamSHA
-		message = buildCommitMessage(ops, previousSHA) + "\n" + rebaseMessageNote(resolutions, upstreamSHA)
+		message = buildCommitMessage(snap.ops, previousSHA) + "\n" + rebaseMessageNote(resolutions, upstreamSHA)
 	}
+	snap.working = working
+	snap.previousSHA = previousSHA
+	return commitSHA, contentSHA, newObjectCount, didRebase, nil
+}
 
+// applyCommittedTree publishes a successful commit back into the cache: the
+// CAS token advances, the rebase baseline moves to the just-committed state
+// (a frozen tree handed a pointer to; the fingerprint is recomputed only on
+// conflict), and the pending stack folds to the survivors. The apply-back is
+// three-way:
+//
+//   - no mid-commit mutation (version unchanged): the normalized working
+//     copy becomes the shared truth (without this the cache keeps raw
+//     mutation state — stale stats, unrepaired inode counter — and every
+//     later Validate trips over it) and dirty clears;
+//   - mid-commit mutation WITH rebase: the committed tree carries upstream
+//     changes the live tree lacks, so the surviving ops replay onto the
+//     committed tree instead of adopting the live tree wholesale (which
+//     would make the next commit overwrite them);
+//   - mid-commit mutation WITHOUT rebase: the live tree already contains the
+//     committed ops' effects plus the newer mutation; drop the committed ops
+//     and keep the mutation's ops + dirty flag for the next commit.
+//
+// The journal is rewritten to the surviving stack, and a fitting commit
+// lifts the size-ceiling breach marker (re-armed on breach).
+func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *commitSnapshot, commitSHA, contentSHA string, newObjectCount uint64, didRebase bool) {
+	working := snap.working
 	pm.mu.Lock()
 	pm.sha = contentSHA
 	pm.objectCount = newObjectCount
-	if pm.version == version {
+	if pm.version == snap.version {
 		// Apply-back: the normalized working copy becomes the shared
 		// truth on success. Without this the cache keeps the raw mutation
 		// state (stale stats, unrepaired inode counter) and every later
@@ -481,13 +644,13 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		pm.meta = working
 		pm.dirty = false
 		pm.lastCommit = h.config.Now()
-		pm.opStack.clearUpTo(opSeq)
+		pm.opStack.clearUpTo(snap.opSeq)
 	} else if didRebase {
 		// A mutation landed mid-commit AND the commit rebased: the
 		// committed tree carries upstream changes the live tree lacks, so
 		// adopting the live tree wholesale would make the next commit
 		// overwrite them. Replay the surviving ops onto the committed tree.
-		pm.opStack.clearUpTo(opSeq)
+		pm.opStack.clearUpTo(snap.opSeq)
 		surviving := pm.opStack.snapshot()
 		if len(surviving) > 0 {
 			rebased := working.Clone()
@@ -512,7 +675,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		// the committed ops' effects plus the newer mutation. Drop the
 		// committed ops (their state is in the live tree) and keep the
 		// mutation's ops + dirty flag for the next commit.
-		pm.opStack.clearUpTo(opSeq)
+		pm.opStack.clearUpTo(snap.opSeq)
 	}
 	// The journal is rewritten to the surviving stack.
 	h.journalRewrite(project, pm.opStack.ops)
@@ -522,6 +685,25 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	// A fitting commit lifts the size-ceiling breach marker (re-armed on breach).
 	pm.sizeCapped = false
 	pm.mu.Unlock()
+}
+
+// commitProjectMetadata commits dirty metadata without holding pm.mu during GitHub I/O.
+func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm *projectMetadata) error {
+	pm.commitMu.Lock()
+	defer pm.commitMu.Unlock()
+
+	started := h.config.Now().UTC()
+	snap := h.snapshotCommitState(project, pm)
+	if snap == nil {
+		return nil
+	}
+
+	commitSHA, contentSHA, newObjectCount, didRebase, err := h.publishWithRebase(ctx, project, pm, snap, started)
+	if err != nil {
+		return err
+	}
+
+	h.applyCommittedTree(project, pm, snap, commitSHA, contentSHA, newObjectCount, didRebase)
 
 	h.warnHistoryThreshold(project, pm)
 	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)

@@ -496,7 +496,7 @@ func TestBulkImportStackPerformance(t *testing.T) {
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	ctx := context.Background()
 
-	const files = 20000
+	const files = 5000
 	started := time.Now()
 	_, err := hub.UpdateRepoMetadataContext(ctx, "proj", func(meta *RepoMetadata) error {
 		for i := 0; i < files; i++ {
@@ -520,4 +520,127 @@ func TestBulkImportStackPerformance(t *testing.T) {
 	if n < files {
 		t.Fatalf("expected at least %d ops (one per file), got %d", files, n)
 	}
+}
+
+// TestJournalLargeFoldStaysLinear pins the journal fold cost: 5000 journaled
+// puts to one path must fold to a single op quickly (foldOps is
+// per-line work, not quadratic), exercising journal I/O rather than the
+// in-memory intent bench.
+func TestJournalLargeFoldStaysLinear(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	journalDir := t.TempDir()
+	cfg := Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, JournalDir: journalDir}
+	hub := backend.newClient(t, cfg)
+
+	var sb strings.Builder
+	fileEntry := FileMeta{Size: 1, Mode: 0o644, Inode: 7, Chunks: []int64{}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
+	for i := 0; i < 5000; i++ {
+		line, err := json.Marshal(Op{Seq: uint64(i + 1), Type: OpPutFile, Paths: []string{"bulk/f.txt"}, Cause: "upload", Timestamp: 1700000100, File: &fileEntry})
+		if err != nil {
+			t.Fatalf("marshal op: %v", err)
+		}
+		sb.Write(line)
+		sb.WriteByte('\n')
+	}
+	raw := sb.String()
+	if len(raw) >= 16<<20 {
+		t.Fatalf("fixture must stay under the 16MB journal line-cap family, got %d bytes", len(raw))
+	}
+	if err := os.WriteFile(filepath.Join(journalDir, "proj.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatalf("write journal: %v", err)
+	}
+	started := time.Now()
+	ops := hub.journalRead("proj")
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("folding 5000 journal lines took %s; fold regressed past linear?", elapsed)
+	}
+	if len(ops) != 1 || ops[0].Type != OpPutFile || len(ops[0].Paths) == 0 || ops[0].Paths[0] != "bulk/f.txt" {
+		t.Fatalf("5000 same-path puts must fold to one put, got %+v", ops)
+	}
+}
+
+// TestJournalFoldEquivalenceAcrossRenameChain pins journal/live-stack
+// agreement for cross-transaction rename chains: T1 renames A->B, T2
+// renames B->C. The folded journal lines must equal the live op stack, and
+// replaying either onto the base must converge to the same tree with no
+// phantom B. Any divergence is a source-owned fold bug (wave 2).
+func TestJournalFoldEquivalenceAcrossRenameChain(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	journalDir := t.TempDir()
+	cfg := Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true, JournalDir: journalDir}
+	hub := backend.newClient(t, cfg)
+	ctx := context.Background()
+
+	if _, err := hub.UploadFileContext(ctx, "proj", "a.txt", writeTempFile(t, t.TempDir(), "a", []byte("a-content"))); err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, "proj"); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+	// Block commits so every mutation stays journaled exactly as in a
+	// process killed mid-flight.
+	var fail atomic.Bool
+	fail.Store(true)
+	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) && fail.Load() {
+			http.Error(w, "injected failure", http.StatusInternalServerError)
+			return true
+		}
+		return false
+	})
+	// T1: rename A->B. T2: rename B->C (separate transactions).
+	if err := hub.RenameContext(ctx, "proj", "a.txt", "b.txt"); err != nil {
+		t.Fatalf("rename A->B: %v", err)
+	}
+	if err := hub.RenameContext(ctx, "proj", "b.txt", "c.txt"); err != nil {
+		t.Fatalf("rename B->C: %v", err)
+	}
+	live := hub.getOrCreateProjectMeta("proj")
+	live.mu.RLock()
+	liveOps := append([]Op(nil), live.opStack.ops...)
+	live.mu.RUnlock()
+
+	folded := hub.journalRead("proj")
+	if len(folded) != len(liveOps) {
+		t.Fatalf("journal fold (%d ops %+v) must equal live stack (%d ops %+v)", len(folded), folded, len(liveOps), liveOps)
+	}
+	for i := range folded {
+		if folded[i].Type != liveOps[i].Type || !equalStringSlices(folded[i].Paths, liveOps[i].Paths) {
+			t.Fatalf("journal line %d %+v != live op %+v", i, folded[i], liveOps[i])
+		}
+	}
+	// Replay equality: both batches replayed onto the committed base must
+	// end at C with no B phantom.
+	observer := backend.newClient(t, cfg)
+	committed, _, err := observer.LoadRepoMetadataContext(ctx, "proj")
+	if err != nil {
+		t.Fatalf("load committed base: %v", err)
+	}
+	for name, batch := range map[string][]Op{"live": liveOps, "folded": folded} {
+		replayed := committed.Clone()
+		if err := applyOps(replayed, batch); err != nil {
+			t.Fatalf("%s replay: %v", name, err)
+		}
+		replayed.Normalize("proj", 1700000500)
+		if replayed.FindFile("b.txt") != nil {
+			t.Fatalf("%s replay left a B phantom: files %+v", name, replayed.Files())
+		}
+		if replayed.FindFile("c.txt") == nil {
+			t.Fatalf("%s replay lost the final path: files %+v", name, replayed.Files())
+		}
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

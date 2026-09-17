@@ -12,10 +12,34 @@ import (
 // stale and must be recomputed before use.
 type sectionSize struct {
 	ok  bool
-	ref any
 	ptr uintptr
 	n   int
 	sum int64
+}
+
+// entryTransition describes one map-key transition (old, present iff hadOld)
+// -> (cur, present iff hasCur) for the incremental size/index/stat/record
+// chain. A single struct replaces the (old, hadOld, cur, hasCur) boolean-flag
+// soup that used to spread across ~10 helpers: call sites build one with
+// putTransition (insert or replace) or removeTransition (delete) and the
+// whole chain consumes it without re-deriving presence.
+type entryTransition[V any] struct {
+	old    V
+	hadOld bool
+	cur    V
+	hasCur bool
+}
+
+// putTransition builds the transition for m[key] = cur, where old/hadOld
+// describe the previous entry (hadOld=false for an insert).
+func putTransition[V any](old V, hadOld bool, cur V) entryTransition[V] {
+	return entryTransition[V]{old: old, hadOld: hadOld, cur: cur, hasCur: true}
+}
+
+// removeTransition builds the transition for delete(m, key), where old is
+// the removed entry.
+func removeTransition[V any](old V) entryTransition[V] {
+	return entryTransition[V]{old: old, hadOld: true}
 }
 
 // Size-cache section indices, ordered as the JSON struct fields.
@@ -26,6 +50,11 @@ const (
 	secReleases
 )
 
+// mapPtr returns the runtime header pointer of a map for identity
+// fingerprinting. The caller must pin the recorded map (the size section and
+// the index fingerprint both hold a reference), so an equal pointer cannot
+// alias a reallocated (GC'd) map. This is the single reflect-based map
+// identity helper in the package.
 func mapPtr[K comparable, V any](m map[K]V) uintptr {
 	return reflect.ValueOf(m).Pointer()
 }
@@ -109,7 +138,7 @@ func sectionExtra[K comparable, V any](s *sectionSize, mp map[K]V) (int64, error
 			}
 			sum += int64(c)
 		}
-		s.ok, s.ref, s.ptr, s.n, s.sum = true, mp, ptr, n, sum
+		s.ok, s.ptr, s.n, s.sum = true, ptr, n, sum
 	}
 	extra := s.sum
 	if n > 1 {
@@ -138,34 +167,33 @@ func entryBytes[K comparable, V any](key K, val V) (int, error) {
 	return klen + 1 + len(vb), nil
 }
 
-// sizeApplySection adjusts one section for a single key transition
-// (old, present iff hadOld) -> (cur, present iff hasCur) on the map mp,
-// which must already reflect the change. A section that no longer matches
-// the map (external swap, or a length the delta cannot explain) is marked
-// stale for on-demand recompute instead of being silently wrong.
-func sizeApplySection[K comparable, V any](s *sectionSize, mp map[K]V, key K, old V, hadOld bool, cur V, hasCur bool) {
+// sizeApplySection adjusts one section for a single key transition t on the
+// map mp, which must already reflect the change. A section that no longer
+// matches the map (external swap, or a length the delta cannot explain) is
+// marked stale for on-demand recompute instead of being silently wrong.
+func sizeApplySection[K comparable, V any](s *sectionSize, mp map[K]V, key K, t entryTransition[V]) {
 	ptr, n := mapPtr(mp), len(mp)
 	oldN := n
-	if hasCur {
+	if t.hasCur {
 		oldN--
 	}
-	if hadOld {
+	if t.hadOld {
 		oldN++
 	}
 	if !s.ok || s.ptr != ptr || s.n != oldN {
 		s.ok = false
 		return
 	}
-	if hadOld {
-		c, err := entryBytes(key, old)
+	if t.hadOld {
+		c, err := entryBytes(key, t.old)
 		if err != nil {
 			s.ok = false
 			return
 		}
 		s.sum -= int64(c)
 	}
-	if hasCur {
-		c, err := entryBytes(key, cur)
+	if t.hasCur {
+		c, err := entryBytes(key, t.cur)
 		if err != nil {
 			s.ok = false
 			return
@@ -175,26 +203,26 @@ func sizeApplySection[K comparable, V any](s *sectionSize, mp map[K]V, key K, ol
 	s.n = n
 }
 
-func (m *RepoMetadata) sizePutDir(path string, old DirMeta, hadOld bool, cur DirMeta) {
-	sizeApplySection(&m.ensureDerived().sections[secDirs], m.dirs, path, old, hadOld, cur, true)
+func (m *RepoMetadata) sizePutDir(path string, t entryTransition[DirMeta]) {
+	sizeApplySection(&m.ensureDerived().sections[secDirs], m.dirs, path, t)
 }
 
 func (m *RepoMetadata) sizeRemoveDir(path string, old DirMeta) {
-	sizeApplySection(&m.ensureDerived().sections[secDirs], m.dirs, path, old, true, DirMeta{}, false)
+	sizeApplySection(&m.ensureDerived().sections[secDirs], m.dirs, path, removeTransition(old))
 }
 
-func (m *RepoMetadata) sizePutFile(name string, old FileMeta, hadOld bool, cur FileMeta) {
-	sizeApplySection(&m.ensureDerived().sections[secFiles], m.files, name, old, hadOld, cur, true)
+func (m *RepoMetadata) sizePutFile(name string, t entryTransition[FileMeta]) {
+	sizeApplySection(&m.ensureDerived().sections[secFiles], m.files, name, t)
 }
 
 func (m *RepoMetadata) sizeRemoveFile(name string, old FileMeta) {
-	sizeApplySection(&m.ensureDerived().sections[secFiles], m.files, name, old, true, FileMeta{}, false)
+	sizeApplySection(&m.ensureDerived().sections[secFiles], m.files, name, removeTransition(old))
 }
 
-func (m *RepoMetadata) sizePutRelease(tag string, old ReleaseRef, hadOld bool, cur ReleaseRef) {
-	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, old, hadOld, cur, true)
+func (m *RepoMetadata) sizePutRelease(tag string, t entryTransition[ReleaseRef]) {
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, t)
 }
 
 func (m *RepoMetadata) sizeRemoveRelease(tag string, old ReleaseRef) {
-	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, old, true, ReleaseRef{}, false)
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, removeTransition(old))
 }

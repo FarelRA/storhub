@@ -10,6 +10,7 @@ import (
 )
 
 func TestReadDataArgReadsStdinDash(t *testing.T) {
+	t.Parallel()
 	app := &App{stdin: strings.NewReader("from stdin")}
 	got, err := readDataArg(app, "-")
 	if err != nil {
@@ -25,6 +26,7 @@ func TestReadDataArgReadsStdinDash(t *testing.T) {
 }
 
 func TestUsageErrorsAreClassified(t *testing.T) {
+	t.Parallel()
 	app := New()
 	var stderr bytes.Buffer
 	app.rootCmd.SetErr(&stderr)
@@ -42,6 +44,7 @@ func TestUsageErrorsAreClassified(t *testing.T) {
 }
 
 func TestChunkSizeClampWarns(t *testing.T) {
+	t.Parallel()
 	if got := normalizeCLIChunkSize(1024); got != minCLIChunkSize {
 		t.Fatalf("clamp broken: %d", got)
 	}

@@ -34,19 +34,28 @@ func (s *syncBuffer) String() string {
 
 const testIndexPath = "/contents/.storhub/index.json"
 
+// waitFor spins until cond holds or the timeout passes; it is the single
+// unified poller behind pollUntil and waitClean (5ms tick: drain is
+// normally <10ms on the mock, so 1ms spins only burned wakeups). Bounds
+// stay at 1s: generous under -race on 2 cores, tight enough to fail fast.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
 // pollUntil spins until cond holds or the deadline passes; event-driven
 // commits are async, so tests synchronize on observable effects instead
 // of sleeping fixed intervals.
 func pollUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	waitFor(t, d, what, cond)
 }
 
 func projectMeta(t *testing.T, hub *StorHub, project string) *projectMetadata {
@@ -83,7 +92,7 @@ func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
 	if err := hub.MkdirContext(context.Background(), "project-event-commit", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	pollUntil(t, 3*time.Second, "triggered metadata commit", func() bool { return puts.Load() >= 1 })
+	pollUntil(t, time.Second, "triggered metadata commit", func() bool { return puts.Load() >= 1 })
 }
 
 // TestFailedMetadataCommitRetainsDirtyUntilRetrigger pins failure
@@ -120,15 +129,15 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	pollUntil(t, 3*time.Second, "clean baseline commit", func() bool { return attempts.Load() >= 1 })
+	pollUntil(t, time.Second, "clean baseline commit", func() bool { return attempts.Load() >= 1 })
 	pm := projectMeta(t, hub, project)
-	pollUntil(t, 3*time.Second, "baseline drain to clean", func() bool { return metaIsClean(pm) })
+	pollUntil(t, time.Second, "baseline drain to clean", func() bool { return metaIsClean(pm) })
 
 	fail.Store(true)
 	if err := hub.MkdirContext(ctx, project, "late"); err != nil {
 		t.Fatalf("mutate under failing push: %v", err)
 	}
-	pollUntil(t, 3*time.Second, "first failed attempt", func() bool { return attempts.Load() >= 2 })
+	pollUntil(t, time.Second, "first failed attempt", func() bool { return attempts.Load() >= 2 })
 
 	// No timer may retry behind the scenes: attempts freeze until the
 	// next explicit trigger. The cfg.Sleep tripwire catches any
@@ -151,14 +160,14 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 	if err := hub.MkdirContext(ctx, project, "late2"); err != nil {
 		t.Fatalf("retriggering mutation: %v", err)
 	}
-	pollUntil(t, 3*time.Second, "retry after retrigger", func() bool { return attempts.Load() > frozen && metaIsClean(pm) })
+	pollUntil(t, time.Second, "retry after retrigger", func() bool { return attempts.Load() > frozen && metaIsClean(pm) })
 	beforeShutdown := attempts.Load()
 
 	fail.Store(true)
 	if err := hub.MkdirContext(ctx, project, "late3"); err != nil {
 		t.Fatalf("mutate for shutdown drain: %v", err)
 	}
-	pollUntil(t, 3*time.Second, "pre-shutdown failed attempt", func() bool { return attempts.Load() > beforeShutdown })
+	pollUntil(t, time.Second, "pre-shutdown failed attempt", func() bool { return attempts.Load() > beforeShutdown })
 	// The drain is best effort but never silent: its final attempt runs
 	// with the fault still armed, so Shutdown must report the failure
 	// (the dirty state it could not push dies with the process) while
@@ -195,7 +204,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	pm := projectMeta(t, hub, project)
-	pollUntil(t, 3*time.Second, "seed commit drain", func() bool { return metaIsClean(pm) })
+	pollUntil(t, time.Second, "seed commit drain", func() bool { return metaIsClean(pm) })
 
 	var puts atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -208,7 +217,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 
 	// The fixed test clock seeds AccessedAt; any later timestamp moves it.
 	hub.QueueAtimeUpdateContext(ctx, project, "watched.txt", false, time.Unix(1700000000, 0).Add(time.Hour).Unix())
-	pollUntil(t, 3*time.Second, "atime-triggered metadata commit", func() bool { return puts.Load() > baseline })
+	pollUntil(t, time.Second, "atime-triggered metadata commit", func() bool { return puts.Load() > baseline })
 }
 
 // TestInvalidateRepoMetadataStopsCommitLoop pins the leak fix: removing a

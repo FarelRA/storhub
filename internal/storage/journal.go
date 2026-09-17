@@ -11,12 +11,25 @@ import (
 )
 
 // The op journal is the crash-survival mirror of a project's pending op
-// stack: every mutation appends its (post-coalescing) op as one JSON line
-// BEFORE the next commit can lose it, and a successful commit rewrites the
-// journal to exactly the still-pending ops (empty stack removes the file).
-// On a cold start, a journal present for a never-hydrated project replays
-// onto the freshly loaded remote state - acknowledged mutations survive a
+// stack: every mutation appends its PRE-COALESCING DELTA as one JSON line
+// with Times=1 BEFORE the next commit can lose it, and a successful commit
+// rewrites the journal to exactly the still-pending ops (empty stack removes
+// the file). On a cold start, a journal present for a never-hydrated project
+// replays onto the freshly loaded remote state - acknowledged mutations survive a
 // crash that the previous discard-on-conflict design would have dropped.
+//
+// Deltas, not tails: appendOpLocked journals the op exactly as appended
+// (appendWithDelta), before stack coalescing rewrote it. foldOps then replays
+// the identical append sequence through the identical rules and converges to
+// exactly the live stack — including cross-transaction rename chains and
+// rename-then-delete, which post-coalescing tails cannot reproduce. Times
+// accumulates during the fold from per-delta Times=1 lines.
+//
+// The journal file is bounded by journalMaxBytes (64MiB): crossing the cap
+// rewrites the journal to the folded survivors even though no commit
+// succeeded (compaction, not acknowledgment) — acknowledged ops are never
+// dropped. The op stack's own byte cap (opStackMaxBytes) triggers the same
+// rewrite, so either bound compacts the file.
 //
 // The journal is append-only and folded with the same coalescing rules as
 // the live stack, so a torn final line (crash mid-write) costs only that
@@ -26,6 +39,16 @@ import (
 const (
 	journalLineInitialBytes = 64 * 1024
 	journalLineMaxBytes     = 16 * 1024 * 1024
+	// journalMaxBytes bounds one project's journal file (64MiB, mirroring
+	// the opStackMaxBytes bound on the live stack). Crossing it compacts via
+	// journalRewrite to the folded survivors; ops are never dropped for
+	// crossing (drop-never — only a commit clears them).
+	journalMaxBytes = 64 << 20
+	// journalRewriteSampleEvery bounds how often the cap is probed: a Stat
+	// per append would double append syscalls, so appendOpLocked stats the
+	// file only when the stack itself crossed its byte cap or every Nth
+	// append (opStack.seq is the monotonic append counter).
+	journalRewriteSampleEvery = 128
 	// journalGroupCommitWindow bounds how long an appended op may sit
 	// un-fsynced. A per-op fsync was one syscall per appended op (a bulk
 	// import = one fsync per file); appends now write immediately and a
@@ -45,12 +68,19 @@ func (h *StorHub) journalPath(project string) string {
 	return filepath.Join(h.config.JournalDir, project+".jsonl")
 }
 
-// journalAppend appends one op line. Best-effort: a journal write failure
-// is logged and never fails the mutation - the journal upgrades durability
-// for acknowledged mutations, it must not downgrade availability. The write
-// is durable to same-machine readers immediately (page cache); the fsync is
-// coalesced by the group-commit timer.
+// journalAppend appends one op line. The op MUST be the pre-coalescing delta
+// (appendWithDelta): journaling post-coalescing tails diverges the folded
+// journal from the live stack on cross-transaction rename chains and
+// rename-then-delete. Times is forced to 1 defensively — accumulation
+// happens in the fold, so a stored Times>1 (old post-coalescing journals,
+// re-appended survivors) would inflate the folded total.
+// Best-effort: a journal write failure is logged and never fails the
+// mutation - the journal upgrades durability for acknowledged mutations, it
+// must not downgrade availability. The write is durable to same-machine
+// readers immediately (page cache); the fsync is coalesced by the
+// group-commit timer.
 func (h *StorHub) journalAppend(project string, op Op) {
+	op.Times = 1
 	path := h.journalPath(project)
 	if path == "" {
 		return
@@ -114,8 +144,17 @@ func (h *StorHub) flushJournals() {
 }
 
 // closeJournals flushes and releases every open journal handle. Called once
-// at Shutdown after the commit loops have exited.
+// at Shutdown after the commit loops have exited. The group-commit timer is
+// stopped first (under journalMu): otherwise one firing can land ~100ms
+// post-Shutdown, pinning the hub and racing Sync against the closes below
+// (error noise only, but pointless).
 func (h *StorHub) closeJournals() {
+	h.journalMu.Lock()
+	if h.journalTimer != nil {
+		h.journalTimer.Stop()
+		h.journalTimer = nil
+	}
+	h.journalMu.Unlock()
 	h.flushJournals()
 	h.journalMu.Lock()
 	defer h.journalMu.Unlock()
@@ -126,9 +165,48 @@ func (h *StorHub) closeJournals() {
 	}
 }
 
+// closeProjectJournal flushes, closes, and forgets one project's journal
+// handle, and removes its journal file. Idempotent: a project with no open
+// handle is a no-op (its cold-recovery file, if any, is left for
+// journalReplayForLoad — only a held handle proves this process owns recent
+// uncommitted appends). No-op when JournalDir == "". Takes journalMu only,
+// never pm.mu or metaMu, so it can run under either.
+//
+// Contract for the eviction owner (workflows.go releaseProjectResidue):
+// call h.closeProjectJournal(name) alongside the git/object/release/logger
+// teardown so project churn cannot retain an open FD plus map entries per
+// project after meta eviction. Safe for deleteRepo too (a deleted project's
+// pending journal is moot).
+func (h *StorHub) closeProjectJournal(project string) {
+	if h.config.JournalDir == "" {
+		return
+	}
+	path := h.journalPath(project)
+	h.journalMu.Lock()
+	f, ok := h.journalFiles[project]
+	if ok {
+		// Sync under the lock: eviction-time, rare, and the handle is
+		// being retired — no append may interleave after the deletes.
+		_ = f.Sync()
+		_ = f.Close()
+		delete(h.journalFiles, project)
+		delete(h.journalDirty, project)
+	}
+	h.journalMu.Unlock()
+	if ok {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logging.Warn(h.projectLogger(project), "op journal remove on close failed", "err", err)
+		}
+	}
+}
+
 // journalRead loads and folds the project's journal. Corrupt lines are
 // skipped individually; a wholly unreadable journal yields nil (the crash
 // loses those pending ops, matching the pre-journal durability contract).
+// Every line's Times is reset to 1 before the fold: lines are deltas (one
+// mutation each) and the fold accumulates, so a stored Times>1 — from
+// pre-delta journals that carried accumulated counts, or re-appended
+// survivors — would inflate the folded total (cosmetic: commit message xN).
 func (h *StorHub) journalRead(project string) []Op {
 	path := h.journalPath(project)
 	if path == "" {
@@ -155,6 +233,7 @@ func (h *StorHub) journalRead(project string) []Op {
 			logging.Warn(h.projectLogger(project), "op journal line unreadable; skipping", "err", err)
 			continue
 		}
+		op.Times = 1
 		ops = append(ops, op)
 	}
 	if err := scanner.Err(); err != nil {
@@ -167,9 +246,43 @@ func (h *StorHub) journalRead(project string) []Op {
 	return foldOps(ops)
 }
 
+// journalFileSize returns the on-disk size of the project's journal file,
+// or 0 when journaling is disabled or the file is absent/unstatable. Read
+// from the filesystem (no new hub state); callers sample it — see
+// journalOverCap.
+func (h *StorHub) journalFileSize(project string) int64 {
+	path := h.journalPath(project)
+	if path == "" {
+		return 0
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+// journalOverCap reports whether the project's journal file crossed
+// journalMaxBytes. appendOpLocked calls this with the stack's monotonic
+// append counter (opStack.seq): the Stat runs only every
+// journalRewriteSampleEvery appends, so cap probing never doubles append
+// syscalls. Crossing compacts via journalRewrite (caller-side), never drops.
+func (h *StorHub) journalOverCap(project string, appendSeq uint64) bool {
+	if h.config.JournalDir == "" {
+		return false
+	}
+	if appendSeq%journalRewriteSampleEvery != 0 {
+		return false
+	}
+	return h.journalFileSize(project) >= journalMaxBytes
+}
+
 // journalRewrite replaces the journal with exactly the still-pending ops.
 // An empty list removes the file. Rewriting (instead of deleting) keeps the
-// journal correct when mutations landed while a commit was in flight.
+// journal correct when mutations landed while a commit was in flight. It is
+// also the cap-compaction path: appendOpLocked calls it when the op-stack or
+// journal byte cap crosses even though no commit succeeded — the rewrite is
+// compaction to the folded survivors, not acknowledgment.
 func (h *StorHub) journalRewrite(project string, ops []Op) {
 	path := h.journalPath(project)
 	if path == "" {

@@ -10,12 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -46,6 +46,8 @@ const (
 	testSingleBufferSize       = 32
 	testLargeChunkSize   int64 = 1 << 30
 	testLargeBufferSize        = 4 << 20
+	// NOTE: the 1000-assets-per-release ceiling lives in non-test source
+	// as releaseAssetCap; tests reference that const, never a literal.
 )
 
 func singleChunkTestConfig() Config {
@@ -64,22 +66,11 @@ func defaultTestConfig() Config {
 }
 
 func smallTransferTestConfig() Config {
-	return Config{
-		ChunkSize:         testSmallChunkSize,
-		BufferSize:        testSmallBufferSize,
-		MaxRetries:        0,
-		AtimePolicy:       "noatime",
-		DisableGitBackend: true,
-		RateMaxWait:       -1,
-		RatePointsPerMin:  1 << 40,
-		RateContentPerMin: 1 << 40,
-	}
+	return baseTestConfig()
 }
 
 func smallRetryDisabledTestConfig() Config {
-	cfg := smallTransferTestConfig()
-	cfg.MaxRetries = 0
-	return cfg
+	return baseTestConfig()
 }
 
 func retryTestConfig() Config {
@@ -88,18 +79,131 @@ func retryTestConfig() Config {
 		BaseRetryDelay:    time.Millisecond,
 		MaxRetryDelay:     5 * time.Millisecond,
 		DisableGitBackend: true,
-		RateMaxWait:       -1,
-		RatePointsPerMin:  1 << 40,
-		RateContentPerMin: 1 << 40,
+		RateMaxWait:       disableRateLimit,
+		RatePointsPerMin:  testRatePointsPerMin,
+		RateContentPerMin: testRateContentPerMin,
 	}
 }
 
 func smallRetryTestConfig() Config {
-	cfg := smallTransferTestConfig()
-	cfg.MaxRetries = 2
-	cfg.BaseRetryDelay = time.Millisecond
-	cfg.MaxRetryDelay = 5 * time.Millisecond
+	return baseTestConfig(withRetries(2))
+}
+
+// disableRateLimit is the RateMaxWait sentinel meaning "fail fast, never
+// wait on the governor" (was: a bare -1 pasted across builders).
+const disableRateLimit = -1
+
+const (
+	testRatePointsPerMin  = int64(1) << 40
+	testRateContentPerMin = int64(1) << 40
+)
+
+// baseTestConfig is the single funnel for mock-backed test hubs: small
+// chunks, no retries, no atime, no git backend, fail-fast governor with an
+// effectively infinite per-minute budget. Variants pass opts (withRetries)
+// instead of pasting the literal block.
+func baseTestConfig(opts ...func(*Config)) Config {
+	cfg := Config{
+		ChunkSize:         testSmallChunkSize,
+		BufferSize:        testSmallBufferSize,
+		MaxRetries:        0,
+		AtimePolicy:       "noatime",
+		DisableGitBackend: true,
+		RateMaxWait:       disableRateLimit,
+		RatePointsPerMin:  testRatePointsPerMin,
+		RateContentPerMin: testRateContentPerMin,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return cfg
+}
+
+// withRetries enables n retries with millisecond test-scale backoff.
+func withRetries(n int) func(*Config) {
+	return func(cfg *Config) {
+		cfg.MaxRetries = n
+		cfg.BaseRetryDelay = time.Millisecond
+		cfg.MaxRetryDelay = 5 * time.Millisecond
+	}
+}
+
+// onContentsPUT arms a one-shot intercept filtered to contents-API PUTs,
+// replacing the pasted Store(Contains(..."/contents/...")) closures with a
+// named hook. t.Cleanup auto-disarms back to pass-through.
+func (m *mockGitHub) onContentsPUT(t *testing.T, fn func(w http.ResponseWriter, r *http.Request) bool) {
+	t.Helper()
+	m.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/") {
+			return fn(w, r)
+		}
+		return false
+	})
+	t.Cleanup(func() {
+		m.intercept.Store((func(http.ResponseWriter, *http.Request) bool)(nil))
+	})
+}
+
+// onAssetGET arms a one-shot intercept filtered to release-asset GETs
+// (both the /releases/assets/<id> resolve and the /releases/<id>/assets
+// list endpoint).
+func (m *mockGitHub) onAssetGET(t *testing.T, fn func(w http.ResponseWriter, r *http.Request) bool) {
+	t.Helper()
+	m.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/assets") {
+			return fn(w, r)
+		}
+		return false
+	})
+	t.Cleanup(func() {
+		m.intercept.Store((func(http.ResponseWriter, *http.Request) bool)(nil))
+	})
+}
+
+// uploadFixture uploads payload to project/path and flushes, returning the
+// flushed hub. Shared by fidelity/contract tests instead of pasting the
+// writeTempFile+Upload+Flush triple.
+func uploadFixture(t *testing.T, backend *mockGitHub, project, name string, payload []byte) *StorHub {
+	t.Helper()
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), name, payload)
+	if _, err := hub.UploadFileContext(ctx, project, name, input); err != nil {
+		t.Fatalf("upload fixture: %v", err)
+	}
+	if err := hub.FlushMetadata(ctx); err != nil {
+		t.Fatalf("flush fixture: %v", err)
+	}
+	return hub
+}
+
+// assertNamerShape pins the asset-name contract for n generated names:
+// lowercase words+extensions shape, no derivation from source file names,
+// no duplicates. Shared by the helper smoke test and the dictionary
+// regression test (which adds only the diversity assertion).
+func assertNamerShape(t *testing.T, namer *assetNamer, n int) []string {
+	t.Helper()
+	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
+	seen := make(map[string]struct{}, n)
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name, err := namer.Next()
+		if err != nil {
+			t.Fatalf("generate asset name: %v", err)
+		}
+		if !nameRe.MatchString(name) {
+			t.Fatalf("unexpected asset name format: %q", name)
+		}
+		if strings.Contains(name, "file") || strings.Contains(name, "txt") || strings.Contains(name, filepath.Base("docs/file.txt")) {
+			t.Fatalf("asset name should not derive from source file name: %q", name)
+		}
+		if _, ok := seen[name]; ok {
+			t.Fatalf("duplicate asset name generated: %q", name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 func rateLimitTestConfig(sleep func(context.Context, time.Duration) error) Config {
@@ -636,7 +740,7 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	}
 	rangeByAsset := make(map[int64][]string)
 	var rangeMu sync.Mutex
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onAssetGET(t, func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/releases/assets/") {
 			return false
 		}
@@ -738,92 +842,46 @@ func TestPatchFileRejectsOutOfBoundsEdit(t *testing.T) {
 	}
 }
 
-func TestPatchFileSupportsInsertGrowth(t *testing.T) {
+func TestPatchFileSupportsEdits(t *testing.T) {
 	t.Parallel()
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "insert.txt", []byte("abcdij"))
-	if _, err := hub.UploadFile("project-patch-insert", "insert.txt", input); err != nil {
-		t.Fatalf("upload file: %v", err)
+	cases := []struct {
+		name       string
+		project    string
+		file       string
+		original   string
+		offset     int64
+		deleteSize int64
+		edit       []byte
+		want       string
+	}{
+		{"insert growth", "project-patch-insert", "insert.txt", "abcdij", 4, 0, []byte("efgh"), "abcdefghij"},
+		{"delete shrink", "project-patch-delete", "delete.txt", "abcXXdef", 3, 2, nil, "abcdef"},
+		{"replace different size", "project-patch-resize", "resize.txt", "abc123xyz", 3, 3, []byte("LONGER"), "abcLONGERxyz"},
+		{"truncate to empty", "project-patch-empty", "empty.txt", "abc", 0, 3, nil, ""},
 	}
-	patched, err := hub.PatchFile("project-patch-insert", "insert.txt", 4, 0, []byte("efgh"))
-	if err != nil {
-		t.Fatalf("insert patch: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backend := newMockGitHub(t)
+			hub := backend.newClient(t, smallTransferTestConfig())
+			input := writeTempFile(t, t.TempDir(), tc.file, []byte(tc.original))
+			if _, err := hub.UploadFile(tc.project, tc.file, input); err != nil {
+				t.Fatalf("upload file: %v", err)
+			}
+			patched, err := hub.PatchFile(tc.project, tc.file, tc.offset, tc.deleteSize, tc.edit)
+			if err != nil {
+				t.Fatalf("patch: %v", err)
+			}
+			if patched.Size != int64(len(tc.want)) {
+				t.Fatalf("unexpected patched size: %d, want %d", patched.Size, len(tc.want))
+			}
+			output := filepath.Join(t.TempDir(), tc.file+".out")
+			if err := hub.DownloadFile(tc.project, tc.file, output); err != nil {
+				t.Fatalf("download patched file: %v", err)
+			}
+			assertFileContent(t, output, []byte(tc.want))
+		})
 	}
-	if patched.Size != int64(len("abcdefghij")) {
-		t.Fatalf("unexpected patched size: %d", patched.Size)
-	}
-	output := filepath.Join(t.TempDir(), "insert.out")
-	if err := hub.DownloadFile("project-patch-insert", "insert.txt", output); err != nil {
-		t.Fatalf("download inserted file: %v", err)
-	}
-	assertFileContent(t, output, []byte("abcdefghij"))
-}
-
-func TestPatchFileSupportsDeleteShrink(t *testing.T) {
-	t.Parallel()
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "delete.txt", []byte("abcXXdef"))
-	if _, err := hub.UploadFile("project-patch-delete", "delete.txt", input); err != nil {
-		t.Fatalf("upload file: %v", err)
-	}
-	patched, err := hub.PatchFile("project-patch-delete", "delete.txt", 3, 2, nil)
-	if err != nil {
-		t.Fatalf("delete patch: %v", err)
-	}
-	if patched.Size != int64(len("abcdef")) {
-		t.Fatalf("unexpected patched size: %d", patched.Size)
-	}
-	output := filepath.Join(t.TempDir(), "delete.out")
-	if err := hub.DownloadFile("project-patch-delete", "delete.txt", output); err != nil {
-		t.Fatalf("download deleted file: %v", err)
-	}
-	assertFileContent(t, output, []byte("abcdef"))
-}
-
-func TestPatchFileSupportsReplacingWithDifferentSize(t *testing.T) {
-	t.Parallel()
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "resize.txt", []byte("abc123xyz"))
-	if _, err := hub.UploadFile("project-patch-resize", "resize.txt", input); err != nil {
-		t.Fatalf("upload file: %v", err)
-	}
-	patched, err := hub.PatchFile("project-patch-resize", "resize.txt", 3, 3, []byte("LONGER"))
-	if err != nil {
-		t.Fatalf("resize patch: %v", err)
-	}
-	if patched.Size != int64(len("abcLONGERxyz")) {
-		t.Fatalf("unexpected patched size: %d", patched.Size)
-	}
-	output := filepath.Join(t.TempDir(), "resize.out")
-	if err := hub.DownloadFile("project-patch-resize", "resize.txt", output); err != nil {
-		t.Fatalf("download resized file: %v", err)
-	}
-	assertFileContent(t, output, []byte("abcLONGERxyz"))
-}
-
-func TestPatchFileSupportsTruncateToEmpty(t *testing.T) {
-	t.Parallel()
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "empty.txt", []byte("abc"))
-	if _, err := hub.UploadFile("project-patch-empty", "empty.txt", input); err != nil {
-		t.Fatalf("upload file: %v", err)
-	}
-	patched, err := hub.PatchFile("project-patch-empty", "empty.txt", 0, 3, nil)
-	if err != nil {
-		t.Fatalf("truncate patch: %v", err)
-	}
-	if patched.Size != 0 {
-		t.Fatalf("expected empty file size, got %d", patched.Size)
-	}
-	output := filepath.Join(t.TempDir(), "empty.out")
-	if err := hub.DownloadFile("project-patch-empty", "empty.txt", output); err != nil {
-		t.Fatalf("download emptied file: %v", err)
-	}
-	assertFileContent(t, output, []byte{})
 }
 
 func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
@@ -1256,7 +1314,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 	cfg.APIBaseURL = backend.server.URL
 	cfg.HTTPClient = backend.server.Client()
 	cfg.Sleep = func(_ context.Context, _ time.Duration) error { return nil }
-	hub, err := NewStorHubWithContext(context.Background(), "token", cfg)
+	hub, err := NewStorHubWithContext(context.Background(), backend.token, cfg)
 	if err != nil {
 		t.Fatalf("constructor should not authenticate eagerly: %v", err)
 	}
@@ -1631,7 +1689,7 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 		t.Fatalf("upload should succeed (metadata commit is async): %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(time.Second)
 	for {
 		files, err := hub.ListFiles("project-retry")
 		if err != nil {
@@ -1643,7 +1701,7 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("retained dirty state was not retried after transient failure; files=%+v", files)
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	repo := backend.repo("project-retry")
 	if repo == nil || len(repo.assets) == 0 || repo.releasesByTag["v1"] == nil {
@@ -1691,7 +1749,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
 		t.Fatalf("upload should succeed (commit is async): %v", err)
 	}
-	stateDeadline := time.Now().Add(5 * time.Second)
+	stateDeadline := time.Now().Add(time.Second)
 	for {
 		conflictsSeen := conflicts.Load() >= 1
 		files, err := hub.ListFiles("project-conflict")
@@ -1705,7 +1763,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 			t.Fatalf("conflict rebase did not converge: conflicts=%d files=%d",
 				conflicts.Load(), len(files))
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -1733,12 +1791,12 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 	}
 	// With batching, commit happens later. Poll (bounded) for the commit,
 	// failure, and retry cycle instead of sleeping a fixed duration.
-	failureDeadline := time.Now().Add(3 * time.Second)
+	failureDeadline := time.Now().Add(time.Second)
 	for failures.Load() < 1 {
 		if time.Now().After(failureDeadline) {
 			t.Fatalf("expected one transient metadata failure, got %d", failures.Load())
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -3093,12 +3151,30 @@ func TestFUSEFlagsAndLocks(t *testing.T) {
 }
 
 type mockGitHub struct {
-	t         *testing.T
-	server    *httptest.Server
-	mu        sync.Mutex
-	owner     string
-	repos     map[string]*mockRepo
+	t      *testing.T
+	server *mockServerRef
+	mu     sync.Mutex
+	owner  string
+	repos  map[string]*mockRepo
+	// intercept is a per-test hook consulted before routing (fault
+	// injection, request counting). Reset in t.Cleanup via
+	// resetMockMutables; prefer the named onContentsPUT/onAssetGET
+	// helpers for new tests over raw path-substring pastes.
 	intercept atomic.Value
+	// faults groups every fault-injection switch (opt-in 429s, CDN
+	// expiry/delay/618, header injector, truncation, collisions) away
+	// from server state. All are per-test and reset in t.Cleanup.
+	faults mockFaults
+	// token is the bearer token expected on API routes (unique per test;
+	// the shared server dispatches on it). The CDN host is exempt:
+	// signed-URL fetches carry no Authorization header.
+	token string
+}
+
+// mockFaults holds the mock's fault-injection switches. Each fault is
+// opt-in per test and reset by resetMockMutables, so arming one never
+// leaks into another test sharing the server socket.
+type mockFaults struct {
 	// embedCap simulates GitHub truncating the asset array embedded in
 	// release objects. When > 0, list/get-release responses carry at most
 	// embedCap embedded assets while the true count stays higher. The
@@ -3108,34 +3184,28 @@ type mockGitHub struct {
 	// 422 already_exists body, simulating a concurrent writer winning the
 	// same asset name. Keyed "repo/tag". Test-only fault injection.
 	collideNext map[string]bool
-	// NOTE: never send X-RateLimit-* headers from this mock. Observed
-	// headers arm the governor's sustainable-pace path, whose reset-based
-	// wait always exceeds fail-fast test configs and 429s the suite.
-	// Governor behavior is covered by its own unit tests instead.
-	// Rate-limit simulation is opt-in per test via rateLimitOnce.
-	// token is the bearer token expected on API routes ("token" unless
-	// overridden). The CDN host is exempt: signed-URL fetches carry no
-	// Authorization header.
-	token string
 	// rateLimitOnce makes the next API response a 429 with Retry-After,
 	// letting retry tests opt into rate-limit simulation without arming
 	// the governor for the whole suite.
 	rateLimitOnce atomic.Bool
+	// rateLimitHeadersOnce makes the next API response carry exhausted
+	// X-RateLimit-* headers (Remaining 0, Reset at mockNow+2s) instead of
+	// a 429, exercising the governor's sustainable-pace wait on a 200.
+	// NOTE: the governor paces against the client's cfg.Now clock, so
+	// tests using this fault must pin faults.mockNow to that same clock.
+	rateLimitHeadersOnce atomic.Bool
 	// cdnSawAuth records whether any CDN fetch carried an Authorization
 	// header (it must not: signed URLs are bearer credentials already).
 	cdnSawAuth atomic.Bool
 	// rateLimitServed counts opt-in 429s served, so retry tests can prove
 	// the fault actually fired instead of inferring it from request counts.
 	rateLimitServed atomic.Int32
-	// nextAssetID mints GLOBALLY unique asset IDs, mirroring real GitHub:
-	// signed CDN URLs (/cdn/<id>) carry no repo, so a per-repo counter
-	// would make CDN lookups ambiguous across repos sharing ID space.
-	nextAssetID atomic.Int64
 	// cdnTTL (nanoseconds) makes signed CDN URLs expire: when > 0, the
-	// octet-stream redirect carries an exp deadline and the CDN 403s
+	// octet-stream redirect carries jwt/se expiries and the CDN 403s
 	// expired fetches, exercising the client's SAS-rejection and
 	// re-resolution path (real GitHub: Azure SAS URLs are short-lived).
 	// Zero (default) keeps URLs immortal so unrelated tests never trip.
+	// Use SetCDNTTL/LoadCDNTTL (time.Duration) instead of raw nanos.
 	cdnTTL atomic.Int64
 	// cdnTimeShift (nanoseconds) fast-forwards the CDN's expiry clock
 	// exactly once (consumed by the next signed-URL check), so tests can
@@ -3143,7 +3213,30 @@ type mockGitHub struct {
 	// past the TTL. The re-resolved URL must then serve normally, so the
 	// shift must not linger.
 	cdnTimeShift atomic.Int64
+	// cdnFail618Once makes the next CDN fetch answer 618
+	// (StatusSignedURLExpired: the front-door JWT died) once, exercising
+	// the client's 618 re-resolution path. Consumed on fire.
+	cdnFail618Once atomic.Bool
+	// cdnDelay (nanoseconds) stalls every CDN body by the given duration,
+	// simulating a slow stream without real latency elsewhere.
+	cdnDelay atomic.Int64
+	// mockNow (unix nanos) overrides the mock's clock; 0 means wall time.
+	// Pin it to the client's frozen cfg.Now when a test needs TTL/reset
+	// headers interpreted against test time instead of wall time.
+	mockNow atomic.Int64
 }
+
+// SetCDNTTL arms signed-URL expiry; LoadCDNTTL reads it back.
+func (f *mockFaults) SetCDNTTL(d time.Duration) { f.cdnTTL.Store(int64(d)) }
+
+// LoadCDNTTL returns the armed TTL (0 = immortal URLs).
+func (f *mockFaults) LoadCDNTTL() time.Duration { return time.Duration(f.cdnTTL.Load()) }
+
+// armRateLimit arms one opt-in 429 for the next API call.
+func (m *mockGitHub) armRateLimit() { m.faults.rateLimitOnce.Store(true) }
+
+// expireCDNOnce fast-forwards the CDN expiry clock once (event, not sleep).
+func (m *mockGitHub) expireCDNOnce(d time.Duration) { m.faults.cdnTimeShift.Store(int64(d)) }
 
 type mockRepo struct {
 	name          string
@@ -3154,8 +3247,19 @@ type mockRepo struct {
 	releasesByTag map[string]*mockRelease
 	releasesByID  map[int64]*mockRelease
 	assets        map[int64]*mockAsset
-	files         map[string]*mockFile
+	// assetsByTag indexes assets per release tag (name uniqueness,
+	// per-tag counts, and per-tag listings all read here instead of
+	// scanning every asset). Maintained on upload/delete paths.
+	assetsByTag map[string]map[int64]*mockAsset
+	files       map[string]*mockFile
+	// dirChildren indexes immediate children per directory path:
+	// dirChildren[dir][name] = isDir. Maintained by putMockFileLocked /
+	// deleteMockFileLocked so ListDir never scans every file.
+	dirChildren   map[string]map[string]bool
 	commitsByPath map[string][]mockCommit
+	// commitTime indexes commit SHA -> commit time across every path, so
+	// ?ref= resolution never scans every path's history.
+	commitTime map[string]time.Time
 }
 
 type mockRelease struct {
@@ -3192,9 +3296,20 @@ type mockCommit struct {
 
 func newMockGitHub(t *testing.T) *mockGitHub {
 	t.Helper()
-	backend := &mockGitHub{t: t, owner: "storhub-tester", repos: make(map[string]*mockRepo), token: "token"}
-	backend.server = httptest.NewServer(http.HandlerFunc(backend.serveHTTP))
-	t.Cleanup(backend.server.Close)
+	token := fmt.Sprintf("token-%d", sharedMockSeq.Add(1))
+	backend := &mockGitHub{
+		t:     t,
+		owner: "storhub-tester",
+		repos: make(map[string]*mockRepo),
+		token: token,
+	}
+	backend.faults.collideNext = make(map[string]bool)
+	backend.server = &mockServerRef{URL: sharedMockBaseURL(t), token: token}
+	registerMockBackend(token, backend)
+	t.Cleanup(func() {
+		backend.resetMockMutables()
+		backend.server.Close()
+	})
 	return backend
 }
 
@@ -3208,7 +3323,7 @@ func (m *mockGitHub) newClient(t *testing.T, cfg Config) *StorHub {
 	if cfg.Sleep == nil {
 		cfg.Sleep = func(_ context.Context, _ time.Duration) error { return nil }
 	}
-	hub, err := NewStorHubWithContext(context.Background(), "token", cfg)
+	hub, err := NewStorHubWithContext(context.Background(), m.token, cfg)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -3218,6 +3333,12 @@ func (m *mockGitHub) newClient(t *testing.T, cfg Config) *StorHub {
 	return hub
 }
 
+// computeGitBlobSHA is intentionally implemented LOCALLY (sha1 over the
+// "blob <len>\0" header + bytes), byte-identical to the production client's
+// computation in internal/github/client.go:710. It must NOT be imported or
+// re-exported from the github package: the mock has to stay an independent
+// oracle, so a regression in the shared helper fails the cross-pin test
+// below instead of passing vacuously on both sides.
 func computeGitBlobSHA(data []byte) string {
 	header := fmt.Sprintf("blob %d\x00", len(data))
 	h := sha1.New()
@@ -3227,7 +3348,7 @@ func computeGitBlobSHA(data []byte) string {
 }
 
 func (m *mockGitHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if fn, ok := m.intercept.Load().(func(http.ResponseWriter, *http.Request) bool); ok && fn(w, r) {
+	if fn, ok := m.intercept.Load().(func(http.ResponseWriter, *http.Request) bool); ok && fn != nil && fn(w, r) {
 		return
 	}
 	// Mirror GitHub: every API route requires a bearer token. The CDN
@@ -3240,11 +3361,23 @@ func (m *mockGitHub) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// Retry-After, then normal service resumes. Scoped to authenticated
 	// API routes: a CDN fetch or an unauthenticated probe must never
 	// spend the fault armed for the next API call.
-	if !strings.HasPrefix(r.URL.Path, "/cdn/") && m.rateLimitOnce.CompareAndSwap(true, false) {
-		m.rateLimitServed.Add(1)
+	if !strings.HasPrefix(r.URL.Path, "/cdn/") && m.faults.rateLimitOnce.CompareAndSwap(true, false) {
+		m.faults.rateLimitServed.Add(1)
 		w.Header().Set("Retry-After", "1")
 		m.writeJSON(w, http.StatusTooManyRequests, map[string]any{"message": "API rate limit exceeded for user ID"})
 		return
+	}
+	// Opt-in exhausted-budget headers for governor tests. The next API
+	// response carries Remaining 0 with Reset at mockNow+2s (a 200, not a
+	// 429), so the governor's sustainable-pace wait engages on the
+	// FOLLOWING requests. Scoped to API routes like the 429 fault; the
+	// CDN never sends rate-limit headers (its authority has no budget).
+	// NOTE: the governor paces against the client's cfg.Now clock, so pin
+	// faults.mockNow to that clock or the reset lands years off.
+	if !strings.HasPrefix(r.URL.Path, "/cdn/") && m.faults.rateLimitHeadersOnce.CompareAndSwap(true, false) {
+		w.Header().Set("X-RateLimit-Limit", "60")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(m.mockTime().Add(2*time.Second).Unix(), 10))
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/user":
@@ -3267,6 +3400,127 @@ func (m *mockGitHub) authToken() string {
 		return "token"
 	}
 	return m.token
+}
+
+// mockTime is the mock's clock: faults.mockNow when pinned, wall time
+// otherwise. CDN expiries and rate-limit resets are minted from it so tests
+// can freeze time instead of racing the wall clock.
+func (m *mockGitHub) mockTime() time.Time {
+	if nanos := m.faults.mockNow.Load(); nanos != 0 {
+		return time.Unix(0, nanos).UTC()
+	}
+	return time.Now().UTC()
+}
+
+// mockCommitSHA mints a 40-hex commit SHA like real GitHub (sha1 of the
+// counter), never the old "commit-%d" shape: a future client-side hex check
+// must fail loudly on the mock exactly as it would in prod.
+func mockCommitSHA(counter int64) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("commit-%d", counter)))
+	return fmt.Sprintf("%x", sum)
+}
+
+// mockTestJWT mints an unsigned test JWT carrying only the exp claim,
+// mirroring the front-door token shape in
+// internal/github/client_test.go:testSignedAssetURL (payload exp is real;
+// sig is never verified, by design on both sides).
+func mockTestJWT(exp time.Time) string {
+	enc := func(v any) string {
+		raw, _ := json.Marshal(v)
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
+		enc(map[string]int64{"exp": exp.Unix()}) + ".testsig"
+}
+
+// mockJWTExpiry decodes the exp claim from a compact JWS without verifying
+// the signature (mirrors the client's jwtExpiry: expiry is public metadata).
+func mockJWTExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
+}
+
+// mockSignedURLExpiry returns the earliest expiry carried by a signed CDN
+// URL: the minimum of the front-door JWT exp and the backing SAS se
+// (mirrors the client's signedURLExpiry min()+margin contract). Legacy
+// ?exp= (unix nanos) URLs are honored for back-compat.
+func mockSignedURLExpiry(query url.Values) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	consider := func(t time.Time, ok bool) {
+		if ok && (!found || t.Before(earliest)) {
+			earliest, found = t, true
+		}
+	}
+	consider(mockJWTExpiry(query.Get("jwt")))
+	if se := query.Get("se"); se != "" {
+		if exp, err := time.Parse(time.RFC3339, se); err == nil {
+			consider(exp, true)
+		}
+	}
+	if exp := query.Get("exp"); exp != "" {
+		if nanos, err := strconv.ParseInt(exp, 10, 64); err == nil {
+			consider(time.Unix(0, nanos).UTC(), true)
+		}
+	}
+	return earliest, found
+}
+
+// mintSignedCDNURL builds the redirect target for an octet-stream asset GET:
+// a /cdn/<id> URL carrying BOTH real expiries (front-door jwt with a short
+// TTL, backing SAS se 10 minutes later), exactly the shape the production
+// client parses via signedURLExpiry. The JWT governs: the client's cache
+// lapses at the earlier expiry minus margin, never at the SAS alone.
+// defaultMockCDNTTL is the signed-URL lifetime minted when a test does not
+// arm cdnTTL: URLs always carry both real expiries (front-door jwt, backing
+// SAS se) like production, so the client's proactive min(jwt,se)-30s cache
+// path is exercised on every download, not just TTL-pinned tests. An hour
+// keeps test traffic far from expiry without wall-clock dependence.
+const defaultMockCDNTTL = time.Hour
+
+func (m *mockGitHub) mintSignedCDNURL(assetID int64) string {
+	base := fmt.Sprintf("%s/cdn/%d", m.server.URL, assetID)
+	ttl := m.faults.LoadCDNTTL()
+	if ttl <= 0 {
+		ttl = defaultMockCDNTTL
+	}
+	// JWT exp is whole-second precision: round the short TTL UP to a
+	// strictly-future second so a 50ms TTL is not born expired by
+	// truncation (a truncated-down exp lands in the past and the
+	// first fetch 403s). The se backs it 10 minutes later.
+	jwtExp := m.mockTime().Add(ttl).Truncate(time.Second)
+	if !jwtExp.After(m.mockTime()) {
+		jwtExp = jwtExp.Add(time.Second)
+	}
+	q := url.Values{}
+	q.Set("jwt", mockTestJWT(jwtExp))
+	q.Set("se", jwtExp.Add(10*time.Minute).UTC().Format(time.RFC3339))
+	return base + "?" + q.Encode()
+}
+
+// findAssetLocked resolves a global asset ID to its record. Caller holds
+// m.mu. Asset IDs are globally unique (globalMockAssetID), so no repo scan
+// ambiguity exists; the shared-server CDN router uses this per backend.
+func (m *mockGitHub) findAssetLocked(id int64) (*mockAsset, bool) {
+	for _, repo := range m.repos {
+		if asset := repo.assets[id]; asset != nil {
+			return asset, true
+		}
+	}
+	return nil, false
 }
 
 func (m *mockGitHub) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
@@ -3293,10 +3547,110 @@ func (m *mockGitHub) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		releasesByTag: make(map[string]*mockRelease),
 		releasesByID:  make(map[int64]*mockRelease),
 		assets:        make(map[int64]*mockAsset),
+		assetsByTag:   make(map[string]map[int64]*mockAsset),
 		files:         make(map[string]*mockFile),
+		dirChildren:   make(map[string]map[string]bool),
 		commitsByPath: make(map[string][]mockCommit),
+		commitTime:    make(map[string]time.Time),
 	}
 	m.writeJSON(w, http.StatusCreated, map[string]any{"name": payload.Name})
+}
+
+// putMockFileLocked stores file bytes under the real git blob SHA and
+// maintains the dirChildren index. Caller holds m.mu. Every repo.files
+// write must go through here (or deleteMockFileLocked) so the directory
+// index never drifts from the file map.
+func (m *mockGitHub) putMockFileLocked(repo *mockRepo, filePath string, data []byte) *mockFile {
+	_ = m
+	file := repo.files[filePath]
+	if file == nil {
+		file = &mockFile{path: filePath}
+		repo.files[filePath] = file
+	}
+	file.sha = computeGitBlobSHA(data)
+	file.data = append([]byte(nil), data...)
+	indexMockDirChild(repo, filePath)
+	return file
+}
+
+// deleteMockFileLocked removes a file and prunes now-empty ancestor index
+// entries. Caller holds m.mu.
+func (m *mockGitHub) deleteMockFileLocked(repo *mockRepo, filePath string) {
+	delete(repo.files, filePath)
+	unindexMockDirChild(repo, filePath)
+}
+
+// indexMockDirChild records filePath's leaf and every ancestor directory in
+// dirChildren: dirChildren[dir][name] reports whether name is a directory.
+// A directory entry always wins over a file entry of the same name.
+func indexMockDirChild(repo *mockRepo, filePath string) {
+	segments := strings.Split(filePath, "/")
+	for i := range segments {
+		dir := strings.Join(segments[:i], "/")
+		child := segments[i]
+		isDir := i < len(segments)-1
+		if repo.dirChildren == nil {
+			repo.dirChildren = make(map[string]map[string]bool)
+		}
+		kids := repo.dirChildren[dir]
+		if kids == nil {
+			kids = make(map[string]bool)
+			repo.dirChildren[dir] = kids
+		}
+		kids[child] = kids[child] || isDir
+	}
+}
+
+// unindexMockDirChild drops filePath's leaf, then prunes ancestors left
+// childless (a directory with no children does not exist on GitHub).
+func unindexMockDirChild(repo *mockRepo, filePath string) {
+	segments := strings.Split(filePath, "/")
+	if len(segments) == 0 {
+		return
+	}
+	dir := strings.Join(segments[:len(segments)-1], "/")
+	if kids := repo.dirChildren[dir]; kids != nil {
+		delete(kids, segments[len(segments)-1])
+	}
+	// Walk up: a directory whose index entry is now empty vanishes, which
+	// may empty its own parent in turn.
+	for d := dir; d != ""; {
+		if kids := repo.dirChildren[d]; kids != nil && len(kids) == 0 {
+			delete(repo.dirChildren, d)
+		} else {
+			break
+		}
+		parent, base := parentDirBase(d)
+		if kids := repo.dirChildren[parent]; kids != nil {
+			delete(kids, base)
+		}
+		d = parent
+	}
+}
+
+func parentDirBase(dir string) (parent, base string) {
+	if i := strings.LastIndex(dir, "/"); i >= 0 {
+		return dir[:i], dir[i+1:]
+	}
+	return "", dir
+}
+
+// recordMockCommitLocked appends a newest-first commit on filePath's history
+// with a 40-hex SHA and maintains the commitTime index. Caller holds m.mu.
+func (m *mockGitHub) recordMockCommitLocked(repo *mockRepo, filePath, message string, data []byte, deleted bool) string {
+	_ = m
+	commitSHA := mockCommitSHA(repo.nextCommitID)
+	repo.nextCommitID++
+	when := time.Unix(1700000000+repo.nextCommitID, 0).UTC()
+	repo.commitsByPath[filePath] = append([]mockCommit{{
+		sha: commitSHA, message: message, path: filePath,
+		data: append([]byte(nil), data...), when: when, deleted: deleted,
+	}}, repo.commitsByPath[filePath]...)
+	if repo.commitTime == nil {
+		repo.commitTime = make(map[string]time.Time)
+	}
+	repo.commitTime[commitSHA] = when
+	return commitSHA
 }
 
 func (m *mockGitHub) handleRepos(w http.ResponseWriter, r *http.Request) {
@@ -3386,18 +3740,11 @@ func (m *mockGitHub) handleDeleteContent(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	delete(repo.files, filePath)
-	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
-	repo.nextCommitID++
+	unindexMockDirChild(repo, filePath)
 	// Mirror GitHub: the delete is itself a commit on the path's history
 	// (revision lists after a delete must show it), and the path is gone
 	// from that commit onward.
-	repo.commitsByPath[filePath] = append([]mockCommit{{
-		sha:     commitSHA,
-		message: payload.Message,
-		path:    filePath,
-		when:    time.Unix(1700000000+repo.nextCommitID, 0).UTC(),
-		deleted: true,
-	}}, repo.commitsByPath[filePath]...)
+	commitSHA := m.recordMockCommitLocked(repo, filePath, payload.Message, nil, true)
 	m.writeJSON(w, http.StatusOK, map[string]any{"commit": map[string]any{"sha": commitSHA}})
 }
 
@@ -3479,18 +3826,9 @@ func (m *mockGitHub) serveFileContentLocked(w http.ResponseWriter, filePath stri
 // known=true, present=false means the path did not exist (or was deleted)
 // at that commit (GitHub: 404 "Not Found").
 func (m *mockGitHub) contentAtRefLocked(repo *mockRepo, filePath, ref string) (data []byte, known, present bool) {
-	var refWhen time.Time
-	for _, commits := range repo.commitsByPath {
-		for _, c := range commits {
-			if c.sha == ref {
-				refWhen, known = c.when, true
-				break
-			}
-		}
-		if known {
-			break
-		}
-	}
+	// O(1) ref resolution via the commitTime index (was: a scan of every
+	// path's history per ?ref= GET).
+	refWhen, known := repo.commitTime[ref]
 	if !known {
 		return nil, false, false
 	}
@@ -3519,31 +3857,37 @@ func (m *mockGitHub) contentAtRefLocked(repo *mockRepo, filePath, ref string) (d
 }
 
 // dirEntriesLocked returns the immediate children of a directory prefix
-// (files stored under path/...). ok=false when nothing lives under it.
-// Caller holds m.mu.
+// from the dirChildren index (was: a scan of every file per ListDir).
+// ok=false when nothing lives under it. Caller holds m.mu.
 func (m *mockGitHub) dirEntriesLocked(repo *mockRepo, dirPath string) ([]map[string]any, bool) {
-	prefix := strings.TrimSuffix(dirPath, "/") + "/"
-	seen := map[string]map[string]any{}
-	for p, f := range repo.files {
-		if !strings.HasPrefix(p, prefix) {
-			continue
-		}
-		rest := strings.TrimPrefix(p, prefix)
-		if i := strings.Index(rest, "/"); i >= 0 {
-			name := rest[:i]
-			if _, ok := seen[name]; !ok {
-				seen[name] = map[string]any{"name": name, "path": prefix + name, "type": "dir"}
-			}
-			continue
-		}
-		seen[rest] = map[string]any{"name": rest, "path": p, "type": "file", "sha": f.sha}
-	}
-	if len(seen) == 0 {
+	// Preserve the historical contract: the root (""/"/") never lists.
+	// GitHub has no root-contents listing on this route and prune's
+	// enumeration always passes a real directory prefix.
+	if strings.Trim(dirPath, "/") == "" {
 		return nil, false
 	}
-	out := make([]map[string]any, 0, len(seen))
-	for _, e := range seen {
-		out = append(out, e)
+	dir := strings.TrimSuffix(dirPath, "/")
+	kids, ok := repo.dirChildren[dir]
+	if !ok || len(kids) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(kids))
+	for name := range kids {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		if kids[name] {
+			out = append(out, map[string]any{"name": name, "path": dir + "/" + name, "type": "dir"})
+			continue
+		}
+		p := dir + "/" + name
+		sha := ""
+		if f := repo.files[p]; f != nil {
+			sha = f.sha
+		}
+		out = append(out, map[string]any{"name": name, "path": p, "type": "file", "sha": sha})
 	}
 	return out, true
 }
@@ -3591,11 +3935,8 @@ func (m *mockGitHub) handlePutContent(w http.ResponseWriter, r *http.Request, re
 	}
 	// Compute real git blob SHA instead of fake counter-based SHA
 	blobSHA := computeGitBlobSHA(data)
-	repo.files[filePath] = &mockFile{path: filePath, sha: blobSHA, data: append([]byte(nil), data...)}
-	commitSHA := fmt.Sprintf("commit-%d", repo.nextCommitID)
-	repo.nextCommitID++
-	commit := mockCommit{sha: commitSHA, message: payload.Message, path: filePath, data: append([]byte(nil), data...), when: time.Unix(1700000000+repo.nextCommitID, 0).UTC()}
-	repo.commitsByPath[filePath] = append([]mockCommit{commit}, repo.commitsByPath[filePath]...)
+	m.putMockFileLocked(repo, filePath, data)
+	commitSHA := m.recordMockCommitLocked(repo, filePath, payload.Message, data, false)
 	// Mirror GitHub: creating a new file answers 201, updating 200.
 	status := http.StatusOK
 	if current == nil {
@@ -3736,45 +4077,75 @@ func (m *mockGitHub) handleListReleaseAssets(w http.ResponseWriter, r *http.Requ
 // embedCap is set; the dedicated list-assets endpoint always serves truth.
 func (m *mockGitHub) embeddedAssetsLocked(repo *mockRepo, tag string) []map[string]any {
 	assets := m.releaseAssetsLocked(repo, tag)
-	if m.embedCap > 0 && len(assets) > m.embedCap {
-		assets = assets[:m.embedCap]
+	if cap := m.faults.embedCap; cap > 0 && len(assets) > cap {
+		assets = assets[:cap]
 	}
 	return assets
 }
 
 func (m *mockGitHub) releaseAssetsLocked(repo *mockRepo, tag string) []map[string]any {
-	type assetRow struct {
-		id   int64
-		name string
-		size int
-	}
-	rows := make([]assetRow, 0)
-	for _, asset := range repo.assets {
-		if asset.releaseTag == tag {
-			rows = append(rows, assetRow{id: asset.id, name: asset.name, size: len(asset.data)})
-		}
+	// O(tag assets) via the per-tag index (was: a scan of every asset in
+	// the repo per call, O(R*A) per releases page when embedded).
+	byTag := repo.assetsByTag[tag]
+	rows := make([]*mockAsset, 0, len(byTag))
+	for _, asset := range byTag {
+		rows = append(rows, asset)
 	}
 	// Deterministic embed order: GitHub lists assets by ascending
 	// ID; Go map iteration is random.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].id < rows[j].id })
 	assets := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		assets = append(assets, map[string]any{"id": row.id, "name": row.name, "size": row.size})
+	for _, asset := range rows {
+		assets = append(assets, map[string]any{"id": asset.id, "name": asset.name, "size": len(asset.data)})
 	}
 	return assets
+}
+
+// tagAssetLocked adds asset to the per-tag index. Caller holds m.mu.
+func tagAssetLocked(repo *mockRepo, asset *mockAsset) {
+	if repo.assetsByTag == nil {
+		repo.assetsByTag = make(map[string]map[int64]*mockAsset)
+	}
+	byTag := repo.assetsByTag[asset.releaseTag]
+	if byTag == nil {
+		byTag = make(map[int64]*mockAsset)
+		repo.assetsByTag[asset.releaseTag] = byTag
+	}
+	byTag[asset.id] = asset
+}
+
+// untagAssetLocked removes id from the per-tag index. Caller holds m.mu.
+func untagAssetLocked(repo *mockRepo, tag string, id int64) {
+	byTag := repo.assetsByTag[tag]
+	if byTag == nil {
+		return
+	}
+	delete(byTag, id)
+	if len(byTag) == 0 {
+		delete(repo.assetsByTag, tag)
+	}
+}
+
+// parsePaging extracts (perPage, page) from a query once for both the
+// slicer and the Link-header writer. A missing/invalid per_page defaults
+// to 30 like real GitHub (was: "return everything"), so a client that
+// forgets per_page still pages instead of passing vacuously.
+func parsePaging(query url.Values) (perPage, page int) {
+	perPage, _ = strconv.Atoi(query.Get("per_page"))
+	page, _ = strconv.Atoi(query.Get("page"))
+	if perPage <= 0 {
+		perPage = 30
+	}
+	if page <= 0 {
+		page = 1
+	}
+	return perPage, page
 }
 
 // writePaginationLinks mirrors GitHub's RFC 5988 Link headers so paging is
 // observable without relying on body-length heuristics.
 func (m *mockGitHub) writePaginationLinks(w http.ResponseWriter, r *http.Request, total int) {
-	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if perPage <= 0 {
-		return
-	}
-	if page <= 0 {
-		page = 1
-	}
+	perPage, page := parsePaging(r.URL.Query())
 	last := (total + perPage - 1) / perPage
 	if last < 1 {
 		last = 1
@@ -3806,6 +4177,7 @@ func (m *mockGitHub) handleDeleteRelease(w http.ResponseWriter, repo *mockRepo, 
 	}
 	delete(repo.releasesByID, releaseID)
 	delete(repo.releasesByTag, release.tag)
+	delete(repo.assetsByTag, release.tag)
 	for id, asset := range repo.assets {
 		if asset.releaseTag == release.tag {
 			delete(repo.assets, id)
@@ -3839,27 +4211,25 @@ func (m *mockGitHub) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Fault injection: one forced name collision for the sink retry test.
-	if m.collideNext[parts[1]+"/"+parts[2]] {
-		delete(m.collideNext, parts[1]+"/"+parts[2])
+	if m.faults.collideNext[parts[1]+"/"+parts[2]] {
+		delete(m.faults.collideNext, parts[1]+"/"+parts[2])
 		m.writeAlreadyExists(w, "ReleaseAsset", "name", name)
 		return
 	}
 	// Mirror GitHub: asset names are unique per release; a duplicate 422s.
-	for _, asset := range repo.assets {
-		if asset.releaseTag == parts[2] && asset.name == name {
+	// The per-tag index answers both the dup check and the count below in
+	// one pass (was: two full asset scans per upload, O(N^2) to fill).
+	byTag := repo.assetsByTag[parts[2]]
+	for _, asset := range byTag {
+		if asset.name == name {
 			m.writeAlreadyExists(w, "ReleaseAsset", "name", name)
 			return
 		}
 	}
-	// Mirror GitHub: a release holds at most 1000 assets; further uploads
-	// 422 with a file_count body (live shape from storhub-web v18).
-	count := 0
-	for _, asset := range repo.assets {
-		if asset.releaseTag == parts[2] {
-			count++
-		}
-	}
-	if count >= 1000 {
+	// Mirror GitHub: a release holds at most releaseAssetCap assets;
+	// further uploads 422 with a file_count body (live shape from
+	// storhub-web v18).
+	if len(byTag) >= releaseAssetCap {
 		m.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"message": "Validation Failed",
 			"errors": []map[string]any{{
@@ -3871,8 +4241,9 @@ func (m *mockGitHub) handleUpload(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	asset := &mockAsset{id: m.nextAssetID.Add(1), name: name, releaseTag: parts[2], data: append([]byte(nil), data...)}
+	asset := &mockAsset{id: globalMockAssetID.Add(1), name: name, releaseTag: parts[2], data: append([]byte(nil), data...)}
 	repo.assets[asset.id] = asset
+	tagAssetLocked(repo, asset)
 	m.writeJSON(w, http.StatusCreated, map[string]any{"id": asset.id, "name": asset.name})
 }
 
@@ -3883,8 +4254,8 @@ func (m *mockGitHub) handleDownloadAsset(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	m.mu.Lock()
-	asset := repo.assets[assetID]
-	if asset == nil {
+	asset, ok := repo.assets[assetID]
+	if !ok {
 		m.mu.Unlock()
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
 		return
@@ -3905,26 +4276,27 @@ func (m *mockGitHub) handleDownloadAsset(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
-	location := fmt.Sprintf("%s/cdn/%d", m.server.URL, assetID)
-	if ttl := m.cdnTTL.Load(); ttl > 0 {
-		location = fmt.Sprintf("%s/cdn/%d?exp=%d", m.server.URL, assetID, time.Now().Add(time.Duration(ttl)).UnixNano())
-	}
-	w.Header().Set("Location", location)
+	w.Header().Set("Location", m.mintSignedCDNURL(assetID))
 	w.WriteHeader(http.StatusFound)
 }
 
 // handleCDN serves signed-URL range fetches: no auth required (the URL is
 // the bearer credential), Range honored, Accept-Ranges advertised. When
-// the URL carries an exp deadline (cdnTTL armed) an expired fetch 403s
-// like GitHub's expired Azure SAS does, forcing the client to re-resolve
-// through the API.
+// the URL carries expiries (cdnTTL armed) an expired fetch 403s like
+// GitHub's expired Azure SAS does, forcing the client to re-resolve
+// through the API. A one-shot 618 (cdnFail618Once) mirrors the front-door
+// JWT dying first, which the client also re-resolves.
 func (m *mockGitHub) handleCDN(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "" {
-		m.cdnSawAuth.Store(true)
+		m.faults.cdnSawAuth.Store(true)
 	}
-	if exp := r.URL.Query().Get("exp"); exp != "" {
-		shift := m.cdnTimeShift.Swap(0)
-		if when, err := strconv.ParseInt(exp, 10, 64); err == nil && time.Now().Add(time.Duration(shift)).UnixNano() > when {
+	if m.faults.cdnFail618Once.CompareAndSwap(true, false) {
+		m.writeJSON(w, ghapi.StatusSignedURLExpired, map[string]any{"message": "jwt:expired"})
+		return
+	}
+	if exp, ok := mockSignedURLExpiry(r.URL.Query()); ok {
+		shift := m.faults.cdnTimeShift.Swap(0)
+		if m.mockTime().Add(time.Duration(shift)).After(exp) {
 			m.writeJSON(w, http.StatusForbidden, map[string]any{"message": "Signature is not valid on this request"})
 			return
 		}
@@ -3935,17 +4307,22 @@ func (m *mockGitHub) handleCDN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.mu.Lock()
+	asset, ok := m.findAssetLocked(assetID)
 	var data []byte
-	for _, repo := range m.repos {
-		if asset := repo.assets[assetID]; asset != nil {
-			data = append([]byte(nil), asset.data...)
-			break
-		}
+	if ok {
+		data = append([]byte(nil), asset.data...)
 	}
 	m.mu.Unlock()
-	if data == nil {
+	if !ok {
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
 		return
+	}
+	if delay := m.faults.cdnDelay.Load(); delay > 0 {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(time.Duration(delay)):
+		}
 	}
 	start, end, partial, err := resolveByteRange(r.Header.Get("Range"), int64(len(data)))
 	if err != nil {
@@ -3974,10 +4351,12 @@ func (m *mockGitHub) handleDeleteAsset(w http.ResponseWriter, repo *mockRepo, ra
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := repo.assets[assetID]; !ok {
+	asset, ok := repo.assets[assetID]
+	if !ok {
 		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
 		return
 	}
+	untagAssetLocked(repo, asset.releaseTag, assetID)
 	delete(repo.assets, assetID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -4025,8 +4404,9 @@ func (m *mockGitHub) addAssetToRelease(t *testing.T, project, tag, name string, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	asset := &mockAsset{id: m.nextAssetID.Add(1), name: name, releaseTag: tag, data: append([]byte(nil), data...)}
+	asset := &mockAsset{id: globalMockAssetID.Add(1), name: name, releaseTag: tag, data: append([]byte(nil), data...)}
 	repo.assets[asset.id] = asset
+	tagAssetLocked(repo, asset)
 	return asset.id
 }
 
@@ -4045,6 +4425,9 @@ func (m *mockGitHub) removeAsset(t *testing.T, project string, assetID int64) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if asset, ok := repo.assets[assetID]; ok {
+		untagAssetLocked(repo, asset.releaseTag, assetID)
+	}
 	delete(repo.assets, assetID)
 }
 
@@ -4064,8 +4447,7 @@ func (m *mockGitHub) setMetadata(t *testing.T, project string, md *RepoMetadata)
 			t.Fatalf("build tree: %v", err)
 		}
 		for sha, data := range res.Objects {
-			p := objectRepoPath(sha)
-			repo.files[p] = &mockFile{path: p, sha: computeGitBlobSHA(data), data: append([]byte(nil), data...)}
+			m.putMockFileLocked(repo, objectRepoPath(sha), data)
 		}
 		mf := &meta.Manifest{
 			Version: meta.CurrentVersion, Project: md.Project, TreeRoot: res.RootSHA,
@@ -4077,24 +4459,18 @@ func (m *mockGitHub) setMetadata(t *testing.T, project string, md *RepoMetadata)
 		if err != nil {
 			t.Fatalf("marshal manifest: %v", err)
 		}
-		repo.files[indexFilePath] = &mockFile{path: indexFilePath, sha: computeGitBlobSHA(mb), data: mb}
+		m.putMockFileLocked(repo, indexFilePath, mb)
 		return
 	}
 	payload, err := md.ToJSON()
 	if err != nil {
 		t.Fatalf("marshal metadata: %v", err)
 	}
-	file := repo.files[metadataFilePath]
-	if file == nil {
-		file = &mockFile{path: metadataFilePath}
-		repo.files[metadataFilePath] = file
-	}
-	file.data = append([]byte(nil), payload...)
 	// Mirror GitHub's stored blob sha: the client computes its
 	// CAS token locally from raw bytes, so a fake counter sha would make
 	// a read-modify-write of seeded legacy state 409 on a precondition
 	// that passes against the real API.
-	file.sha = computeGitBlobSHA(payload)
+	m.putMockFileLocked(repo, metadataFilePath, payload)
 }
 
 func (m *mockGitHub) assertRepoStats(t *testing.T, project string, files int, size int64) {
@@ -4163,6 +4539,34 @@ func (m *mockGitHub) writeAlreadyExists(w http.ResponseWriter, resource, field, 
 	})
 }
 
+// TestMockBlobSHAMatchesGitVectors cross-pins the mock's local blob-SHA
+// oracle against git's documented hashes: the empty blob must hash to
+// e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 (git hash-object -t blob
+// /dev/null), and the digest must be sensitive to both content and length.
+// If the production helper drifts from real git, this fails while the
+// integration pins keep passing, isolating the oracle from the client.
+func TestMockBlobSHAMatchesGitVectors(t *testing.T) {
+	t.Parallel()
+	if got := computeGitBlobSHA(nil); got != "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {
+		t.Fatalf("empty blob SHA = %q, want git's e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", got)
+	}
+	a := computeGitBlobSHA([]byte("hello"))
+	b := computeGitBlobSHA([]byte("hello!"))
+	c := computeGitBlobSHA([]byte("hello"))
+	if len(a) != 40 {
+		t.Fatalf("blob SHA must be 40-hex, got %q", a)
+	}
+	if a == b {
+		t.Fatal("blob SHA must be content-sensitive")
+	}
+	if a != c {
+		t.Fatal("blob SHA must be deterministic")
+	}
+	if computeGitBlobSHA([]byte("")) != computeGitBlobSHA(nil) {
+		t.Fatal("empty slice and nil must hash identically (length-0 header)")
+	}
+}
+
 func writeTempFile(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -4176,14 +4580,7 @@ func paginateSlice[T any](items []T, query url.Values) []T {
 	if query == nil {
 		return items
 	}
-	perPage, _ := strconv.Atoi(query.Get("per_page"))
-	page, _ := strconv.Atoi(query.Get("page"))
-	if perPage <= 0 {
-		perPage = len(items)
-	}
-	if page <= 0 {
-		page = 1
-	}
+	perPage, page := parsePaging(query)
 	start := (page - 1) * perPage
 	if start >= len(items) {
 		return nil
@@ -4416,19 +4813,11 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 	}
 
 	// Let the async commit loop drain so eviction preconditions hold.
-	cleanDeadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, time.Second, "metadata drain before forced eviction", func() bool {
 		pm.mu.Lock()
-		dirty := pm.dirty
-		pm.mu.Unlock()
-		if !dirty {
-			break
-		}
-		if time.Now().After(cleanDeadline) {
-			t.Fatal("metadata never drained before forced eviction")
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
+		defer pm.mu.Unlock()
+		return !pm.dirty
+	})
 
 	// Simulate eviction racing an in-flight operation.
 	hub.metaMu.Lock()
@@ -4462,12 +4851,12 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 	}
 
 	// The revived commit loop must eventually publish the late change.
-	pollDeadline := time.Now().Add(3 * time.Second)
+	pollDeadline := time.Now().Add(time.Second)
 	for time.Now().Before(pollDeadline) {
 		if _, err := hub.StatPathContext(ctx, project, "late"); err == nil {
 			return
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("revived metadata never committed the late mutation")
 }
@@ -4626,7 +5015,7 @@ func mockRaw(t *testing.T, backend *mockGitHub, method, path string, body any) *
 	if err != nil {
 		t.Fatalf("build raw request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Authorization", "Bearer "+backend.token)
 	resp, err := backend.server.Client().Do(req)
 	if err != nil {
 		t.Fatalf("raw %s %s: %v", method, path, err)
@@ -4700,6 +5089,16 @@ func TestMockUnknownRefIs404(t *testing.T) {
 		return mockRaw(t, backend, http.MethodGet, p, nil).StatusCode
 	}
 	putRawStatus(t, backend, "ref404", "a.txt", map[string]any{"message": "a1", "content": base64.StdEncoding.EncodeToString([]byte("a1"))})
+	// commit SHAs are 40-hex like prod; resolve them dynamically instead of
+	// pinning the old counter shape.
+	revsA, err := hub.gh.ListFileCommits(ctx, hub.Owner(), "ref404", "a.txt")
+	if err != nil || len(revsA) != 1 {
+		t.Fatalf("list a.txt commits: %v %+v", err, revsA)
+	}
+	commitA := revsA[0].SHA
+	if len(commitA) != 40 {
+		t.Fatalf("mock commit SHAs must be 40-hex like prod, got %q", commitA)
+	}
 	// commit-1 created a.txt. An unknown SHA must 404, not serve HEAD.
 	if got := get("a.txt", "0123456789abcdef"); got != http.StatusNotFound {
 		t.Fatalf("unknown ref must 404, got %d", got)
@@ -4707,7 +5106,12 @@ func TestMockUnknownRefIs404(t *testing.T) {
 	// A commit that touched a DIFFERENT path still resolves: b.txt's
 	// create commit sees a.txt at its commit-1 content.
 	putRawStatus(t, backend, "ref404", "b.txt", map[string]any{"message": "b1", "content": base64.StdEncoding.EncodeToString([]byte("b1"))})
-	resp := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/ref404/contents/a.txt?ref=commit-2", nil)
+	revsB, err := hub.gh.ListFileCommits(ctx, hub.Owner(), "ref404", "b.txt")
+	if err != nil || len(revsB) != 1 {
+		t.Fatalf("list b.txt commits: %v %+v", err, revsB)
+	}
+	commitB := revsB[0].SHA
+	resp := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/ref404/contents/a.txt?ref="+commitB, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("valid cross-path ref must resolve, got %d", resp.StatusCode)
 	}
@@ -4716,7 +5120,7 @@ func TestMockUnknownRefIs404(t *testing.T) {
 		t.Fatalf("ref read must serve the at-or-before content, got %q", body)
 	}
 	// b.txt did not exist at commit-1: 404 Not Found (not HEAD!).
-	if got := get("b.txt", "commit-1"); got != http.StatusNotFound {
+	if got := get("b.txt", commitA); got != http.StatusNotFound {
 		t.Fatalf("path created after ref must 404, got %d", got)
 	}
 	// HEAD and the default branch resolve to current state.
@@ -4768,7 +5172,7 @@ func TestMockDirListingOverCapIs403(t *testing.T) {
 	backend.mu.Lock()
 	for i := 0; i <= contentsListingCap; i++ {
 		name := fmt.Sprintf("big/f%05d", i)
-		repo.files[name] = &mockFile{path: name, sha: computeGitBlobSHA([]byte(name)), data: []byte(name)}
+		backend.putMockFileLocked(repo, name, []byte(name))
 	}
 	backend.mu.Unlock()
 	resp := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/cap403/contents/big", nil)
@@ -4781,7 +5185,7 @@ func TestMockDirListingOverCapIs403(t *testing.T) {
 	}
 	// At the cap the listing still answers.
 	backend.mu.Lock()
-	delete(repo.files, "big/f00000")
+	backend.deleteMockFileLocked(repo, "big/f00000")
 	backend.mu.Unlock()
 	if got := mockRaw(t, backend, http.MethodGet, "/repos/"+backend.owner+"/cap403/contents/big", nil).StatusCode; got != http.StatusOK {
 		t.Fatalf("listing at the cap must 200, got %d", got)
@@ -4877,7 +5281,7 @@ func TestMockReleasesListedNewestFirst(t *testing.T) {
 func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
-	backend.rateLimitOnce.Store(true)
+	backend.armRateLimit()
 	req, _ := http.NewRequest(http.MethodGet, backend.server.URL+"/cdn/404110", nil)
 	resp, err := backend.server.Client().Do(req)
 	if err != nil {
@@ -4890,8 +5294,8 @@ func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
 	if got := mockRaw(t, backend, http.MethodGet, "/user", nil).StatusCode; got != http.StatusTooManyRequests {
 		t.Fatalf("API route must take the armed fault, got %d", got)
 	}
-	if backend.rateLimitServed.Load() != 1 {
-		t.Fatalf("fault must fire exactly once, served=%d", backend.rateLimitServed.Load())
+	if backend.faults.rateLimitServed.Load() != 1 {
+		t.Fatalf("fault must fire exactly once, served=%d", backend.faults.rateLimitServed.Load())
 	}
 }
 
@@ -4900,7 +5304,7 @@ func TestMockRateLimitFaultScopedToAPIRoutes(t *testing.T) {
 func TestMockCDNExpiryForcesReResolution(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
-	backend.cdnTTL.Store(int64(50 * time.Millisecond))
+	backend.faults.SetCDNTTL(50 * time.Millisecond)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	payload := []byte("expiring cdn payload")
@@ -4924,7 +5328,10 @@ func TestMockCDNExpiryForcesReResolution(t *testing.T) {
 	}
 	// Event, not wall clock: shift the CDN's expiry clock past the TTL
 	// once, so the cached signed URL is provably stale for the next fetch.
-	backend.cdnTimeShift.Store(int64(60 * time.Millisecond))
+	// The shift (2s, virtual - zero wall cost) must exceed the minted
+	// whole-second JWT exp (up to ~1s out: 50ms TTL rounded up), or the
+	// cached URL would still verify and no re-resolution would fire.
+	backend.expireCDNOnce(2 * time.Second)
 	if err := hub.DownloadFileContext(ctx, "cdnexp", "exp.txt", out); err != nil {
 		t.Fatalf("download with expired cached URL must re-resolve, got: %v", err)
 	}

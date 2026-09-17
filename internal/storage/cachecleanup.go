@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 )
@@ -121,6 +122,44 @@ func projectDirIsOrphan(base, project string) bool {
 	return pid == 0 || !pidAlive(pid)
 }
 
+// reapDirs is the single home of the reaper's ReadDir/RemoveAll/Warn/Info
+// loop (audit 24): reapOrphaned (git mirrors + legacy roots) and
+// reapOrphanedObjectCaches (lock-judged object dirs) shared only the shape
+// through duplicated code. shouldReap decides per entry (returning keep =
+// false skips); after runs on each successful removal (e.g. lock release).
+// Best-effort: one undeletable entry never stops the rest. Returns the
+// number of directories reclaimed.
+func reapDirs(logger *slog.Logger, label, base string, shouldReap func(name string, entry os.DirEntry) (reap bool), after func(name string)) int {
+	if base == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return 0
+	}
+	reaped := 0
+	for _, entry := range entries {
+		if !shouldReap(entry.Name(), entry) {
+			continue
+		}
+		dir := filepath.Join(base, entry.Name())
+		if err := os.RemoveAll(dir); err != nil {
+			if logger != nil {
+				logger.Warn("cache reaper could not remove "+label, "dir", dir, "err", err)
+			}
+			continue
+		}
+		reaped++
+		if after != nil {
+			after(entry.Name())
+		}
+		if logger != nil {
+			logger.Info("reaped "+label, "dir", dir)
+		}
+	}
+	return reaped
+}
+
 // reapOrphanedProjects removes per-project cache directories whose owner
 // is gone, plus legacy top-level storhub-git-<pid> roots from before the
 // XDG layout. Best-effort: one undeletable entry never stops the rest.
@@ -131,53 +170,97 @@ func reapOrphaned(logger *slog.Logger, bases ...string) int {
 		if base == "" {
 			continue
 		}
-		entries, err := os.ReadDir(base)
+		b := base
+		reaped += reapDirs(logger, "orphaned cache entry", b, func(name string, entry os.DirEntry) bool {
+			switch {
+			case name == locksDirName:
+				return false
+			case entry.IsDir():
+				// Project cache dir: orphan when unlocked or dead-locked.
+				return projectDirIsOrphan(b, name)
+			case legacyRunDirPattern.MatchString(name):
+				// Legacy whole-root naming; pid decides liveness.
+				m := legacyRunDirPattern.FindStringSubmatch(name)
+				pid, _ := strconv.Atoi(m[1])
+				return !pidAlive(pid)
+			default:
+				return false
+			}
+		}, func(name string) { releaseProjectLock(b, name) })
+	}
+	return reaped
+}
+
+// spoolOrphanAge bounds how long a crashed upload's spool file may linger:
+// live spools exist only for one asset-window upload (bounded by the HTTP
+// client's own timeout, minutes), so anything older died with its uploader
+// (audit 31: ReapOrphanedCaches swept git/objects/legacy-tmp but never
+// rest/upload-*).
+const spoolOrphanAge = time.Hour
+
+// reapSpoolDir removes upload-* spool files older than maxAge by mtime in
+// dir (flat layout, no per-upload dirs). Live uploads hold young files;
+// only crash orphans age out. Best-effort; returns files reclaimed.
+// A missing dir is not an error (nothing ever spooled there).
+func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	reaped := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "upload-") {
+			continue
+		}
+		p := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		for _, entry := range entries {
-			dir := filepath.Join(base, entry.Name())
-			switch {
-			case entry.Name() == locksDirName:
-				continue
-			case entry.IsDir():
-				// Project cache dir: orphan when unlocked or dead-locked.
-				if !projectDirIsOrphan(base, entry.Name()) {
-					continue
-				}
-			case legacyRunDirPattern.MatchString(entry.Name()):
-				// Legacy whole-root naming; pid decides liveness.
-				m := legacyRunDirPattern.FindStringSubmatch(entry.Name())
-				pid, _ := strconv.Atoi(m[1])
-				if pidAlive(pid) {
-					continue
-				}
-			default:
-				continue
-			}
-			if err := os.RemoveAll(dir); err != nil {
-				if logger != nil {
-					logger.Warn("cache reaper could not remove orphan", "dir", dir, "err", err)
-				}
-				continue
-			}
-			reaped++
-			releaseProjectLock(base, entry.Name())
+		if now.Sub(info.ModTime()) < maxAge {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
 			if logger != nil {
-				logger.Info("reaped orphaned cache entry", "dir", dir)
+				logger.Warn("cache reaper could not remove orphaned spool file", "file", p, "err", err)
 			}
+			continue
+		}
+		reaped++
+		if logger != nil {
+			logger.Info("reaped orphaned spool file", "file", p)
 		}
 	}
 	return reaped
 }
 
 // ReapOrphanedCaches reclaims storhub cache leftovers in the standard
-// locations: the git base, the object cache base, and the legacy
-// temp-directory pattern. Used by hub startup and by `storhub cache prune`.
+// locations: the git base, the object cache base, crashed-upload spool
+// files (by mtime), and the legacy temp-directory pattern. Used by hub
+// startup and by `storhub cache prune`.
 func ReapOrphanedCaches(logger *slog.Logger) int {
-	gitBase := storcfg.DefaultGitCacheBase()
+	return ReapOrphanedCachesForBase(logger, storcfg.CacheBase())
+}
+
+// ReapOrphanedCachesForBase reclaims every cache class beneath one base
+// (git/objects/rest + the legacy storhub/rest spool shim): the
+// test-injectable form of ReapOrphanedCaches, which passes the process
+// CacheBase. Object liveness is judged by the git worktree lock, spool
+// files by mtime (live spools are young).
+func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
+	if base == "" {
+		return 0
+	}
+	gitBase := filepath.Join(base, "git")
+	objectsBase := filepath.Join(base, "objects")
 	reaped := reapOrphaned(logger, gitBase, os.TempDir())
-	reaped += reapOrphanedObjectCaches(logger, storcfg.DefaultObjectCacheBase(), gitBase)
+	reaped += reapOrphanedObjectCaches(logger, objectsBase, gitBase)
+	// Spool sweep by mtime: current path plus the pre-fix double-storhub
+	// shim (<base>/storhub/rest), which spoolBase() migrates at runtime
+	// but may still hold files when the symlink was never created.
+	reaped += reapSpoolDir(logger, filepath.Join(base, "rest"), spoolOrphanAge)
+	reaped += reapSpoolDir(logger, filepath.Join(base, "storhub", "rest"), spoolOrphanAge)
 	return reaped
 }
 
@@ -190,31 +273,12 @@ func ReapOrphanedCaches(logger *slog.Logger) int {
 // entry's content address on first read and self-heals, and every miss
 // simply refetches from the repo.
 func reapOrphanedObjectCaches(logger *slog.Logger, objectsBase, lockBase string) int {
-	entries, err := os.ReadDir(objectsBase)
-	if err != nil {
-		return 0
-	}
-	reaped := 0
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == locksDirName {
-			continue
+	return reapDirs(logger, "orphaned object cache", objectsBase, func(name string, entry os.DirEntry) bool {
+		if !entry.IsDir() || name == locksDirName {
+			return false
 		}
-		dir := filepath.Join(objectsBase, entry.Name())
-		if !projectDirIsOrphan(lockBase, entry.Name()) {
-			continue
-		}
-		if err := os.RemoveAll(dir); err != nil {
-			if logger != nil {
-				logger.Warn("cache reaper could not remove orphaned object cache", "dir", dir, "err", err)
-			}
-			continue
-		}
-		reaped++
-		if logger != nil {
-			logger.Info("reaped orphaned object cache", "dir", dir)
-		}
-	}
-	return reaped
+		return projectDirIsOrphan(lockBase, name)
+	}, nil)
 }
 
 // noSpaceError reports an out-of-space failure with the directory that

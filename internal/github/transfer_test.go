@@ -66,7 +66,7 @@ func TestUploadCallerDeadlineSurfacesWithoutSpin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := c.UploadAsset(ctx, "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
+	_, err := c.UploadAsset(ctx, server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expired deadline must surface")

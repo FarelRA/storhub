@@ -32,6 +32,7 @@ var (
 
 func TestMain(m *testing.M) {
 	code := m.Run()
+	shutdownSharedMockServer()
 	if gitSeedRoot != "" {
 		_ = os.RemoveAll(gitSeedRoot)
 	}

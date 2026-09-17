@@ -27,7 +27,7 @@ func ValidateAccessPathShape(value string) error {
 // significant - leading/trailing spaces are legal filename characters on
 // Unix and are preserved verbatim. A name consisting only of whitespace is
 // rejected here, not silently mapped to the root: the metadata store still
-// keys whitespace-only names at the root (see normalizeStoredPathErr in
+// keys whitespace-only names at the root (see normalizeStoredPath in
 // internal/metadata), so accepting one would create a root-masquerading
 // phantom entry.
 //

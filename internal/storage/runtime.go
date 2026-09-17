@@ -54,6 +54,16 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		return
 	}
 
+	// Size-ceiling gate (audit 17): a capped project can never commit
+	// growth, so appending atime ops only grows opStack toward the 4096
+	// force-retry while every commit fails oversizeError and re-arms.
+	// Drop advisory atime like noatime; direct mutation paths already
+	// gate via ensureMutableLocked (caches.go:334).
+	if pm.sizeCapped {
+		pm.mu.Unlock()
+		return
+	}
+
 	// A non-nil trigger channel means dirtiness was actually marked.
 	var trigger chan struct{}
 	// The published tree is shared with lock-free readers, so an atime bump

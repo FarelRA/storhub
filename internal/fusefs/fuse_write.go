@@ -51,6 +51,12 @@ type ByteRange struct {
 	End   int64
 }
 
+// maxDirtyRanges caps the disjoint dirty-range count per inode. Past the
+// cap the ranges coalesce into one authoritative span (see
+// ensureDirtyBounded): a sparse 1-byte-write storm must not grow the slice
+// without bound until commit clears it.
+const maxDirtyRanges = 1024
+
 type writeBootstrap struct {
 	baseSize int64
 }
@@ -124,7 +130,7 @@ func (w *inodeWriteState) materializeBootstrap(size int64) error {
 	if w.temp != nil {
 		return nil
 	}
-	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
+	temp, err := w.fs.newOverlayTemp("inode-*")
 	if err != nil {
 		return err
 	}
@@ -165,7 +171,7 @@ func (w *inodeWriteState) materialize(ctx context.Context) error {
 		return nil
 	}
 	path := w.path
-	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
+	temp, err := w.fs.newOverlayTemp("inode-*")
 	if err != nil {
 		w.mu.Unlock()
 		return err
@@ -204,7 +210,7 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 	if w.baseTemp != nil {
 		return nil
 	}
-	baseTemp, err := os.CreateTemp(w.fs.cacheDir, "inode-base-*")
+	baseTemp, err := w.fs.newOverlayTemp("inode-base-*")
 	if err != nil {
 		return err
 	}
@@ -225,10 +231,10 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 	// Re-check: another goroutine may have already set this
 	if w.baseTemp != nil {
 		if err := baseTemp.Close(); err != nil {
-			logging.Error(nil, "failed to close base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
+			logging.Error(w.fs.log(), "failed to close base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
 		}
 		if err := os.Remove(baseTempPath); err != nil {
-			logging.Error(nil, "failed to remove base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
+			logging.Error(w.fs.log(), "failed to remove base snapshot temp (duplicate)", "path", baseTempPath, "err", err)
 		}
 		return nil
 	}
@@ -240,13 +246,13 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 func (w *inodeWriteState) clearBaseSnapshotLocked() {
 	if w.baseTemp != nil {
 		if err := w.baseTemp.Close(); err != nil {
-			logging.Error(nil, "failed to close base snapshot temp", "err", err)
+			logging.Error(w.fs.log(), "failed to close base snapshot temp", "err", err)
 		}
 		w.baseTemp = nil
 	}
 	if w.baseTempPath != "" {
 		if err := os.Remove(w.baseTempPath); err != nil {
-			logging.Error(nil, "failed to remove base snapshot temp", "path", w.baseTempPath, "err", err)
+			logging.Error(w.fs.log(), "failed to remove base snapshot temp", "path", w.baseTempPath, "err", err)
 		}
 		w.baseTempPath = ""
 	}
@@ -283,9 +289,8 @@ func (w *inodeWriteState) refreshBaseSnapshotLocked() error {
 }
 
 // markDirtyLocked records [start,end) as dirty, merging with touching or
-// overlapping ranges. The dirty set stays sorted and disjoint. The merge
-// reuses the existing slice (the old form allocated a fresh range slice on
-// every single write).
+// overlapping ranges. The dirty set stays sorted and disjoint, reusing the
+// existing slice instead of allocating a fresh one per write.
 func (w *inodeWriteState) markDirtyLocked(start, end int64) {
 	if start < 0 {
 		start = 0
@@ -317,6 +322,110 @@ func (w *inodeWriteState) markDirtyLocked(start, end int64) {
 	}
 	w.dirtyRanges[i] = ByteRange{Start: start, End: end}
 	w.dirtyRanges = append(w.dirtyRanges[:i+1], w.dirtyRanges[j:]...)
+}
+
+// ensureDirtyBounded enforces maxDirtyRanges after a mark. Past the cap the
+// dirty set collapses to one span and the temp is made authoritative (see
+// coalesceDirtyLocked), so the bound holds no matter how fragmented the
+// write pattern gets. Caller must hold opMu and w.mu; the backfill may drop
+// and re-acquire w.mu around base reads (opMu stays held, so no commit or
+// competing read interleaves).
+func (w *inodeWriteState) ensureDirtyBounded(ctx context.Context) error {
+	if len(w.dirtyRanges) <= maxDirtyRanges {
+		return nil
+	}
+	if w.tempAuthoritative {
+		// The temp already holds the whole file: collapsing is honest
+		// with no backfill.
+		w.dirtyRanges = []ByteRange{{Start: 0, End: w.logicalSize}}
+		if w.logicalSize == 0 {
+			w.dirtyRanges = nil
+		}
+		return nil
+	}
+	return w.coalesceDirtyLocked(ctx)
+}
+
+// coalesceDirtyLocked materializes the full logical content into the temp
+// (backfilling clean gaps from the base snapshot or the hub) and collapses
+// the dirty set to a single [0, logicalSize) span with tempAuthoritative
+// set. Collapsing without the backfill would corrupt: clean regions would
+// serve temp holes (zeros) instead of base bytes on reads, and the commit
+// would upload those zeros over real data. On backfill failure the honest
+// range set is left intact and the error propagates to the writer.
+func (w *inodeWriteState) coalesceDirtyLocked(ctx context.Context) error {
+	if err := w.ensureTempLocked(); err != nil {
+		return err
+	}
+	honest := append([]ByteRange(nil), w.dirtyRanges...)
+	baseSize := w.baseSize
+	logicalSize := w.logicalSize
+	// Backfill every clean gap below the base size: above it the temp
+	// holes already read as the logical zeros.
+	pos := int64(0)
+	for _, r := range honest {
+		if err := w.backfillGapLocked(ctx, pos, r.Start, baseSize); err != nil {
+			return err
+		}
+		pos = r.End
+	}
+	if err := w.backfillGapLocked(ctx, pos, logicalSize, baseSize); err != nil {
+		return err
+	}
+	if err := w.temp.Truncate(logicalSize); err != nil {
+		return err
+	}
+	w.dirtyRanges = []ByteRange{{Start: 0, End: logicalSize}}
+	if logicalSize == 0 {
+		w.dirtyRanges = nil
+	}
+	w.tempAuthoritative = true
+	return nil
+}
+
+// backfillGapLocked copies the base bytes for the clean gap [from, to)
+// into the temp. Ranges at or above the base size need nothing: temp holes
+// already read as the logical zeros there. Reads prefer the local base
+// snapshot when one exists and fall back to the hub.
+func (w *inodeWriteState) backfillGapLocked(ctx context.Context, from, to, baseSize int64) error {
+	if from < 0 {
+		from = 0
+	}
+	if to > baseSize {
+		to = baseSize
+	}
+	if from >= to {
+		return nil
+	}
+	buf := make([]byte, w.fs.copyPageSize())
+	for offset := from; offset < to; {
+		want := int64(len(buf))
+		if remaining := to - offset; want > remaining {
+			want = remaining
+		}
+		var n int
+		var err error
+		if w.baseTemp != nil {
+			n, err = w.baseTemp.ReadAt(buf[:want], offset)
+		} else {
+			var data []byte
+			data, err = w.readBaseRangeLocked(ctx, offset, want)
+			if err == nil {
+				n = copy(buf, data)
+			}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+		if _, err := w.temp.WriteAt(buf[:n], offset); err != nil {
+			return err
+		}
+		offset += int64(n)
+	}
+	return nil
 }
 
 func (w *inodeWriteState) truncateDirtyRangesLocked(size int64) {
@@ -398,7 +507,7 @@ func (w *inodeWriteState) ensureTempLocked() error {
 	if w.temp != nil {
 		return nil
 	}
-	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-*")
+	temp, err := w.fs.newOverlayTemp("inode-*")
 	if err != nil {
 		return err
 	}
@@ -605,33 +714,46 @@ func totalByteRanges(ranges []ByteRange) int64 {
 	return total
 }
 
+// Commit-strategy thresholds: when ranged patching costs more than a
+// wholesale rewrite. shouldReplaceLocked checks them top to bottom; every
+// arm is live policy for when per-range overhead (one metadata commit
+// each) dominates.
+const (
+	// replaceDirtyFracNum/replaceDirtyFracDen: dirty >= 3/4 of the file:
+	// patching would rewrite most of the file a range at a time.
+	replaceDirtyFracNum = 3
+	replaceDirtyFracDen = 4
+	// replaceFragRanges/replaceFragCoverNum/replaceFragCoverDen: >= 12
+	// dirty ranges covering >= 1/3 of the file: fragmentation dominates.
+	replaceFragRanges   = 12
+	replaceFragCoverNum = 1
+	replaceFragCoverDen = 3
+	// replaceHalfNum/replaceHalfDen: dirty >= 1/2 of the file: the
+	// break-even point where replace wins unconditionally.
+	replaceHalfNum = 1
+	replaceHalfDen = 2
+	// rewriteRangesMany: >= 4 planned ranges: rebuild the touched chunks
+	// wholesale when fragmentation is high but byte volume is modest.
+	rewriteRangesMany = 4
+	// rewriteRangesSome: >= 2 planned ranges covering < 1/2 of the file.
+	rewriteRangesSome = 2
+)
+
 // shouldReplaceLocked decides whether pending writes escalate to a
 // full-file replace (one atomic remote rewrite) instead of ranged patching.
-//
-// The ladder, checked top to bottom - every arm is live policy, tuned for
-// when ranged patching costs more than replacing:
-//
-//   - dirty ≥ 75% of the file: patching would rewrite most of the file a
-//     range at a time; replace once instead.
-//   - ≥12 dirty ranges covering ≥ 1/3 of the file: per-range overhead
-//     (one metadata commit each) dominates at this fragmentation.
-//   - dirty ≥ 50% of the file: half the file rewritten is the break-even
-//     point where replace wins unconditionally.
 func (w *inodeWriteState) shouldReplaceLocked(planned []ByteRange) bool {
-	fileSize := maxInt64(w.baseSize, w.logicalSize)
+	fileSize := max(w.baseSize, w.logicalSize)
 	if fileSize == 0 {
 		return false
 	}
 	dirtyBytes := w.dirtyBytesLocked()
-	if dirtyBytes*4 >= fileSize*3 {
+	if dirtyBytes*replaceDirtyFracDen >= fileSize*replaceDirtyFracNum {
 		return true
 	}
-	// Note: an earlier draft also had "planned >= 24 && dirtyBytes*2 >=
-	// fileSize"; it was strictly subsumed by the final arm and removed.
-	if len(planned) >= 12 && dirtyBytes*3 >= fileSize {
+	if len(planned) >= replaceFragRanges && dirtyBytes*replaceFragCoverDen >= fileSize*replaceFragCoverNum {
 		return true
 	}
-	if dirtyBytes*2 >= fileSize {
+	if dirtyBytes*replaceHalfDen >= fileSize*replaceHalfNum {
 		return true
 	}
 	return false
@@ -641,10 +763,10 @@ func (w *inodeWriteState) shouldChunkRewriteLocked(planned []ByteRange) bool {
 	if len(planned) == 0 {
 		return false
 	}
-	if len(planned) >= 4 {
+	if len(planned) >= rewriteRangesMany {
 		return true
 	}
-	if len(planned) >= 2 && totalByteRanges(planned) < maxInt64(w.baseSize, w.logicalSize)/2 {
+	if len(planned) >= rewriteRangesSome && totalByteRanges(planned) < max(w.baseSize, w.logicalSize)/2 {
 		return true
 	}
 	return false
@@ -703,37 +825,39 @@ func (w *inodeWriteState) writeWorkingRangeToLocked(out *os.File, start, end int
 	return nil
 }
 
-func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (string, error) {
-	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-commit-*")
+// newOverlayTemp creates one overlay temp file in the mount cache dir:
+// the single funnel behind write-state materialization, base snapshots,
+// handle snapshots, and commit snapshots.
+func (s *Filesystem) newOverlayTemp(prefix string) (*os.File, error) {
+	return os.CreateTemp(s.cacheDir, prefix)
+}
+
+// newSnapshotTemp creates a sized commit snapshot temp, fills it via
+// fill, then syncs and closes it, returning its path. Any failure closes
+// and removes the temp and returns the error: the snapshot is owned by the
+// calling commit frame either way.
+func (s *Filesystem) newSnapshotTemp(prefix string, size int64, fill func(*os.File) error) (string, error) {
+	temp, err := s.newOverlayTemp(prefix)
 	if err != nil {
 		return "", err
 	}
-	if err := temp.Truncate(w.logicalSize); err != nil {
-		if closeErr := temp.Close(); closeErr != nil {
-			logging.Error(nil, "failed to close commit snapshot temp after truncate error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+	name := temp.Name()
+	cleanup := true
+	defer func() {
+		if !cleanup {
+			return
 		}
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove commit snapshot temp after truncate error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+		if err := temp.Close(); err != nil {
+			logging.Error(s.log(), "failed to close snapshot temp", "path", name, "err", err)
 		}
+		if err := os.Remove(name); err != nil {
+			logging.Error(s.log(), "failed to remove snapshot temp", "path", name, "err", err)
+		}
+	}()
+	if err := temp.Truncate(size); err != nil {
 		return "", err
 	}
-	if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
-		if err := w.writeWorkingRangeToLocked(temp, 0, w.logicalSize); err != nil {
-			if closeErr := temp.Close(); closeErr != nil {
-				logging.Error(nil, "failed to close commit snapshot temp after write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
-			}
-			if removeErr := os.Remove(temp.Name()); removeErr != nil {
-				logging.Error(nil, "failed to remove commit snapshot temp after write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-			}
-			return "", err
-		}
-	} else if err := w.writeRangeToLocked(ctx, temp, 0, w.logicalSize); err != nil {
-		if closeErr := temp.Close(); closeErr != nil {
-			logging.Error(nil, "failed to close commit snapshot temp after range write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
-		}
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove commit snapshot temp after range write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
+	if err := fill(temp); err != nil {
 		return "", err
 	}
 	// Crash ordering: the snapshot is the commit's input. Sync it
@@ -741,21 +865,23 @@ func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (st
 	// so a local crash in between cannot rewrite the backend from a
 	// torn local file.
 	if err := temp.Sync(); err != nil {
-		if closeErr := temp.Close(); closeErr != nil {
-			logging.Error(nil, "failed to close commit snapshot temp after sync error", "path", temp.Name(), "closeErr", closeErr, "err", err)
-		}
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove commit snapshot temp after sync error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
 		return "", err
 	}
 	if err := temp.Close(); err != nil {
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove commit snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
+		_ = os.Remove(name)
 		return "", err
 	}
-	return temp.Name(), nil
+	cleanup = false
+	return name, nil
+}
+
+func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (string, error) {
+	return w.fs.newSnapshotTemp("inode-commit-*", w.logicalSize, func(temp *os.File) error {
+		if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
+			return w.writeWorkingRangeToLocked(temp, 0, w.logicalSize)
+		}
+		return w.writeRangeToLocked(ctx, temp, 0, w.logicalSize)
+	})
 }
 
 func (w *inodeWriteState) replaceInputPathLocked(ctx context.Context) (string, bool, error) {
@@ -773,69 +899,29 @@ func (w *inodeWriteState) replaceInputPathLocked(ctx context.Context) (string, b
 }
 
 func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges []ByteRange) (string, error) {
-	temp, err := os.CreateTemp(w.fs.cacheDir, "inode-ranges-*")
-	if err != nil {
-		return "", err
-	}
-	if err := temp.Truncate(w.logicalSize); err != nil {
-		if closeErr := temp.Close(); closeErr != nil {
-			logging.Error(nil, "failed to close range snapshot temp after truncate error", "path", temp.Name(), "closeErr", closeErr, "err", err)
-		}
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove range snapshot temp after truncate error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
-		return "", err
-	}
-	buf := make([]byte, w.fs.copyPageSize())
-	for _, r := range ranges {
-		for offset := r.Start; offset < r.End; {
-			want := int64(len(buf))
-			if remaining := r.End - offset; want > remaining {
-				want = remaining
-			}
-			n, err := w.readIntoLocked(ctx, buf[:want], offset)
-			if err != nil {
-				if closeErr := temp.Close(); closeErr != nil {
-					logging.Error(nil, "failed to close range snapshot temp after read error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+	return w.fs.newSnapshotTemp("inode-ranges-*", w.logicalSize, func(temp *os.File) error {
+		buf := make([]byte, w.fs.copyPageSize())
+		for _, r := range ranges {
+			for offset := r.Start; offset < r.End; {
+				want := int64(len(buf))
+				if remaining := r.End - offset; want > remaining {
+					want = remaining
 				}
-				if removeErr := os.Remove(temp.Name()); removeErr != nil {
-					logging.Error(nil, "failed to remove range snapshot temp after read error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+				n, err := w.readIntoLocked(ctx, buf[:want], offset)
+				if err != nil {
+					return err
 				}
-				return "", err
-			}
-			if n == 0 {
-				break
-			}
-			if _, err := temp.WriteAt(buf[:n], offset); err != nil {
-				if closeErr := temp.Close(); closeErr != nil {
-					logging.Error(nil, "failed to close range snapshot temp after write error", "path", temp.Name(), "closeErr", closeErr, "err", err)
+				if n == 0 {
+					break
 				}
-				if removeErr := os.Remove(temp.Name()); removeErr != nil {
-					logging.Error(nil, "failed to remove range snapshot temp after write error", "path", temp.Name(), "removeErr", removeErr, "err", err)
+				if _, err := temp.WriteAt(buf[:n], offset); err != nil {
+					return err
 				}
-				return "", err
+				offset += int64(n)
 			}
-			offset += int64(n)
 		}
-	}
-	// Crash ordering: same durability contract as the full commit
-	// snapshot - the chunk rewrite must read complete local bytes.
-	if err := temp.Sync(); err != nil {
-		if closeErr := temp.Close(); closeErr != nil {
-			logging.Error(nil, "failed to close range snapshot temp after sync error", "path", temp.Name(), "closeErr", closeErr, "err", err)
-		}
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove range snapshot temp after sync error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
-		return "", err
-	}
-	if err := temp.Close(); err != nil {
-		if removeErr := os.Remove(temp.Name()); removeErr != nil {
-			logging.Error(nil, "failed to remove range snapshot temp after close error", "path", temp.Name(), "removeErr", removeErr, "err", err)
-		}
-		return "", err
-	}
-	return temp.Name(), nil
+		return nil
+	})
 }
 
 func (w *inodeWriteState) closeTemp() {
@@ -847,22 +933,22 @@ func (w *inodeWriteState) closeTemp() {
 	w.closed = true
 	if w.temp != nil {
 		if err := w.temp.Close(); err != nil {
-			logging.Error(nil, "failed to close write state temp file", "err", err)
+			logging.Error(w.fs.log(), "failed to close write state temp file", "err", err)
 		}
 	}
 	if w.tempPath != "" {
 		if err := os.Remove(w.tempPath); err != nil {
-			logging.Error(nil, "failed to remove write state temp file", "path", w.tempPath, "err", err)
+			logging.Error(w.fs.log(), "failed to remove write state temp file", "path", w.tempPath, "err", err)
 		}
 	}
 	if w.baseTemp != nil {
 		if err := w.baseTemp.Close(); err != nil {
-			logging.Error(nil, "failed to close write state base temp file", "err", err)
+			logging.Error(w.fs.log(), "failed to close write state base temp file", "err", err)
 		}
 	}
 	if w.baseTempPath != "" {
 		if err := os.Remove(w.baseTempPath); err != nil {
-			logging.Error(nil, "failed to remove write state base temp file", "path", w.baseTempPath, "err", err)
+			logging.Error(w.fs.log(), "failed to remove write state base temp file", "path", w.baseTempPath, "err", err)
 		}
 	}
 	w.mu.Unlock()
@@ -931,7 +1017,6 @@ func (w *inodeWriteState) hasUncommittedChanges() bool {
 }
 
 func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	_ = ctx
 	if h.writeState == nil {
 		// No write state exists for this handle: only read-oriented
 		// materialized snapshots (e.g. displaced handles) land here. The
@@ -980,6 +1065,12 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		}
 	}
 	h.writeState.markDirtyLocked(off, end)
+	// Bound the disjoint-range count: pathological scatter patterns
+	// collapse into one authoritative span (with base backfill) instead
+	// of growing the slice until commit.
+	if err := h.writeState.ensureDirtyBounded(ctx); err != nil {
+		return uint32(n), errnoFromError(err)
+	}
 	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
 	return uint32(n), 0
 }
@@ -1102,6 +1193,7 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 		h.writeState.mu.Lock()
 		h.writeState.pending = shfs.MetadataPatch{}
 		h.writeState.mu.Unlock()
+		h.fs.dropPinnedForPath(targetPath)
 		h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 		return 0
 	}
@@ -1233,10 +1325,9 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 
 	// One batched operation for the whole commit: a single release
 	// resolution and playlist rebuild instead of one round-trip chain per
-	// range. Ascending order replaces the old right-to-left dance - no
-	// intermediate offsets to keep valid. Either the whole batch commits
-	// or none of it does, so failures leave every range dirty and the
-	// retry replays the identical batch.
+	// range. Ascending order needs no intermediate offset fixups. Either
+	// the whole batch commits or none of it does, so failures leave every
+	// range dirty and the retry replays the identical batch.
 	h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
 	if _, err := h.fs.hub.PatchFileRangesContext(ctx, h.fs.project, targetPath, edits); err != nil {
 		h.fs.debugf("commit failed path=%s inode=%d step=patch-batch err=%v", targetPath, h.inode, err)
@@ -1301,7 +1392,9 @@ func (w *inodeWriteState) commitCacheRefreshLocked(logicalSize int64) {
 	w.tempAuthoritative = false
 }
 
-// commitPostUpdate applies pending metadata, clears it, evicts inode cache, and notifies.
+// commitPostUpdate applies pending metadata, clears it, evicts the shared
+// pin for the path (the version changed, so open handles re-pin on next
+// open), and notifies.
 // Caller must NOT hold h.writeState.mu.
 func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string, pending shfs.MetadataPatch) syscall.Errno {
 	if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
@@ -1310,6 +1403,7 @@ func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string,
 	h.writeState.mu.Lock()
 	h.writeState.pending = shfs.MetadataPatch{}
 	h.writeState.mu.Unlock()
+	h.fs.dropPinnedForPath(targetPath)
 	h.fs.notifyKernelContentChanged(h.inode)
 	h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
 	return 0

@@ -23,6 +23,28 @@ import (
 
 const maxMetadataBytes = 8 << 20
 
+// Central tunables for the storage pipeline. All caps and thresholds that
+// were previously scattered as magic literals live here with their
+// rationale, so a limit change has one edit site.
+//
+//	releaseAssetCap: GitHub's per-release asset ceiling (1000). The upload
+//	  picker (workflows.go), isReleaseFull, and the mock's file_count 422
+//	  must agree on this value.
+//	maxReleaseRotations: bound on release-full rotations per chunk upload
+//	  (workflows.go chunkSink.put). Persistent-full releases (concurrent
+//	  writers) previously re-listed + re-uploaded forever; exceeding the
+//	  cap fails loudly instead.
+//	maxNameRetries: bound on asset-name collision retries per chunk.
+//	maxPendingOpsPerProject, releaseCacheTTL, metaCacheIdleTTL,
+//	sweeperInterval live in caches.go (cache residency policy); they are
+//	referenced here for discoverability but defined there to keep the
+//	cache policy in one place.
+const (
+	releaseAssetCap     = 1000
+	maxReleaseRotations = 5
+	maxNameRetries      = 5
+)
+
 var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type (
@@ -55,8 +77,8 @@ type StorHub struct {
 	gh         *ghapi.Client
 	config     storcfg.Config
 	bufferPool sync.Pool
-	ownerMu    sync.Mutex
-	repoMu     sync.Mutex
+	ownerMu    sync.RWMutex
+	repoMu     sync.RWMutex
 	repoState  map[string]bool
 	logger     *slog.Logger
 
@@ -113,9 +135,39 @@ type StorHub struct {
 	// WaitGroup-misuse window where Add raced Wait with a zero counter.
 	shutdownMu      sync.Mutex
 	shutdownStarted bool
+	// shutdownDone closes when every commit loop and the sweeper have
+	// exited (i.e. shutdownWg drains). It is created once and shared by
+	// all Shutdown callers so a timed-out Shutdown does not strand a
+	// per-call waiter goroutine parked on Wg.Wait: the waiter below is
+	// the only one, and late callers observe the same channel.
+	// Guarded by shutdownMu for creation; read-only afterwards.
+	shutdownDone chan struct{}
 	// capWarned records that the MaxTrackedProjects overflow warning has
 	// fired for the current threshold crossing; guarded by metaMu.
 	capWarned bool
+}
+
+// isValidation422 matches a 422 whose structured errors[] array carries the
+// given code/field (empty means "don't care"), falling back to a
+// lowercased substring scan for responses that predate structured parsing
+// (proxies, older mocks). It is the single home of the
+// errors.As+422+IsValidationIssue+substring pattern; isAlreadyExists and
+// isReleaseFull are thin specializations.
+func isValidation422(err error, code, field string, substrings ...string) bool {
+	var apiErr *ghapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	if apiErr.IsValidationIssue(code, field) {
+		return true
+	}
+	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
+	for _, sub := range substrings {
+		if sub != "" && strings.Contains(bodyLower, strings.ToLower(sub)) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAlreadyExists reports GitHub's duplicate-resource 422. The structural
@@ -123,30 +175,14 @@ type StorHub struct {
 // substring remains as a fallback for responses that predate structured
 // parsing (proxies, older mocks).
 func isAlreadyExists(err error) bool {
-	var apiErr *ghapi.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
-		return false
-	}
-	if apiErr.IsValidationIssue("already_exists", "") {
-		return true
-	}
-	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
-	return strings.Contains(bodyLower, "already_exists")
+	return isValidation422(err, "already_exists", "", "already_exists")
 }
 
 // isReleaseFull reports the release-asset ceiling 422. The live prod body
 // (v18 probe) carries errors[].field "file_count" - matched structurally;
 // the legacy substrings cover older body shapes.
 func isReleaseFull(err error) bool {
-	var apiErr *ghapi.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
-		return false
-	}
-	if apiErr.IsValidationIssue("", "file_count") {
-		return true
-	}
-	bodyLower := strings.ToLower(apiErr.Body + " " + apiErr.Message)
-	return strings.Contains(bodyLower, "file_count") || strings.Contains(bodyLower, "1000") || strings.Contains(bodyLower, "too many")
+	return isValidation422(err, "", "file_count", "file_count", "1000", "too many")
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
@@ -159,18 +195,48 @@ func (h *StorHub) debugf(format string, args ...any) {
 }
 
 func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
+	// Hot read paths (list/download/stat) stay silent at Debug: logging
+	// every list-files/list-releases/read at Debug turned an idle mount's
+	// thousands-of-ops-per-minute into formatted stderr traffic. Mutating
+	// and commit paths keep their Debug start; read failures still log
+	// via logOpFinish's error branch.
+	if isReadOnlyOp(op) {
+		return time.Time{}
+	}
 	logging.Debug(h.projectLogger(project), op+" start", args...)
 	return time.Now().UTC()
 }
 
 func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
+	// Demoted read ops pass a zero start (logOpStart skipped them);
+	// report a zero elapsed instead of time.Since(zero).
+	elapsed := time.Duration(0)
+	if !started.IsZero() {
+		elapsed = time.Since(started)
+	}
 	if err != nil {
-		args = append(args, "elapsed", time.Since(started), "err", err)
+		args = append(args, "elapsed", elapsed, "err", err)
 		logging.Error(h.projectLogger(project), op+" failed", args...)
 		return
 	}
-	args = append(args, "elapsed", time.Since(started))
+	if isReadOnlyOp(op) {
+		return
+	}
+	args = append(args, "elapsed", elapsed)
 	logging.Debug(h.projectLogger(project), op+" complete", args...)
+}
+
+// isReadOnlyOp reports the ops whose per-call Debug start/complete logs are
+// demoted away. The set is the read-only verbs (list/stat/download paths);
+// every mutating verb keeps its Debug span. Errors always log regardless.
+func isReadOnlyOp(op string) bool {
+	switch op {
+	case "list-files", "list-releases", "list-metadata-revisions",
+		"download-file":
+		return true
+	default:
+		return false
+	}
 }
 
 func NewStorHub(token string) (*StorHub, error) {
@@ -229,12 +295,12 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 func (h *StorHub) Owner() string { return h.owner }
 
 func (h *StorHub) ensureOwner(ctx context.Context) error {
-	h.ownerMu.Lock()
+	h.ownerMu.RLock()
 	if strings.TrimSpace(h.owner) != "" {
-		h.ownerMu.Unlock()
+		h.ownerMu.RUnlock()
 		return nil
 	}
-	h.ownerMu.Unlock()
+	h.ownerMu.RUnlock()
 
 	owner, err := h.getAuthenticatedUser(ctx)
 	if err != nil {
@@ -276,12 +342,20 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 		}
 	})
 
-	// Wait for all commit loops to finish with timeout
-	done := make(chan struct{})
-	go func() {
-		h.shutdownWg.Wait()
-		close(done)
-	}()
+	// Wait for all commit loops to finish with timeout. The waiter is
+	// shared: a single goroutine closes shutdownDone when shutdownWg
+	// drains, so N concurrent/timed-out Shutdown calls observe one
+	// channel instead of stranding N waiters parked on Wg.Wait.
+	h.shutdownMu.Lock()
+	if h.shutdownDone == nil {
+		h.shutdownDone = make(chan struct{})
+		go func(done chan struct{}) {
+			h.shutdownWg.Wait()
+			close(done)
+		}(h.shutdownDone)
+	}
+	done := h.shutdownDone
+	h.shutdownMu.Unlock()
 
 	select {
 	case <-done:

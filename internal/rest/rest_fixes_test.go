@@ -565,10 +565,10 @@ func TestRecursiveQueryBoolParsing(t *testing.T) {
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 	for _, truthy := range []string{"true", "1", "yes", "TRUE"} {
 		resp := mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/nodes?path=docs&recursive="+truthy, nil, nil, http.StatusNotImplemented)
-		assertErrorCode(t, resp, "recursive_delete_unsupported")
+		assertErrorCode(t, resp, "not_implemented")
 	}
 	resp := mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/nodes?path=docs&recursive=banana", nil, nil, http.StatusBadRequest)
-	assertErrorCode(t, resp, "invalid_request")
+	assertErrorCode(t, resp, "bad_request")
 	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/nodes?path=docs&recursive=false", nil, nil, http.StatusNoContent)
 }
 

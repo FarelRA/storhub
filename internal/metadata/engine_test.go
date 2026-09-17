@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// --- deliverable 8: incremental index == full rebuild ---------------------
+// --- incremental index == full rebuild ------------------------------------
 
 // compareDerived asserts that two trees agree on every index-visible
 // observation: child lists, per-inode families, and all nlink forms.
@@ -64,6 +64,7 @@ func compareDerived(t *testing.T, step string, a, b *RepoMetadata) {
 // performs a full RebuildIndexes. A freshness assertion proves `inc` never
 // silently fell back to a rebuild.
 func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
+	t.Parallel()
 	now := int64(1000)
 	inc := NewRepoMetadata("equiv")
 	oracle := NewRepoMetadata("equiv")
@@ -101,7 +102,7 @@ func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
 	})
 	apply("inode rewrite via ReplaceFile", func(m *RepoMetadata) {
 		h := *m.FindFile("a/hard")
-		h.Inode = m.AllocateInode()
+		h.Inode = m.allocateInode()
 		m.ReplaceFile("a/hard", h)
 	})
 	apply("remove file", func(m *RepoMetadata) {
@@ -122,7 +123,9 @@ func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
 		m.RemoveFile("top.txt")
 	})
 	apply("releases do not disturb the index", func(m *RepoMetadata) {
-		m.EnsureRelease("v1", now)
+		if _, err := m.EnsureRelease("v1", now); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 		m.RemoveRelease("v1")
 	})
 	apply("empty-inode direct write", func(m *RepoMetadata) {
@@ -140,9 +143,10 @@ func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
 	compareDerived(t, "final", inc, oracle)
 }
 
-// --- deliverable 8: cheap clone / shared index ----------------------------
+// --- cheap clone / shared index -------------------------------------------
 
 func TestCloneSharesIndexAndIsolatesMutations(t *testing.T) {
+	t.Parallel()
 	now := int64(10)
 	m := NewRepoMetadata("share")
 	m.EnsureDirectory("d", now)
@@ -199,9 +203,10 @@ func TestCloneSharesIndexAndIsolatesMutations(t *testing.T) {
 	}
 }
 
-// --- deliverable 8: streaming BuildTree parity ----------------------------
+// --- streaming BuildTree parity -------------------------------------------
 
 func TestBuildTreeStreamParity(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	res, err := BuildTree(m)
 	if err != nil {
@@ -232,6 +237,7 @@ func TestBuildTreeStreamParity(t *testing.T) {
 }
 
 func TestBuildTreeStreamCacheReuseAndKnown(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	res1, err := BuildTree(m)
 	if err != nil {
@@ -313,9 +319,10 @@ func TestBuildTreeStreamCacheReuseAndKnown(t *testing.T) {
 	}
 }
 
-// --- deliverable 8: size counter == ToJSON length --------------------------
+// --- size counter == ToJSON length -----------------------------------------
 
 func TestSerializedSizeMatchesToJSON(t *testing.T) {
+	t.Parallel()
 	now := int64(500)
 	m := NewRepoMetadata("size")
 	check := func(step string) {
@@ -344,19 +351,27 @@ func TestSerializedSizeMatchesToJSON(t *testing.T) {
 	if !m.derived.sections[secFiles].ok {
 		t.Fatal("tracked file upsert must keep the files section fresh")
 	}
-	m.PutChunk(1, ChunkInfo{Size: 3, Offset: 0, AssetID: 11})
+	if err := m.PutChunk(1, ChunkInfo{Size: 3, Offset: 0, AssetID: 11}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
 	check("put chunk")
 	m.SetFileAtime("d/f", now+7)
 	check("set atime")
 	m.UpsertFile("d/f", FileMeta{Size: 9, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{1, 2}}, now+1)
 	check("overwrite")
-	m.PutChunk(2, ChunkInfo{Size: 6, Offset: 3, AssetID: 12})
+	if err := m.PutChunk(2, ChunkInfo{Size: 6, Offset: 3, AssetID: 12}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
 	m.UpsertFile(`d/we"ird\ü<>&`, FileMeta{Size: 1, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{3}}, now)
-	m.PutChunk(3, ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 13})
+	if err := m.PutChunk(3, ChunkInfo{Size: 1, Offset: 0, Release: "v1", AssetID: 13}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
 	check("escaped path")
 	m.UpsertFile("d/link", FileMeta{Symlink: "../f", Mode: 0o777, UploadedAt: now, ModifiedAt: now}, now)
 	check("symlink")
-	m.EnsureRelease("v1", now)
+	if _, err := m.EnsureRelease("v1", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	check("release add")
 	m.WriteFileDirect("d/f", FileMeta{Inode: 4242, Size: 2, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{2}})
 	check("inode rewrite")
@@ -414,12 +429,18 @@ func TestSerializedSizeMatchesToJSON(t *testing.T) {
 // TestValidateScratchMapStillDetectsDuplicates pins the per-file duplicate
 // detection after the scratch-map reuse.
 func TestValidateScratchMapStillDetectsDuplicates(t *testing.T) {
+	t.Parallel()
 	m := NewRepoMetadata("dup")
 	m.EnsureDirectory("d", 1)
 	m.UpsertFile("d/a", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1, ModifiedAt: 1, Chunks: []int64{1}}, 1)
 	m.UpsertFile("d/b", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1, ModifiedAt: 1, Chunks: []int64{1}}, 1)
-	m.PutChunk(1, ChunkInfo{Size: 2, Offset: 0, AssetID: 1})
+	if err := m.PutChunk(1, ChunkInfo{Size: 2, Offset: 0, AssetID: 1}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
 	m.RecomputeStats()
+	// The fixture hand-forges chunk 1 instead of minting it; lift the
+	// counter past the live max for the counter-floor check.
+	m.NextChunkID = 2
 	if err := m.Validate(); err != nil {
 		t.Fatalf("cross-file shared chunk must validate: %v", err)
 	}
@@ -445,6 +466,7 @@ func TestValidateScratchMapStillDetectsDuplicates(t *testing.T) {
 // the original tree still reads. A raw struct copy (t := *m) would be a vet
 // copylocks error; Clone is the only sanctioned sharing path.
 func TestCloneMutationDoesNotCorruptSourceIndex(t *testing.T) {
+	t.Parallel()
 	now := int64(10)
 	m := NewRepoMetadata("valuecopy")
 	m.EnsureDirectory("d", now)
@@ -481,6 +503,7 @@ func TestCloneMutationDoesNotCorruptSourceIndex(t *testing.T) {
 // TestDerivedIndexesSurviveJSONRoundTrip pins that marshalling never touches
 // the derived state and decoding starts from a clean slate.
 func TestDerivedIndexesSurviveJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	m := sampleTree(t)
 	data, err := m.ToJSON()
 	if err != nil {

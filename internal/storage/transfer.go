@@ -29,14 +29,8 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	if err != nil {
 		return "", "", err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, _, err := h.resolveAuthedPath(ctx, repoMeta, fileName, true)
 	if err != nil {
-		return "", "", err
-	}
-	if cleanName == "" {
-		return "", "", errors.New("file name is required")
-	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return "", "", err
 	}
 	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
@@ -46,10 +40,55 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	if existing == nil {
 		return "", "", fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
-	workingMeta := repoMeta.Clone()
-	workingMeta.RemoveFile(cleanName)
-	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, workingMeta, requiredSlots)
+	// Release probe, not a full tree clone (audit 33): picking only reads
+	// the release set + counts, so a throwaway carrying just the catalog
+	// avoids an O(tree) memcpy per upload/patch.
+	probe, err := newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	if err != nil {
+		return "", "", err
+	}
+	probe.RemoveFile(cleanName)
+	releaseTag, uploadURL, err = h.getOrCreateUploadRelease(ctx, project, probe, requiredSlots)
 	return releaseTag, uploadURL, err
+}
+
+// resolveAuthedPath is the single home of the 6-line validate+resolve+
+// traversal preamble pasted across Prepare/Finalize/put/patch/delete/read:
+// shape-check the raw path, resolve it against meta (following the final
+// symlink when followFinal, e.g. open(O_CREAT|O_TRUNC) put semantics vs
+// unlink(2) delete semantics), reject empties, and enforce traversal
+// policy. Callers add their own parent/existence checks after.
+func (h *StorHub) resolveAuthedPath(ctx context.Context, repoMeta *RepoMetadata, rawPath string, followFinal bool) (cleanName string, traversed []string, err error) {
+	if err := shfs.ValidateAccessPathShape(rawPath); err != nil {
+		return "", nil, err
+	}
+	cleanName, traversed, err = shfs.ResolveAccessPath(repoMeta, rawPath, followFinal)
+	if err != nil {
+		return "", nil, err
+	}
+	if cleanName == "" {
+		return "", nil, errors.New("file name is required")
+	}
+	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+		return "", nil, err
+	}
+	return cleanName, traversed, nil
+}
+
+// newReleaseProbe builds a minimal catalog-only tree for release picking:
+// the release set is copied, files/chunks/dirs are not. getOrCreateUploadRelease
+// only reads releases (+ EnsureRelease bookkeeping on the throwaway), so a
+// full Clone (O(tree) memcpy of all four stored maps) per upload/patch was
+// pure waste. The probe is discarded after picking; the commit path
+// re-ensures the landed releases on the authoritative tree.
+func newReleaseProbe(repoMeta *RepoMetadata, project string, now int64) (*RepoMetadata, error) {
+	probe := NewRepoMetadata(project)
+	for tag := range repoMeta.Releases() {
+		if _, err := probe.EnsureRelease(tag, now); err != nil {
+			return nil, err
+		}
+	}
+	return probe, nil
 }
 
 // trimChunks drops chunks at or beyond size and re-sorts/re-indexes them.
@@ -90,14 +129,8 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	if err != nil {
 		return nil, err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, _, err := h.resolveAuthedPath(ctx, repoMeta, fileName, true)
 	if err != nil {
-		return nil, err
-	}
-	if cleanName == "" {
-		return nil, errors.New("file name is required")
-	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	current := repoMeta.FindFile(cleanName)
@@ -126,14 +159,26 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// clone that is discarded before this call. All mutations apply to a
 	// private COW copy; the shared tree is swapped in only on success.
 	tree := cowTree(pm.meta)
-	tree.EnsureRelease(releaseTag, now)
-	ensureChunkReleases(tree, chunks, now)
+	if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, chunks)
+		return nil, err
+	}
+	if err := ensureChunkReleases(tree, chunks, now); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, chunks)
+		return nil, err
+	}
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(chunks))
 	for i := range chunks {
 		id := tree.AllocateChunkID()
-		tree.PutChunk(id, chunks[i])
+		if err := tree.PutChunk(id, chunks[i]); err != nil {
+			pm.mu.Unlock()
+			h.compensateDeleteAssets(ctx, project, chunks)
+			return nil, err
+		}
 		chunkIDs[i] = id
 	}
 	fileMeta.Chunks = chunkIDs
@@ -235,7 +280,18 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	return h.FinalizeReplaceChunksContext(ctx, project, filePath, sink.releaseTag, uploaded, sink.results)
 }
 
-func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPath string, replace bool) (result *FileMeta, err error) {
+// uploadFileContext creates a file; replaceFileContext overwrites one.
+// Both share putFileInner: the only flag branches left are the op
+// name/cause strings and the exists checks.
+func (h *StorHub) uploadFileContext(ctx context.Context, project, fileName, inputPath string) (result *FileMeta, err error) {
+	return h.putFileInner(ctx, project, fileName, inputPath, false)
+}
+
+func (h *StorHub) replaceFileContext(ctx context.Context, project, fileName, inputPath string) (result *FileMeta, err error) {
+	return h.putFileInner(ctx, project, fileName, inputPath, true)
+}
+
+func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath string, replace bool) (result *FileMeta, err error) {
 	op := "upload-file"
 	if replace {
 		op = "replace-file"
@@ -275,14 +331,8 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}
 	// put has open(O_CREAT|O_TRUNC) semantics: a final symlink is followed
 	// to its target, so followFinal is true.
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, traversed, err := h.resolveAuthedPath(ctx, repoMeta, fileName, true)
 	if err != nil {
-		return nil, err
-	}
-	if cleanName == "" {
-		return nil, errors.New("file name is required")
-	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	if err := shfs.RequireParentDirectory(repoMeta, cleanName); err != nil {
@@ -305,7 +355,10 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	}
 	defer func() { _ = planner.Close() }()
 
-	workingMeta := repoMeta.Clone()
+	workingMeta, err := newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
 	workingMeta.RemoveFile(cleanName)
 	requiredSlots := planner.NumChunks()
 	if fileInfo.Size() == 0 {
@@ -385,17 +438,29 @@ func (h *StorHub) putFileContext(ctx context.Context, project, fileName, inputPa
 	// All mutations apply to a private COW copy; the shared tree is swapped
 	// in only once every fallible step has succeeded.
 	tree := cowTree(pm.meta)
-	tree.EnsureRelease(releaseTag, h.config.Now().Unix())
+	if _, err := tree.EnsureRelease(releaseTag, h.config.Now().Unix()); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
+		return nil, err
+	}
 	// Rotation may have spread this file's chunks across releases;
 	// ensuring only the initial tag would strand rotated chunks outside
 	// the catalog where PurgeUntracked deletes live data.
-	ensureChunkReleases(tree, results, h.config.Now().Unix())
+	if err := ensureChunkReleases(tree, results, h.config.Now().Unix()); err != nil {
+		pm.mu.Unlock()
+		h.compensateDeleteAssets(ctx, project, results)
+		return nil, err
+	}
 	// Allocate identifiers against the authoritative in-memory metadata so
 	// concurrent operations can never mint colliding chunk IDs.
 	chunkIDs := make([]int64, len(results))
 	for i := range results {
 		id := tree.AllocateChunkID()
-		tree.PutChunk(id, results[i])
+		if err := tree.PutChunk(id, results[i]); err != nil {
+			pm.mu.Unlock()
+			h.compensateDeleteAssets(ctx, project, results)
+			return nil, err
+		}
 		chunkIDs[i] = id
 	}
 	fileMeta.Chunks = chunkIDs
@@ -448,37 +513,32 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 	buf := h.getBuffer()
 	defer h.putBuffer(buf)
 
-	for attempt := 0; attempt <= h.config.MaxRetries; attempt++ {
+	// Single-attempt closure over the open→copy→close sequence; withRetry
+	// (retry.go) owns the backoff/sleep shape. Open and copy errors share
+	// the isRetryableDownloadError gate, preserving the old semantics.
+	attempt := func() error {
 		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
-			if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
-				return fmt.Errorf("download chunk %d: %w", chunk.AssetID, err)
-			}
-			if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(err))); sleepErr != nil {
-				return sleepErr
-			}
-			continue
+			return fmt.Errorf("download chunk %d: %w", chunk.AssetID, err)
 		}
-
 		written, copyErr := h.writeChunk(outFile, reader, *buf, chunk)
-		closeErr := reader.Close()
-		if copyErr == nil && closeErr != nil {
+		if closeErr := reader.Close(); copyErr == nil {
 			copyErr = closeErr
 		}
 		if copyErr == nil && written != chunk.Size {
 			copyErr = fmt.Errorf("chunk %d size mismatch: expected %d, got %d", chunk.AssetID, chunk.Size, written)
 		}
-		if copyErr == nil {
-			return nil
-		}
-		if !isRetryableDownloadError(copyErr) || attempt == h.config.MaxRetries {
+		if copyErr != nil {
 			return fmt.Errorf("download chunk %d: %w", chunk.AssetID, copyErr)
 		}
-		if sleepErr := h.config.Sleep(ctx, h.retryDelay(attempt, extractAPIError(copyErr))); sleepErr != nil {
-			return sleepErr
-		}
+		return nil
 	}
-	return fmt.Errorf("download chunk %d: exhausted retries", chunk.AssetID)
+	// The "download chunk %d" wrapper uses %w, so errors.As/Is inside
+	// isRetryableDownloadError still see the causal API/CDN/network
+	// error through it.
+	return h.withRetry(ctx, "download-chunk", h.config.MaxRetries+1, func(err error) bool {
+		return isRetryableDownloadError(err)
+	}, attempt)
 }
 
 func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chunk ChunkInfo) (int64, error) {

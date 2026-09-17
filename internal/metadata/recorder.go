@@ -1,5 +1,7 @@
 package metadata
 
+import "maps"
+
 // The intent recorder is the transaction-scoped half of intent-based op
 // synthesis. UpdateRepoMetadataContext attaches a recorder to the private
 // COW candidate before fn runs; every tracked mutator then records the
@@ -74,21 +76,21 @@ func (m *RepoMetadata) AttachIntentRecorder(r *IntentRecorder) { m.recorder = r 
 // carries a live recorder.
 func (m *RepoMetadata) DetachIntentRecorder() { m.recorder = nil }
 
-// FileIntents returns the recorded file intents. READ-ONLY: the fold must
-// not mutate the recorder's maps.
-func (r *IntentRecorder) FileIntents() map[string]FileIntent { return r.files }
+// FileIntents returns a copy of the recorded file intents. The fold must
+// not mutate the recorder's maps, so callers get a clone, not the live map.
+func (r *IntentRecorder) FileIntents() map[string]FileIntent { return maps.Clone(r.files) }
 
-// DirIntents returns the recorded directory intents. READ-ONLY: see
+// DirIntents returns a copy of the recorded directory intents. See
 // FileIntents.
-func (r *IntentRecorder) DirIntents() map[string]DirIntent { return r.dirs }
+func (r *IntentRecorder) DirIntents() map[string]DirIntent { return maps.Clone(r.dirs) }
 
-// ChunkIntents returns the recorded chunk intents. READ-ONLY: see
+// ChunkIntents returns a copy of the recorded chunk intents. See
 // FileIntents.
-func (r *IntentRecorder) ChunkIntents() map[int64]ChunkIntent { return r.chunks }
+func (r *IntentRecorder) ChunkIntents() map[int64]ChunkIntent { return maps.Clone(r.chunks) }
 
-// ReleaseIntents returns the recorded release intents. READ-ONLY: see
+// ReleaseIntents returns a copy of the recorded release intents. See
 // FileIntents.
-func (r *IntentRecorder) ReleaseIntents() map[string]ReleaseIntent { return r.releases }
+func (r *IntentRecorder) ReleaseIntents() map[string]ReleaseIntent { return maps.Clone(r.releases) }
 
 // --- recording hooks (called by the tracked mutators) ---------------------
 //
@@ -96,82 +98,67 @@ func (r *IntentRecorder) ReleaseIntents() map[string]ReleaseIntent { return r.re
 // pre-transaction state can never alias an entry the transaction replaces
 // later.
 
+// recordFirst inserts val under key unless the key already has a pinned
+// intent: the first touch of a transaction wins, later touches are no-ops.
+func recordFirst[K comparable, V any](intents map[K]V, key K, val V) {
+	if _, ok := intents[key]; !ok {
+		intents[key] = val
+	}
+}
+
 func (m *RepoMetadata) recordFilePut(name string, old FileMeta, existed bool) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.files[name]; ok {
-		return
-	}
-	m.recorder.files[name] = FileIntent{Existed: existed, Old: old.Clone()}
+	recordFirst(m.recorder.files, name, FileIntent{Existed: existed, Old: old.Clone()})
 }
 
 func (m *RepoMetadata) recordFileRemove(name string, old FileMeta) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.files[name]; ok {
-		return
-	}
-	m.recorder.files[name] = FileIntent{Existed: true, Old: old.Clone()}
+	recordFirst(m.recorder.files, name, FileIntent{Existed: true, Old: old.Clone()})
 }
 
 func (m *RepoMetadata) recordDirPut(path string, old DirMeta, existed bool) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.dirs[path]; ok {
-		return
-	}
-	m.recorder.dirs[path] = DirIntent{Existed: existed, Old: old.Clone()}
+	recordFirst(m.recorder.dirs, path, DirIntent{Existed: existed, Old: old.Clone()})
 }
 
 func (m *RepoMetadata) recordDirRemove(path string, old DirMeta) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.dirs[path]; ok {
-		return
-	}
-	m.recorder.dirs[path] = DirIntent{Existed: true, Old: old.Clone()}
+	recordFirst(m.recorder.dirs, path, DirIntent{Existed: true, Old: old.Clone()})
 }
 
 func (m *RepoMetadata) recordChunkPut(id int64, existed bool) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.chunks[id]; ok {
-		return
-	}
-	m.recorder.chunks[id] = ChunkIntent{Existed: existed}
+	recordFirst(m.recorder.chunks, id, ChunkIntent{Existed: existed})
 }
 
 func (m *RepoMetadata) recordChunkDelete(id int64) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.chunks[id]; ok {
-		return
-	}
-	m.recorder.chunks[id] = ChunkIntent{Existed: true}
+	recordFirst(m.recorder.chunks, id, ChunkIntent{Existed: true})
 }
 
 func (m *RepoMetadata) recordReleasePut(tag string, old ReleaseRef, existed bool) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.releases[tag]; ok {
-		return
-	}
-	m.recorder.releases[tag] = ReleaseIntent{Existed: existed, Old: old.Clone()}
+	// ReleaseRef is a pure value type: struct assignment pins the state.
+	recordFirst(m.recorder.releases, tag, ReleaseIntent{Existed: existed, Old: old})
 }
 
-func (m *RepoMetadata) recordReleaseRemove(tag string) {
+func (m *RepoMetadata) recordReleaseRemove(tag string, old ReleaseRef) {
 	if m.recorder == nil {
 		return
 	}
-	if _, ok := m.recorder.releases[tag]; ok {
-		return
-	}
-	m.recorder.releases[tag] = ReleaseIntent{Existed: true}
+	recordFirst(m.recorder.releases, tag, ReleaseIntent{Existed: true, Old: old})
 }

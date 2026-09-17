@@ -8,6 +8,7 @@ import (
 )
 
 func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "input.bin")
 	data := []byte("abcdefghij")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -49,6 +50,7 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 }
 
 func TestChunkerErrorEdges(t *testing.T) {
+	t.Parallel()
 	if _, err := NewStreamingChunker(filepath.Join(t.TempDir(), "missing.bin"), "blob", 4); err == nil {
 		t.Fatal("expected missing file error")
 	}
@@ -73,6 +75,7 @@ func TestChunkerErrorEdges(t *testing.T) {
 }
 
 func TestChunkNameWidthPast999(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wide.bin")
 	buf := make([]byte, 1000)

@@ -24,9 +24,9 @@ type contextKey string
 const (
 	identityContextKey   contextKey = "storhub.identity"
 	createModeContextKey contextKey = "storhub.create_mode"
-	accessRead                      = 0x4
-	accessWrite                     = 0x2
-	accessExec                      = 0x1
+	accessRead                      = 0o4
+	accessWrite                     = 0o2
+	accessExec                      = 0o1
 )
 
 const (
@@ -127,7 +127,7 @@ func CheckWriteAccess(ctx context.Context, repo *meta.RepoMetadata, filePath str
 }
 
 func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath string) error {
-	if err := CheckTraverse(ctx, repo, dirPath); err != nil {
+	if err := CheckWalk(ctx, repo, dirPath); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, dirPath)
@@ -159,7 +159,7 @@ func CheckWriteAccessResolved(ctx context.Context, repo *meta.RepoMetadata, clea
 // CheckListDirAccessResolved is CheckListDirAccess for an already-resolved
 // concrete directory key (see CheckReadAccessResolved).
 func CheckListDirAccessResolved(ctx context.Context, repo *meta.RepoMetadata, dirPath string, traversed []string) error {
-	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+	if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, dirPath)
@@ -178,7 +178,7 @@ func CheckListDirAccessResolved(ctx context.Context, repo *meta.RepoMetadata, di
 // the traversed chain and only the write check needs the parent node.
 func CheckParentWriteResolved(ctx context.Context, repo *meta.RepoMetadata, targetPath string, traversed []string) error {
 	parent := ParentPath(targetPath)
-	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+	if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, parent)
@@ -191,28 +191,35 @@ func CheckParentWriteResolved(ctx context.Context, repo *meta.RepoMetadata, targ
 	return checkAccess(IdentityFromContext(ctx), attrs, accessWrite|accessExec)
 }
 
-func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
-	// Symlink components are followed before checking ancestors: POSIX
-	// traversal permission applies to the directories actually walked, in
-	// walk order. The final component is left unresolved so that
-	// lstat/readlink-style operations check permission to reach the link
-	// itself, not its target. The walked set includes the chain up to every
-	// spliced absolute link, not just the final path's ancestors.
+// CheckWalk verifies execute permission on the directories a user path's
+// resolution walk descends into, in walk order (root first). It resolves
+// first, then checks: symlink components are followed before checking
+// ancestors, so POSIX traversal permission applies to the directories
+// actually walked. The final component is left unresolved so that
+// lstat/readlink-style operations check permission to reach the link
+// itself, not its target.
+func CheckWalk(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
 	_, traversed, err := resolvePathTracked(repo, targetPath, false)
 	if err != nil {
 		return err
 	}
-	return CheckTraversal(ctx, repo, traversed)
+	return CheckWalkResolved(ctx, repo, traversed)
 }
 
-// CheckTraversal verifies execute permission on the directories a
+// CheckTraverse is the deprecated spelling of CheckWalk, kept so existing
+// callers (including out-of-package storage verbs) keep compiling.
+func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
+	return CheckWalk(ctx, repo, targetPath)
+}
+
+// CheckWalkResolved verifies execute permission on the directories a
 // resolution walk actually descended into, in walk order (root first).
 // Operations that resolved a user path with ResolveAccessPath must consume
 // the returned traversed list through this check: re-resolving only the
 // concrete key would miss the ancestors of an absolute link's own parent
 // chain (a 0700 directory containing "link -> /pub/x" must not leak
 // through the link).
-func CheckTraversal(ctx context.Context, repo *meta.RepoMetadata, traversed []string) error {
+func CheckWalkResolved(ctx context.Context, repo *meta.RepoMetadata, traversed []string) error {
 	id := IdentityFromContext(ctx)
 	checked := make(map[string]struct{}, len(traversed))
 	for _, dir := range traversed {
@@ -221,6 +228,12 @@ func CheckTraversal(ctx context.Context, repo *meta.RepoMetadata, traversed []st
 		}
 	}
 	return nil
+}
+
+// CheckTraversal is the deprecated spelling of CheckWalkResolved, kept so
+// existing callers (including out-of-package storage verbs) keep compiling.
+func CheckTraversal(ctx context.Context, repo *meta.RepoMetadata, traversed []string) error {
+	return CheckWalkResolved(ctx, repo, traversed)
 }
 
 func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struct{}, dirPath string) error {
@@ -240,7 +253,7 @@ func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struc
 
 func CheckParentWrite(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
 	parent := ParentPath(targetPath)
-	if err := CheckTraverse(ctx, repo, parent); err != nil {
+	if err := CheckWalk(ctx, repo, parent); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, parent)
@@ -407,7 +420,7 @@ func TouchParentDirectory(repo *meta.RepoMetadata, targetPath string, now int64)
 }
 
 func checkPathAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath string, need int) error {
-	if err := CheckTraverse(ctx, repo, targetPath); err != nil {
+	if err := CheckWalk(ctx, repo, targetPath); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, targetPath)
@@ -423,7 +436,7 @@ func checkPathAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath st
 // walk order) plus the symlink chains a re-resolution of the key alone
 // would miss.
 func checkPathAccessResolved(ctx context.Context, repo *meta.RepoMetadata, cleanPath string, traversed []string, need int) error {
-	if err := CheckTraversal(ctx, repo, traversed); err != nil {
+	if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
 		return err
 	}
 	attrs, err := lookupNode(repo, cleanPath)

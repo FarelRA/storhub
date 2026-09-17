@@ -143,7 +143,7 @@ func TestObjectCacheByteBudgetEviction(t *testing.T) {
 		total += len(data)
 	}
 	c.mu.Lock()
-	gotTotal, gotCount := c.total, len(c.order)
+	gotTotal, gotCount := c.total, len(c.elems)
 	c.mu.Unlock()
 	if gotTotal > c.maxBytes {
 		t.Fatalf("byte budget exceeded after eviction: total=%d max=%d", gotTotal, c.maxBytes)

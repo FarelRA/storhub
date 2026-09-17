@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import type { ModalKind } from '~/composables/use-console'
+import type { ModalKind } from '~/utils/modal-kinds'
+import { modalGroupOf } from '~/utils/modal-kinds'
 
-const console_ = useConsole()
-const { modalOpen, modalKind, modalForm: form, modalError } = console_
+const consoleStore = useConsole()
+const { modalOpen, modalKind, modalForm: form, modalError } = consoleStore
 
-const isPathKind = computed(() =>
-  ['mkdir', 'create-file'].includes(modalKind.value),
-)
-const isNewPathKind = computed(() => ['rename', 'move', 'copy', 'link', 'symlink'].includes(modalKind.value))
-const isMetaKind = computed(() => ['chmod', 'chown', 'utimes', 'xattr-set', 'xattr-remove'].includes(modalKind.value))
-const isTextOpKind = computed(() => ['append', 'patch', 'truncate'].includes(modalKind.value))
+// Single source of truth for form sections: MODAL_GROUPS in modal-kinds.ts.
+const group = computed(() => modalGroupOf(modalKind.value))
+const isPathKind = computed(() => group.value === 'path')
+const isNewPathKind = computed(() => group.value === 'newPath')
+const isMetaKind = computed(() => group.value === 'meta')
+const isTextOpKind = computed(() => group.value === 'textOp')
 
 const submitLabel = computed(() => {
   const map: Partial<Record<ModalKind, string>> = {
@@ -28,15 +29,15 @@ const submitLabel = computed(() => {
 })
 
 const isMoveOrCopy = computed(() => ['move', 'copy'].includes(modalKind.value))
-const bulkCount = computed(() => console_.selectedPaths.value.size)
+const bulkCount = computed(() => consoleStore.selectedPaths.value.size)
 </script>
 
 <template>
   <ModalShell
     :open="modalOpen"
-    :title="modalOpen ? console_.modalTitle(modalKind) : ''"
-    @close="console_.closeModal()"
-    @submit="console_.submitModal()"
+    :title="modalOpen ? consoleStore.modalTitle(modalKind) : ''"
+    @close="consoleStore.closeModal()"
+    @submit="consoleStore.submitModal()"
   >
     <p
       v-if="modalError"
@@ -57,7 +58,7 @@ const bulkCount = computed(() => console_.selectedPaths.value.size)
       <template v-if="isMoveOrCopy && bulkCount > 1">
         <p class="text-sm text-mist">{{ modalKind === 'move' ? 'Move' : 'Copy' }} {{ bulkCount }} items to:</p>
         <ul class="max-h-24 overflow-y-auto rounded border border-hair bg-surface px-2 py-1 font-mono text-xs">
-          <li v-for="p in [...console_.selectedPaths.value]" :key="p" class="truncate">{{ p }}</li>
+          <li v-for="p in [...consoleStore.selectedPaths.value]" :key="p" class="truncate">{{ p }}</li>
         </ul>
         <label class="block">
           <span class="field-label">Destination directory</span>
@@ -67,7 +68,7 @@ const bulkCount = computed(() => console_.selectedPaths.value.size)
       <template v-else>
         <label v-if="modalKind !== 'symlink'" class="block">
           <span class="field-label">Existing path</span>
-          <input :value="modalKind === 'rename' ? form.path : console_.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
+          <input :value="modalKind === 'rename' ? form.path : consoleStore.selectedPath.value" type="text" class="input font-mono opacity-60" disabled >
         </label>
         <label class="block">
           <span class="field-label">{{ modalKind === 'symlink' ? 'Link path' : modalKind === 'move' ? 'Destination' : modalKind === 'copy' ? 'Destination' : 'New path' }}</span>
@@ -118,7 +119,7 @@ const bulkCount = computed(() => console_.selectedPaths.value.size)
     </div>
 
     <div v-else-if="isTextOpKind" class="flex flex-col gap-3">
-      <p class="font-mono text-xs text-mist">{{ console_.selectedPath.value }}</p>
+      <p class="font-mono text-xs text-mist">{{ consoleStore.selectedPath.value }}</p>
       <div v-if="modalKind === 'patch'" class="grid grid-cols-2 gap-3">
         <label class="block">
           <span class="field-label">Offset (bytes)</span>
@@ -140,7 +141,7 @@ const bulkCount = computed(() => console_.selectedPaths.value.size)
     </div>
 
     <div class="mt-5 flex justify-end gap-2">
-      <button type="button" class="btn" @click="console_.closeModal()">Cancel</button>
+      <button type="button" class="btn" @click="consoleStore.closeModal()">Cancel</button>
       <button type="submit" class="btn btn-solid">{{ submitLabel }}</button>
     </div>
   </ModalShell>

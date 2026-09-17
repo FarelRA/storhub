@@ -129,8 +129,10 @@ func TestUploadHardeningRewriteCompensatesMidUploadFailure(t *testing.T) {
 	}
 }
 
-// Six consecutive release-full rotations must still upload: rotations
-// must not consume the 5x name-collision budget.
+// Release-full rotations must not consume the 5x name-collision budget:
+// five consecutive rotations still upload. A sixth consecutive rotation
+// fails loudly against the rotation ceiling (maxReleaseRotations) instead
+// of spinning forever against permanently-full releases.
 func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
@@ -144,24 +146,33 @@ func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
 	if err != nil || len(releases) == 0 {
 		t.Fatalf("list releases: %v (releases=%d)", err, len(releases))
 	}
-	var posts atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
-			if posts.Add(1) <= 6 {
-				w.WriteHeader(http.StatusUnprocessableEntity)
-				_, _ = w.Write([]byte(hardeningFileCountBody))
-				return true
+	newSink := func(failures int32) *chunkSink {
+		var posts atomic.Int32
+		backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
+				if posts.Add(1) <= failures {
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					_, _ = w.Write([]byte(hardeningFileCountBody))
+					return true
+				}
 			}
-		}
-		return false
-	})
-	sink := hub.newChunkSink(ctx, "project-hardening-rotation", releases[0].TagName, releases[0].UploadURL, 1,
-		func(remaining int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
+			return false
+		})
+		return hub.newChunkSink(ctx, "project-hardening-rotation", releases[0].TagName, releases[0].UploadURL, 1,
+			func(remaining int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
+	}
+	sink := newSink(5)
 	if err := sink.put(bytes.NewReader([]byte("12345678")), 8, 0); err != nil {
-		t.Fatalf("six rotations must not exhaust the name budget, got: %v", err)
+		t.Fatalf("five rotations must not exhaust the name budget, got: %v", err)
 	}
 	if len(sink.results) != 1 {
 		t.Fatalf("expected one uploaded chunk, got %d", len(sink.results))
+	}
+	sink = newSink(6)
+	if err := sink.put(bytes.NewReader([]byte("12345678")), 8, 0); err == nil {
+		t.Fatal("expected sixth consecutive rotation to fail against the rotation ceiling")
+	} else if !strings.Contains(err.Error(), "full after 5 rotations") {
+		t.Fatalf("expected rotation-ceiling error, got: %v", err)
 	}
 }
 

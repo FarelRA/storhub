@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { EntryInfo } from '~/utils/api-types'
 
-const console_ = useConsole()
+const consoleStore = useConsole()
 
 const rows = computed(() => {
-  const entry = console_.selectedEntry.value as EntryInfo | null
+  const entry = consoleStore.selectedEntry.value as EntryInfo | null
   if (!entry) {
     // Always render the full key set so the panel never jumps around.
     return ['path', 'kind', 'mode', 'uid / gid', 'size', 'inode', 'links', 'modified'].map((key) => ({

@@ -1,16 +1,15 @@
 <script setup lang="ts">
-const console_ = useConsole()
-const { xattrs, selectedPath, canWrite } = console_
+import { copyText } from '~/utils/clipboard'
+
+const consoleStore = useConsole()
+const { xattrs, selectedPath, canWrite } = consoleStore
 const toasts = useToasts()
 const { ask } = useConfirm()
 
 async function copyValue(value: string) {
-  try {
-    await navigator.clipboard.writeText(value)
-    toasts.success('Value copied')
-  } catch {
-    toasts.error('Clipboard unavailable')
-  }
+  const ok = await copyText(value)
+  if (ok) toasts.success('Value copied')
+  else toasts.error('Clipboard unavailable')
 }
 
 async function removeFirst() {
@@ -22,7 +21,7 @@ async function removeFirst() {
     confirmLabel: 'Remove',
     danger: true,
   })
-  if (ok && selectedPath.value) await console_.removeXattr(selectedPath.value, name)
+  if (ok && selectedPath.value) await consoleStore.removeXattr(selectedPath.value, name)
 }
 </script>
 
@@ -30,7 +29,7 @@ async function removeFirst() {
   <section class="space-y-3">
     <div class="flex items-center justify-between gap-2">
       <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Extended attributes</h2>
-      <button class="btn btn-sm" :disabled="!selectedPath" @click="console_.loadXattrs()">Reload</button>
+      <button class="btn btn-sm" :disabled="!selectedPath" @click="consoleStore.loadXattrs()">Reload</button>
     </div>
 
     <p v-if="!xattrs.length" class="text-sm text-mist">
@@ -52,7 +51,7 @@ async function removeFirst() {
     </ul>
 
     <div class="flex flex-wrap gap-2">
-      <button class="btn btn-sm" :disabled="!selectedPath || !canWrite" @click="console_.openModal('xattr-set')">
+      <button class="btn btn-sm" :disabled="!selectedPath || !canWrite" @click="consoleStore.openModal('xattr-set')">
         Set
       </button>
       <button class="btn btn-danger btn-sm" :disabled="!xattrs.length || !canWrite" @click="removeFirst">

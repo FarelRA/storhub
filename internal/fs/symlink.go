@@ -12,13 +12,42 @@ import (
 // Linux's SYMLOOP_MAX (40) so legitimate deep chains resolve.
 const maxSymlinkHops = 40
 
-// ResolvePath follows symlinks among the components of targetPath and
-// returns the physical path they resolve to. When followFinal is false the
-// trailing component is returned unresolved (lstat/readlink semantics).
-// The empty path denotes the root.
-func ResolvePath(repo *meta.RepoMetadata, targetPath string, followFinal bool) (string, error) {
-	resolved, _, err := resolvePathTracked(repo, targetPath, followFinal)
+// LstatResolve follows symlinks among the components of targetPath and
+// returns the physical path they resolve to, leaving the trailing
+// component unresolved (lstat/readlink/unlink semantics). The empty path
+// denotes the root.
+func LstatResolve(repo *meta.RepoMetadata, targetPath string) (string, error) {
+	resolved, _, err := resolvePathTracked(repo, targetPath, false)
 	return resolved, err
+}
+
+// StatResolve follows symlinks among the components of targetPath,
+// including a final symlink (stat/open semantics). The empty path denotes
+// the root.
+func StatResolve(repo *meta.RepoMetadata, targetPath string) (string, error) {
+	resolved, _, err := resolvePathTracked(repo, targetPath, true)
+	return resolved, err
+}
+
+// LstatResolveTracked is LstatResolve plus the ordered list of directories
+// the walk actually descended into, for DAC consumption.
+func LstatResolveTracked(repo *meta.RepoMetadata, targetPath string) (string, []string, error) {
+	return resolvePathTracked(repo, targetPath, false)
+}
+
+// StatResolveTracked is StatResolve plus the ordered list of directories
+// the walk actually descended into, for DAC consumption.
+func StatResolveTracked(repo *meta.RepoMetadata, targetPath string) (string, []string, error) {
+	return resolvePathTracked(repo, targetPath, true)
+}
+
+// ResolvePath is kept for existing callers: it is LstatResolve when
+// followFinal is false and StatResolve when true.
+func ResolvePath(repo *meta.RepoMetadata, targetPath string, followFinal bool) (string, error) {
+	if followFinal {
+		return StatResolve(repo, targetPath)
+	}
+	return LstatResolve(repo, targetPath)
 }
 
 // ResolveAccessPath is the single repo-aware entry point every
@@ -30,11 +59,16 @@ func ResolvePath(repo *meta.RepoMetadata, targetPath string, followFinal bool) (
 // the cursor; checking only the final key's ancestors would miss the
 // chain up to the link). followFinal selects stat/open semantics (true:
 // the final symlink is followed) versus lstat/readlink/unlink semantics
-// (false: the final component is returned unresolved). Pure key
+// (false: the final component is returned unresolved). Prefer the
+// StatResolveTracked/LstatResolveTracked pair for new code; this wrapper
+// stays for existing callers. Pure key
 // canonicalization of concrete paths stays with NormalizePath; this
 // function never pre-canonicalizes its input.
 func ResolveAccessPath(repo *meta.RepoMetadata, rawPath string, followFinal bool) (string, []string, error) {
-	return resolvePathTracked(repo, rawPath, followFinal)
+	if followFinal {
+		return StatResolveTracked(repo, rawPath)
+	}
+	return LstatResolveTracked(repo, rawPath)
 }
 
 // resolvePathTracked is ResolvePath plus the ordered list of directories

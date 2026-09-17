@@ -61,8 +61,6 @@ type objectCache struct {
 	elems    map[string]*list.Element
 	sizes    map[string]int // sha -> byte size (for accounting)
 	total    int64          // sum of sizes (guarded by mu)
-	order    []string       // membership set (sha present in the cache)
-	pos      map[string]int // sha -> index in order (O(1) swap-remove)
 }
 
 func newObjectCache(dir string, max int) *objectCache {
@@ -74,7 +72,6 @@ func newObjectCache(dir string, max int) *objectCache {
 		lru:   list.New(),
 		elems: make(map[string]*list.Element),
 		sizes: make(map[string]int),
-		pos:   make(map[string]int),
 	}
 }
 
@@ -166,7 +163,8 @@ func (c *objectCache) remove(sha string) {
 }
 
 // touchLocked records a use of sha: O(1) move-to-front on the recency list,
-// inserting the entry if it is new.
+// inserting the entry if it is new. Membership is the LRU list + map
+// alone (audit 24): the former order/pos set duplicated them.
 func (c *objectCache) touchLocked(sha string, size int) {
 	if el, ok := c.elems[sha]; ok {
 		if old := c.sizes[sha]; old != size {
@@ -180,12 +178,9 @@ func (c *objectCache) touchLocked(sha string, size int) {
 	c.sizes[sha] = size
 	c.total += int64(size)
 	c.elems[sha] = c.lru.PushFront(objectLRUItem{sha: sha, size: size})
-	c.pos[sha] = len(c.order)
-	c.order = append(c.order, sha)
 }
 
-// removeLocked drops sha from every structure. O(1) via the position index
-// (swap-remove from order).
+// removeLocked drops sha from every structure.
 func (c *objectCache) removeLocked(sha string) {
 	if el, ok := c.elems[sha]; ok {
 		c.lru.Remove(el)
@@ -195,29 +190,28 @@ func (c *objectCache) removeLocked(sha string) {
 		c.total -= int64(size)
 		delete(c.sizes, sha)
 	}
-	if i, ok := c.pos[sha]; ok {
-		last := len(c.order) - 1
-		if i != last {
-			moved := c.order[last]
-			c.order[i] = moved
-			c.pos[moved] = i
-		}
-		c.order = c.order[:last]
-		delete(c.pos, sha)
+}
+
+// evictEntryLocked drops the least-recently-used entry (list back).
+// Returns false when empty. Extracted so eviction policy has one site.
+func (c *objectCache) evictEntryLocked() bool {
+	back := c.lru.Back()
+	if back == nil {
+		return false
 	}
+	sha := back.Value.(objectLRUItem).sha
+	c.removeLocked(sha)
+	_ = os.Remove(c.path(sha))
+	return true
 }
 
 // evictLocked enforces the count and byte bounds, dropping least-recently-used
 // entries (list back) first.
 func (c *objectCache) evictLocked() {
 	for c.lru.Len() > 0 && (c.lru.Len() > c.max || c.total > c.maxBytes) {
-		back := c.lru.Back()
-		if back == nil {
+		if !c.evictEntryLocked() {
 			return
 		}
-		sha := back.Value.(objectLRUItem).sha
-		c.removeLocked(sha)
-		_ = os.Remove(c.path(sha))
 	}
 }
 
@@ -250,28 +244,86 @@ func (h *StorHub) objectCacheFor(project string) *objectCache {
 // file or REST contents GET), verifying the content address on the way in. A
 // missing object is an error: a manifest must never reference absent bytes.
 func (h *StorHub) fetchObject(ctx context.Context, project, sha string) ([]byte, error) {
+	return h.fetchObjectAt(ctx, project, "", sha)
+}
+
+// fetchObjectAt is the single home of index-object fetching (audit 24:
+// fetchObject/fetchObjectAtRef shared only the verify+put tail through
+// divergent git-vs-REST heads). ref="" reads HEAD, otherwise the given
+// commit SHA.
+func (h *StorHub) fetchObjectAt(ctx context.Context, project, ref, sha string) ([]byte, error) {
 	cache := h.objectCacheFor(project)
 	if data, ok := cache.get(sha); ok {
 		return data, nil
 	}
-	var data []byte
-	var err error
-	if repo := h.getGitRepo(project); repo != nil {
-		data, err = repo.readFileHead(ctx, objectRepoPath(sha))
-	} else {
-		if err = h.ensureOwner(ctx); err != nil {
-			return nil, err
-		}
-		data, _, err = h.gh.GetFileContent(ctx, h.owner, project, objectRepoPath(sha), "")
-	}
+	data, err := h.readObjectBytes(ctx, project, ref, sha)
 	if err != nil {
-		return nil, fmt.Errorf("fetch object %s: %w", shortSHA(sha), err)
+		return nil, err
 	}
 	if meta.ObjectSHA(data) != sha {
 		return nil, fmt.Errorf("object %s failed content verification on fetch", shortSHA(sha))
 	}
 	cache.put(sha, data)
 	return data, nil
+}
+
+// readObjectBytes resolves one object's bytes from the backend without
+// touching the cache: git via the mirror (HEAD or pinned ref), REST via
+// the contents API.
+func (h *StorHub) readObjectBytes(ctx context.Context, project, ref, sha string) ([]byte, error) {
+	path := objectRepoPath(sha)
+	if repo := h.getGitRepo(project); repo != nil {
+		var data []byte
+		var err error
+		if ref == "" {
+			data, err = repo.readFileHead(ctx, path)
+		} else {
+			data, err = repo.readFileRef(ctx, ref, path)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("fetch object %s: %w", shortSHA(sha), err)
+		}
+		return data, nil
+	}
+	if err := h.ensureOwner(ctx); err != nil {
+		return nil, err
+	}
+	data, _, err := h.gh.GetFileContent(ctx, h.owner, project, path, ref)
+	if err != nil {
+		return nil, fmt.Errorf("fetch object %s: %w", shortSHA(sha), err)
+	}
+	return data, nil
+}
+
+// pinnedFetcher returns a batch object loader pinned to one sync: on the
+// git backend it syncs ONCE and resolves every object against the pinned
+// HEAD with no further fetch+hard-reset cycles (audit 33: cold loads paid
+// O(objects) serialized syncs). On REST each object is one GET either way,
+// so the closure is fetchObject directly. Content addresses are immutable,
+// so a pinned read serves any manifest revision, not just HEAD.
+func (h *StorHub) pinnedFetcher(ctx context.Context, project string) (func(sha string) ([]byte, error), error) {
+	cache := h.objectCacheFor(project)
+	if repo := h.getGitRepo(project); repo != nil {
+		head, err := repo.syncAndPinHEAD(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return func(sha string) ([]byte, error) {
+			if data, ok := cache.get(sha); ok {
+				return data, nil
+			}
+			data, err := repo.readFileAtPinned(ctx, head, objectRepoPath(sha))
+			if err != nil {
+				return nil, fmt.Errorf("fetch object %s: %w", shortSHA(sha), err)
+			}
+			if meta.ObjectSHA(data) != sha {
+				return nil, fmt.Errorf("object %s failed content verification on fetch", shortSHA(sha))
+			}
+			cache.put(sha, data)
+			return data, nil
+		}, nil
+	}
+	return func(sha string) ([]byte, error) { return h.fetchObject(ctx, project, sha) }, nil
 }
 
 // writeObjects uploads every object in the set that is not already cached
@@ -301,12 +353,13 @@ func (h *StorHub) writeObjects(ctx context.Context, project string, objects map[
 			// A concurrent writer may have uploaded the identical object
 			// first; that is success for a content-addressed write. GitHub
 			// reports a create collision two ways: 409 when a sha was
-			// supplied and mismatched, and 422 ("SHA wasn't supplied" /
-			// already exists) for a sha-less create onto an existing path —
-			// exactly what an upstream-but-uncached object hits. Either
-			// status is benign only when the upstream bytes verify against
-			// the claimed address.
-			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || apiErr.StatusCode == http.StatusUnprocessableEntity) {
+			// supplied and mismatched, and 422 for a sha-less create onto
+			// an existing path. The 422 arrives in two shapes: a
+			// structured already_exists issue, or the prose-only
+			// `"sha" wasn't supplied` sentence with NO errors[] entry
+			// (that absence is itself the API's contract for this case).
+			// Any other contents 422 is a real error and propagates.
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusConflict || ((apiErr.StatusCode == http.StatusUnprocessableEntity) && (apiErr.IsValidationIssue("already_exists", "") || apiErr.IsSHANotSupplied()))) {
 				upstream, _, gerr := h.gh.GetFileContent(ctx, h.owner, project, objectRepoPath(sha), "")
 				var getErr *ghapi.APIError
 				if gerr != nil && errors.As(gerr, &getErr) && getErr.NotFound() {

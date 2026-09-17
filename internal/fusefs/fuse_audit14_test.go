@@ -21,6 +21,7 @@ import (
 // successful blocking lock. The fix captures the stop-func and defers it;
 // a completed request must leave no goroutine behind.
 func TestSetlkwReleasesAfterFuncGoroutine(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -60,6 +61,7 @@ func TestSetlkwReleasesAfterFuncGoroutine(t *testing.T) {
 // readahead window is the normal FUSE cap, never the (multi-GB) chunk
 // size.
 func TestReadAheadBytesCapped(t *testing.T) {
+	t.Parallel()
 	if got := readAheadBytes(chunking.DefaultChunkSize); got != maxReadAheadBytes {
 		t.Fatalf("default chunk size must clamp to %d, got %d", maxReadAheadBytes, got)
 	}
@@ -74,6 +76,7 @@ func TestReadAheadBytesCapped(t *testing.T) {
 // TestMarkDirtyLockedMergesInPlace pins the merge semantics of the
 // allocation-free rewrite: sorted, disjoint, touching ranges coalesce.
 func TestMarkDirtyLockedMergesInPlace(t *testing.T) {
+	t.Parallel()
 	w := &inodeWriteState{}
 	w.markDirtyLocked(10, 20)
 	w.markDirtyLocked(30, 40)
@@ -112,6 +115,7 @@ func assertRanges(t *testing.T, got, want []ByteRange) {
 // for the same (kind, node, name) collapse into it; a different kind or
 // name does not.
 func TestNotifyCoalescesDuplicates(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -143,6 +147,7 @@ func TestNotifyCoalescesDuplicates(t *testing.T) {
 // is held, beginNotify blocks the mutation path (backpressure) instead of
 // spawning another notify goroutine, and resumes when a slot frees.
 func TestNotifySlotsBoundCaller(t *testing.T) {
+	t.Parallel()
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
@@ -157,7 +162,7 @@ func TestNotifySlotsBoundCaller(t *testing.T) {
 	select {
 	case <-blocked:
 		t.Fatal("beginNotify must block while all notify slots are held")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 	<-fsys.notifySlots
 	select {
@@ -174,6 +179,7 @@ func TestNotifySlotsBoundCaller(t *testing.T) {
 // handle streams the listing and keeps a per-child attribute snapshot so
 // the kernel's entry fills never re-stat.
 func TestDirHandleServesListingSnapshot(t *testing.T) {
+	t.Parallel()
 	now := int64(99)
 	hub := &stubHub{
 		readDir: func(context.Context, string, string) ([]shfs.DirEntry, error) {
@@ -245,6 +251,7 @@ func TestDirHandleServesListingSnapshot(t *testing.T) {
 // read-only mounts default to long entry/attr timeouts, explicit values
 // still win, and writable mounts keep the 60s defaults.
 func TestReadOnlyMountRaisesKernelTimeouts(t *testing.T) {
+	t.Parallel()
 	ro, err := New(&stubHub{}, "demo", Options{CacheDir: t.TempDir(), ExtraMountOpts: []string{"noatime", "ro"}})
 	if err != nil {
 		t.Fatalf("new ro filesystem: %v", err)

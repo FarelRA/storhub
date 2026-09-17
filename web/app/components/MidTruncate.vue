@@ -35,30 +35,18 @@ function textWidth(el: HTMLElement, str: string): number {
   return c.measureText(str).width
 }
 
-/** Longest prefix of s that fits maxPx (binary search over character cuts). */
-function fitPrefix(s: string, maxPx: number, el: HTMLElement): string {
+/** Longest edge of s that fits maxPx (binary search over character cuts). */
+function fitEdge(s: string, maxPx: number, el: HTMLElement, side: 'head' | 'tail'): string {
+  const take = side === 'head' ? (n: number) => s.slice(0, n) : (n: number) => s.slice(s.length - n)
   if (s === '' || textWidth(el, s) <= maxPx) return s
   let lo = 0
   let hi = s.length
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2)
-    if (textWidth(el, s.slice(0, mid)) <= maxPx) lo = mid
+    if (textWidth(el, take(mid)) <= maxPx) lo = mid
     else hi = mid - 1
   }
-  return s.slice(0, lo)
-}
-
-/** Longest suffix of s that fits maxPx. */
-function fitSuffix(s: string, maxPx: number, el: HTMLElement): string {
-  if (s === '' || textWidth(el, s) <= maxPx) return s
-  let lo = 0
-  let hi = s.length
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2)
-    if (textWidth(el, s.slice(s.length - mid)) <= maxPx) lo = mid
-    else hi = mid - 1
-  }
-  return s.slice(s.length - lo)
+  return take(lo)
 }
 
 function recompute() {
@@ -91,8 +79,8 @@ function recompute() {
   const headBudget = (avail * headNatural) / total
   const tailBudget = avail - headBudget
 
-  headShow.value = fitPrefix(headPart, headBudget, el)
-  tailShow.value = fitSuffix(tailPart, tailBudget, el)
+  headShow.value = fitEdge(headPart, headBudget, el, 'head')
+  tailShow.value = fitEdge(tailPart, tailBudget, el, 'tail')
   truncated.value = true
 }
 

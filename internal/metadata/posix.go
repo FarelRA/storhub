@@ -57,15 +57,6 @@ func defaultOwnerIDs() (uint32, uint32) {
 	return uint32(os.Getuid()), uint32(os.Getgid())
 }
 
-func chooseNonZeroTime(values ...int64) int64 {
-	for _, value := range values {
-		if value != 0 {
-			return value
-		}
-	}
-	return 0
-}
-
 func timeToUnix(t time.Time) int64 {
 	if t.IsZero() {
 		return 0

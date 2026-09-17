@@ -7,12 +7,10 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// Benchmarks for the two op-synthesis paths over identical transactions.
-// The diff path (synthesizeOpsFromDiff, the equivalence oracle) walks the
-// whole pre-transaction tree; the intent path (synthesizeOpsFromIntents)
-// only touches what the transaction recorded. A mutation on a large tree
-// must therefore be flat in tree size on the intent path, and a bulk import
-// must stay linear in the number of imported files on both.
+// Benchmarks for intent op-synthesis over identical transactions. The
+// intent path (synthesizeOpsFromIntents) only touches what the transaction
+// recorded. A mutation on a large tree must therefore be flat in tree size,
+// and a bulk import must stay linear in the number of imported files.
 
 func benchTree(b *testing.B, files int) *RepoMetadata {
 	b.Helper()

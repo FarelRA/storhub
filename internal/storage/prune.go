@@ -66,51 +66,82 @@ func (h *StorHub) PruneContext(ctx context.Context, project, scope string, keep 
 	return h.Prune(ctx, project, PruneScope(scope), keep, dryRun)
 }
 
-// Prune runs the requested scope. keep is a history-compaction threshold
-// (git): compaction runs only when manifest commits exceed keep, and it
-// collapses every older manifest into ONE checkpoint commit, so exactly one
-// revision survives; keep > 1 is rejected because it would promise a
-// retention the checkpoint cannot provide. dryRun reports without deleting.
-func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, keep int, dryRun bool) (*PruneResult, error) {
+// PruneRequest is the flag-free prune invocation: scope selects what to
+// reclaim, keep is the history-compaction threshold (git only; keep > 1 is
+// rejected), dryRun reports without deleting. It replaces the
+// boolean-flag Prune(..., keep, dryRun) 4-way switch with per-scope
+// methods sharing one validation front.
+type PruneRequest struct {
+	Scope  PruneScope
+	Keep   int
+	DryRun bool
+}
+
+// PruneReq runs a PruneRequest. Prune/PruneContext/PruneProject are thin
+// public-compat wrappers over it.
+func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest) (*PruneResult, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
 	if h.projectHasUncommittedState(project) {
 		return nil, fmt.Errorf("prune refused for project %s: uncommitted metadata changes pending; flush before pruning", project)
 	}
-	res := &PruneResult{Scope: scope, DryRun: dryRun}
-	switch scope {
+	res := &PruneResult{Scope: req.Scope, DryRun: req.DryRun}
+	switch req.Scope {
 	case PruneAssets:
 		if err := h.pruneAssets(ctx, project, res); err != nil {
 			return nil, err
 		}
 	case PruneObjects:
-		if err := h.pruneObjects(ctx, project, res, dryRun); err != nil {
+		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
 			return nil, err
 		}
 	case PruneHistory:
-		if err := h.pruneHistory(ctx, project, keep, res, dryRun); err != nil {
+		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
 			return nil, err
 		}
 	case PruneAll:
-		if err := h.pruneHistory(ctx, project, keep, res, dryRun); err != nil {
+		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
 			return nil, err
 		}
-		if err := h.pruneObjects(ctx, project, res, dryRun); err != nil {
+		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
 			return nil, err
 		}
 		if err := h.pruneAssets(ctx, project, res); err != nil {
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|all)", scope)
+		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|all)", req.Scope)
 	}
 	return res, nil
 }
 
+// Prune runs the requested scope. keep is a history-compaction threshold
+// (git): compaction runs only when manifest commits exceed keep, and it
+// collapses every older manifest into ONE checkpoint commit, so exactly one
+// revision survives; keep > 1 is rejected because it would promise a
+// retention the checkpoint cannot provide. dryRun reports without deleting.
+func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, keep int, dryRun bool) (*PruneResult, error) {
+	return h.PruneReq(ctx, project, PruneRequest{Scope: scope, Keep: keep, DryRun: dryRun})
+}
+
 func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult) error {
 	if res.DryRun {
-		res.Notes = append(res.Notes, "assets: dry-run does not enumerate release assets; run without --dry-run to see the reclaim")
+		// Dry-run reports the would-delete counts (PruneResult contract:
+		// "what a prune did (or would do, under DryRun)"), like
+		// pruneObjects reports len(orphans). Classification is
+		// side-effect free; nothing is deleted.
+		releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
+		if err != nil {
+			return err
+		}
+		res.DeletedReleases = len(releaseTasks)
+		res.DeletedAssets = len(assetTasks)
+		if len(releaseTasks)+len(assetTasks) == 0 {
+			res.Notes = append(res.Notes, "assets: dry-run found nothing to reclaim")
+		} else {
+			res.Notes = append(res.Notes, fmt.Sprintf("assets: dry-run would delete %d releases and %d assets", len(releaseTasks), len(assetTasks)))
+		}
 		return nil
 	}
 	purged, err := h.PurgeUntrackedContext(ctx, project)
@@ -258,7 +289,9 @@ type objectRef struct {
 // contentsListingCap is GitHub's hard cap on a contents-API directory
 // listing: larger directories are truncated or rejected outright. Prune
 // must never classify reachability from a possibly truncated enumeration —
-// an object the cap hid would be deleted as an orphan.
+// an object the cap hid would be deleted as an orphan. This equals
+// releaseAssetCap numerically but is a different ceiling (API listing page
+// vs release assets), so it keeps its own name on purpose.
 const contentsListingCap = 1000
 
 func (h *StorHub) listRepoObjects(ctx context.Context, project string) ([]objectRef, error) {

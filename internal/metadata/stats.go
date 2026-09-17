@@ -12,14 +12,14 @@ import "sort"
 // statsFilePut adjusts TotalFiles/TotalSize for one file entry transition.
 // Symlinks are excluded from both counters - the same rule RecomputeStats
 // applies.
-func (m *RepoMetadata) statsFilePut(old FileMeta, existed bool, cur FileMeta) {
-	if existed && old.Symlink == "" {
+func (m *RepoMetadata) statsFilePut(t entryTransition[FileMeta]) {
+	if t.hadOld && t.old.Symlink == "" {
 		m.TotalFiles--
-		m.TotalSize -= old.Size
+		m.TotalSize -= t.old.Size
 	}
-	if cur.Symlink == "" {
+	if t.hasCur && t.cur.Symlink == "" {
 		m.TotalFiles++
-		m.TotalSize += cur.Size
+		m.TotalSize += t.cur.Size
 	}
 }
 
@@ -46,7 +46,7 @@ func (m *RepoMetadata) countAsset(tag string, delta int) {
 		original := ref
 		ref.AssetCount += delta
 		m.releases[tag] = ref
-		m.sizePutRelease(tag, original, true, ref)
+		m.sizePutRelease(tag, putTransition(original, true, ref))
 		return
 	}
 	d := m.ensureDerived()
@@ -56,22 +56,28 @@ func (m *RepoMetadata) countAsset(tag string, delta int) {
 	d.pendingAssets[tag] += delta
 }
 
+// sortIDsByOffset orders chunk ids by data offset in place. It is the one
+// backing sort behind SortFileChunks (single file) and sortFileChunksByOffset
+// (whole tree); missing ids resolve to the zero ChunkInfo, matching the
+// chunksOffsetSorted fast-path check.
+func sortIDsByOffset(chunks map[int64]ChunkInfo, ids []int64) {
+	sort.SliceStable(ids, func(i, j int) bool {
+		return chunks[ids[i]].Offset < chunks[ids[j]].Offset
+	})
+}
+
 // SealTransaction stamps the per-transaction bookkeeping on a candidate
 // tree. O(1): the candidate's entries are already normalized (the source
 // tree was normalized and the mutators initialize new entries), its stats
 // were maintained incrementally by the mutators, and its counters by
 // allocateInode/allocateChunkID - so the full Normalize/RecomputeStats
 // walk (entry loops, chunk sort, counter reconciliation, index rebuild)
-// is wholesale-construction work, not mutation work.
+// is wholesale-construction work, not mutation work. The root touch-up is
+// the shared counters-free fast path of normalizeRoot, never the O(N)
+// counter reconciliation.
 func (m *RepoMetadata) SealTransaction(project string, now int64) {
 	m.Project = chooseNonEmpty(m.Project, project)
-	if m.Root.Inode == 0 {
-		m.Root.Inode = 1
-	}
-	if m.Root.Mode == 0 {
-		m.Root.Mode = defaultDirMode()
-	}
-	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
+	m.normalizeRootFast()
 	if m.Version == 0 {
 		m.Version = maxMetadataVersion
 	}
@@ -81,9 +87,11 @@ func (m *RepoMetadata) SealTransaction(project string, now int64) {
 }
 
 // SortFileChunks sorts one file's chunk-id list by data offset, maintaining
-// the size cache (the id order is part of the entry's serialized bytes). The
-// transaction calls this for the files a mutation touched; Normalize's
-// whole-tree sort remains for wholesale construction paths.
+// the size cache (the id order is part of the entry's serialized bytes) and
+// recording the intent (a standalone call on an otherwise-untouched path in
+// a transaction must still reach the fold). The transaction calls this for
+// the files a mutation touched; Normalize's whole-tree sort remains for
+// wholesale construction paths.
 func (m *RepoMetadata) SortFileChunks(path string) {
 	path = normalizeStoredPath(path)
 	file, ok := m.files[path]
@@ -92,10 +100,9 @@ func (m *RepoMetadata) SortFileChunks(path string) {
 	}
 	original := file
 	sorted := append([]int64(nil), file.Chunks...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return m.chunks[sorted[i]].Offset < m.chunks[sorted[j]].Offset
-	})
+	sortIDsByOffset(m.chunks, sorted)
 	file.Chunks = sorted
 	m.files[path] = file
-	m.sizePutFile(path, original, true, file)
+	m.sizePutFile(path, putTransition(original, true, file))
+	m.recordFilePut(path, original, true)
 }

@@ -22,7 +22,9 @@ func seedMeta(t *testing.T, hub *StorHub, project, dir, file string, chunkID int
 		m.EnsureDirectory(dir, 1700000000)
 		m.Chunks()[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
 		m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
-		m.EnsureRelease("v1", 1700000000)
+		if _, err := m.EnsureRelease("v1", 1700000000); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 		return nil
 	}, "storhub: seed "+dir)
 	if err != nil {
@@ -46,7 +48,9 @@ func seedLegacyBlob(t *testing.T, hub *StorHub, project, dir, file string, chunk
 	m.EnsureDirectory(dir, 1700000000)
 	m.Chunks()[chunkID] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: chunkID}
 	m.UpsertFile(dir+"/"+file, FileMeta{Size: 4, Mode: 0o644, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{chunkID}}, 1700000000)
-	m.EnsureRelease("v1", 1700000000)
+	if _, err := m.EnsureRelease("v1", 1700000000); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	m.Normalize(project, 1700000000)
 	m.Version = 4 // pin the legacy single-blob schema (the split default is 5)
 	blob, err := m.ToJSON()
@@ -245,6 +249,45 @@ func newGitBackedHub(t *testing.T, url string, cfg Config) *StorHub {
 	return hub
 }
 
+// TestFailedBuildDoesNotPoisonTreeCache pins that a streaming build which
+// never commits (a failed commit attempt's build, an admission-time build)
+// must not mark its objects stored in the shared TreeCache: the next real
+// commit must upload everything its manifest references, or fresh loads
+// 404 on objects the manifest names but nobody stored. The build runs in a
+// scratch copy; only commit success swaps it in.
+func TestFailedBuildDoesNotPoisonTreeCache(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
+	if _, err := hub.UploadFile("project-poison-cache", "a.txt", input); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	// Simulate the failed attempt's build: same tree, same shared cache,
+	// results discarded — nothing reaches upstream.
+	hub.metaMu.RLock()
+	pm := hub.metaCache["project-poison-cache"]
+	hub.metaMu.RUnlock()
+	pm.mu.RLock()
+	tree := pm.meta
+	pm.mu.RUnlock()
+	if _, _, _, err := hub.buildIndexStream(ctx, "project-poison-cache", tree); err != nil {
+		t.Fatalf("simulated failed build: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, "project-poison-cache"); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	probe := backend.newClient(t, smallTransferTestConfig())
+	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "project-poison-cache")
+	if err != nil {
+		t.Fatalf("fresh load after poisoned build: %v", err)
+	}
+	if fresh.FindFile("a.txt") == nil {
+		t.Fatal("a.txt missing after commit following a discarded build")
+	}
+}
+
 func TestHistoryWarnOncePerWindow(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
@@ -318,7 +361,9 @@ func TestSplitIndexRoundTripPreservesXAttrsAndCounters(t *testing.T) {
 		m.EnsureDirectory("x", 1700000000)
 		m.Chunks()[1] = ChunkInfo{Size: 2, Offset: 0, Release: "v1", AssetID: 7}
 		m.UpsertFile("x/f", FileMeta{Size: 2, Mode: 0o600, UID: 42, GID: 43, UploadedAt: 1700000000, ModifiedAt: 1700000000, Chunks: []int64{1}, XAttrs: meta.XAttrMap{"user.k": []byte("v")}}, 1700000000)
-		m.EnsureRelease("v1", 1700000000)
+		if _, err := m.EnsureRelease("v1", 1700000000); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
 		return nil
 	}, "storhub: seed")
 	if err != nil {

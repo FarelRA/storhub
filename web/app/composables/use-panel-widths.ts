@@ -1,3 +1,5 @@
+import { PREVIEW_COLUMN_RESERVE_PX } from '~/utils/limits'
+
 /**
  * Draggable panel widths for the desktop three-column shell.
  * Module-scoped singleton, persisted to localStorage; every value is
@@ -7,29 +9,25 @@ export type PanelKey = 'sidebar' | 'directory'
 
 const STORAGE_KEY = 'storhub.panels.v1'
 
-const LIMITS: Record<PanelKey, { min: number; max: number; def: number }> = {
+/** Declared bounds per panel, for aria-valuemin/valuemax on the gutter. */
+export const PANEL_LIMITS: Record<PanelKey, { min: number; max: number; def: number }> = {
   sidebar: { min: 220, max: 480, def: 288 },
   directory: { min: 340, max: 900, def: 560 },
 }
 
 function clampFor(key: PanelKey, px: number): number {
-  const { min, max } = LIMITS[key]
+  const { min, max } = PANEL_LIMITS[key]
   // The directory pane must leave room for the preview column.
   const effectiveMax = key === 'directory' && typeof window !== 'undefined'
-    ? Math.min(max, window.innerWidth - 560)
+    ? Math.min(max, window.innerWidth - PREVIEW_COLUMN_RESERVE_PX)
     : max
   return Math.min(Math.max(Math.round(px), min), Math.max(effectiveMax, min))
 }
 
-/** Declared bounds for a panel, for aria-valuemin/valuemax on the gutter. */
-export function panelLimits(key: PanelKey): { min: number; max: number; def: number } {
-  return LIMITS[key]
-}
-
 function load(): Record<PanelKey, number> {
   const fallback = {
-    sidebar: LIMITS.sidebar.def,
-    directory: LIMITS.directory.def,
+    sidebar: PANEL_LIMITS.sidebar.def,
+    directory: PANEL_LIMITS.directory.def,
   }
   if (typeof window === 'undefined') return fallback
   try {
@@ -52,7 +50,7 @@ function setWidth(key: PanelKey, px: number): void {
 }
 
 function resetPanel(key: PanelKey): void {
-  setWidth(key, LIMITS[key].def)
+  setWidth(key, PANEL_LIMITS[key].def)
 }
 
 function persist(): void {
@@ -65,11 +63,5 @@ function persist(): void {
 }
 
 export function usePanelWidths() {
-  return {
-    panels,
-    setWidth,
-    resetPanel,
-    persist,
-
-  }
+  return { panels, setWidth, resetPanel, persist }
 }

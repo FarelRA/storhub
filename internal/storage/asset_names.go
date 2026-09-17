@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 )
 
 // assetDictionary is the single source for both name words and extensions.
@@ -42,7 +41,11 @@ var assetDictionary = []string{
 var assetSeparators = []string{"-", "_", ""}
 
 type assetNamer struct {
-	mu   sync.Mutex
+	// No mutex: the namer is per-chunkSink (one upload loop), never
+	// shared across goroutines (audit 24). Hoisting it to the hub
+	// would require re-adding a lock; per-sink keeps collision scope
+	// to the current file's chunks, which is exactly what the
+	// maxNameRetries budget assumes.
 	used map[string]struct{}
 }
 
@@ -51,8 +54,6 @@ func newAssetNamer() *assetNamer {
 }
 
 func (n *assetNamer) Next() (string, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
 	for attempts := 0; attempts < 32; attempts++ {
 		name, err := randomAssetName()
 		if err != nil {

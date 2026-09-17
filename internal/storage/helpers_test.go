@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,11 +14,15 @@ import (
 	"github.com/FarelRA/storhub/internal/posix"
 )
 
-func TestHelperUtilities(t *testing.T) {
+func TestNormalizePathPreservesWhitespace(t *testing.T) {
 	t.Parallel()
 	if got, err := shfs.NormalizePath(" docs/guide.txt "); err != nil || got != " docs/guide.txt " {
 		t.Fatalf("whitespace must be preserved in fs paths: %q %v", got, err)
 	}
+}
+
+func TestNormalizePathRootAndAbsolute(t *testing.T) {
+	t.Parallel()
 	if got, err := shfs.NormalizePath("."); err != nil || got != "" {
 		t.Fatalf("expected root path normalization, got %q %v", got, err)
 	}
@@ -30,43 +32,49 @@ func TestHelperUtilities(t *testing.T) {
 	if _, err := shfs.NormalizePath("../escape"); err == nil {
 		t.Fatal("expected path escape error")
 	}
+}
+
+func TestStoredPathParentHelpers(t *testing.T) {
+	t.Parallel()
 	if shfs.ParentPath("docs/guide.txt") != "docs" {
 		t.Fatal("unexpected stored path helpers")
 	}
 	if !shfs.IsParentOrSame("docs", "docs/guide.txt") || shfs.IsParentOrSame("images", "docs/guide.txt") {
 		t.Fatal("unexpected parent/same result")
 	}
+}
+
+func TestShortSHA(t *testing.T) {
+	t.Parallel()
 	if shortSHA("1234567890123456") != "123456789012" || shortSHA("short") != "short" {
 		t.Fatal("unexpected short sha")
 	}
-	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
-	seen := make(map[string]struct{})
-	namer := newAssetNamer()
-	for i := 0; i < 32; i++ {
-		name, err := namer.Next()
-		if err != nil {
-			t.Fatalf("generate asset name: %v", err)
-		}
-		if !nameRe.MatchString(name) {
-			t.Fatalf("unexpected asset name format: %q", name)
-		}
-		if strings.Contains(name, "file") || strings.Contains(name, "txt") || strings.Contains(name, filepath.Base("docs/file.txt")) {
-			t.Fatalf("asset name should not derive from source file name: %q", name)
-		}
-		if _, ok := seen[name]; ok {
-			t.Fatalf("duplicate asset name generated: %q", name)
-		}
-		seen[name] = struct{}{}
-	}
+}
+
+func TestAssetNamerShape(t *testing.T) {
+	t.Parallel()
+	assertNamerShape(t, newAssetNamer(), 32)
+}
+
+func TestDefaultModes(t *testing.T) {
+	t.Parallel()
 	if defaultFileMode(NodeKindFile) != 0o644 || defaultFileMode(NodeKindSymlink) != 0o777 || defaultDirMode() != 0o755 {
 		t.Fatal("unexpected mode defaults")
 	}
+}
+
+func TestCloneStringMapAndChooseNonZeroTime(t *testing.T) {
+	t.Parallel()
 	if posix.CloneStringMap(nil) != nil {
 		t.Fatal("expected nil clone")
 	}
 	if posix.ChooseNonZeroTime(0, 1) == 0 {
 		t.Fatal("expected chosen non-zero time")
 	}
+}
+
+func TestSleepWithContext(t *testing.T) {
+	t.Parallel()
 	if err := storcfg.SleepWithContext(context.Background(), 0); err != nil {
 		t.Fatalf("expected no-op sleep, got %v", err)
 	}
@@ -124,17 +132,11 @@ func requireEnvValue(t *testing.T, name string) string {
 
 func TestAssetNamingDictionaryRegression(t *testing.T) {
 	t.Parallel()
-	nameRe := regexp.MustCompile(`^[a-z]+(?:[-_]?[a-z]+){0,4}(?:\.[a-z]+){1,5}$`)
+	// Shape (words/extensions/derivation/uniqueness) is pinned once by
+	// assertNamerShape; this regression adds only the diversity assertion.
+	names := assertNamerShape(t, newAssetNamer(), 200)
 	seenExts := make(map[string]int)
-	namer := newAssetNamer()
-	for i := 0; i < 200; i++ {
-		name, err := namer.Next()
-		if err != nil {
-			t.Fatalf("generate asset name: %v", err)
-		}
-		if !nameRe.MatchString(name) {
-			t.Fatalf("unexpected asset name format %q: want 1-5 words, 1-5 extensions", name)
-		}
+	for _, name := range names {
 		parts := strings.Split(name, ".")
 		if len(parts) < 2 || len(parts) > 6 {
 			t.Fatalf("unexpected dot parts %q: want 1-5 words + 1-5 exts", name)

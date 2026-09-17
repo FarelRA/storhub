@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { DirEntry } from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
-import { shareLink, SHARE_TTL_5M } from '~/utils/share-links'
+import { shareLink, SHARE_TTL_5M, SHARE_TTL_5M_LABEL } from '~/utils/share-links'
 
-const console_ = useConsole()
+const consoleStore = useConsole()
 const toasts = useToasts()
 const { ask } = useConfirm()
 
@@ -17,6 +17,24 @@ const emit = defineEmits<{
   open: [entry: DirEntry]
 }>()
 
+const menu = useEntryMenu()
+const { openMenu, setKebabRef, toggleMenu, closeMenu } = menu
+const selection = useEntrySelection({
+  getEntries: () => props.entries,
+  openEntry: entry => emit('open', entry),
+})
+const {
+  listRef,
+  selectedSet,
+  isSelected,
+  handleRowClick,
+  handleRowDblClick,
+  handleKeydown,
+  onTouchStart,
+  onTouchEnd,
+  onTouchMove,
+} = selection
+
 function glyph(entry: DirEntry): string {
   if (entry.is_dir) return '▸'
   if (entry.is_symlink) return '↪'
@@ -29,135 +47,26 @@ function glyphClass(entry: DirEntry): string {
   return 'text-mist/60'
 }
 
-// ---- Kebab menu ------------------------------------------------------------
-// One open menu at a time; rendered in a body portal so pane scrolling can
-// never clip it. Flips above the anchor when space below runs out.
-
-interface MenuState {
-  entry: DirEntry
-  style: Record<string, string>
-}
-
-const MENU_MAX_HEIGHT = 380
-
-const openMenu = ref<MenuState | null>(null)
-const kebabButtons = new Map<string, HTMLElement>()
-
-function setKebabRef(path: string, el: Element | { $el?: unknown } | null) {
-  if (el instanceof HTMLElement) kebabButtons.set(path, el)
-}
-
-function toggleMenu(entry: DirEntry) {
-  if (openMenu.value?.entry.path === entry.path) {
-    closeMenu()
-    return
-  }
-  const button = kebabButtons.get(entry.path)
-  if (!button) return
-  const rect = button.getBoundingClientRect()
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-  const margin = 8
-  const estWidth = 256 // min-w-56 + padding, covers longest labels like "Copy direct link"
-  let left = rect.right
-  // Clamp horizontally so the menu (right-aligned to the button) never leaves the viewport
-  if (left > vw - margin) left = vw - margin
-  if (left - estWidth < margin) left = estWidth + margin
-  const spaceBelow = vh - rect.bottom - margin
-  const spaceAbove = rect.top - margin
-  // Flip only if the menu wouldn't fit below and there's more room above
-  const flipUp = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow
-  const available = flipUp ? spaceAbove : spaceBelow
-  // Only limit height to what the viewport actually offers - the menu
-  // will scroll internally (overflowY) only when its natural height
-  // exceeds this available space.
-  const maxHeight = Math.max(160, available - 4)
-  const y = flipUp ? rect.top : rect.bottom + 4
-  openMenu.value = {
-    entry,
-    style: {
-      left: `${left}px`,
-      ...(flipUp ? { bottom: `${vh - y + 4}px` } : { top: `${y}px` }),
-      transform: 'translateX(-100%)',
-      maxHeight: `${maxHeight}px`,
-      overflowY: 'auto',
-    },
-  }
-}
-
-function closeMenu() {
-  openMenu.value = null
-}
-
-function onGlobalPointer(event: MouseEvent) {
-  const target = event.target as HTMLElement
-  if (!target.closest('[data-entry-menu]')) closeMenu()
-}
-
-function onKey(event: KeyboardEvent) {
-  if (event.key === 'Escape') closeMenu()
-}
-
-function addMenuListeners() {
-  window.addEventListener('click', onGlobalPointer, true)
-  window.addEventListener('keydown', onKey)
-  window.addEventListener('resize', closeMenu)
-}
-
-function removeMenuListeners() {
-  window.removeEventListener('click', onGlobalPointer, true)
-  window.removeEventListener('keydown', onKey)
-  window.removeEventListener('resize', closeMenu)
-}
-
-watch(openMenu, (open) => {
-  if (import.meta.client) {
-    if (open) addMenuListeners()
-    else removeMenuListeners()
-  }
-})
-
-onMounted(() => {
-  window.addEventListener('keydown', handleKeydown)
-  // Focus list for desktop keyboard navigation
-  if (!isMobile.value && listRef.value) {
-    nextTick(() => listRef.value?.focus({ preventScroll: true }))
-  }
-})
-
-// Unmounting with the menu open must not leak the three global listeners
-// (the watcher above may not fire during unmount) or the long-press timer.
-let pressTimer: ReturnType<typeof setTimeout> | null = null
-
-onUnmounted(() => {
-  window.removeEventListener('keydown', handleKeydown)
-  if (import.meta.client) removeMenuListeners()
-  if (pressTimer !== null) {
-    clearTimeout(pressTimer)
-    pressTimer = null
-  }
-})
-
 async function runFor(_entry: DirEntry, fn: () => Promise<void> | void) {
   closeMenu()
   await fn()
 }
 
 /** Stat the row first so modals + detail panes operate on the same entry. */
-async function withFocus(entry: DirEntry, kind: Parameters<typeof console_.openModal>[0], contextDir?: string) {
-  await console_.focusEntry(entry)
-  console_.openModal(kind, contextDir)
+async function withFocus(entry: DirEntry, kind: Parameters<typeof consoleStore.openModal>[0], contextDir?: string) {
+  await consoleStore.focusEntry(entry)
+  consoleStore.openModal(kind, contextDir)
 }
 
 async function shareEntry(entry: DirEntry) {
   closeMenu()
-  const share = await console_.createShare(entry.path, SHARE_TTL_5M)
+  const share = await consoleStore.createShare(entry.path, SHARE_TTL_5M)
   if (!share?.token) {
     toasts.error('Failed to create share link')
     return
   }
   await copyText(shareLink(share))
-  toasts.success('Share link copied (valid 5 min)')
+  toasts.success(`Share link copied (valid ${SHARE_TTL_5M_LABEL})`)
 }
 
 async function removeEntry(entry: DirEntry) {
@@ -167,202 +76,11 @@ async function removeEntry(entry: DirEntry) {
     confirmLabel: 'Remove',
     danger: true,
   })
-  if (ok) await console_.removeSelected(entry)
+  if (ok) await consoleStore.removeSelected(entry)
 }
 
 function isFile(entry: DirEntry): boolean {
   return !entry.is_dir && !entry.is_symlink
-}
-
-// ---- Selection (desktop/mobile) -------------------------------------------
-// Desktop = click selects, double-click opens, arrows work.
-// Mobile = tap opens when nothing selected, otherwise toggles.
-// Many desktop browsers now report maxTouchPoints>0 (touchpad) or
-// pointer:coarse, so we require coarse+no-hover+small viewport together.
-const isMobile = ref(false)
-
-function updateIsMobile() {
-  if (!import.meta.client) {
-    isMobile.value = false
-    return
-  }
-  const coarse = window.matchMedia('(pointer: coarse)').matches
-  const noHover = window.matchMedia('(hover: none)').matches
-  const touch = navigator.maxTouchPoints > 0
-  const small = window.matchMedia('(max-width: 1023px)').matches
-  // Only treat as mobile on small viewports with touch/coarse input.
-  isMobile.value = small && (coarse || noHover || touch)
-}
-
-if (import.meta.client) {
-  updateIsMobile()
-  window.addEventListener('resize', updateIsMobile)
-  // Also listen to media query changes for devices that toggle coarse/hover
-  try {
-    window.matchMedia('(pointer: coarse)').addEventListener('change', updateIsMobile)
-    window.matchMedia('(hover: none)').addEventListener('change', updateIsMobile)
-    window.matchMedia('(max-width: 1023px)').addEventListener('change', updateIsMobile)
-  } catch (_e) {
-    void _e
-  }
-}
-
-onUnmounted(() => {
-  if (import.meta.client) {
-    window.removeEventListener('resize', updateIsMobile)
-    try {
-      window.matchMedia('(pointer: coarse)').removeEventListener('change', updateIsMobile)
-      window.matchMedia('(hover: none)').removeEventListener('change', updateIsMobile)
-      window.matchMedia('(max-width: 1023px)').removeEventListener('change', updateIsMobile)
-    } catch (_e) {
-      void _e
-    }
-  }
-})
-
-const selectedSet = computed(() => console_.selectedPaths.value)
-
-const listRef = ref<HTMLElement | null>(null)
-
-// Keep keyboard focus on the list after selection changes so arrows keep working
-watch(() => props.entries.length, () => {
-  if (!isMobile.value && listRef.value && document.activeElement?.closest('[data-entry-list]')) {
-    listRef.value.focus({ preventScroll: true })
-  }
-})
-
-function isSelected(entry: DirEntry): boolean {
-  return selectedSet.value.has(entry.path)
-}
-
-function handleRowClick(entry: DirEntry, event: MouseEvent) {
-  if (isMobile.value) {
-    // Mobile: click is open when nothing selected, else toggle select
-    if (selectedSet.value.size === 0) emit('open', entry)
-    else handleSelect(entry, event)
-    return
-  }
-  handleSelect(entry, event)
-}
-
-function handleRowDblClick(entry: DirEntry) {
-  if (!isMobile.value) emit('open', entry)
-}
-
-let shiftAnchor: string | null = null
-
-function handleSelect(entry: DirEntry, event: MouseEvent) {
-  const e = event as MouseEvent & { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }
-  if (e.shiftKey) {
-    // Keep anchor at the point where Shift was first held; extend from there
-    if (!shiftAnchor) shiftAnchor = console_.lastSelected.value ?? console_.selectedPath.value ?? entry.path
-    const anchor = shiftAnchor ?? entry.path
-    console_.selectRange(anchor, entry.path)
-  } else {
-    shiftAnchor = null
-    if (e.metaKey || e.ctrlKey) {
-      console_.toggleSelect(entry.path)
-    } else {
-      console_.selectSingle(entry.path)
-    }
-  }
-}
-
-function handleKeydown(event: KeyboardEvent) {
-  if (event.defaultPrevented) return
-  if (!props.entries.length) return
-  const active = document.activeElement as HTMLElement | null
-  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return
-  // Only handle when focus is inside the entry list or no input is focused
-  const inList = !!active?.closest('[data-entry-list]') || active === listRef.value || !active || active === document.body
-  if (!inList && active && active !== document.body) {
-    // If focus is outside the list (e.g., sidebar), don't hijack arrows
-    const listEl = listRef.value
-    if (listEl && !listEl.contains(active)) return
-  }
-  const idx = props.entries.findIndex((e) => e.path === console_.lastSelected.value)
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault()
-    const dir = event.key === 'ArrowDown' ? 1 : -1
-    // When nothing is selected, ArrowDown selects first, ArrowUp selects last
-    let nextIdx: number
-    if (idx === -1) {
-      nextIdx = dir === 1 ? 0 : props.entries.length - 1
-    } else {
-      nextIdx = Math.max(0, Math.min(props.entries.length - 1, idx + dir))
-    }
-    const next = props.entries[nextIdx]
-    if (!next) return
-    if (event.shiftKey) {
-      if (!shiftAnchor) shiftAnchor = console_.lastSelected.value ?? console_.selectedPath.value ?? props.entries[idx]?.path ?? next.path
-      const anchor = shiftAnchor ?? next.path
-      console_.selectRange(anchor, next.path)
-    } else {
-      shiftAnchor = null
-      console_.selectSingle(next.path)
-    }
-    // Keep the newly selected row visible and keep keyboard focus on the list
-    nextTick(() => {
-      const row = document.querySelector<HTMLElement>(`[data-path="${CSS.escape(next.path)}"]`)
-      row?.scrollIntoView({ block: 'nearest' })
-    })
-  } else if (event.key === 'Enter') {
-    event.preventDefault()
-    shiftAnchor = null
-    const targetPath = console_.lastSelected.value || console_.selectedPath.value
-    const target = props.entries.find((e) => e.path === targetPath) ?? (idx >= 0 ? props.entries[idx] : null)
-    if (target) emit('open', target)
-  } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
-    event.preventDefault()
-    shiftAnchor = null
-    console_.selectAll()
-  } else if (event.key === 'Escape') {
-    shiftAnchor = null
-    console_.clearSelection()
-  } else if (event.key === 'Home' || (event.key === 'ArrowUp' && (event.ctrlKey || event.metaKey))) {
-    event.preventDefault()
-    shiftAnchor = null
-    const first = props.entries[0]
-    if (!first) return
-    if (event.shiftKey) {
-      if (!shiftAnchor) shiftAnchor = console_.lastSelected.value ?? props.entries[idx]?.path ?? first.path
-      console_.selectRange(shiftAnchor, first.path)
-    } else {
-      console_.selectSingle(first.path)
-    }
-  } else if (event.key === 'End' || (event.key === 'ArrowDown' && (event.ctrlKey || event.metaKey))) {
-    event.preventDefault()
-    shiftAnchor = null
-    const last = props.entries.at(-1)
-    if (!last) return
-    if (event.shiftKey) {
-      if (!shiftAnchor) shiftAnchor = console_.lastSelected.value ?? props.entries[idx]?.path ?? last.path
-      console_.selectRange(shiftAnchor, last.path)
-    } else {
-      console_.selectSingle(last.path)
-    }
-  }
-}
-
-// Long-press for mobile select
-function onTouchStart(entry: DirEntry) {
-  if (!isMobile.value) return
-  pressTimer = setTimeout(() => {
-    console_.toggleSelect(entry.path)
-    if (navigator.vibrate) navigator.vibrate(20)
-    pressTimer = null
-  }, 500)
-}
-
-function onTouchEnd() {
-  if (pressTimer) {
-    clearTimeout(pressTimer)
-    pressTimer = null
-  }
-}
-
-function onTouchMove() {
-  onTouchEnd()
 }
 
 // Bulk helpers
@@ -370,7 +88,7 @@ const menuTargets = computed(() => {
   const cur = openMenu.value?.entry
   if (!cur) return [] as DirEntry[]
   if (selectedSet.value.has(cur.path) && selectedSet.value.size > 1) {
-    return props.entries.filter((e) => selectedSet.value.has(e.path))
+    return props.entries.filter(e => selectedSet.value.has(e.path))
   }
   return [cur]
 })
@@ -382,7 +100,7 @@ const canBulkCopy = computed(() => menuTargets.value.length > 0)
 
 async function downloadBulk() {
   closeMenu()
-  for (const e of menuTargets.value) await console_.downloadEntry(e)
+  for (const e of menuTargets.value) await consoleStore.downloadEntry(e)
 }
 
 async function removeBulk() {
@@ -398,39 +116,39 @@ async function removeBulk() {
     danger: true,
   })
   if (!ok) return
-  await console_.removeMany(targets.map((e) => e.path))
+  await consoleStore.removeMany(targets.map(e => e.path))
 }
 
 function moveBulk() {
   closeMenu()
   // keep current multi-selection as is
-  console_.openModal('move')
+  consoleStore.openModal('move')
 }
 
 function copyBulk() {
   closeMenu()
-  console_.openModal('copy')
+  consoleStore.openModal('copy')
 }
 
 async function openMove(entry: DirEntry) {
-  await console_.focusEntry(entry)
+  await consoleStore.focusEntry(entry)
   // Preserve bulk selection if this entry is part of it
-  if (!console_.selectedPaths.value.has(entry.path)) {
-    console_.selectSingle(entry.path)
-  } else if (console_.selectedPaths.value.size === 0) {
-    console_.selectSingle(entry.path)
+  if (!consoleStore.selectedPaths.value.has(entry.path)) {
+    consoleStore.selectSingle(entry.path)
+  } else if (consoleStore.selectedPaths.value.size === 0) {
+    consoleStore.selectSingle(entry.path)
   }
-  console_.openModal('move')
+  consoleStore.openModal('move')
 }
 
 async function openCopy(entry: DirEntry) {
-  await console_.focusEntry(entry)
-  if (!console_.selectedPaths.value.has(entry.path)) {
-    console_.selectSingle(entry.path)
-  } else if (console_.selectedPaths.value.size === 0) {
-    console_.selectSingle(entry.path)
+  await consoleStore.focusEntry(entry)
+  if (!consoleStore.selectedPaths.value.has(entry.path)) {
+    consoleStore.selectSingle(entry.path)
+  } else if (consoleStore.selectedPaths.value.size === 0) {
+    consoleStore.selectSingle(entry.path)
   }
-  console_.openModal('copy')
+  consoleStore.openModal('copy')
 }
 </script>
 
@@ -507,12 +225,12 @@ async function openCopy(entry: DirEntry) {
 
           <template v-if="menuTargets.length > 1">
             <button v-if="canBulkDownload" role="menuitem" class="menu-item" @click="downloadBulk">Download ({{ menuTargets.length }})</button>
-            <template v-if="console_.canWrite.value">
+            <template v-if="consoleStore.canWrite.value">
               <div class="menu-sep" />
               <button v-if="canBulkMove" role="menuitem" class="menu-item" @click="moveBulk">Move ({{ menuTargets.length }})</button>
               <button v-if="canBulkCopy" role="menuitem" class="menu-item" @click="copyBulk">Copy ({{ menuTargets.length }})</button>
             </template>
-            <template v-if="console_.canWrite.value && canBulkRemove">
+            <template v-if="consoleStore.canWrite.value && canBulkRemove">
               <div class="menu-sep" />
               <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="removeBulk">Remove ({{ menuTargets.length }})</button>
             </template>
@@ -523,20 +241,22 @@ async function openCopy(entry: DirEntry) {
               {{ entry.is_dir ? 'Browse' : 'Preview' }}
             </button>
 
-            <template v-if="console_.canWrite.value">
+            <template v-if="consoleStore.canWrite.value">
               <div v-if="entry.is_dir" class="menu-sep" />
-              <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('create-file', entry.path))">New file here</button>
-              <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.openModal('mkdir', entry.path))">New folder here</button>
+              <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.openModal('create-file', entry.path))">New file here</button>
+              <button v-if="entry.is_dir" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.openModal('mkdir', entry.path))">New folder here</button>
 
               <div class="menu-sep" />
               <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'rename'))">Rename</button>
               <button role="menuitem" class="menu-item" @click="runFor(entry, () => openMove(entry))">Move</button>
               <button role="menuitem" class="menu-item" @click="runFor(entry, () => openCopy(entry))">Copy</button>
               <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'link'))">Hard link</button>
-              <button role="menuitem" class="menu-item" title="Create a symlink pointing to this entry, inside the current directory" @click="runFor(entry, () => withFocus(entry, 'symlink', console_.currentPath.value))">Symlink</button>
+              <button role="menuitem" class="menu-item" title="Create a symlink pointing to this entry, inside the current directory" @click="runFor(entry, () => withFocus(entry, 'symlink', consoleStore.currentPath.value))">Symlink</button>
               <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chmod'))">Chmod</button>
-              <button v-if="console_.isAdmin.value" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chown'))">Chown</button>
+              <button v-if="consoleStore.isAdmin.value" role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'chown'))">Chown</button>
               <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'utimes'))">Timestamps</button>
+              <button role="menuitem" class="menu-item" title="Inspect and edit extended attributes in the preview pane" @click="runFor(entry, () => withFocus(entry, 'xattr-set'))">Set xattr</button>
+              <button role="menuitem" class="menu-item" @click="runFor(entry, () => withFocus(entry, 'xattr-remove'))">Remove xattr</button>
 
               <template v-if="isFile(entry)">
                 <div class="menu-sep" />
@@ -546,17 +266,17 @@ async function openCopy(entry: DirEntry) {
               </template>
 
               <div class="menu-sep" />
-              <button role="menuitem" class="menu-item" @click="runFor(entry, () => shareEntry(entry))">Share</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed URL, valid 5 minutes. Works with curl/wget too." @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link</button>
+              <button role="menuitem" class="menu-item" title="Short-lived share, valid 5 minutes" @click="runFor(entry, () => shareEntry(entry))">Share (5 min)</button>
+              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.downloadEntry(entry))">Download</button>
+              <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed URL, valid 5 minutes. Works with curl/wget too." @click="runFor(entry, () => consoleStore.copyDirectLink(entry))">Copy direct link</button>
             </template>
             <template v-else>
               <div class="menu-sep" />
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.downloadEntry(entry))">Download</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => console_.copyDirectLink(entry))">Copy direct link</button>
+              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.downloadEntry(entry))">Download</button>
+              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.copyDirectLink(entry))">Copy direct link</button>
             </template>
 
-            <template v-if="console_.canWrite.value">
+            <template v-if="consoleStore.canWrite.value">
               <div class="menu-sep" />
               <button role="menuitem" class="menu-item text-clay-soft hover:bg-clay/20" @click="runFor(entry, () => removeEntry(entry))">Remove</button>
             </template>

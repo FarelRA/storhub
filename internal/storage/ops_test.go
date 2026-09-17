@@ -325,8 +325,12 @@ func TestBuildCommitMessage(t *testing.T) {
 
 	msg := buildCommitMessage(stack.ops, "a1b2c3d4e5f60789")
 	lines := strings.Split(msg, "\n")
-	if lines[0] != "storhub: 3 ops (2 put, 1 del) on top of a1b2c3d4e5f6" {
-		t.Fatalf("unexpected summary line: %q", lines[0])
+	// Pin stable tokens, not the full sentence: copy edits to the summary
+	// prose must not rerun the suite.
+	for _, token := range []string{"storhub:", "3 ops", "2 put", "1 del", "a1b2c3d4e5f6"} {
+		if !strings.Contains(lines[0], token) {
+			t.Fatalf("summary line %q must carry token %q", lines[0], token)
+		}
 	}
 	if !strings.Contains(msg, "put docs/report.pdf 2.2MiB 2 chunks (v5) mode 0644 [upload]") {
 		t.Fatalf("missing put line in:\n%s", msg)

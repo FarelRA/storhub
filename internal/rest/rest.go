@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,8 @@ const (
 	defaultRESTPatchBodySize = 8 << 20
 	defaultRESTShareTTL      = 7 * 24 * time.Hour
 	maxRequestBodyMemory     = 32 << 10
+	// panicStackSize bounds the captured goroutine stack on panic recovery.
+	panicStackSize = 8192
 	// nobodyUID/nobodyGID is the POSIX "nobody" account: share-link visitors
 	// get no identity beyond what path permissions grant them.
 	nobodyUID = uint32(65534)
@@ -144,25 +147,9 @@ func (h *restHandler) clientFor(r *http.Request) Client {
 	return h.client
 }
 
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (w *statusWriter) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusWriter) Write(p []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	n, err := w.ResponseWriter.Write(p)
-	w.bytes += n
-	return n, err
-}
+// HTTP status/byte capture lives in internal/logging (HTTPRecorder): the
+// former statusWriter duplicate was removed so one package owns one job.
+// See logging/http_recorder.go.
 
 type shareRegistry struct {
 	mu    sync.RWMutex
@@ -252,45 +239,9 @@ func NewHandler(hub *storage.StorHub, opts Options) (http.Handler, error) {
 }
 
 func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
-	if opts.Auth == nil && !opts.AllowAnonymous {
-		return nil, errors.New("security constraint: no Auth configured; set AllowAnonymous:true to serve unauthenticated traffic deliberately")
-	}
-	opts = opts.withDefaults()
-	logger := logging.WithComponent(nil, "rest")
-	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
-		logger = logging.WithComponent(provider.Logger(), "rest")
-	}
-	// Unified key: all cards (auth and share) derive from TokenSigningKey.
-	// This gives one EdDSA key for the whole API, share and login are just
-	// different capabilities (kind) on the same JWT.
-	if opts.Auth != nil {
-		if len(opts.Auth.TokenSigningKey) < 32 {
-			return nil, errors.New("security constraint: token signing key must be at least 32 bytes")
-		}
-		if isWeakShareKey(opts.Auth.TokenSigningKey) {
-			return nil, errors.New("security constraint: token signing key is a known weak/default key")
-		}
-	}
-	if len(opts.ShareSigningKey) > 0 {
-		if len(opts.ShareSigningKey) < 32 {
-			return nil, errors.New("security constraint: share signing key must be at least 32 bytes")
-		}
-		if isWeakShareKey(opts.ShareSigningKey) {
-			return nil, errors.New("security constraint: share signing key is a known weak/default key")
-		}
-	}
-	h := &restHandler{client: client, opts: opts, shares: &shareRegistry{items: map[string]*shareRecord{}, revoked: map[string]time.Time{}}, logger: logger}
-	if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
-		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
-		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
-		opts.ShareSigningKey = h.shareSignKey.Seed()
-	} else if len(opts.ShareSigningKey) > 0 {
-		seed := opts.ShareSigningKey
-		if len(seed) > 32 {
-			hash := sha256.Sum256(seed)
-			seed = hash[:]
-		}
-		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+	h, auth, err := newRestHandler(client, opts)
+	if err != nil {
+		return nil, err
 	}
 	r := chi.NewRouter()
 
@@ -304,32 +255,16 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	r.Get("/_nuxt/*", h.serveUIAssets)
 	r.Get("/favicon.svg", h.serveUIPublic)
 
-	basePath := strings.TrimRight(opts.BasePath, "/")
+	basePath := strings.TrimRight(h.opts.BasePath, "/")
 
-	r.Get(basePath, h.serveAPIInfo)
-	r.Get(basePath+"/shares/{id}", h.serveShareInfo)
-	r.Get(basePath+"/shares/{id}/download", h.serveShareDownload)
-	r.Head(basePath+"/shares/{id}/download", h.serveShareDownload)
-	r.Post(basePath+"/shares/{id}/derive", h.serveShareDerive)
+	r.Get(basePath, h.handleAPIInfo)
+	r.Get(basePath+"/shares/{token}", h.handleShareInfo)
+	r.Get(basePath+"/shares/{token}/download", h.serveShareDownload)
+	r.Head(basePath+"/shares/{token}/download", h.serveShareDownload)
+	r.Post(basePath+"/shares/{token}/derive", h.handleShareDerive)
 
-	if opts.Auth != nil {
-		auth, err := newAuthenticator(*opts.Auth)
-		if err != nil {
-			return nil, err
-		}
-		r.Post(basePath+"/auth/login", func(w http.ResponseWriter, r *http.Request) {
-			var req restLoginRequest
-			if err := h.decodeJSON(r, &req); err != nil {
-				h.writeMappedError(w, err)
-				return
-			}
-			principal, token, ttl, err := auth.login(req.Username, req.Password)
-			if err != nil {
-				h.writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
-				return
-			}
-			h.writeJSON(w, http.StatusOK, restLoginResponse{Token: token, TokenType: "Bearer", ExpiresIn: int64(ttl.Seconds()), Principal: principal})
-		})
+	if auth != nil {
+		r.Post(basePath+"/auth/login", h.handleLogin(auth))
 
 		r.Group(func(r chi.Router) {
 			r.Use(h.authMiddleware(auth, basePath))
@@ -344,6 +279,78 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 	}
 
 	return r, nil
+}
+
+// newRestHandler validates keys, applies defaults, derives the EdDSA share
+// key, and builds the handler plus its authenticator (nil for anonymous).
+// Split out of newHandlerForClient so route-table construction
+// (registerRoutes inline above) and login handling read as separate steps.
+func newRestHandler(client Client, opts Options) (*restHandler, *restAuthenticator, error) {
+	if opts.Auth == nil && !opts.AllowAnonymous {
+		return nil, nil, errors.New("security constraint: no Auth configured; set AllowAnonymous:true to serve unauthenticated traffic deliberately")
+	}
+	opts = opts.withDefaults()
+	logger := logging.WithComponent(nil, "rest")
+	if provider, ok := client.(interface{ Logger() *slog.Logger }); ok && provider.Logger() != nil {
+		logger = logging.WithComponent(provider.Logger(), "rest")
+	}
+	// Unified key: all cards (auth and share) derive from TokenSigningKey.
+	// This gives one EdDSA key for the whole API, share and login are just
+	// different capabilities (kind) on the same JWT.
+	if opts.Auth != nil {
+		if len(opts.Auth.TokenSigningKey) < 32 {
+			return nil, nil, errors.New("security constraint: token signing key must be at least 32 bytes")
+		}
+		if isWeakShareKey(opts.Auth.TokenSigningKey) {
+			return nil, nil, errors.New("security constraint: token signing key is a known weak/default key")
+		}
+	}
+	if len(opts.ShareSigningKey) > 0 {
+		if len(opts.ShareSigningKey) < 32 {
+			return nil, nil, errors.New("security constraint: share signing key must be at least 32 bytes")
+		}
+		if isWeakShareKey(opts.ShareSigningKey) {
+			return nil, nil, errors.New("security constraint: share signing key is a known weak/default key")
+		}
+	}
+	h := &restHandler{client: client, opts: opts, shares: newShareRegistry(), logger: logger}
+	if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
+		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
+		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+		h.opts.ShareSigningKey = h.shareSignKey.Seed()
+	} else if len(opts.ShareSigningKey) > 0 {
+		seed := opts.ShareSigningKey
+		if len(seed) > 32 {
+			hash := sha256.Sum256(seed)
+			seed = hash[:]
+		}
+		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+	}
+	if opts.Auth == nil {
+		return h, nil, nil
+	}
+	auth, err := newAuthenticator(*opts.Auth)
+	if err != nil {
+		return nil, nil, err
+	}
+	return h, auth, nil
+}
+
+// handleLogin serves POST /auth/login: decode credentials, mint an auth JWT.
+func (h *restHandler) handleLogin(auth *restAuthenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req restLoginRequest
+		if err := h.decodeJSON(r, &req, false); err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
+		principal, token, ttl, err := auth.login(req.Username, req.Password)
+		if err != nil {
+			h.writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
+			return
+		}
+		h.writeJSON(w, http.StatusOK, restLoginResponse{Token: token, TokenType: "Bearer", ExpiresIn: int64(ttl.Seconds()), Principal: principal})
+	}
 }
 
 func (o Options) withDefaults() Options {
@@ -374,20 +381,22 @@ func (o Options) withDefaults() Options {
 }
 
 func (h *restHandler) registerProjectRoutes(r chi.Router) {
-	r.Get("/", h.handleProject)
-	r.Delete("/", h.handleProject)
-	r.Get("/nodes", h.handleNodes)
-	r.Head("/nodes", h.handleNodes)
-	r.Delete("/nodes", h.handleNodes)
+	// One handler per method: the router owns dispatch, so handlers never
+	// switch on r.Method again and methodNotAllowed boilerplate is gone.
+	r.Get("/", h.handleProjectGet)
+	r.Delete("/", h.handleProjectDelete)
+	r.Get("/nodes", h.handleNodeGet)
+	r.Head("/nodes", h.handleNodeGet)
+	r.Delete("/nodes", h.handleNodeDelete)
 	r.Get("/children", h.handleChildren)
-	r.Get("/content", h.handleContentRead)
-	r.Head("/content", h.handleContentRead)
+	r.Get("/content", h.serveContent)
+	r.Head("/content", h.serveContent)
 	r.Put("/content", h.handleContentReplace)
 	r.Patch("/content", h.handleContentPatch)
 	r.Get("/xattrs", h.handleXAttrs)
-	r.Get("/xattrs/value", h.handleXAttrValue)
-	r.Put("/xattrs/value", h.handleXAttrValue)
-	r.Delete("/xattrs/value", h.handleXAttrValue)
+	r.Get("/xattrs/value", h.handleXAttrGet)
+	r.Put("/xattrs/value", h.handleXAttrPut)
+	r.Delete("/xattrs/value", h.handleXAttrDelete)
 	r.Get("/revisions", h.handleRevisions)
 	r.Post("/ops/create-file", h.handleCreateFile)
 	r.Post("/ops/mkdir", h.handleMkdir)
@@ -404,17 +413,17 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/revert-path", h.handleRevertPath)
 	r.Post("/ops/purge", h.handlePurge)
 	r.Post("/ops/prune", h.handlePrune)
-	r.Get("/shares", h.handleProjectShares)
-	r.Post("/shares", h.handleProjectShares)
-	r.Get("/shares/{shareID}", h.handleProjectShare)
-	r.Delete("/shares/{shareID}", h.handleProjectShare)
+	r.Get("/shares", h.handleProjectSharesGet)
+	r.Post("/shares", h.handleProjectSharesPost)
+	r.Get("/shares/{shareID}", h.handleProjectShareGet)
+	r.Delete("/shares/{shareID}", h.handleProjectShareDelete)
 }
 
 func (h *restHandler) recoverPanics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				stack := make([]byte, 8192)
+				stack := make([]byte, panicStackSize)
 				n := runtime.Stack(stack, false)
 				logging.Error(h.logger, "panic serving request",
 					"method", r.Method,
@@ -430,15 +439,17 @@ func (h *restHandler) recoverPanics(next http.Handler) http.Handler {
 
 func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Gate BEFORE redacting: RedactSensitivePath+RedactQueryValues run
+		// per request even when Info is dropped at the warn default.
+		if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelInfo) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		started := time.Now().UTC()
-		sw := &statusWriter{ResponseWriter: w}
+		sw := logging.NewHTTPRecorder(w)
 		logging.Info(h.logger, "http request start", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "query", logging.RedactQueryValues(r.URL.RawQuery), "remote", r.RemoteAddr)
 		next.ServeHTTP(sw, r)
-		status := sw.status
-		if status == 0 {
-			status = http.StatusOK
-		}
-		logging.Info(h.logger, "http request complete", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "status", status, "bytes", sw.bytes, "elapsed", time.Since(started))
+		logging.Info(h.logger, "http request complete", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "status", sw.Status(), "bytes", sw.Bytes(), "elapsed", time.Since(started))
 	})
 }
 
@@ -456,75 +467,101 @@ func requestBearerToken(r *http.Request) string {
 func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := requestBearerToken(r)
-			fromQuery := false
+			token, fromQuery := bearerOrQueryToken(r)
 			if token == "" {
-				token = strings.TrimSpace(r.URL.Query().Get("token"))
-				fromQuery = true
-			}
-			if token == "" {
-				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
-				h.writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
+				h.writeUnauthorized(w, auth, "missing bearer token")
 				return
 			}
-
-			principal, err := auth.parseToken(token)
-			if err == nil && fromQuery {
-				// Auth JWTs must travel in the Authorization header: query
-				// strings land in intermediaries, browser history and
-				// Referer headers. Query-token acceptance is reserved for
-				// share capabilities (handled below), not the whole
-				// authenticated surface.
-				principal, err = nil, errors.New("auth tokens are not accepted via query")
-			}
-			if err == nil {
-				// Re-read the user record behind the token: auth JWTs are
-				// otherwise irrevocable, so a disabled, demoted, or removed
-				// account must not keep full access until expiry.
-				fresh, live := auth.currentPrincipal(principal)
-				if !live {
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
-					h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
-					return
-				}
-				principal = fresh
-				// Attach the caller's identity for the storage layers below:
-				// downstream permission checks must see the authenticated
-				// principal, never the server process's own credentials.
-				identity := shfs.WithIdentity(r.Context(), shfs.Identity{
-					UID:    principal.UID,
-					GID:    principal.PrimaryGID,
-					Groups: principal.Groups,
-					Admin:  principal.Admin,
-				})
-				ctx := context.WithValue(identity, clientCtxKey, &authorizedClient{base: h.client, principal: principal})
+			// authPrincipal rejects auth-JWT-via-query explicitly so the
+			// token falls through to the share lane below before failing.
+			if ctx, ok := h.authPrincipal(r, auth, token, fromQuery); ok {
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-
-			claims, err := h.parseShareToken(token)
-			if err == nil {
-				if h.isRevoked(claims.ID) {
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
-					h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
-					return
-				}
-				project := chi.URLParam(r, "project")
-				if project == claims.Project && strings.HasPrefix(r.URL.Path, basePath+"/projects/"+project+"/shares") {
-					h.writeError(w, http.StatusForbidden, "forbidden", "share links cannot manage shares")
-					return
-				}
-				// Share links act as an unauthenticated read-only visitor.
-				identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
-				ctx := context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
+			if ctx, ok, fatal := h.sharePrincipal(r, auth, basePath, token, w); fatal {
+				return
+			} else if ok {
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
-			h.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
+			h.writeUnauthorized(w, auth, "invalid bearer token")
 		})
 	}
+}
+
+// bearerOrQueryToken extracts the bearer credential, reporting whether it
+// came from the query string (share-capability lane) or the header.
+func bearerOrQueryToken(r *http.Request) (token string, fromQuery bool) {
+	if token = requestBearerToken(r); token != "" {
+		return token, false
+	}
+	if token = strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return token, true
+	}
+	return "", false
+}
+
+// authPrincipal verifies an auth JWT and returns the request context
+// carrying the authorized client. ok=false means "not a usable auth token,
+// try the share lane"; a nil context with ok=false after a query-token
+// rejection still falls through to shares.
+func (h *restHandler) authPrincipal(r *http.Request, auth *restAuthenticator, token string, fromQuery bool) (context.Context, bool) {
+	principal, err := auth.parseToken(token)
+	if err == nil && fromQuery {
+		// Auth JWTs must travel in the Authorization header: query
+		// strings land in intermediaries, browser history and
+		// Referer headers. Query-token acceptance is reserved for
+		// share capabilities (handled below), not the whole
+		// authenticated surface.
+		return nil, false
+	}
+	if err != nil {
+		return nil, false
+	}
+	// Re-read the user record behind the token: auth JWTs are
+	// otherwise irrevocable, so a disabled, demoted, or removed
+	// account must not keep full access until expiry.
+	fresh, live := auth.currentPrincipal(principal)
+	if !live {
+		return nil, false
+	}
+	// Attach the caller's identity for the storage layers below:
+	// downstream permission checks must see the authenticated
+	// principal, never the server process's own credentials.
+	identity := shfs.WithIdentity(r.Context(), shfs.Identity{
+		UID:    fresh.UID,
+		GID:    fresh.PrimaryGID,
+		Groups: fresh.Groups,
+		Admin:  fresh.Admin,
+	})
+	return context.WithValue(identity, clientCtxKey, &authorizedClient{base: h.client, principal: fresh}), true
+}
+
+// sharePrincipal verifies a share JWT and returns the nobody-visitor
+// context scoped to the shared path. fatal=true means the handler already
+// answered (share-management forbidden); ok=false means "not a share token".
+func (h *restHandler) sharePrincipal(r *http.Request, auth *restAuthenticator, basePath, token string, w http.ResponseWriter) (context.Context, bool, bool) {
+	claims, err := h.parseShareToken(token)
+	if err != nil {
+		return nil, false, false
+	}
+	if h.isRevoked(claims.ID) {
+		h.writeUnauthorized(w, auth, "invalid bearer token")
+		return nil, false, true
+	}
+	project := chi.URLParam(r, "project")
+	if project == claims.Project && strings.HasPrefix(r.URL.Path, basePath+"/projects/"+project+"/shares") {
+		h.writeMappedError(w, errForbidden("share links cannot manage shares"))
+		return nil, false, true
+	}
+	// Share links act as an unauthenticated read-only visitor.
+	identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
+	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path)), true, false
+}
+
+func (h *restHandler) writeUnauthorized(w http.ResponseWriter, auth *restAuthenticator, message string) {
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
+	h.writeError(w, http.StatusUnauthorized, "unauthorized", message)
 }
 
 func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
@@ -542,7 +579,9 @@ func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "window.STORHUB_UI_CONFIG = %s;", payload)
 }
 
-func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
+// handleAPIInfo answers GET <basePath>: service identity for the console.
+// A handle* route (JSON document), not a serve* byte stream.
+func (h *restHandler) handleAPIInfo(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"service":   "storhub-rest",
 		"version":   "v1",
@@ -553,36 +592,24 @@ func (h *restHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *restHandler) decodeJSON(r *http.Request, dst any) error {
+// decodeJSON reads one JSON object from the request body.
+// allowEmpty treats a missing or whitespace-only body as "no fields
+// supplied" (dst left at zero): endpoints whose whole body is optional
+// (prune) pass true so a bodyless POST is not a 400 EOF, matching purge.
+func (h *restHandler) decodeJSON(r *http.Request, dst any, allowEmpty bool) error {
 	if r.Body == nil {
+		if allowEmpty {
+			return nil
+		}
 		return errBadRequest("request body is required")
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyMemory+1))
 	if err != nil {
 		return errBadRequest("unable to read request body")
 	}
-	return decodeJSONPayload(payload, dst)
-}
-
-// decodeJSONOptional behaves like decodeJSON but treats an empty (or
-// whitespace-only) body as "no fields supplied", leaving dst at its zero
-// value. Endpoints whose whole body is optional (prune) use it so a
-// bodyless POST is not a 400 EOF, matching purge.
-func (h *restHandler) decodeJSONOptional(r *http.Request, dst any) error {
-	if r.Body == nil {
+	if allowEmpty && len(bytes.TrimSpace(payload)) == 0 {
 		return nil
 	}
-	payload, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyMemory+1))
-	if err != nil {
-		return errBadRequest("unable to read request body")
-	}
-	if len(bytes.TrimSpace(payload)) == 0 {
-		return nil
-	}
-	return decodeJSONPayload(payload, dst)
-}
-
-func decodeJSONPayload(payload []byte, dst any) error {
 	if int64(len(payload)) > maxRequestBodyMemory {
 		return errPayloadTooLarge(fmt.Sprintf("request body exceeds %d bytes", maxRequestBodyMemory))
 	}
@@ -597,9 +624,17 @@ func decodeJSONPayload(payload []byte, dst any) error {
 	return nil
 }
 
-func (h *restHandler) methodNotAllowed(w http.ResponseWriter, methods ...string) {
-	w.Header().Set("Allow", strings.Join(methods, ", "))
-	h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+// decodePathRequest decodes a {"path": ...} body for the simple file-ops.
+// One decode+validate site so handlers stay three lines.
+func (h *restHandler) decodePathRequest(r *http.Request, field string) (string, error) {
+	var req pathRequest
+	if err := h.decodeJSON(r, &req, false); err != nil {
+		return "", err
+	}
+	if err := requireNonEmptyPath(field, req.Path); err != nil {
+		return "", err
+	}
+	return req.Path, nil
 }
 
 func (h *restHandler) writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -688,10 +723,19 @@ func mappedStatus(err error) int {
 	}
 }
 
+// mappedCode is the single owner of wire error codes: every status maps
+// to exactly one code. Handlers must use errBadRequest/errPayloadTooLarge
+// (+writeMappedError) instead of inventing ad-hoc codes (xattr_too_large,
+// invalid_request, invalid_patch_op, recursive_delete_unsupported); bespoke
+// codes survive only where the status alone cannot distinguish the case
+// (conflict sub-cases, not_implemented, range). writeError is reserved for
+// truly bespoke cases (auth challenges, UI fallbacks).
 func mappedCode(status int) string {
 	switch status {
 	case http.StatusBadRequest:
 		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
 	case http.StatusForbidden:
 		return "forbidden"
 	case http.StatusNotFound:
@@ -720,6 +764,10 @@ func mappedCode(status int) string {
 // REST-layer input validation: reject malformed client input
 // with 400 HERE instead of forwarding it to storage, whose generic errors
 // would surface as 500s echoing internal wording.
+//
+// Canonical query/body parsers: exactly three — parseNonNegativeInt,
+// parseBoolStrict, parsePruneScope. Do not add a fourth idiom; CLI-side
+// parsing mirrors parseNonNegativeInt via parseNonNegativeArg (usageError).
 
 func requireNonEmptyPath(field, value string) error {
 	if strings.TrimSpace(value) == "" {
@@ -728,11 +776,51 @@ func requireNonEmptyPath(field, value string) error {
 	return nil
 }
 
-func requireNonNegative(field string, value int64) error {
-	if value < 0 {
-		return errBadRequest(field + " must be non-negative")
+// parseNonNegativeInt parses a required non-negative int64 query/body value.
+// Missing, malformed, or negative inputs all answer 400 here so storage
+// never sees them.
+func parseNonNegativeInt(raw, field string) (int64, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, errBadRequest(field + " is required")
 	}
-	return nil
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, errBadRequest(field + " must be a valid integer")
+	}
+	if value < 0 {
+		return 0, errBadRequest(field + " must be non-negative")
+	}
+	return value, nil
+}
+
+// parseBoolStrict interprets a query-string boolean. Absent means false;
+// recognized truthy/falsey spellings resolve; anything else is a 400 so
+// callers never silently take the other branch.
+func parseBoolStrict(raw, field string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false", "0", "no":
+		return false, nil
+	case "true", "1", "yes":
+		return true, nil
+	default:
+		return false, errBadRequest(field + " must be a boolean (true/false)")
+	}
+}
+
+// parsePruneScope validates a prune scope against the storage constants
+// (the single source of the objects|assets|history|all set). Empty means
+// "all". Unknown scopes answer 400 with the known set as guidance.
+func parsePruneScope(raw string) (storage.PruneScope, error) {
+	scope := strings.TrimSpace(raw)
+	if scope == "" {
+		return storage.PruneAll, nil
+	}
+	switch storage.PruneScope(scope) {
+	case storage.PruneObjects, storage.PruneAssets, storage.PruneHistory, storage.PruneAll:
+		return storage.PruneScope(scope), nil
+	default:
+		return "", errBadRequest(`prune scope must be one of "objects", "assets", "history", "all"`)
+	}
 }
 
 // commitSHAPattern matches git object ids: lowercase hex, 7 (shortest
@@ -748,15 +836,6 @@ func requireCommitSHA(value string) error {
 		return errBadRequest("commit_sha must be a 7-64 character hexadecimal commit SHA")
 	}
 	return nil
-}
-
-func validPruneScope(scope string) bool {
-	switch scope {
-	case "objects", "assets", "history", "all":
-		return true
-	default:
-		return false
-	}
 }
 
 type restStatusError struct {
@@ -794,19 +873,5 @@ var weakShareKeys = [][]byte{
 }
 
 func isWeakShareKey(key []byte) bool {
-	for _, weak := range weakShareKeys {
-		if len(key) == len(weak) {
-			match := true
-			for i := range key {
-				if key[i] != weak[i] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-		}
-	}
-	return false
+	return slices.ContainsFunc(weakShareKeys, func(w []byte) bool { return bytes.Equal(key, w) })
 }

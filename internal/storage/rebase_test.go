@@ -311,3 +311,110 @@ func TestRebaseMessageNoteTruncatesOnRuneBoundary(t *testing.T) {
 		t.Fatalf("expected the note to stay well-formed, got %q", note)
 	}
 }
+
+// TestRebaseRenameVsRenameDisjointConverge pins non-overlapping renames:
+// rival renames docs->archive upstream while our pending op renames
+// tmp->tmp2. Both renames land, no resolutions recorded.
+func TestRebaseRenameVsRenameDisjointConverge(t *testing.T) {
+	t.Parallel()
+	base := newTestMeta("p")
+	base.EnsureDirectory("docs", 1700000000)
+	base.EnsureDirectory("tmp", 1700000000)
+	basePaths := hashPaths(base)
+
+	upstream := base.Clone()
+	if err := applyOps(upstream, []Op{
+		{Type: OpRename, Paths: []string{"docs", "archive"}, Cause: "mv", Timestamp: 1700000100, Dir: &DirMeta{Inode: 20, Mode: 0o755, CreatedAt: 1700000000, ModifiedAt: 1700000000}},
+	}); err != nil {
+		t.Fatalf("rival rename: %v", err)
+	}
+
+	ops := []Op{
+		{Type: OpRename, Paths: []string{"tmp", "tmp2"}, Cause: "mv", Timestamp: 1700000200, Dir: &DirMeta{Inode: 21, Mode: 0o755, CreatedAt: 1700000200, ModifiedAt: 1700000200}},
+	}
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
+	if err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+	if !rebased.HasDirectory("archive") || !rebased.HasDirectory("tmp2") {
+		t.Fatalf("both renames must land: archive=%v tmp2=%v",
+			rebased.HasDirectory("archive"), rebased.HasDirectory("tmp2"))
+	}
+	if rebased.HasDirectory("docs") || rebased.HasDirectory("tmp") {
+		t.Fatal("rename sources must be gone after rebase")
+	}
+	if len(resolutions) != 0 {
+		t.Fatalf("expected clean rebase (disjoint renames), got %+v", resolutions)
+	}
+	if err := rebased.Validate(); err != nil {
+		t.Fatalf("rebased tree invalid: %v", err)
+	}
+}
+
+// TestRebaseSetattrLosesToNewerPut pins setattr participation in LWW: our
+// older chmod must not clobber the rival's newer content write.
+func TestRebaseSetattrLosesToNewerPut(t *testing.T) {
+	t.Parallel()
+	base := newTestMeta("p")
+	if err := base.PutChunk(1, ChunkInfo{Size: 4, Offset: 0, AssetID: 11}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+	seed := FileMeta{Size: 4, Mode: 0o644, Inode: 61, Chunks: []int64{1}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
+	base.UpsertFile("a.txt", seed, 1700000000)
+	basePaths := hashPaths(base)
+
+	upstream := base.Clone()
+	rival := FileMeta{Size: 42, Mode: 0o600, Inode: 62, Chunks: []int64{1}, UploadedAt: 1700000300, ModifiedAt: 1700000300, AccessedAt: 1700000300, ChangedAt: 1700000300}
+	upstream.UpsertFile("a.txt", rival, 1700000300)
+
+	ours := FileMeta{Size: 4, Mode: 0o600, Inode: 61, Chunks: []int64{1}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000200}
+	ops := []Op{
+		{Type: OpSetattr, Paths: []string{"a.txt"}, Cause: "chmod", Timestamp: 1700000200, File: &ours},
+	}
+
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
+	if err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+	got := rebased.FindFile("a.txt")
+	if got == nil || got.Size != 42 || got.ChangedAt != 1700000300 {
+		t.Fatalf("expected newer upstream put to survive our older setattr, got %+v", got)
+	}
+	if len(resolutions) != 1 || !strings.Contains(resolutions[0].Note, "upstream newer") {
+		t.Fatalf("expected recorded upstream-newer resolution, got %+v", resolutions)
+	}
+}
+
+// TestRebaseNewerSetattrWinsOverOlderPut pins the mirror: our newer chmod
+// wins over the rival's older content write, and the win is recorded.
+func TestRebaseNewerSetattrWinsOverOlderPut(t *testing.T) {
+	t.Parallel()
+	base := newTestMeta("p")
+	if err := base.PutChunk(1, ChunkInfo{Size: 4, Offset: 0, AssetID: 11}); err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+	seed := FileMeta{Size: 4, Mode: 0o644, Inode: 63, Chunks: []int64{1}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
+	base.UpsertFile("a.txt", seed, 1700000000)
+	basePaths := hashPaths(base)
+
+	upstream := base.Clone()
+	rival := FileMeta{Size: 9, Mode: 0o644, Inode: 64, Chunks: []int64{1}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
+	upstream.UpsertFile("a.txt", rival, 1700000100)
+
+	ours := FileMeta{Size: 4, Mode: 0o600, Inode: 63, Chunks: []int64{1}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000200}
+	ops := []Op{
+		{Type: OpSetattr, Paths: []string{"a.txt"}, Cause: "chmod", Timestamp: 1700000200, File: &ours},
+	}
+
+	rebased, resolutions, err := rebaseWorkingTree(upstream, ops, basePaths, false)
+	if err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+	got := rebased.FindFile("a.txt")
+	if got == nil || got.Mode != 0o600 || got.ChangedAt != 1700000200 {
+		t.Fatalf("expected our newer setattr to win (mode 0600, ts 200), got %+v", got)
+	}
+	if len(resolutions) != 1 || !strings.Contains(resolutions[0].Note, "LWW") {
+		t.Fatalf("expected recorded LWW resolution, got %+v", resolutions)
+	}
+}

@@ -47,103 +47,99 @@ type pathRequest struct {
 	Path string `json:"path"`
 }
 
-type renameRequest struct {
-	OldPath string `json:"old_path"`
-	NewPath string `json:"new_path"`
-}
+// renameRequest and other mutation shapes live in rest_mutations.go with
+// their handlers; copyRequest stays here because copySrcDst documents the
+// legacy alias at the type.
 
+// copyRequest carries a server-side copy. src_path/dst_path are canonical;
+// old_path/new_path are a deprecated legacy alias kept for wire
+// compatibility: they warn-but-work this release and will be removed in a
+// future version. New clients must send src_path/dst_path.
 type copyRequest struct {
 	SrcPath string `json:"src_path"`
 	DstPath string `json:"dst_path"`
+	// Deprecated: use SrcPath/DstPath instead. Kept as a fallback alias.
 	OldPath string `json:"old_path"`
+	// Deprecated: use DstPath instead. Kept as a fallback alias.
 	NewPath string `json:"new_path"`
 }
 
-type linkRequest struct {
-	ExistingPath string `json:"existing_path"`
-	NewPath      string `json:"new_path"`
+// copySrcDst resolves the effective (src,dst) pair, preferring the
+// canonical fields and falling back to the deprecated aliases.
+func copySrcDst(req copyRequest) (src, dst string, err error) {
+	src = strings.TrimSpace(req.SrcPath)
+	if src == "" {
+		src = strings.TrimSpace(req.OldPath)
+	}
+	dst = strings.TrimSpace(req.DstPath)
+	if dst == "" {
+		dst = strings.TrimSpace(req.NewPath)
+	}
+	if src == "" || dst == "" {
+		return "", "", errBadRequest("src_path and dst_path are required")
+	}
+	return src, dst, nil
 }
 
-type symlinkRequest struct {
-	Target   string `json:"target"`
-	LinkPath string `json:"link_path"`
-}
-
-type chmodRequest struct {
-	Path string `json:"path"`
-	Mode uint32 `json:"mode"`
-}
-
-type chownRequest struct {
-	Path string `json:"path"`
-	UID  uint32 `json:"uid"`
-	GID  uint32 `json:"gid"`
-}
-
-type utimesRequest struct {
-	Path  string    `json:"path"`
-	Atime time.Time `json:"atime"`
-	Mtime time.Time `json:"mtime"`
-}
-
-func (h *restHandler) handleNodes(w http.ResponseWriter, r *http.Request) {
+// handleNodeGet serves GET/HEAD /nodes: stat one node with ETag/304 support.
+func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		eTag := restEntryETag(entry)
-		h.setRevisionHeader(w, r, project)
-		if h.ifNoneMatchSatisfied(r.Header.Get("If-None-Match"), eTag) {
-			w.Header().Set("ETag", eTag)
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		w.Header().Set("ETag", eTag)
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		h.writeJSON(w, http.StatusOK, nodeResponse{Project: project, Entry: entry, ETag: eTag})
-	case http.MethodDelete:
-		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		revOpts, perr := h.mutationPrecondition(r, project, targetPath)
-		if perr != nil {
-			h.writeMappedError(w, perr)
-			return
-		}
-		if entry.IsDir {
-			recursive, ok := parseQueryBool(r.URL.Query().Get("recursive"))
-			if !ok {
-				h.writeError(w, http.StatusBadRequest, "invalid_request", "recursive must be a boolean (true/false)")
-				return
-			}
-			if recursive {
-				h.writeError(w, http.StatusNotImplemented, "recursive_delete_unsupported", "recursive directory deletion is not supported")
-				return
-			}
-		}
-		if entry.IsDir {
-			err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath, revOpts...)
-		} else {
-			err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath, revOpts...)
-		}
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodDelete)
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
 	}
+	eTag := restEntryETag(entry)
+	h.setRevisionHeader(w, r, project)
+	if matchEntityTag(r.Header.Get("If-None-Match"), eTag) {
+		w.Header().Set("ETag", eTag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", eTag)
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, nodeResponse{Project: project, Entry: entry, ETag: eTag})
+}
+
+// handleNodeDelete serves DELETE /nodes: remove one file or empty dir.
+func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	targetPath := r.URL.Query().Get("path")
+	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	revOpts, perr := h.mutationPrecondition(r, project, targetPath)
+	if perr != nil {
+		h.writeMappedError(w, perr)
+		return
+	}
+	if entry.IsDir {
+		recursive, berr := parseBoolStrict(r.URL.Query().Get("recursive"), "recursive")
+		if berr != nil {
+			h.writeMappedError(w, berr)
+			return
+		}
+		if recursive {
+			h.writeError(w, http.StatusNotImplemented, "not_implemented", "recursive directory deletion is not supported")
+			return
+		}
+	}
+	if entry.IsDir {
+		err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath, revOpts...)
+	} else {
+		err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath, revOpts...)
+	}
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
@@ -154,10 +150,13 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	h.setRevisionHeader(w, r, project)
 	h.writeJSON(w, http.StatusOK, entriesResponse{Project: project, Path: dirPath, Entries: entries})
 }
 
-func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) {
+// serveContent serves GET/HEAD /content: raw file bytes. A serve* stream
+// (not a handle* JSON route) because the body is user-stored bytes.
+func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
 	// User-stored bytes share the API origin with the console: never let a
@@ -169,7 +168,7 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if entry.IsDir {
-		h.writeError(w, http.StatusConflict, "is_directory", fmt.Sprintf("path is a directory: %s", filePath))
+		h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)})
 		return
 	}
 	if entry.IsSymlink {
@@ -190,15 +189,16 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 	}
 
 	eTag := restEntryETag(entry)
-	if h.ifNoneMatchSatisfied(r.Header.Get("If-None-Match"), eTag) {
+	h.setRevisionHeader(w, r, project)
+	if matchEntityTag(r.Header.Get("If-None-Match"), eTag) {
 		w.Header().Set("ETag", eTag)
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	start, end, partial, err := parseByteRange(r.Header.Get("Range"), entry.Size)
-	if err != nil {
+	start, end, partial, rerr := parseByteRange(r.Header.Get("Range"), entry.Size)
+	if rerr != nil {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
-		h.writeError(w, http.StatusRequestedRangeNotSatisfiable, "range_not_satisfiable", err.Error())
+		h.writeMappedError(w, &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rerr.Error()})
 		return
 	}
 	contentLength := end - start
@@ -216,6 +216,12 @@ func (h *restHandler) handleContentRead(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(status)
+	h.streamFileRange(w, r, project, filePath, start, end)
+}
+
+// streamFileRange streams [start,end) in StreamChunkSize windows. Shared by
+// serveContent and share downloads so the short-read comment lives once.
+func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, project, filePath string, start, end int64) {
 	sent := int64(0)
 	for offset := start; offset < end; {
 		readLen := h.opts.StreamChunkSize
@@ -247,62 +253,19 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
-	entry, exists, err := h.lookupOptional(r, project, filePath)
-	if err != nil {
-		h.writeMappedError(w, err)
+	entry, exists, revOpts, ok := h.checkReplacePreconditions(w, r, project, filePath)
+	if !ok {
 		return
 	}
-	replaceRevOpts, replaceRevErr := h.mutationPrecondition(r, project, filePath)
-	if replaceRevErr != nil {
-		h.writeMappedError(w, replaceRevErr)
+	created, ok := h.createReplacePlaceholder(w, r, project, filePath, entry, exists)
+	if !ok {
 		return
-	}
-	if exists {
-		// Type conflicts hold under both If-Match flavors.
-		if entry.IsDir {
-			h.writeError(w, http.StatusConflict, "is_directory", fmt.Sprintf("path is a directory: %s", filePath))
-			return
-		}
-		if replaceRevOpts == nil {
-			if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
-				if !isPreconditionHeaderEmpty(err) {
-					h.writeMappedError(w, err)
-					return
-				}
-			}
-			if h.ifNoneMatchStar(r.Header.Get("If-None-Match")) {
-				h.writeMappedError(w, errPreconditionFailed("resource already exists"))
-				return
-			}
-		}
-	} else if r.Header.Get("If-Match") != "" {
-		h.writeMappedError(w, errPreconditionFailed("resource does not exist"))
-		return
-	}
-
-	created := !exists
-	if !exists {
-		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-	} else if entry.IsSymlink {
-		// A symlink is replaced by a regular file, not followed; clear it
-		// first because create refuses existing nodes.
-		if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
 	}
 	// The create call above leaves an empty placeholder behind when the path
 	// did not exist (or clobbers a symlink). If the body transfer then
 	// fails, remove the placeholder instead of stranding an orphan the
 	// client believes was never created.
-	replaceOpts := replaceRevOpts
+	replaceOpts := revOpts
 	if r.ContentLength >= 0 {
 		replaceOpts = append(replaceOpts, shfs.WithSize(r.ContentLength))
 	}
@@ -316,14 +279,82 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	uploadCtx := context.WithoutCancel(r.Context())
 	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
-			if cleanupErr := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); cleanupErr != nil {
+			if cleanupErr := h.clientFor(r).DeleteFileContext(uploadCtx, project, filePath); cleanupErr != nil {
 				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
 			}
 		}
 		h.writeMappedError(w, err)
 		return
 	}
-	h.respondWithNode(w, r, project, filePath, ternaryStatus(created, http.StatusCreated, http.StatusOK))
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	h.respondWithNode(w, r, project, filePath, status)
+}
+
+// checkReplacePreconditions stats the target and enforces If-Match /
+// If-None-Match semantics. ok=false means the handler already answered.
+func (h *restHandler) checkReplacePreconditions(w http.ResponseWriter, r *http.Request, project, filePath string) (entry *shfs.EntryInfo, exists bool, revOpts []shfs.MutateOption, ok bool) {
+	entry, exists, err := h.lookupOptional(r, project, filePath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return nil, false, nil, false
+	}
+	revOpts, revErr := h.mutationPrecondition(r, project, filePath)
+	if revErr != nil {
+		h.writeMappedError(w, revErr)
+		return nil, false, nil, false
+	}
+	if exists {
+		// Type conflicts hold under both If-Match flavors.
+		if entry.IsDir {
+			h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)})
+			return nil, false, nil, false
+		}
+		if revOpts == nil {
+			if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
+				if !isPreconditionHeaderEmpty(err) {
+					h.writeMappedError(w, err)
+					return nil, false, nil, false
+				}
+			}
+			if matchEntityTag(r.Header.Get("If-None-Match"), "*") {
+				h.writeMappedError(w, errPreconditionFailed("resource already exists"))
+				return nil, false, nil, false
+			}
+		}
+	} else if r.Header.Get("If-Match") != "" {
+		h.writeMappedError(w, errPreconditionFailed("resource does not exist"))
+		return nil, false, nil, false
+	}
+	return entry, exists, revOpts, true
+}
+
+// createReplacePlaceholder ensures a regular file exists for the body
+// transfer. It reports whether the file is newly created (for status and
+// failure cleanup). ok=false means the handler already answered.
+func (h *restHandler) createReplacePlaceholder(w http.ResponseWriter, r *http.Request, project, filePath string, entry *shfs.EntryInfo, exists bool) (created, ok bool) {
+	if !exists {
+		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
+			h.writeMappedError(w, err)
+			return false, false
+		}
+		return true, true
+	}
+	if entry.IsSymlink {
+		// A symlink is replaced by a regular file, not followed; clear it
+		// first because create refuses existing nodes.
+		if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
+			h.writeMappedError(w, err)
+			return false, false
+		}
+		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
+			h.writeMappedError(w, err)
+			return false, false
+		}
+	}
+	return false, true
 }
 
 func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +387,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	case "truncate":
 		err = h.patchOpTruncate(r, project, filePath)
 	default:
-		h.writeError(w, http.StatusBadRequest, "invalid_patch_op", "query parameter op must be one of append, write, patch, truncate")
+		h.writeMappedError(w, errBadRequest("query parameter op must be one of append, write, patch, truncate"))
 		return
 	}
 	if err != nil {
@@ -375,11 +406,8 @@ func (h *restHandler) patchOpAppend(r *http.Request, project, filePath string) e
 
 // patchOpWrite applies one atomic write at the required offset.
 func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) error {
-	offset, err := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
+	offset, err := parseNonNegativeInt(r.URL.Query().Get("offset"), "offset")
 	if err != nil {
-		return err
-	}
-	if err := requireNonNegative("offset", offset); err != nil {
 		return err
 	}
 	return h.streamWriteBody(r, project, filePath, r.Body, offset)
@@ -387,18 +415,12 @@ func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) er
 
 // patchOpPatch applies one range replacement (offset/delete_size/edit).
 func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) error {
-	offset, err := parseRequiredInt64(r.URL.Query().Get("offset"), "offset")
+	offset, err := parseNonNegativeInt(r.URL.Query().Get("offset"), "offset")
 	if err != nil {
 		return err
 	}
-	if err := requireNonNegative("offset", offset); err != nil {
-		return err
-	}
-	deleteSize, err := parseRequiredInt64(r.URL.Query().Get("delete_size"), "delete_size")
+	deleteSize, err := parseNonNegativeInt(r.URL.Query().Get("delete_size"), "delete_size")
 	if err != nil {
-		return err
-	}
-	if err := requireNonNegative("delete_size", deleteSize); err != nil {
 		return err
 	}
 	edit, err := h.readSizedBody(r.Body, "patch payload exceeds the configured limit")
@@ -415,11 +437,8 @@ func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) er
 
 // patchOpTruncate resizes the file to the required size.
 func (h *restHandler) patchOpTruncate(r *http.Request, project, filePath string) error {
-	size, err := parseRequiredInt64(r.URL.Query().Get("size"), "size")
+	size, err := parseNonNegativeInt(r.URL.Query().Get("size"), "size")
 	if err != nil {
-		return err
-	}
-	if err := requireNonNegative("size", size); err != nil {
 		return err
 	}
 	revOpts, err := h.mutationPrecondition(r, project, filePath)
@@ -511,48 +530,90 @@ func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	h.setRevisionHeader(w, r, project)
 	h.writeJSON(w, http.StatusOK, xattrListResponse{Project: project, Path: targetPath, Names: names})
 }
 
-func (h *restHandler) handleXAttrValue(w http.ResponseWriter, r *http.Request) {
+// handleXAttrGet serves GET /xattrs/value: raw xattr bytes.
+//
+// X-Content-Type-Options: nosniff is set (like /content) so a browser never
+// sniffs stored xattr bytes into an executable representation. No
+// Content-Disposition: attachment is set: xattr values are fetched via XHR
+// for inline use (never navigated to), so a download affordance would break
+// the console's read path without adding security beyond nosniff+octet-stream.
+func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	name := r.URL.Query().Get("name")
-	switch r.Method {
-	case http.MethodGet:
-		value, err := h.clientFor(r).GetXAttrContext(r.Context(), project, targetPath, name)
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("X-StorHub-XAttr-Name", name)
-		w.Header().Set("Content-Length", strconv.Itoa(len(value)))
-		_, _ = w.Write(value)
-	case http.MethodPut:
-		payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
-		if err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		if int64(len(payload)) > h.opts.MaxPatchBodySize {
-			h.writeError(w, http.StatusRequestEntityTooLarge, "xattr_too_large", "xattr value exceeds the configured limit")
-			return
-		}
-		if err := h.clientFor(r).SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	case http.MethodDelete:
-		if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
-			h.writeMappedError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		h.methodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+	name, ok := h.requireXAttrName(w, r)
+	if !ok {
+		return
 	}
+	value, err := h.clientFor(r).GetXAttrContext(r.Context(), project, targetPath, name)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	h.setRevisionHeader(w, r, project)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-StorHub-XAttr-Name", name)
+	w.Header().Set("Content-Length", strconv.Itoa(len(value)))
+	_, _ = w.Write(value)
+}
+
+// handleXAttrPut serves PUT /xattrs/value.
+func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	targetPath := r.URL.Query().Get("path")
+	name, ok := h.requireXAttrName(w, r)
+	if !ok {
+		return
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if int64(len(payload)) > h.opts.MaxPatchBodySize {
+		h.writeMappedError(w, errPayloadTooLarge("xattr value exceeds the configured limit"))
+		return
+	}
+	if err := h.clientFor(r).SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleXAttrDelete serves DELETE /xattrs/value.
+func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) {
+	project := chi.URLParam(r, "project")
+	targetPath := r.URL.Query().Get("path")
+	name, ok := h.requireXAttrName(w, r)
+	if !ok {
+		return
+	}
+	if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// requireXAttrName validates the ?name= query: non-empty (like path) and
+// free of CR/LF so Header.Set cannot split the response. ok=false means
+// the handler already answered 400.
+func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (string, bool) {
+	name := r.URL.Query().Get("name")
+	if strings.TrimSpace(name) == "" {
+		h.writeMappedError(w, errBadRequest("name is required"))
+		return "", false
+	}
+	if strings.ContainsAny(name, "\r\n") {
+		h.writeMappedError(w, errBadRequest("name must not contain CR or LF"))
+		return "", false
+	}
+	return name, true
 }
 
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
@@ -562,231 +623,8 @@ func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	h.setRevisionHeader(w, r, project)
 	h.writeJSON(w, http.StatusOK, revisionsResponse{Project: project, Revisions: revisions})
-}
-
-func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req pathRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.Path, http.StatusCreated)
-}
-
-func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req pathRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).MkdirContext(r.Context(), project, req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.Path, http.StatusCreated)
-}
-
-func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req pathRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).RmdirContext(r.Context(), project, req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req pathRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).DeleteFileContext(r.Context(), project, req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req renameRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("old_path", req.OldPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("new_path", req.NewPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).RenameContext(r.Context(), project, req.OldPath, req.NewPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
-}
-
-func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req copyRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	src := strings.TrimSpace(req.SrcPath)
-	if src == "" {
-		src = strings.TrimSpace(req.OldPath)
-	}
-	dst := strings.TrimSpace(req.DstPath)
-	if dst == "" {
-		dst = strings.TrimSpace(req.NewPath)
-	}
-	if src == "" || dst == "" {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "src_path and dst_path are required")
-		return
-	}
-	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, dst, http.StatusCreated)
-}
-
-func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req linkRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("existing_path", req.ExistingPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("new_path", req.NewPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if _, err := h.clientFor(r).LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.NewPath, http.StatusCreated)
-}
-
-func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req symlinkRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("target", req.Target); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("link_path", req.LinkPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if _, err := h.clientFor(r).SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.LinkPath, http.StatusCreated)
-}
-
-func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req chmodRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
-}
-
-func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req chownRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := h.clientFor(r).ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
-}
-
-func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
-	project := chi.URLParam(r, "project")
-	var req utimesRequest
-	if err := h.decodeJSON(r, &req); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	if err := requireNonEmptyPath("path", req.Path); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	// A zero time.Time would silently forward Unix() = -62135596800 to
-	// storage; require both stamps to be present.
-	if req.Atime.IsZero() || req.Mtime.IsZero() {
-		h.writeMappedError(w, errBadRequest("atime and mtime are required"))
-		return
-	}
-	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
-		h.writeMappedError(w, err)
-		return
-	}
-	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
 func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, project, targetPath string, status int) {
@@ -809,36 +647,38 @@ func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string
 	return nil, false, err
 }
 
-// streamWriteBody applies an entire write atomically by buffering the body
-// up to MaxPatchBodySize and issuing a single WriteFileAt call. Chunked
-// multi-call writes would expose torn intermediate states to concurrent
-// readers and leave partial data committed on failure; bodies beyond the
-// cap are rejected so clients fall back to the atomic full-file PUT.
-func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
+// streamSizedBody buffers one mutation body up to MaxPatchBodySize and
+// applies it atomically via fn. Chunked multi-call writes would expose torn
+// intermediate states to concurrent readers and leave partial data committed
+// on failure; bodies beyond the cap are rejected so clients fall back to
+// the atomic full-file PUT. streamWriteBody/streamAppendBody are thin
+// wrappers over it.
+func (h *restHandler) streamSizedBody(r *http.Request, project, filePath string, body io.Reader, fn func(payload []byte, revOpts []shfs.MutateOption) error) error {
 	payload, err := h.readSizedBody(body, fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
 	if err != nil {
 		return err
 	}
-	revOptsW, perrW := h.mutationPrecondition(r, project, filePath)
-	if perrW != nil {
-		return perrW
+	revOpts, perr := h.mutationPrecondition(r, project, filePath)
+	if perr != nil {
+		return perr
 	}
-	_, err = h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOptsW...)
-	return err
+	return fn(payload, revOpts)
 }
 
-// streamAppendBody mirrors streamWriteBody: one AppendFile call, or 413.
-func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
-	payload, err := h.readSizedBody(body, fmt.Sprintf("mutation body exceeds the configured limit of %d bytes; use full-file PUT for large payloads", h.opts.MaxPatchBodySize))
-	if err != nil {
+// streamWriteBody applies an entire write atomically: one WriteFileAt call.
+func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
+	return h.streamSizedBody(r, project, filePath, body, func(payload []byte, revOpts []shfs.MutateOption) error {
+		_, err := h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOpts...)
 		return err
-	}
-	revOptsA, perrA := h.mutationPrecondition(r, project, filePath)
-	if perrA != nil {
-		return perrA
-	}
-	_, err = h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload, revOptsA...)
-	return err
+	})
+}
+
+// streamAppendBody applies an entire append atomically: one AppendFile call.
+func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
+	return h.streamSizedBody(r, project, filePath, body, func(payload []byte, revOpts []shfs.MutateOption) error {
+		_, err := h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload, revOpts...)
+		return err
+	})
 }
 
 // readSizedBody buffers at most MaxPatchBodySize bytes from a mutation body;
@@ -872,16 +712,10 @@ func readCappedBody(body io.Reader, limit int64) ([]byte, error) {
 	return payload, nil
 }
 
-func (h *restHandler) ifNoneMatchStar(header string) bool {
-	for _, part := range strings.Split(header, ",") {
-		if strings.TrimSpace(part) == "*" {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *restHandler) ifNoneMatchSatisfied(header, eTag string) bool {
+// matchEntityTag reports whether an If-* header list (comma-separated,
+// whitespace-tolerant) matches eTag or the "*" wildcard. The single owner
+// of entity-tag list parsing; requireMatch is its thin error wrapper.
+func matchEntityTag(header, eTag string) bool {
 	if strings.TrimSpace(header) == "" {
 		return false
 	}
@@ -898,11 +732,8 @@ func (h *restHandler) requireMatch(header, eTag string) error {
 	if strings.TrimSpace(header) == "" {
 		return errEmptyPrecondition
 	}
-	for _, part := range strings.Split(header, ",") {
-		value := strings.TrimSpace(part)
-		if value == "*" || value == eTag {
-			return nil
-		}
+	if matchEntityTag(header, eTag) {
+		return nil
 	}
 	return errPreconditionFailed("etag precondition failed")
 }
@@ -1013,34 +844,6 @@ func parseByteRange(header string, size int64) (start, end int64, partial bool, 
 	return start, inclusiveEnd + 1, true, nil
 }
 
-func parseRequiredInt64(raw, field string) (int64, error) {
-	if strings.TrimSpace(raw) == "" {
-		return 0, errBadRequest(field + " is required")
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, errBadRequest(field + " must be a valid integer")
-	}
-	return value, nil
-}
-
-// parseQueryBool interprets a query-string boolean. Absent means false;
-// recognized truthy/falsey spellings resolve; anything else reports ok=false
-// so the caller answers 400 instead of silently taking the other branch.
-func parseQueryBool(raw string) (value bool, ok bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "false", "0", "no":
-		return false, true
-	case "true", "1", "yes":
-		return true, true
-	default:
-		return false, false
-	}
-}
-
-func ternaryStatus(cond bool, yes, no int) int {
-	if cond {
-		return yes
-	}
-	return no
-}
+// NOTE: query parsers live in rest.go as the canonical three
+// (parseNonNegativeInt/parseBoolStrict/parsePruneScope); do not add
+// handler-local variants here.

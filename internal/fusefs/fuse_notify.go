@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"log/slog"
 	"runtime"
 
 	"github.com/FarelRA/storhub/internal/logging"
@@ -80,7 +81,11 @@ func safeNotifyContent(node *storhubNode) {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			n := runtime.Stack(buf, false)
-			logging.Error(nil, "panic in NotifyContent", "panic", r, "stack", string(buf[:n]))
+			logger := slog.Default()
+			if node != nil {
+				logger = node.fs.log()
+			}
+			logging.Error(logger, "panic in NotifyContent", "panic", r, "stack", string(buf[:n]))
 		}
 	}()
 	if node == nil || !fsConnected(node.fs) {
@@ -92,10 +97,17 @@ func safeNotifyContent(node *storhubNode) {
 // beginNotify marks a notification pending and takes a concurrency slot.
 // It reports false when an identical notification is already queued: the
 // duplicate coalesces into the pending one (post-commit invalidation
-// storms collapse). The slot is taken synchronously so the mutation path
-// feels kernel backpressure instead of piling up unbounded notify
-// goroutines. A nil filesystem (test seam driving detached nodes) skips
-// both bookkeeping and the bound.
+// storms collapse). Slot ownership: the slot is taken synchronously here,
+// on the mutation path, so the mutator feels kernel backpressure instead
+// of piling up unbounded notify goroutines; ownership passes to the
+// spawned goroutine, which releases the slot in a defer. A wedged
+// /dev/fuse therefore parks at most maxConcurrentNotifies slot-holders and
+// the next mutation blocks in beginNotify. That block is by-design
+// backpressure (no orphaned slot, no timeout/drain: timing out would lose
+// invalidations the 60s entry/attr timeouts would then serve stale, and
+// Close/Unmount cannot safely drain goroutines blocked in a kernel write).
+// A nil filesystem (test seam driving detached nodes) skips both
+// bookkeeping and the bound.
 func (s *Filesystem) beginNotify(key notifyKey) bool {
 	if s == nil {
 		return true
@@ -123,14 +135,13 @@ func (s *Filesystem) endNotify(key notifyKey) {
 	s.notifyMu.Unlock()
 }
 
-func safeNotifyEntry(node *storhubNode, name string) {
-	if node == nil || !fsConnected(node.fs) {
-		return
-	}
-	entryFn := notifyEntryFunc
-	fs := node.fs
-	key := notifyKey{kind: notifyKindEntry, node: node, name: name}
-	if !fs.beginNotify(key) {
+// notifyAsync dispatches fn on a fresh goroutine under the concurrency
+// bound: the single funnel behind safeNotifyEntry/safeNotifyDelete, which
+// previously duplicated the recover+slot dance. The pending mark clears
+// before fn runs (see endNotify) so a mutation landing during the kernel
+// write still enqueues its own invalidation.
+func (s *Filesystem) notifyAsync(key notifyKey, what string, fn func()) {
+	if !s.beginNotify(key) {
 		return
 	}
 	go func() {
@@ -138,15 +149,30 @@ func safeNotifyEntry(node *storhubNode, name string) {
 			if r := recover(); r != nil {
 				buf := make([]byte, 4096)
 				n := runtime.Stack(buf, false)
-				logging.Error(nil, "panic in NotifyEntry", "panic", r, "stack", string(buf[:n]))
+				logger := slog.Default()
+				if s != nil {
+					logger = s.log()
+				}
+				logging.Error(logger, "panic in "+what, "panic", r, "stack", string(buf[:n]))
 			}
-			if fs != nil {
-				<-fs.notifySlots
+			if s != nil {
+				<-s.notifySlots
 			}
 		}()
-		fs.endNotify(key)
-		entryFn(node, name)
+		s.endNotify(key)
+		fn()
 	}()
+}
+
+func safeNotifyEntry(node *storhubNode, name string) {
+	if node == nil || !fsConnected(node.fs) {
+		return
+	}
+	entryFn := notifyEntryFunc
+	fs := node.fs
+	fs.notifyAsync(notifyKey{kind: notifyKindEntry, node: node, name: name}, "NotifyEntry", func() {
+		entryFn(node, name)
+	})
 }
 
 func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
@@ -156,26 +182,11 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	entryFn := notifyEntryFunc
 	deleteFn := notifyDeleteFunc
 	fs := parent.fs
-	key := notifyKey{kind: notifyKindDelete, node: parent, name: name}
-	if !fs.beginNotify(key) {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				buf := make([]byte, 4096)
-				n := runtime.Stack(buf, false)
-				logging.Error(nil, "panic in NotifyDelete", "panic", r, "stack", string(buf[:n]))
-			}
-			if fs != nil {
-				<-fs.notifySlots
-			}
-		}()
-		fs.endNotify(key)
+	fs.notifyAsync(notifyKey{kind: notifyKindDelete, node: parent, name: name}, "NotifyDelete", func() {
 		if child == nil {
 			entryFn(parent, name)
 			return
 		}
 		deleteFn(parent, name, child)
-	}()
+	})
 }

@@ -3,7 +3,6 @@ package fs
 import (
 	"context"
 	"errors"
-	"os"
 	"syscall"
 	"testing"
 
@@ -15,7 +14,9 @@ func TestCheckStickyDelete(t *testing.T) {
 	t.Parallel()
 	now := int64(280)
 	repo := meta.NewRepoMetadata("demo")
-	repo.EnsureRelease("v1", now)
+	if _, err := repo.EnsureRelease("v1", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	repo.EnsureDirectory("tmp", now)
 	dir := repo.GetDirectory("tmp")
 	dir.Mode = 0o1777
@@ -55,15 +56,16 @@ func TestShouldUpdateAtimePolicy(t *testing.T) {
 
 func TestIdentityFromContextFailsClosed(t *testing.T) {
 	t.Parallel()
-	// An absent identity must never masquerade as anonymous root: it
-	// resolves to the local process user, and only a process that genuinely
-	// runs as root normalizes to Admin.
+	// An absent identity must never masquerade as an admin: the fallback
+	// carries no Admin even when the daemon runs as root (the process uid
+	// is not a caller assertion). Pinned without os.Getuid so the test
+	// reads identically as root and as CI's UID 1001.
 	id := IdentityFromContext(context.Background())
-	if id.UID != uint32(os.Getuid()) || id.GID != uint32(os.Getgid()) {
-		t.Fatalf("expected process identity, got %+v", id)
+	if id.Admin {
+		t.Fatalf("absent identity must not inherit Admin: %+v", id)
 	}
-	if os.Getuid() != 0 && id.Admin {
-		t.Fatal("non-root process must not inherit Admin from an absent identity")
+	if IdentityPresent(context.Background()) {
+		t.Fatal("absent identity must not count as present")
 	}
 
 	root := IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 1000}))

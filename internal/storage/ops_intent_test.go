@@ -11,24 +11,15 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// The intent-based synthesis equivalence battery. For every scenario the
-// SAME transaction (fn against a COW candidate) is synthesized twice:
+// The intent-based synthesis contract. For every scenario the SAME
+// transaction (fn against a COW candidate) is synthesized from the intents
+// the tracked mutators recorded while fn ran (the O(changes) path).
 //
-//	intent path: synthesizeOpsFromIntents over the intents the tracked
-//	             mutators recorded while fn ran (the new O(changes) path)
-//	diff path:   synthesizeOpsFromDiff over the whole pre/post trees
-//	             (the former O(tree) path, kept as the equivalence oracle)
-//
-// Both batches must be equal as multisets (the diff iterates whole maps,
-// whose order is unspecified, so intra-class order is not part of the
-// contract), and replaying the intent ops onto the pre-transaction tree
-// must reproduce the candidate tree.
+// Every batch must replay onto the pre-transaction tree and reproduce the
+// candidate tree exactly (files, dirs, chunks, releases, root).
 
 const intentTestNow = int64(1700000500)
 
-// runIntentTransaction applies fn the way UpdateRepoMetadataContext does: COW copy,
-// recorder attached before fn, Normalize + RecomputeStats after, recorder
-// detached before the fold. Returns the candidate plus both op batches.
 // runIntentTransaction applies fn the way UpdateRepoMetadataContext does:
 // COW copy, recorder attached, fn, touched-file canonicalization, the O(1)
 // seal (NOT the full Normalize+RecomputeStats walk), detach, fold. It also
@@ -95,7 +86,9 @@ func intentTestFile(m *RepoMetadata, size int64, chunkIDs []int64) FileMeta {
 
 func intentTestChunk(m *RepoMetadata, size int64) int64 {
 	id := m.AllocateChunkID()
-	m.PutChunk(id, ChunkInfo{Size: size, Offset: 0, Release: "v1", AssetID: 900 + id})
+	if err := m.PutChunk(id, ChunkInfo{Size: size, Offset: 0, Release: "v1", AssetID: 900 + id}); err != nil {
+		panic(fmt.Sprintf("test seed chunk must be valid: %v", err))
+	}
 	return id
 }
 
@@ -296,11 +289,17 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 		{
 			name: "release create update delete",
 			build: func(m *RepoMetadata) {
-				m.EnsureRelease("v1", 1700000000)
+				if _, err := m.EnsureRelease("v1", 1700000000); err != nil {
+					t.Fatalf("seed release: %v", err)
+				}
 			},
 			fn: func(m *RepoMetadata) error {
-				m.PutRelease("v1", ReleaseRef{CreatedAt: intentTestNow})
-				m.EnsureRelease("v2", intentTestNow)
+				if err := m.PutRelease("v1", ReleaseRef{CreatedAt: intentTestNow}); err != nil {
+					t.Fatalf("seed release: %v", err)
+				}
+				if _, err := m.EnsureRelease("v2", intentTestNow); err != nil {
+					t.Fatalf("seed release: %v", err)
+				}
 				m.RemoveRelease("v1")
 				return nil
 			},
@@ -523,5 +522,232 @@ func TestIntentFnErrorLeavesStackUntouched(t *testing.T) {
 	pm.mu.RUnlock()
 	if ops != 0 || dirty {
 		t.Fatalf("failed fn leaked into the shared stack (ops=%d dirty=%v)", ops, dirty)
+	}
+}
+
+// TestIntentOpsPermutationConverges pins replay order-independence: every
+// permutation of a small batch must replay onto the pre-transaction tree
+// and reproduce the candidate tree. A replay that converges only in
+// emission order escapes the single-order pins above.
+func TestIntentOpsPermutationConverges(t *testing.T) {
+	t.Parallel()
+	before := newTestMeta("p")
+	intentOps, _ := runIntentTransaction(t, before, func(m *RepoMetadata) error {
+		m.EnsureDirectory("docs", intentTestNow)
+		m.UpsertFile("docs/a.txt", intentTestFile(m, 4, nil), intentTestNow)
+		m.UpsertFile("docs/b.txt", intentTestFile(m, 6, nil), intentTestNow)
+		return nil
+	})
+	if len(intentOps) == 0 {
+		t.Fatal("fixture broken: expected ops from the transaction")
+	}
+	reference := func() *RepoMetadata {
+		replayed := before.Clone()
+		if err := applyOps(replayed, intentOps); err != nil {
+			t.Fatalf("reference applyOps: %v", err)
+		}
+		replayed.Normalize("p", intentTestNow)
+		replayed.RecomputeStats()
+		return replayed
+	}()
+	wantFiles, wantDirs := reference.Files(), reference.Dirs()
+	permute := func(ops []Op, visit func([]Op)) {
+		var rec func([]Op, int)
+		rec = func(cur []Op, i int) {
+			if i == len(cur) {
+				visit(append([]Op(nil), cur...))
+				return
+			}
+			for j := i; j < len(cur); j++ {
+				cur[i], cur[j] = cur[j], cur[i]
+				rec(cur, i+1)
+				cur[i], cur[j] = cur[j], cur[i]
+			}
+		}
+		rec(append([]Op(nil), ops...), 0)
+	}
+	checked := 0
+	permute(intentOps, func(order []Op) {
+		replayed := before.Clone()
+		if err := applyOps(replayed, order); err != nil {
+			t.Fatalf("applyOps(%v): %v", order, err)
+		}
+		replayed.Normalize("p", intentTestNow)
+		replayed.RecomputeStats()
+		if !reflect.DeepEqual(replayed.Files(), wantFiles) || !reflect.DeepEqual(replayed.Dirs(), wantDirs) {
+			t.Fatalf("permutation %v diverges:\n got files %+v dirs %+v\nwant files %+v dirs %+v",
+				order, replayed.Files(), replayed.Dirs(), wantFiles, wantDirs)
+		}
+		checked++
+	})
+	if checked < 2 {
+		t.Fatalf("expected multiple permutations, checked %d", checked)
+	}
+}
+
+// TestIntentFoldEmitsRenameMkdirPutForRenameRecreate pins the fold shape
+// for rename-dir-then-recreate-under-old-path in ONE transaction, and that
+// every delivery order of the emitted set replays to the candidate: the
+// rename carries the member list, the mkdir carries the candidate's record
+// for the recreated path, and the put carries the file.
+func TestIntentFoldEmitsRenameMkdirPutForRenameRecreate(t *testing.T) {
+	t.Parallel()
+	before := newTestMeta("p")
+	before.EnsureDirectory("docs", intentTestNow)
+	before.UpsertFile("docs/old.txt", intentTestFile(before, 4, nil), intentTestNow)
+	ops, candidate := runIntentTransaction(t, before, func(m *RepoMetadata) error {
+		rec := m.GetDirectory("docs")
+		if rec == nil {
+			t.Fatal("setup broken: docs missing")
+		}
+		m.RemoveDirectory("docs")
+		m.WriteDirDirect("archive", *rec)
+		// Mirror the fs remap: the rename carries the subtree, not just
+		// the dir record.
+		old := m.FindFile("docs/old.txt")
+		if old == nil {
+			t.Fatal("setup broken: docs/old.txt missing")
+		}
+		m.RemoveFile("docs/old.txt")
+		m.WriteFileDirect("archive/old.txt", *old)
+		m.EnsureDirectory("docs", intentTestNow)
+		m.UpsertFile("docs/n.txt", intentTestFile(m, 1, nil), intentTestNow)
+		return nil
+	})
+	kinds := map[OpType]int{}
+	var dirRename *Op
+	var fileRename *Op
+	var mkdir *Op
+	for i := range ops {
+		kinds[ops[i].Type]++
+		if ops[i].Type == OpRename && ops[i].Dir != nil {
+			dirRename = &ops[i]
+		}
+		if ops[i].Type == OpRename && ops[i].File != nil {
+			fileRename = &ops[i]
+		}
+		if ops[i].Type == OpMkdir && len(ops[i].Paths) > 0 && ops[i].Paths[0] == "docs" {
+			mkdir = &ops[i]
+		}
+	}
+	if kinds[OpRename] != 2 || kinds[OpMkdir] != 1 || kinds[OpPutFile] != 1 || len(ops) != 4 {
+		t.Fatalf("fold shape: want dir-rename + file-rename + mkdir + put, got %v", kinds)
+	}
+	if dirRename.Members == nil || len(dirRename.Members) != 1 || dirRename.Members[0] != "docs/old.txt" {
+		t.Fatalf("dir rename must carry member list [docs/old.txt], got %+v", dirRename.Members)
+	}
+	if fileRename.Paths[0] != "docs/old.txt" || fileRename.Paths[1] != "archive/old.txt" {
+		t.Fatalf("file rename must pair docs/old.txt -> archive/old.txt, got %v", fileRename.Paths)
+	}
+	if mkdir.Dir == nil || mkdir.Dir.Inode != candidate.Dirs()["docs"].Inode {
+		t.Fatalf("mkdir must carry the candidate docs record, got %+v", mkdir.Dir)
+	}
+	assertReplayReproduces(t, "rename-recreate emission order", before, candidate, ops)
+	permuteAll := func(ops []Op, visit func([]Op)) {
+		var rec func([]Op, []Op)
+		rec = func(fixed, rest []Op) {
+			if len(rest) == 0 {
+				visit(fixed)
+				return
+			}
+			for i := range rest {
+				next := append(append([]Op{}, fixed...), rest[i])
+				rem := append(append([]Op{}, rest[:i]...), rest[i+1:]...)
+				rec(next, rem)
+			}
+		}
+		rec(nil, ops)
+	}
+	checked := 0
+	permuteAll(ops, func(order []Op) {
+		replayed := before.Clone()
+		if err := applyOps(replayed, order); err != nil {
+			t.Fatalf("applyOps(%v): %v", order, err)
+		}
+		replayed.Normalize("p", intentTestNow)
+		if !reflect.DeepEqual(replayed.Files(), candidate.Files()) || !reflect.DeepEqual(replayed.Dirs(), candidate.Dirs()) {
+			t.Fatalf("order %v diverges from candidate:\n got files %+v dirs %+v\nwant files %+v dirs %+v",
+				order, replayed.Files(), replayed.Dirs(), candidate.Files(), candidate.Dirs())
+		}
+		checked++
+	})
+	if checked != 24 {
+		t.Fatalf("expected 24 orders, checked %d", checked)
+	}
+}
+
+// a rename-vs-recreate set converges to the SAME tree: whichever order the
+// journal or the network delivers, replay is deterministic. The sets mirror
+// exactly what the fold emits (rename with member list, literal mkdir
+// carrying the candidate's record for a recreated path, state puts) —
+// replay convergence is only defined over fold-shaped batches, because the
+// mkdir's candidate record is what lets all orders agree on the recreated
+// path's identity.
+func TestIntentOpsBothOrdersDeterministic(t *testing.T) {
+	t.Parallel()
+	mkdirDocs := &DirMeta{Inode: 5, Mode: 0o755, UID: 1000, GID: 1000, CreatedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}
+	pairs := []struct {
+		name string
+		ops  []Op
+	}{
+		{
+			name: "rename dir then recreate file under old path",
+			ops: []Op{
+				{Type: OpRename, Paths: []string{"docs", "archive"}, Cause: "mv", Timestamp: 1, Dir: &DirMeta{Inode: 20, Mode: 0o755, CreatedAt: 1700000000, ModifiedAt: 1700000000}, Members: []string{}},
+				{Type: OpMkdir, Paths: []string{"docs"}, Cause: "mv", Timestamp: 1, Dir: mkdirDocs},
+				{Type: OpPutFile, Paths: []string{"docs/n.txt"}, Cause: "upload", Timestamp: 2, File: &FileMeta{Size: 1, Mode: 0o644, Inode: 21, UploadedAt: 2, ModifiedAt: 2, AccessedAt: 2, ChangedAt: 2}},
+			},
+		},
+		{
+			name: "rmdir then delete child",
+			ops: []Op{
+				{Type: OpRmdir, Paths: []string{"tmp"}, Cause: "rmdir", Timestamp: 1},
+				{Type: OpDeleteFile, Paths: []string{"tmp/k.txt"}, Cause: "unlink", Timestamp: 2},
+			},
+		},
+	}
+	run := func(order []Op) (files map[string]FileMeta, dirs map[string]DirMeta, ok bool) {
+		base := newTestMeta("p")
+		base.EnsureDirectory("docs", intentTestNow)
+		base.EnsureDirectory("tmp", intentTestNow)
+		base.UpsertFile("tmp/k.txt", intentTestFile(base, 1, nil), intentTestNow)
+		if err := applyOps(base, order); err != nil {
+			return nil, nil, false
+		}
+		base.Normalize("p", intentTestNow)
+		return base.Files(), base.Dirs(), true
+	}
+	var permuteAll func(ops []Op, visit func([]Op))
+	permuteAll = func(ops []Op, visit func([]Op)) {
+		if len(ops) <= 1 {
+			visit(ops)
+			return
+		}
+		for i := range ops {
+			rest := append(append([]Op{}, ops[:i]...), ops[i+1:]...)
+			permuteAll(rest, func(tail []Op) {
+				visit(append(append([]Op{}, ops[i]), tail...))
+			})
+		}
+	}
+	for _, tc := range pairs {
+		var firstFiles map[string]FileMeta
+		var firstDirs map[string]DirMeta
+		checked := 0
+		permuteAll(tc.ops, func(order []Op) {
+			f, d, ok := run(order)
+			if !ok {
+				t.Fatalf("%s: replay must not error in order %v", tc.name, order)
+			}
+			if checked == 0 {
+				firstFiles, firstDirs = f, d
+			} else if !reflect.DeepEqual(f, firstFiles) || !reflect.DeepEqual(d, firstDirs) {
+				t.Fatalf("%s: orders diverge:\n order %+v files %+v dirs %+v\n first files %+v dirs %+v", tc.name, order, f, d, firstFiles, firstDirs)
+			}
+			checked++
+		})
+		if checked < 2 {
+			t.Fatalf("%s: expected multiple orders, checked %d", tc.name, checked)
+		}
 	}
 }

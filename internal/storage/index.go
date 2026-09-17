@@ -17,57 +17,86 @@ import (
 // idempotently before it, so a crash between object writes and the manifest
 // CAS leaves only unreferenced garbage for `storhub prune` to reclaim.
 
-// readIndexHead fetches the project's current index: the split manifest when
-// present, otherwise the legacy metadata blob. found=false means neither exists
-// (brand-new or wiped project). The returned sha is the CAS token for the
-// document that was found (manifest blob sha for a split project, metadata
-// blob sha for a legacy one). Callers distinguish the layout with
-// meta.IsManifest(data) rather than a flag threaded through here.
-func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, found bool, err error) {
+// isNotFoundErr is the uniform NotFound check for backend reads (audit 24:
+// the two inline styles — `!errors.As(...) || !NotFound` vs
+// `e.(*APIError)` type assertion — now have one home). It matches only the
+// APIError NotFound shape; git/sentinel NotFound goes through
+// isMetadataNotFound (workflows.go).
+func isNotFoundErr(err error) bool {
+	var apiErr *ghapi.APIError
+	return errors.As(err, &apiErr) && apiErr.NotFound()
+}
+
+// readIndexDoc fetches ONE index document (manifest or legacy blob) at a
+// ref: "" means HEAD. It is the single backend-dispatch point (audit 24)
+// behind readIndexHead/readIndexRevision and the object fetchers
+// (fetchObjectAt/fetchObjectAtRef via readObjectBytes): git reads go
+// through the mirror, REST through GetFileContent. found=false
+// means absent at this ref (not an error). The returned sha is the CAS
+// token for the document found (manifest blob sha on REST, HEAD commit sha
+// on git). Callers distinguish the layout with meta.IsManifest(data).
+func (h *StorHub) readIndexDoc(ctx context.Context, project, path, ref string) (data []byte, sha string, found bool, err error) {
+	if repo := h.getGitRepo(project); repo != nil {
+		if ref == "" {
+			// HEAD reads keep the atomic (data, sha) pairing: a
+			// concurrent sync advancing HEAD between a content read
+			// and a separate HEAD read would pair content at commit
+			// N with token N+1, passing the next CAS pre-check while
+			// built from N (silent overwrite of N+1).
+			d, s, rerr := readIndexHeadGit(ctx, repo, path)
+			if rerr != nil {
+				if isMetadataNotFound(rerr) {
+					return nil, "", false, nil
+				}
+				return nil, "", false, rerr
+			}
+			return d, s, true, nil
+		}
+		data, rerr := repo.readFileRef(ctx, ref, path)
+		if rerr != nil {
+			if isMetadataNotFound(rerr) {
+				return nil, "", false, nil
+			}
+			return nil, "", false, rerr
+		}
+		// Git tokens are commit SHAs: echo the requested ref.
+		return data, ref, true, nil
+	}
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, "", false, err
 	}
-	if repo := h.getGitRepo(project); repo != nil {
-		if d, s, rerr := readIndexHeadGit(ctx, repo, indexFilePath); rerr == nil {
-			return d, s, true, nil
-		} else if !isMetadataNotFound(rerr) {
-			return nil, "", false, rerr
-		}
-		d, s, rerr := readIndexHeadGit(ctx, repo, metadataFilePath)
-		if rerr == nil {
-			return d, s, true, nil
-		}
-		if isMetadataNotFound(rerr) {
+	d, s, rerr := h.gh.GetFileContent(ctx, h.owner, project, path, ref)
+	if rerr != nil {
+		if isNotFoundErr(rerr) {
 			return nil, "", false, nil
 		}
 		return nil, "", false, rerr
 	}
-	// REST: try the manifest, then the legacy blob.
-	d, s, rerr := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, "")
-	if rerr == nil {
-		return d, s, true, nil
+	return d, s, true, nil
+}
+
+// readIndexHead fetches the project's current index: the split manifest when
+// present, otherwise the legacy metadata blob. found=false means neither exists
+// (brand-new or wiped project).
+func (h *StorHub) readIndexHead(ctx context.Context, project string) (data []byte, sha string, found bool, err error) {
+	if err := h.ensureOwner(ctx); err != nil {
+		return nil, "", false, err
 	}
-	var apiErr *ghapi.APIError
-	if !errors.As(rerr, &apiErr) || !apiErr.NotFound() {
+	if d, s, ok, rerr := h.readIndexDoc(ctx, project, indexFilePath, ""); rerr != nil {
 		return nil, "", false, rerr
-	}
-	d, s, rerr = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, "")
-	if rerr == nil {
+	} else if ok {
 		return d, s, true, nil
 	}
-	if e, ok := rerr.(*ghapi.APIError); ok && e.NotFound() {
-		return nil, "", false, nil
-	}
-	return nil, "", false, rerr
+	return h.readIndexDoc(ctx, project, metadataFilePath, "")
 }
 
 // readIndexHeadGit reads one index document from the git mirror, pairing the
-// content with the HEAD commit atomically. readFileHead syncs and reads
-// under r.mu, but a concurrent fetchObject sync can advance HEAD before a
-// separate headCommitSHA call, pairing content at commit N with token N+1 -
-// the next CAS would then pass its pre-check while the tree was built from
-// N, silently overwriting N+1. Re-reading the file AT the returned sha makes
-// (data, sha) a consistent pair: readFileRef resolves the sha under r.mu, so
+// content with the HEAD commit atomically. readFileHead syncs and reads,
+// but a concurrent sync can advance HEAD before a separate headCommitSHA
+// call, pairing content at commit N with token N+1 - the next CAS would
+// then pass its pre-check while the tree was built from N, silently
+// overwriting N+1. Re-reading the file AT the returned sha makes (data,
+// sha) a consistent pair: readFileRef pins the sha under the sync lock, so
 // the bytes are always the bytes of the commit the token names. If HEAD
 // moved between the reads, the pinned read simply returns the newer commit's
 // content; if the path cannot be resolved at that sha, fall back to the
@@ -107,7 +136,14 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 	if err != nil {
 		return nil, 0, err
 	}
-	fetched := func(sha string) ([]byte, error) { return h.fetchObject(ctx, project, sha) }
+	// Batch load against one pinned HEAD (audit 33): the per-object
+	// fetchObject path syncs (fetch+hard-reset) per object, so a cold
+	// load paid O(objects) serialized syncs on one mutex. Pin once,
+	// resolve every object against the pin with no further syncs.
+	fetched, ferr := h.pinnedFetcher(ctx, project)
+	if ferr != nil {
+		return nil, 0, ferr
+	}
 	loaded, err := meta.LoadTree(manifest, fetched)
 	if err != nil {
 		return nil, 0, fmt.Errorf("load split index: %w", err)
@@ -125,7 +161,152 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 // the default and latest write path). It returns the new running object count
 // so the caller can carry the threshold hint forward. A 409 from the CAS
 // propagates unchanged so the commit loop can rebase and retry.
+//
+// The build streams (BuildTreeStream) through the project's retained
+// TreeCache with known=object-cache-membership: unchanged subtrees are
+// neither re-marshalled nor retained, so a commit no longer materializes
+// the full Objects map duplicating tree bytes (audit 31: filesByParent +
+// dirs + byBucket + full objects map per commit). Only genuinely-new
+// objects drive the running count and the upload set.
+//
+// The non-streaming BuildTree path is retained ONE release behind as the
+// fallback on streaming failure (do not delete yet): if BuildTreeStream
+// errors, publishIndex falls back to the old full-map build rather than
+// failing the commit.
 func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
+	refs, objects, scratch, oerr := h.buildIndexStream(ctx, project, tree)
+	if oerr != nil {
+		// Fallback, one release behind: full-map build. Do not delete.
+		// (Per-object admission runs inside the stream's emit and in
+		// the fallback alike; both surface oversizeError.)
+		return h.publishIndexFull(ctx, project, tree, prevSHA, message, prevObjectCount)
+	}
+	// Only streamed (genuinely new) objects drive the running count;
+	// cache-known objects are already upstream.
+	objectCount := prevObjectCount + uint64(len(objects))
+
+	if repo := h.getGitRepo(project); repo != nil {
+		// Git: objects and manifest land in one commit (atomic).
+		files := make(map[string][]byte, len(objects)+1)
+		for sha, data := range objects {
+			files[objectRepoPath(sha)] = data
+		}
+		manifest := h.buildManifestFromRefs(project, tree, refs, objectCount)
+		mb, merr := meta.MarshalManifest(manifest)
+		if merr != nil {
+			return "", "", prevObjectCount, merr
+		}
+		files[indexFilePath] = mb
+		commitSHA, contentSHA, err = repo.writeCommitPushCASMulti(ctx, files, message, prevSHA)
+		if err == nil {
+			h.cacheObjects(project, objects)
+			h.rememberTreeCache(project, tree, scratch)
+		}
+		return commitSHA, contentSHA, objectCount, err
+	}
+
+	// REST: write objects idempotently, then CAS the manifest.
+	written, werr := h.writeObjects(ctx, project, objects)
+	if werr != nil {
+		return "", "", prevObjectCount, werr
+	}
+	objectCount = prevObjectCount + uint64(written)
+	manifest := h.buildManifestFromRefs(project, tree, refs, objectCount)
+	mb, merr := meta.MarshalManifest(manifest)
+	if merr != nil {
+		return "", "", prevObjectCount, merr
+	}
+	// The manifest itself is a contents-API document too: a
+	// pathological bucket list can push it past the limit even when every
+	// object fits. Surfacing that as an oversizeError arms the size-ceiling marker
+	// instead of livelocking the retry loop on a bare 422.
+	if err := checkManifestSize(mb); err != nil {
+		return "", "", objectCount, err
+	}
+	commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, indexFilePath, mb, prevSHA, message)
+	if err == nil {
+		h.rememberTreeCache(project, tree, scratch)
+	}
+	return commitSHA, contentSHA, objectCount, err
+}
+
+// buildIndexStream runs the streaming build: new/changed objects are
+// emitted into the returned map (skipping cache-known shas), unchanged
+// subtrees are skipped via the project's retained TreeCache. The map
+// holds only the delta, not the whole index.
+func (h *StorHub) buildIndexStream(ctx context.Context, project string, tree *meta.RepoMetadata) (*meta.TreeRefs, map[string][]byte, *meta.TreeCache, error) {
+	_ = ctx
+	cache := h.objectCacheFor(project)
+	pm := h.lookupProjectMeta(project)
+	// Build into a scratch copy of the shared cache, never the shared
+	// cache itself: putNodes during the build mark objects "already
+	// stored", and a build that never commits (conflict, error, shutdown
+	// race) must not poison the shared baseline with objects it never
+	// uploaded. The scratch is swapped in by rememberTreeCache only on
+	// commit success; on failure it is dropped and the shared baseline
+	// still describes what is actually upstream.
+	var scratch *meta.TreeCache
+	if pm != nil {
+		pm.mu.Lock()
+		scratch = pm.treeCache.Clone()
+		pm.mu.Unlock()
+	} else {
+		scratch = meta.NewTreeCache()
+	}
+	objects := make(map[string][]byte)
+	known := func(sha string) bool { return cache.contains(sha) }
+	emit := func(sha string, data []byte) error {
+		if len(data) > maxMetadataBytes {
+			return &oversizeError{size: len(data), limit: maxMetadataBytes}
+		}
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		objects[sha] = cp
+		return nil
+	}
+	refs, err := meta.BuildTreeStream(tree, scratch, known, emit)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build index tree: %w", err)
+	}
+	return refs, objects, scratch, nil
+}
+
+// rememberTreeCache swaps a successful build's scratch cache in as the
+// project's new baseline: every object the scratch skipped was either
+// emitted by this build (uploaded before the manifest CAS) or skipped on
+// the previous baseline (uploaded by the commit that installed it), so
+// "cache hit" stays equivalent to "already stored upstream". A nil scratch
+// (full-build fallback, which populates no cache) resets the baseline to
+// empty instead of keeping stale entries: the next streaming build then
+// re-emits by object-cache membership, wasteful but never wrong. A missing
+// entry (evicted mid-commit) simply drops the cache — the next commit
+// rebuilds uncached.
+func (h *StorHub) rememberTreeCache(project string, tree *RepoMetadata, scratch *meta.TreeCache) {
+	pm := h.lookupProjectMeta(project)
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if scratch == nil {
+		pm.treeCache = meta.NewTreeCache()
+		return
+	}
+	// Revalidate the bound against the committed tree (shas, not bytes).
+	if tree != nil {
+		dirs := len(tree.Dirs())
+		files := len(tree.Files())
+		if dirs+files > treeCacheMaxEntries {
+			pm.treeCache = meta.NewTreeCache()
+			return
+		}
+	}
+	pm.treeCache = scratch
+}
+
+// publishIndexFull is the pre-streaming full-map build, retained ONE
+// release behind as publishIndex's fallback (do not delete yet).
+func (h *StorHub) publishIndexFull(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
 	res, merr := meta.BuildTree(tree)
 	if merr != nil {
 		return "", "", prevObjectCount, fmt.Errorf("build index tree: %w", merr)
@@ -201,6 +382,24 @@ func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, res *me
 		TreeRoot:     res.RootSHA,
 		ChunkBuckets: res.ChunkBuckets,
 		Releases:     res.ReleasesSHA,
+		ObjectCount:  objectCount,
+		NextInode:    tree.NextInode,
+		NextChunkID:  tree.NextChunkID,
+		Stats:        meta.ManifestStats{Files: tree.TotalFiles, Bytes: tree.TotalSize},
+		LastMod:      tree.LastMod,
+	}
+}
+
+// buildManifestFromRefs is buildManifest for the streaming path: TreeRefs
+// carries the same manifest references as TreeResult without the full
+// objects map.
+func (h *StorHub) buildManifestFromRefs(project string, tree *meta.RepoMetadata, refs *meta.TreeRefs, objectCount uint64) *meta.Manifest {
+	return &meta.Manifest{
+		Version:      meta.CurrentVersion,
+		Project:      project,
+		TreeRoot:     refs.RootSHA,
+		ChunkBuckets: refs.ChunkBuckets,
+		Releases:     refs.ReleasesSHA,
 		ObjectCount:  objectCount,
 		NextInode:    tree.NextInode,
 		NextChunkID:  tree.NextChunkID,

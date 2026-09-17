@@ -54,14 +54,10 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 	if len(attrs) != 1 || string(attrs["user.a"]) != "1" {
 		t.Fatalf("unexpected xattrs: %+v", attrs)
 	}
-	when := chooseNonZeroTime(0, 5)
-	if when == 0 {
-		t.Fatalf("unexpected chosen time: %v", when)
-	}
-	if got, ok := ParseNumericReleaseTag("v12"); !ok || got != 12 {
+	if got, ok := parseNumericReleaseTag("v12"); !ok || got != 12 {
 		t.Fatalf("unexpected release tag parse: %d %v", got, ok)
 	}
-	if _, ok := ParseNumericReleaseTag("feature"); ok {
+	if _, ok := parseNumericReleaseTag("feature"); ok {
 		t.Fatal("expected non-numeric tag parse failure")
 	}
 }
@@ -76,7 +72,9 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	repo.dirs["docs"] = DirMeta{Inode: 2, CreatedAt: now, ModifiedAt: now}
 	repo.dirs["docs/sub"] = DirMeta{Inode: 3, XAttrs: XAttrMap{"user.dir": []byte("1")}, CreatedAt: now, ModifiedAt: now}
 
-	repo.EnsureRelease("v2", now)
+	if _, err := repo.EnsureRelease("v2", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	repo.UpsertFile("docs/sub/file.txt", FileMeta{Size: 3, Inode: 5, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{2, 1}}, now)
 	repo.chunks[1] = ChunkInfo{Offset: 0, Size: 2, AssetID: 1}
 	repo.chunks[2] = ChunkInfo{Offset: 2, Size: 1, AssetID: 2}
@@ -148,11 +146,17 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 	if !repo.HasDirectory("docs") || !repo.HasDirectory("docs/specs") {
 		t.Fatalf("expected ensured directories")
 	}
-	release := repo.EnsureRelease("v1", now)
+	release, err := repo.EnsureRelease("v1", now)
+	if err != nil {
+		t.Fatalf("ensure release: %v", err)
+	}
 	if release == nil || release.AssetCount != 0 {
 		t.Fatalf("unexpected release: %+v", release)
 	}
-	release = repo.EnsureRelease("v1", now)
+	release, err = repo.EnsureRelease("v1", now)
+	if err != nil {
+		t.Fatalf("ensure existing release: %v", err)
+	}
 	if release == nil || release.AssetCount != 0 {
 		t.Fatalf("unexpected release: %+v", release)
 	}
@@ -184,8 +188,8 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 	if repo.RemoveFile("missing") || repo.RemoveDirectory("missing") || repo.RemoveRelease("missing") {
 		t.Fatal("expected missing removals to return false")
 	}
-	before := repo.AllocateInode()
-	after := repo.AllocateInode()
+	before := repo.allocateInode()
+	after := repo.allocateInode()
 	if after <= before {
 		t.Fatalf("expected increasing inode allocation: %d %d", before, after)
 	}
@@ -330,6 +334,10 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 	ok.files["f"] = FileMeta{Inode: 2, Size: 15, Chunks: []int64{1, 2, 3}}
 	ok.TotalFiles = 1
 	ok.TotalSize = 15
+	// Counters must clear the live max under the counter-floor check (the
+	// fixture hand-forges entries instead of minting them).
+	ok.NextInode = 3
+	ok.NextChunkID = 4
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("disjoint chunks rejected: %v", err)
 	}
@@ -359,13 +367,13 @@ func TestSymlinkModeDefaults(t *testing.T) {
 		t.Fatalf("symlink creation default = %o, want %o", got.Mode, defaultFileMode(NodeKindSymlink))
 	}
 	f := &FileMeta{Symlink: "t"}
-	f.Normalize(100)
+	f.Normalize()
 	if f.Mode != defaultFileMode(NodeKindSymlink) {
 		t.Fatalf("symlink normalize default = %o, want %o", f.Mode, defaultFileMode(NodeKindSymlink))
 	}
 	// Regular files keep the regular default.
 	r := &FileMeta{Size: 1, Chunks: []int64{}}
-	r.Normalize(100)
+	r.Normalize()
 	if r.Mode != defaultFileMode(NodeKindFile) {
 		t.Fatalf("regular default = %o, want %o", r.Mode, defaultFileMode(NodeKindFile))
 	}
@@ -397,7 +405,7 @@ func TestReadLookupsNormalizeKeys(t *testing.T) {
 func TestFileMetaNormalizeKeepsChunkOrder(t *testing.T) {
 	t.Parallel()
 	f := FileMeta{Size: 6, Chunks: []int64{2, 1}}
-	f.Normalize(100)
+	f.Normalize()
 	if len(f.Chunks) != 2 || f.Chunks[0] != 2 || f.Chunks[1] != 1 {
 		t.Fatalf("FileMeta.Normalize reordered chunks by id: %v", f.Chunks)
 	}
@@ -407,10 +415,10 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	t.Parallel()
 	now := int64(300)
 	repo := NewRepoMetadata("validate")
-	InitializeNewFileIdentity(repo, &FileMeta{}, now)
+	initializeNewFileIdentity(repo, &FileMeta{}, now)
 	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, XAttrs: XAttrMap{"user.demo": []byte("1")}}
 	incoming := &FileMeta{}
-	PreserveFileIdentity(incoming, existing, now+60)
+	preserveFileIdentity(incoming, existing, now+60)
 	if incoming.Inode != existing.Inode || string(incoming.XAttrs["user.demo"]) != "1" {
 		t.Fatalf("unexpected preserved identity: %+v", incoming)
 	}
@@ -418,7 +426,7 @@ func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	// must never leak onto the incoming file.
 	symExisting := &FileMeta{Inode: 43, Mode: 0o777, Symlink: "target", UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
 	symIncoming := &FileMeta{}
-	PreserveFileIdentity(symIncoming, symExisting, now+60)
+	preserveFileIdentity(symIncoming, symExisting, now+60)
 	if symIncoming.Symlink != "" {
 		t.Fatalf("symlink target leaked onto regular file: %+v", symIncoming)
 	}
@@ -558,7 +566,9 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 	m := NewRepoMetadata("demo")
 	link := FileMeta{Symlink: "target", Size: 6, Inode: 7, Mode: 0o120777, UID: 1, GID: 1}
 	m.UpsertFile("link", link, 100)
-	m.EnsureRelease("v1", 100)
+	if _, err := m.EnsureRelease("v1", 100); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 
 	file := FileMeta{Size: 4, Chunks: []int64{1}, Mode: 0o100644}
@@ -635,7 +645,9 @@ func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
 func TestCountersPersistAcrossReload(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureRelease("v1", 1)
+	if _, err := m.EnsureRelease("v1", 1); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	m.chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
 	m.UpsertFile("a.txt", FileMeta{Size: 1, Chunks: []int64{1}}, 1)
 	m.Normalize("demo", 1)
@@ -657,10 +669,10 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 	if reloaded.NextChunkID < nextChunk {
 		t.Fatalf("chunk counter rolled back: %d < %d", reloaded.NextChunkID, nextChunk)
 	}
-	if reloaded.AllocateChunkID() != nextChunk {
+	if reloaded.allocateChunkID() != nextChunk {
 		t.Fatalf("chunk id reused after reload")
 	}
-	if reloaded.AllocateInode() != nextInode {
+	if reloaded.allocateInode() != nextInode {
 		t.Fatalf("inode reused after reload")
 	}
 }
@@ -668,7 +680,9 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureRelease("v1", 1)
+	if _, err := m.EnsureRelease("v1", 1); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	m.chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
 	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 	m.UpsertFile("f.bin", FileMeta{Size: 6, Chunks: []int64{2, 1}, Inode: 9}, 1)
@@ -683,7 +697,9 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 
 	// Out-of-order stored chunks must fail validation loudly.
 	bad := NewRepoMetadata("demo")
-	bad.EnsureRelease("v1", 1)
+	if _, err := bad.EnsureRelease("v1", 1); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	bad.chunks[1] = ChunkInfo{Size: 4, Offset: 4, Release: "v1"}
 	bad.chunks[2] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 	bad.UpsertFile("g.bin", FileMeta{Size: 8, Chunks: []int64{1, 2}, Inode: 9}, 1)
@@ -818,12 +834,12 @@ func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
 func TestNormalizePreservesAuthoritativeZeros(t *testing.T) {
 	t.Parallel()
 	f := &FileMeta{}
-	f.Normalize(1700000000)
+	f.Normalize()
 	if f.UploadedAt != 0 || f.ModifiedAt != 0 || f.AccessedAt != 0 || f.ChangedAt != 0 {
 		t.Fatalf("normalize backfilled zeros: %+v", f)
 	}
 	d := &DirMeta{}
-	d.Normalize(1700000000)
+	d.Normalize()
 	if d.CreatedAt != 0 || d.ModifiedAt != 0 {
 		t.Fatalf("dir normalize backfilled zeros: %+v", d)
 	}

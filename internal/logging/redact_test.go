@@ -3,6 +3,7 @@ package logging
 import "testing"
 
 func TestRedactQueryValuesMasksUnsafeKeys(t *testing.T) {
+	t.Parallel()
 	got := RedactQueryValues("path=/docs/a.txt&token=secret.jwt&op=append")
 	want := "op=append&path=%2Fdocs%2Fa.txt&token=REDACTED"
 	if got != want {
@@ -11,6 +12,7 @@ func TestRedactQueryValuesMasksUnsafeKeys(t *testing.T) {
 }
 
 func TestRedactQueryValuesMasksUnparseableQuery(t *testing.T) {
+	t.Parallel()
 	// A bare % sequence cannot decode; the whole value is untrustworthy.
 	if got := RedactQueryValues("token=abc%zz"); got != redactedPlaceholder {
 		t.Fatalf("expected wholesale redaction, got %q", got)
@@ -21,6 +23,7 @@ func TestRedactQueryValuesMasksUnparseableQuery(t *testing.T) {
 }
 
 func TestRedactSensitivePathMasksShareIdentifiers(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"/shares/eyJhbGciOiJIUzI1NiJ9.tok.sig/download", "/shares/REDACTED/download"},
 		{"/api/v1/projects/demo/shares/rec-123", "/api/v1/projects/demo/shares/REDACTED"},
@@ -34,6 +37,7 @@ func TestRedactSensitivePathMasksShareIdentifiers(t *testing.T) {
 }
 
 func TestRedactRequestURI(t *testing.T) {
+	t.Parallel()
 	got := RedactRequestURI("/shares/sig-token-xyz/download?path=/a.txt&sig=zzz")
 	want := "/shares/REDACTED/download?path=%2Fa.txt&sig=REDACTED"
 	if got != want {

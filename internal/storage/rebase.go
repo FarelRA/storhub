@@ -34,16 +34,19 @@ func (e *rebaseExhaustedError) Unwrap() error { return e.err }
 
 // hashEntry fingerprints one metadata entry for change detection. JSON
 // marshaling of a struct is field-order deterministic, so the hash is
-// stable across processes.
-func hashEntry(v any) [16]byte {
+// stable across processes. The ok result is false when the entry cannot
+// marshal (these structs always marshal in practice); callers fall back to
+// the zero hash, which fails closed by flagging the path changed on one
+// side only, never by hiding a change both sides share.
+func hashEntry(v any) ([16]byte, bool) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return [16]byte{}
+		return [16]byte{}, false
 	}
 	sum := sha256.Sum256(data)
 	var out [16]byte
 	copy(out[:], sum[:16])
-	return out
+	return out, true
 }
 
 // hashPaths fingerprints the file/dir namespace (including root) of a
@@ -51,19 +54,24 @@ func hashEntry(v any) [16]byte {
 func hashPaths(meta *RepoMetadata) map[string][16]byte {
 	out := make(map[string][16]byte, len(meta.Files())+len(meta.Dirs())+1)
 	for path, f := range meta.Files() {
-		out["f:"+path] = hashEntry(f)
+		h, _ := hashEntry(f)
+		out["f:"+path] = h
 	}
 	for path, d := range meta.Dirs() {
-		out["d:"+path] = hashEntry(d)
+		h, _ := hashEntry(d)
+		out["d:"+path] = h
 	}
-	out["d:"] = hashEntry(meta.Root)
+	h, _ := hashEntry(meta.Root)
+	out["d:"] = h
 	return out
 }
 
-// changedPaths reports which namespace keys upstream differs from the base
+// changedByHash reports which namespace keys upstream differs from the base
 // snapshot the pending ops were built against: changed entries, entries
-// upstream added, and entries upstream deleted.
-func changedPaths(base map[string][16]byte, upstream *RepoMetadata) map[string]bool {
+// upstream added, and entries upstream deleted. It FINDS conflicts (content
+// hash over the rebase baseline); changedByTime then resolves a known
+// conflict by timestamp.
+func changedByHash(base map[string][16]byte, upstream *RepoMetadata) map[string]bool {
 	current := hashPaths(upstream)
 	changed := make(map[string]bool)
 	for key, h := range current {
@@ -77,6 +85,11 @@ func changedPaths(base map[string][16]byte, upstream *RepoMetadata) map[string]b
 		}
 	}
 	return changed
+}
+
+// changedPaths is the historical name of changedByHash; prefer changedByHash.
+func changedPaths(base map[string][16]byte, upstream *RepoMetadata) map[string]bool {
+	return changedByHash(base, upstream)
 }
 
 // opConflictKeys returns the namespace keys an op asserts over.
@@ -123,13 +136,16 @@ func opConflictKeys(op Op) []string {
 // policy table. Returns the rebased tree and every resolution made (for
 // the commit message and strict-mode reporting).
 func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byte, strict bool) (*RepoMetadata, []ConflictResolution, error) {
-	changed := changedPaths(base, upstream)
+	changed := changedByHash(base, upstream)
 	working := upstream.Clone()
 	// One shared replay plan for the batch: moves recorded by earlier
 	// renames resolve later from-references, and removals skipped by
 	// conflict resolution below (plan.unremove) reappear as live children
-	// for later rmdirs.
+	// for later rmdirs. One shared collision index likewise: identifier
+	// occupancy is snapshotted once and updated incrementally, not
+	// rescanned per op.
 	plan := newReplayPlan(ops)
+	cidx := newCollisionIndex(working)
 	var resolutions []ConflictResolution
 	for _, op := range ops {
 		conflictPath := ""
@@ -165,22 +181,38 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 				resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
 					Note: fmt.Sprintf("put wins over our delete (data preservation): %s", conflictPath)})
 				// The skipped removal never lands: drop its paths from the
-				// doomed set so a later rmdir sees the survivor again.
+				// doomed set so a later rmdir sees the survivor again, and
+				// from the target set so live occupants count as genuine
+				// again for later collision checks.
 				plan.unremove(op)
+				plan.untarget(op)
 				continue
 			}
 		}
-		if conflictPath != "" && isStateClass(op.Type) && upstreamIsNewer(working, op) {
+		if conflictPath != "" && isStateClass(op.Type) && changedByTime(working, op) {
 			// True last-writer-wins: "we commit later" is not "we
 			// wrote later". When the upstream entry changed after our op
 			// was recorded, upstream owns the newer write and our stale
 			// state-class assertion is dropped (recorded) instead of
-			// clobbering it.
+			// clobbering it. Its target leaves the target set with it:
+			// the overwrite never lands, so occupants there are genuine.
 			resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
 				Note: fmt.Sprintf("upstream newer for %s (kept upstream, our stale %s dropped)", conflictPath, op.Type)})
+			plan.untarget(op)
 			continue
 		}
-		if err := applyOneOp(working, op, plan, &resolutions); err != nil {
+		if conflictPath != "" && op.Type == OpRename && renameSupersededByUpstream(working, op) {
+			// Renames overwrite their target unconditionally at apply
+			// time, so a stale rename would clobber a newer upstream
+			// target with no timestamp check — the rename counterpart of
+			// the state-class LWW drop above.
+			resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
+				Note: fmt.Sprintf("upstream newer for rename target %s (kept upstream, our stale %s dropped)", op.Paths[1], op.Type)})
+			plan.unremove(op)
+			plan.untarget(op)
+			continue
+		}
+		if err := applyOneOpIndexed(working, op, plan, &resolutions, cidx); err != nil {
 			return nil, nil, err
 		}
 		if conflictPath != "" {
@@ -196,36 +228,119 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 	return working, resolutions, nil
 }
 
-// upstreamIsNewer reports whether any entry the op asserts over changed
-// upstream after the op was recorded. The comparison uses the entry's
-// change time - ChangedAt for files, the later of ChangedAt/ModifiedAt for
-// directories - against the op's timestamp. An entry upstream deleted after
-// our op is not "newer": recreating it is the data-preserving choice and
-// stays ours.
-func upstreamIsNewer(working *RepoMetadata, op Op) bool {
+// opTargetChangedAt returns the newest change time among the entries an op
+// asserts over, and whether any such entry exists upstream. It is the shared
+// timestamp source for staleness checks: changedByTime (rebase LWW) and
+// renameSupersededByUpstream (cold-replay rename guard) both read through it
+// so the "what counts as newer" definition cannot drift between the two
+// paths. Change time is ChangedAt for files and the later of
+// ChangedAt/ModifiedAt for directories. An entry upstream deleted after our
+// op is not "newer": recreating it is the data-preserving choice, so a
+// missing entry reports ok=false instead of a zero time.
+func opTargetChangedAt(meta *RepoMetadata, op Op) (int64, bool) {
+	var newest int64
+	var found bool
 	for _, key := range opConflictKeys(op) {
 		switch {
 		case strings.HasPrefix(key, "f:"):
-			if f, ok := working.Files()[strings.TrimPrefix(key, "f:")]; ok && f.ChangedAt > op.Timestamp {
-				return true
+			if f, ok := meta.Files()[strings.TrimPrefix(key, "f:")]; ok {
+				found = true
+				if f.ChangedAt > newest {
+					newest = f.ChangedAt
+				}
 			}
 		case key == "d:":
-			if max(working.Root.ChangedAt, working.Root.ModifiedAt) > op.Timestamp {
-				return true
+			found = true
+			if t := max(meta.Root.ChangedAt, meta.Root.ModifiedAt); t > newest {
+				newest = t
 			}
 		case strings.HasPrefix(key, "d:"):
-			if d, ok := working.Dirs()[strings.TrimPrefix(key, "d:")]; ok &&
-				max(d.ChangedAt, d.ModifiedAt) > op.Timestamp {
-				return true
+			if d, ok := meta.Dirs()[strings.TrimPrefix(key, "d:")]; ok {
+				found = true
+				if t := max(d.ChangedAt, d.ModifiedAt); t > newest {
+					newest = t
+				}
 			}
 		}
 	}
-	return false
+	return newest, found
+}
+
+// changedByTime reports whether any entry the op asserts over changed
+// upstream after the op was recorded. The comparison uses the entry's change
+// time (see opTargetChangedAt) against the op's timestamp. An entry upstream
+// deleted after our op is not "newer": recreating it is the data-preserving
+// choice and stays ours.
+func changedByTime(working *RepoMetadata, op Op) bool {
+	ts, ok := opTargetChangedAt(working, op)
+	return ok && ts > op.Timestamp
+}
+
+// renameSupersededByUpstream reports whether a rename must not replay over
+// current upstream state: its target exists upstream with a change time
+// newer than the op. File/dir renames overwrite their target
+// unconditionally at apply time, so a stale rename (journaled before a
+// crash, rival advanced the target since) would clobber newer remote bytes —
+// unlike single-target state ops, which the timestamp guard already drops. A
+// missing from-path is NOT superseding: replay is defensive and applies the
+// payload literally.
+//
+// Contract for the cold-replay owner (workflows.go dropSupersededOps,
+// ~line 1009): timestamp-check renames instead of keeping them
+// unconditionally. Suggested edit (pipeline agent owns that file):
+//
+//	default: // renames + catalog ops reach here today
+//	    if op.Type == OpRename && renameSupersededByUpstream(meta, op) {
+//	        logging.Warn(logger, "op journal rename superseded by newer remote state; skipped",
+//	            "project", project, "op", op.Type, "to", op.Paths[1], ...)
+//	        continue
+//	    }
+//	    kept = append(kept, op)
+//
+// From-liveness needs no check: a rename whose source is gone upstream
+// replays its payload literally (the dir-rename path writes op.Dir at the
+// target even when the source is missing), matching current behavior.
+func renameSupersededByUpstream(meta *RepoMetadata, op Op) bool {
+	if op.Type != OpRename || len(op.Paths) != 2 {
+		return false
+	}
+	to := op.Paths[1]
+	var changedAt int64
+	var exists bool
+	if op.File != nil {
+		if f, ok := meta.Files()[to]; ok {
+			changedAt, exists = f.ChangedAt, true
+		}
+	} else {
+		if d, ok := meta.Dirs()[to]; ok {
+			changedAt, exists = max(d.ChangedAt, d.ModifiedAt), true
+		}
+	}
+	return exists && changedAt > op.Timestamp
 }
 
 // maxRebaseNoteBytes bounds the resolution detail carried in a commit
 // message so a pathological conflict storm cannot bloat the summary line.
 const maxRebaseNoteBytes = 300
+
+// truncateRuneSafe cuts s to at most maxBytes without splitting a UTF-8
+// sequence and emitting invalid bytes: trailing continuation bytes are
+// dropped, then a dangling rune start whose tail was cut.
+func truncateRuneSafe(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := s[:maxBytes]
+	for len(cut) > 0 && !utf8.RuneStart(cut[len(cut)-1]) {
+		cut = cut[:len(cut)-1]
+	}
+	if len(cut) > 0 {
+		if r, size := utf8.DecodeRuneInString(cut[len(cut)-1:]); r == utf8.RuneError && size == 1 {
+			cut = cut[:len(cut)-1]
+		}
+	}
+	return cut
+}
 
 // rebaseMessageNote renders the rebase summary appended to a commit
 // message that landed after conflict resolution.
@@ -239,20 +354,7 @@ func rebaseMessageNote(resolutions []ConflictResolution, upstreamSHA string) str
 	}
 	joined := strings.Join(notes, "; ")
 	if len(joined) > maxRebaseNoteBytes {
-		// Cut on a rune boundary: a raw byte slice can split a UTF-8
-		// sequence and emit invalid bytes into the commit message. Drop
-		// trailing continuation bytes, then a dangling rune start whose
-		// tail was cut.
-		cut := joined[:maxRebaseNoteBytes]
-		for len(cut) > 0 && !utf8.RuneStart(cut[len(cut)-1]) {
-			cut = cut[:len(cut)-1]
-		}
-		if len(cut) > 0 {
-			if r, size := utf8.DecodeRuneInString(cut[len(cut)-1:]); r == utf8.RuneError && size == 1 {
-				cut = cut[:len(cut)-1]
-			}
-		}
-		joined = cut + "..."
+		joined = truncateRuneSafe(joined, maxRebaseNoteBytes) + "..."
 	}
 	return fmt.Sprintf("rebase: rebased onto %s: %d resolved (%s)", shortSHA(upstreamSHA), len(resolutions), joined)
 }
@@ -299,19 +401,17 @@ func (h *StorHub) rebaseOntoUpstream(ctx context.Context, project string, ops []
 	return rebased, upstreamSHA, resolutions, nil
 }
 
-// remapOpCollisions rewrites an op's identifiers that collide with diverged
-// upstream state before replay: chunk IDs allocated by both writers for
-// different records are remapped to fresh IDs (data integrity), and node
-// inodes colliding across kinds are remapped (Validate forbids file/dir
-// inode collisions and duplicate directory inodes; file/file sharing is
-// legal hardlink semantics and stays). Caller provides storage for the
-// recorded resolutions.
-func remapOpCollisions(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions *[]ConflictResolution) {
+// remapOpCollisionsIndexed is the batch entry: cidx snapshots identifier
+// occupancy once per batch (newCollisionIndex) and is updated incrementally
+// as the batch applies, so per-op checks are O(1) instead of O(tree) scans.
+// Chunk-ID checks stay live against meta (O(1) map lookups); only the inode
+// occupancy reads come from the index.
+func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex) {
 	if op.File != nil {
 		idRemap := make(map[int64]int64)
 		for id, record := range op.Chunks {
 			if existing, ok := meta.Chunks()[id]; ok && existing != record {
-				idRemap[id] = meta.AllocateChunkID()
+				idRemap[id] = plan.allocChunkAvoiding(meta)
 			}
 		}
 		if len(idRemap) > 0 {
@@ -332,8 +432,8 @@ func remapOpCollisions(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions
 			recordResolution(resolutions, *op, opPath(*op),
 				"chunk ids remapped (divergent allocation between writers)")
 		}
-		if op.File.Inode != 0 && inodeCollidesWithDirFamily(meta, op.File.Inode) {
-			op.File.Inode = meta.AllocateInode()
+		if op.File.Inode != 0 && cidx.fileCollidesWithDirFamilyExcept(op.File.Inode, plan.batchTargetsExcept(opPath(*op))) {
+			op.File.Inode = plan.allocInodeAvoiding(meta)
 			recordResolution(resolutions, *op, opPath(*op),
 				"inode remapped (collides with upstream directory inode)")
 		}
@@ -362,50 +462,23 @@ func remapOpCollisions(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions
 			if op.Type == OpRename && plan != nil {
 				// The entry may already live at its batch-forwarded
 				// location when an earlier rename relocated the subtree.
-				except[plan.forward(op.Paths[0])] = struct{}{}
+				except[plan.translateForward(op.Paths[0])] = struct{}{}
 			}
 		}
-		if !isRootOp && inodeTakenByAnotherNode(meta, op.Dir.Inode, except) {
-			op.Dir.Inode = meta.AllocateInode()
+		// Batch-asserted paths join the exemption: the batch overwrites
+		// them with its own records in every delivery order, so a live
+		// occupant is replay scaffolding (an ensureParentFor mint for a
+		// not-yet-replayed target), not a divergent allocation. Genuine
+		// upstream occupants live off-target and still remap.
+		if plan != nil {
+			for t := range plan.targets {
+				except[t] = struct{}{}
+			}
+		}
+		if !isRootOp && cidx.takenByAnotherNode(op.Dir.Inode, except) {
+			op.Dir.Inode = plan.allocInodeAvoiding(meta)
 			recordResolution(resolutions, *op, opPath(*op),
 				"directory inode remapped (collides with upstream node)")
 		}
 	}
-}
-
-// inodeCollidesWithDirFamily reports whether inode is taken by the root or
-// any directory - the collisions Validate forbids for an incoming FILE
-// node. File/file sharing stays legal (hardlinks) and never remaps.
-func inodeCollidesWithDirFamily(meta *RepoMetadata, inode uint64) bool {
-	if inode == meta.Root.Inode {
-		return true
-	}
-	for _, d := range meta.Dirs() {
-		if d.Inode == inode {
-			return true
-		}
-	}
-	return false
-}
-
-// inodeTakenByAnotherNode reports whether inode is taken by the root, any
-// directory, or any file OTHER than the entries at exceptPaths. The
-// exemptions are for rename replay: the from-path (and its
-// batch-forwarded location) holding the payload's own inode is identity,
-// not a collision (see the OpRename call site above).
-func inodeTakenByAnotherNode(meta *RepoMetadata, inode uint64, exceptPaths map[string]struct{}) bool {
-	if inode == meta.Root.Inode {
-		return true
-	}
-	for path, d := range meta.Dirs() {
-		if _, ok := exceptPaths[path]; !ok && d.Inode == inode {
-			return true
-		}
-	}
-	for path, f := range meta.Files() {
-		if _, ok := exceptPaths[path]; !ok && f.Inode == inode {
-			return true
-		}
-	}
-	return false
 }

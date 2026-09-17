@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { panelLimits, type PanelKey } from '~/composables/use-panel-widths'
+import { PANEL_LIMITS, type PanelKey } from '~/composables/use-panel-widths'
 
 const props = defineProps<{ panel: PanelKey }>()
 
 const { panels, setWidth, resetPanel, persist } = usePanelWidths()
-const limits = computed(() => panelLimits(props.panel))
+const limits = computed(() => PANEL_LIMITS[props.panel])
 
 const dragging = ref(false)
 let startX = 0

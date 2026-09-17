@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
@@ -34,7 +35,12 @@ type projectMetadata struct {
 	dirty      bool
 	version    uint64
 	lastCommit time.Time
-	lastAccess time.Time
+	// lastAccess is the sweeper's idle clock. It is an atomic UnixNano
+	// so every cache hit can bump it without taking pm.mu exclusive:
+	// the old per-op pm.mu.Lock just to touch a timestamp serialized
+	// all same-project readers behind writers. Loads/stores use
+	// h.config.Now(); zero means "never accessed".
+	lastAccess atomic.Int64
 	stopCh     chan struct{}
 	stoppedCh  chan struct{}
 	triggerCh  chan struct{}
@@ -77,6 +83,15 @@ type projectMetadata struct {
 	// fired for the current crossing, so it logs once per window rather
 	// than on every commit. Guarded by mu.
 	historyWarned bool
+	// treeCache carries per-object Merkle build state across commits so
+	// an unchanged subtree is neither re-marshalled nor re-emitted
+	// (BuildTreeStream). It is valid only for the tree it was built from
+	// plus the caller's retained object store; guarded by mu, never
+	// shared across projects or goroutines. Bounded by entry count
+	// (shas, not bytes): when the node+bucket census exceeds
+	// treeCacheMaxEntries the cache resets instead of growing with the
+	// tree. See treeCacheFor.
+	treeCache *metadata.TreeCache
 }
 
 // releaseCacheTTL bounds how stale a cached release list may be before the
@@ -139,12 +154,13 @@ func (h *StorHub) setCachedReleases(project string, releases []ghapi.Release) {
 	h.trimReleaseCacheLocked()
 }
 
-// slimReleases copies a release list for cache residency, keeping only the
-// fields the upload picker reads (tag, upload URL, release ID, and each
-// asset's ID) and dropping the per-asset Name/Size strings. A project with
-// 100k cached assets no longer pins 100k name strings; the picker's capacity
-// math (len + ID + placeholder detection) is unaffected.
-func slimReleases(in []ghapi.Release) []ghapi.Release {
+// copyReleases is the single home of release-list copying. slim=true keeps
+// only the fields the upload picker reads (tag, upload URL, release ID,
+// each asset's ID) and drops per-asset Name/Size strings; slim=false
+// deep-copies everything. A shallow struct copy would alias the Assets
+// backing arrays, letting any caller that mutates a fetched Release
+// corrupt the cache.
+func copyReleases(in []ghapi.Release, slim bool) []ghapi.Release {
 	if in == nil {
 		return nil
 	}
@@ -153,13 +169,26 @@ func slimReleases(in []ghapi.Release) []ghapi.Release {
 		out[i] = r
 		if r.Assets != nil {
 			assets := make([]ghapi.Asset, len(r.Assets))
-			for j, a := range r.Assets {
-				assets[j] = ghapi.Asset{ID: a.ID}
+			if slim {
+				for j, a := range r.Assets {
+					assets[j] = ghapi.Asset{ID: a.ID}
+				}
+			} else {
+				copy(assets, r.Assets)
 			}
 			out[i].Assets = assets
 		}
 	}
 	return out
+}
+
+// slimReleases copies a release list for cache residency, keeping only the
+// fields the upload picker reads (tag, upload URL, release ID, and each
+// asset's ID) and dropping the per-asset Name/Size strings. A project with
+// 100k cached assets no longer pins 100k name strings; the picker's capacity
+// math (len + ID + placeholder detection) is unaffected.
+func slimReleases(in []ghapi.Release) []ghapi.Release {
+	return copyReleases(in, true)
 }
 
 // trimReleaseCacheLocked evicts the stalest entries past the cap. Caller
@@ -183,19 +212,7 @@ func (h *StorHub) trimReleaseCacheLocked() {
 // A shallow struct copy would alias the Assets backing arrays, letting any
 // caller that mutates a fetched Release corrupt the cache.
 func cloneReleases(in []ghapi.Release) []ghapi.Release {
-	if in == nil {
-		return nil
-	}
-	out := make([]ghapi.Release, len(in))
-	for i, r := range in {
-		out[i] = r
-		if r.Assets != nil {
-			cp := make([]ghapi.Asset, len(r.Assets))
-			copy(cp, r.Assets)
-			out[i].Assets = cp
-		}
-	}
-	return out
+	return copyReleases(in, false)
 }
 
 // clearSizeCapped lifts the breach marker after a fitting commit or an
@@ -257,14 +274,8 @@ func (h *StorHub) addReleaseToCache(project string, release *ghapi.Release) {
 // cloneReleaseShallow copies a release for cache residency with its own asset
 // backing array, keeping only asset IDs (the picker never reads Name/Size).
 func cloneReleaseShallow(r *ghapi.Release) *ghapi.Release {
-	out := *r
-	if r.Assets != nil {
-		assets := make([]ghapi.Asset, len(r.Assets))
-		for j, a := range r.Assets {
-			assets[j] = ghapi.Asset{ID: a.ID}
-		}
-		out.Assets = assets
-	}
+	cp := copyReleases([]ghapi.Release{*r}, true)
+	out := cp[0]
 	return &out
 }
 
@@ -367,47 +378,81 @@ func (h *StorHub) getGitRepo(project string) *gitRepo {
 		return r
 	}
 	r = newGitRepo(h.config.GitCacheDir, h.owner, project, h.token)
+	// Thread the hub's injectable clock into the git backend so tests
+	// can freeze time (audit 34): wall time.Now() made commit ordering
+	// diverge from the mock's logical clock. Nil means time.Now.
+	r.now = h.config.Now
 	h.gitRepos[project] = r
 	return r
 }
 
-// getOrCreateProjectMeta returns the projectMetadata for a project, creating it if needed
-func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
-	// Fast path: read lock to check if exists
+// touchLastAccess bumps the sweeper idle clock without taking pm.mu.
+// The atomic keeps per-op hits off the exclusive lock (audit 33).
+func touchLastAccess(pm *projectMetadata, now time.Time) {
+	if pm == nil || now.IsZero() {
+		return
+	}
+	pm.lastAccess.Store(now.UnixNano())
+}
+
+// lastAccessTime loads the idle stamp (zero when never accessed).
+func lastAccessTime(pm *projectMetadata) time.Time {
+	if pm == nil {
+		return time.Time{}
+	}
+	nano := pm.lastAccess.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano).UTC()
+}
+
+// lookupOrInsert is the single double-checked-lock core behind
+// getOrCreateProjectMeta (read paths, admit unbounded) and
+// getOrCreateProjectMetaAdmitted (mutation paths, backpressure when at
+// cap with nothing evictable). admit=false inserts regardless (fresh
+// entries are clean, hence evictable, so growth self-limits);
+// admit=true refuses a brand-new project when the residency cap cannot
+// admit it.
+func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, error) {
 	h.metaMu.RLock()
 	pm, exists := h.metaCache[project]
 	h.metaMu.RUnlock()
-
 	if exists {
-		pm.mu.Lock()
-		pm.lastAccess = h.config.Now()
-		pm.mu.Unlock()
-		return pm
+		touchLastAccess(pm, h.config.Now())
+		return pm, nil
 	}
-
-	// Slow path: write lock to create
 	h.metaMu.Lock()
-
-	// Double-check after acquiring write lock
-	pm, exists = h.metaCache[project]
-	if exists {
+	if pm, exists = h.metaCache[project]; exists {
 		h.metaMu.Unlock()
-		pm.mu.Lock()
-		pm.lastAccess = h.config.Now()
-		pm.mu.Unlock()
-		return pm
+		touchLastAccess(pm, h.config.Now())
+		return pm, nil
 	}
-
 	now := h.config.Now()
 	// Enforce the residency cap before adding another entry: growth is an
 	// event, so the cap is applied exactly when a new project joins. Read
 	// paths admit unbounded (a freshly loaded entry is clean and therefore
-	// evictable); mutation entry points use getOrCreateProjectMetaAdmitted.
+	// evictable); mutation entry points use admit=true for backpressure.
+	// DELIBERATE CONTRACT (audit 31, test-pinned): an all-dirty cache
+	// inserts unbounded on the read path; hard-capping reads too was
+	// EXCLUDED — change nothing here without revisiting
+	// eventdriven_test.go:347.
 	admitted, evicted := h.evictForCapacityLocked()
+	if admit && !admitted {
+		h.metaMu.Unlock()
+		h.releaseEvicted(evicted)
+		return nil, fmt.Errorf("too many tracked projects with unpushed metadata (cap %d): flush or retry before mutating a new project", h.config.MaxTrackedProjects)
+	}
 	_ = admitted // read path inserts regardless; fresh entries are evictable
 	pm = h.newProjectMetaLocked(project, now)
 	h.metaMu.Unlock()
 	h.releaseEvicted(evicted)
+	return pm, nil
+}
+
+// getOrCreateProjectMeta returns the projectMetadata for a project, creating it if needed
+func (h *StorHub) getOrCreateProjectMeta(project string) *projectMetadata {
+	pm, _ := h.lookupOrInsert(project, false)
 	return pm
 }
 
@@ -426,34 +471,7 @@ func (h *StorHub) releaseEvicted(evicted []string) {
 // make the cap bypassable by persistently-dirty projects - backpressure
 // instead asks the caller to retry once a flush frees a slot.
 func (h *StorHub) getOrCreateProjectMetaAdmitted(project string) (*projectMetadata, error) {
-	h.metaMu.RLock()
-	pm, exists := h.metaCache[project]
-	h.metaMu.RUnlock()
-	if exists {
-		pm.mu.Lock()
-		pm.lastAccess = h.config.Now()
-		pm.mu.Unlock()
-		return pm, nil
-	}
-
-	h.metaMu.Lock()
-	if pm, exists = h.metaCache[project]; exists {
-		h.metaMu.Unlock()
-		pm.mu.Lock()
-		pm.lastAccess = h.config.Now()
-		pm.mu.Unlock()
-		return pm, nil
-	}
-	admitted, evicted := h.evictForCapacityLocked()
-	if !admitted {
-		h.metaMu.Unlock()
-		h.releaseEvicted(evicted)
-		return nil, fmt.Errorf("too many tracked projects with unpushed metadata (cap %d): flush or retry before mutating a new project", h.config.MaxTrackedProjects)
-	}
-	pm = h.newProjectMetaLocked(project, h.config.Now())
-	h.metaMu.Unlock()
-	h.releaseEvicted(evicted)
-	return pm, nil
+	return h.lookupOrInsert(project, true)
 }
 
 // newProjectMetaLocked creates the entry, inserts it, and starts its commit
@@ -461,15 +479,31 @@ func (h *StorHub) getOrCreateProjectMetaAdmitted(project string) (*projectMetada
 // Caller holds metaMu for writing.
 func (h *StorHub) newProjectMetaLocked(project string, now time.Time) *projectMetadata {
 	pm := &projectMetadata{
-		meta:       metadata.NewRepoMetadata(project),
-		stopCh:     make(chan struct{}),
-		stoppedCh:  make(chan struct{}),
-		triggerCh:  make(chan struct{}, 1),
-		lastAccess: now,
+		meta:      metadata.NewRepoMetadata(project),
+		stopCh:    make(chan struct{}),
+		stoppedCh: make(chan struct{}),
+		triggerCh: make(chan struct{}, 1),
 	}
+	pm.lastAccess.Store(now.UnixNano())
 	h.metaCache[project] = pm
 	h.startCommitLoopLocked(project, pm)
 	return pm
+}
+
+// evictEntryLocked stops a project's loop and removes it from the cache.
+// Caller holds metaMu for writing and pm.mu is taken here; the shared
+// close/stop/delete block was duplicated in evictForCapacityLocked and
+// sweepCachesOnce. Returns true when the entry was evictable and removed.
+func evictEntryLocked(h *StorHub, name string, pm *projectMetadata) bool {
+	pm.mu.Lock()
+	evictable := !pm.dirty && !pm.reviving && !pm.stopped
+	if evictable {
+		pm.stopped = true
+		close(pm.stopCh)
+		delete(h.metaCache, name)
+	}
+	pm.mu.Unlock()
+	return evictable
 }
 
 // evictForCapacityLocked keeps the tracked-project set at
@@ -501,10 +535,9 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 	for name, pm := range h.metaCache {
 		pm.mu.RLock()
 		eligible := !pm.dirty && !pm.reviving && !pm.stopped
-		last := pm.lastAccess
 		pm.mu.RUnlock()
 		if eligible {
-			cands = append(cands, candidate{name: name, lastAccess: last})
+			cands = append(cands, candidate{name: name, lastAccess: lastAccessTime(pm)})
 		}
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].lastAccess.Before(cands[j].lastAccess) })
@@ -515,15 +548,7 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 	// itself is stable while we walk.
 	for _, cand := range cands {
 		pm := h.metaCache[cand.name]
-		pm.mu.Lock()
-		evictable := !pm.dirty && !pm.reviving && !pm.stopped
-		if evictable {
-			pm.stopped = true
-			close(pm.stopCh)
-			delete(h.metaCache, cand.name)
-		}
-		pm.mu.Unlock()
-		if evictable {
+		if evictEntryLocked(h, cand.name, pm) {
 			// Successful enforcement re-arms the overflow warning: at
 			// steady state the cache pins len == cap forever, so without
 			// this the first crossing would silence all later ones.
@@ -572,39 +597,70 @@ func (h *StorHub) sweeperLoop() {
 // sweepCachesOnce TTL-evicts idle clean metadata entries (cascading their
 // residue), drops stale release lists, and pokes a commit retry for dirty
 // projects whose op stack outgrew the residency cap.
+//
+// Lock discipline (audit 33): the candidate snapshot is taken under
+// metaMu.RLock; per-project decisions run after the global lock is
+// dropped so a contended pm.mu never stalls all cache misses/inserts.
+// Eviction re-takes metaMu for writing and re-validates under pm.mu.
+// Force-flush pokes re-read the CURRENT triggerCh under pm.mu: the
+// channel captured before unlock may be stale after a
+// markProjectDirtyLiveLocked revival swap (caches.go vs commit.go), and
+// a stale send wakes nobody, losing the maxPendingOps retry until the
+// next 30s tick.
 func (h *StorHub) sweepCachesOnce() {
 	now := h.config.Now()
 
-	var evicted []string
-	h.metaMu.Lock()
+	type snapshot struct {
+		name string
+		pm   *projectMetadata
+	}
+	h.metaMu.RLock()
+	snap := make([]snapshot, 0, len(h.metaCache))
 	for name, pm := range h.metaCache {
-		pm.mu.Lock()
-		idleClean := !pm.dirty && !pm.reviving && !pm.stopped && !pm.lastAccess.IsZero() && now.Sub(pm.lastAccess) > metaCacheIdleTTL
-		forceFlush := pm.dirty && len(pm.opStack.ops) >= maxPendingOpsPerProject
-		trigger := pm.triggerCh
-		pm.mu.Unlock()
+		snap = append(snap, snapshot{name: name, pm: pm})
+	}
+	h.metaMu.RUnlock()
+
+	var evicted []string
+	for _, s := range snap {
+		s.pm.mu.RLock()
+		idle := !s.pm.dirty && !s.pm.reviving && !s.pm.stopped
+		last := lastAccessTime(s.pm)
+		needFlush := s.pm.dirty && s.pm.opStack.needsForceFlush()
+		s.pm.mu.RUnlock()
+		idleClean := idle && !last.IsZero() && now.Sub(last) > metaCacheIdleTTL
 		if idleClean {
-			pm.mu.Lock()
-			if !pm.dirty && !pm.reviving && !pm.stopped {
-				pm.stopped = true
-				close(pm.stopCh)
-				delete(h.metaCache, name)
-				pm.mu.Unlock()
-				evicted = append(evicted, name)
-				continue
+			h.metaMu.Lock()
+			// Re-validate under both locks: the entry may have been
+			// mutated, revived, or evicted since the snapshot.
+			if cur, ok := h.metaCache[s.name]; ok && cur == s.pm {
+				if evictEntryLocked(h, s.name, s.pm) {
+					evicted = append(evicted, s.name)
+					h.metaMu.Unlock()
+					continue
+				}
 			}
-			pm.mu.Unlock()
+			h.metaMu.Unlock()
 		}
-		if forceFlush {
-			// Retry the failing commit; the stack can never be dropped
-			// (acknowledged mutations), only pushed.
-			select {
-			case trigger <- struct{}{}:
-			default:
+		if needFlush {
+			// Re-read the live trigger under pm.mu; a revival may have
+			// swapped it since the snapshot. The non-blocking send
+			// holds pm.mu, which is safe (never blocks).
+			s.pm.mu.Lock()
+			stale := s.pm.stopped || s.pm.reviving
+			trigger := s.pm.triggerCh
+			stillDirty := s.pm.dirty && len(s.pm.opStack.ops) >= maxPendingOpsPerProject
+			if !stale && stillDirty {
+				// Retry the failing commit; the stack can never be dropped
+				// (acknowledged mutations), only pushed.
+				select {
+				case trigger <- struct{}{}:
+				default:
+				}
 			}
+			s.pm.mu.Unlock()
 		}
 	}
-	h.metaMu.Unlock()
 	h.releaseEvicted(evicted)
 
 	h.releaseMu.Lock()
@@ -615,3 +671,10 @@ func (h *StorHub) sweepCachesOnce() {
 	}
 	h.releaseMu.Unlock()
 }
+
+// treeCacheMaxEntries bounds the per-project Merkle build cache by entry
+// count (shas, not bytes): one entry per directory node + one per chunk
+// bucket + one releases object. A 16k-entry tree is already far past any
+// realistic single-commit working set; exceeding it resets the cache
+// (costing re-marshal, never correctness).
+const treeCacheMaxEntries = 16384

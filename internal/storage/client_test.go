@@ -16,9 +16,10 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// oversizeTestEntries is sized so a single directory serializes past the
-// 8MiB contents ceiling: ~125 bytes of JSON per entry => ~10MB.
-const oversizeTestEntries = 80000
+// oversizeTestEntries is sized to the 8MiB contents ceiling from the
+// measured ~126 bytes of JSON per entry, plus 10% headroom: 74000 entries
+// serialize to ~9.3MB, the minimum fixture that crosses the ceiling.
+const oversizeTestEntries = 74000
 
 func addBigDir(m *RepoMetadata, entries int) {
 	m.EnsureDirectory("big", 1700000000)
@@ -30,21 +31,14 @@ func addBigDir(m *RepoMetadata, entries int) {
 
 // waitClean parks until the project's async commit loop has drained all
 // dirty state, so a test can mark dirty without racing a buffered trigger.
+// Unified on waitFor (1s bound, 5ms tick): drain is <10ms on the mock.
 func waitClean(t *testing.T, pm *projectMetadata) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, time.Second, "metadata drain", func() bool {
 		pm.mu.Lock()
-		dirty := pm.dirty
-		pm.mu.Unlock()
-		if !dirty {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("metadata never drained")
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
+		defer pm.mu.Unlock()
+		return !pm.dirty
+	})
 }
 
 // TestOversizeAdmissionRejectsFastWithoutLeakingState pins the oversize-admission contract:
@@ -180,10 +174,9 @@ func TestMigrationClobberDetectedAndRebased(t *testing.T) {
 			defer backend.mu.Unlock()
 			repo := backend.repos[project]
 			for sha, data := range res.Objects {
-				p := objectRepoPath(sha)
-				repo.files[p] = &mockFile{path: p, sha: computeGitBlobSHA(data), data: append([]byte(nil), data...)}
+				backend.putMockFileLocked(repo, objectRepoPath(sha), data)
 			}
-			repo.files[".storhub/index.json"] = &mockFile{path: ".storhub/index.json", sha: computeGitBlobSHA(mb), data: append([]byte(nil), mb...)}
+			backend.putMockFileLocked(repo, ".storhub/index.json", mb)
 		}
 		return false
 	})
@@ -258,13 +251,9 @@ func TestMigrationAfterConcurrentMigrateRebases(t *testing.T) {
 	}
 	// Wait until the async loop has attempted (and failed) the migration
 	// commit, so it cannot race the rival's publish afterwards.
-	deadline := time.Now().Add(5 * time.Second)
-	for rejected.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("async migration commit never attempted")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, time.Second, "async migration commit attempt", func() bool {
+		return rejected.Load() != 0
+	})
 
 	// A rival migrates the same legacy project and commits first.
 	rival := backend.newClient(t, smallTransferTestConfig())
@@ -427,7 +416,7 @@ func TestRevivalTimeoutRetainsAcknowledgedMutation(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("revival timeout never resolved")
 	}
 

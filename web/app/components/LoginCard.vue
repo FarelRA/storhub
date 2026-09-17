@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const console_ = useConsole()
+const consoleStore = useConsole()
 const username = ref('')
 const password = ref('')
 const submitting = ref(false)
@@ -7,7 +7,7 @@ const submitting = ref(false)
 async function submit() {
   submitting.value = true
   try {
-    await console_.login(username.value.trim(), password.value)
+    await consoleStore.login(username.value.trim(), password.value)
     password.value = ''
   } finally {
     submitting.value = false

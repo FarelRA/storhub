@@ -1,26 +1,26 @@
 <script setup lang="ts">
 import { copyText } from '~/utils/clipboard'
-import { directLink, shareLink, SHARE_TTL_7D } from '~/utils/share-links'
+import { directLink, shareLink, SHARE_TTL_7D, SHARE_TTL_7D_LABEL } from '~/utils/share-links'
+import type { AnyEntry } from '~/utils/api-types'
 
-const console_ = useConsole()
-const { shares } = console_
+const consoleStore = useConsole()
+const { shares } = consoleStore
 const toasts = useToasts()
 const { ask } = useConfirm()
 
-const singlePath = computed(() => {
-  if (console_.selectedPaths.value.size === 1) {
-    const [only] = [...console_.selectedPaths.value]
-    return only ?? null
+// One selected entry, whether it arrives via the multi-select set or the
+// single focus path: null while a multi-selection is active.
+const singleSelection = computed<{ path: string; entry: AnyEntry | null } | null>(() => {
+  if (consoleStore.selectedPaths.value.size === 1) {
+    const [only] = [...consoleStore.selectedPaths.value]
+    if (only === undefined) return null
+    const entry = consoleStore.entries.value.find(e => e.path === only) ?? consoleStore.selectedEntry.value
+    return { path: only, entry }
   }
-  if (console_.selectedPaths.value.size === 0 && console_.selectedPath.value) return console_.selectedPath.value
+  if (consoleStore.selectedPaths.value.size === 0 && consoleStore.selectedPath.value) {
+    return { path: consoleStore.selectedPath.value, entry: consoleStore.selectedEntry.value }
+  }
   return null
-})
-const singleEntry = computed(() => {
-  if (console_.selectedPaths.value.size === 1) {
-    const [only] = [...console_.selectedPaths.value]
-    return console_.entries.value.find((e) => e.path === only) ?? console_.selectedEntry.value
-  }
-  return console_.selectedEntry.value
 })
 
 async function copy(label: string, value: string) {
@@ -28,21 +28,20 @@ async function copy(label: string, value: string) {
   toasts.success(`${label} copied`)
 }
 
-// Shares panel: both buttons create 7-day shares; one copies the ?share
-// link, the other the direct download link.
-async function createShare() {
-  const p = singlePath.value
-  if (!p) return
-  const share = await console_.createShare(p, SHARE_TTL_7D)
-  if (share) await copy('Share link', shareLink(share))
-}
-
-async function createDirect() {
-  const p = singlePath.value
-  if (!p) return
-  const share = await console_.createShare(p, SHARE_TTL_7D)
-  if (share?.download_url) await copy('Direct link', directLink(share))
-  else if (share) await copy('Share link', shareLink(share))
+// Both buttons mint 7-day shares (see share-links.ts for WHY the panel TTL
+// differs from the kebab's); one copies the ?share link, the other the
+// direct download link.
+async function createAndCopy(kind: 'share' | 'direct') {
+  const selection = singleSelection.value
+  if (!selection) return
+  const share = await consoleStore.createShare(selection.path, SHARE_TTL_7D)
+  if (!share) return
+  if (kind === 'share') {
+    await copy('Share link', shareLink(share))
+    return
+  }
+  if (share.download_url) await copy('Direct link', directLink(share))
+  else await copy('Share link', shareLink(share))
 }
 
 async function remove(share: { id: string; path: string }) {
@@ -52,30 +51,30 @@ async function remove(share: { id: string; path: string }) {
     confirmLabel: 'Delete',
     danger: true,
   })
-  if (ok) await console_.deleteShare(share as Parameters<typeof console_.deleteShare>[0])
+  if (ok) await consoleStore.deleteShare(share as Parameters<typeof consoleStore.deleteShare>[0])
 }
 </script>
 
 <template>
-  <section v-if="!console_.isSharedView.value" class="space-y-3">
+  <section v-if="!consoleStore.isSharedView.value" class="space-y-3">
     <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Shares</h2>
 
     <div class="flex flex-wrap gap-2">
       <button
         class="btn btn-sm"
-        :disabled="!singlePath || !console_.project.value"
-        title="Share the selected file or folder (7 days, single only)"
-        @click="createShare()"
+        :disabled="!singleSelection || !consoleStore.project.value"
+        :title="`Share the selected file or folder (${SHARE_TTL_7D_LABEL}, single only)`"
+        @click="createAndCopy('share')"
       >
-        Share selected…
+        Share selected ({{ SHARE_TTL_7D_LABEL }})…
       </button>
       <button
         class="btn btn-sm"
-        :disabled="!singlePath || !console_.project.value || !!singleEntry?.is_dir"
-        title="Direct download share for the selected file (7 days, single file only)"
-        @click="createDirect()"
+        :disabled="!singleSelection || !consoleStore.project.value || !!singleSelection?.entry?.is_dir"
+        :title="`Direct download share for the selected file (${SHARE_TTL_7D_LABEL}, single file only)`"
+        @click="createAndCopy('direct')"
       >
-        Direct download…
+        Direct download ({{ SHARE_TTL_7D_LABEL }})…
       </button>
     </div>
 

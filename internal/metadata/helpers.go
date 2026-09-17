@@ -37,6 +37,12 @@ func normalizeStoredPathErr(value string) (string, error) {
 // for now; Validate rejects such keys at load/commit boundaries. Semantics
 // intentionally mirror fs.NormalizePath; TestPathNormalizerConformance pins
 // the two implementations together so they cannot drift again.
+//
+// Deprecated: load-path-only total normalizer. Prefer normalizeStoredPathErr
+// (the checked primary) wherever a caller can act on the error; escaping
+// paths pass through here silently and are rejected by Validate at the
+// boundary instead. Cross-package callers cannot use either (both are
+// unexported); in-package call sites migrate as their signatures allow.
 func normalizeStoredPath(value string) string {
 	cleaned, err := normalizeStoredPathErr(value)
 	if err != nil {

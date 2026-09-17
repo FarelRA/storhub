@@ -179,7 +179,7 @@ func TestHardenedUploadRetryRewindsAndSucceeds(t *testing.T) {
 	cfg := retryTaxonomyConfig(server, nil)
 	cfg.MaxRetries = 2
 	c := NewClient("t", cfg)
-	id, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("payload-bytes"), int64(len("payload-bytes")))
+	id, err := c.UploadAsset(context.Background(), server.URL+"/upload", "chunk.bin", strings.NewReader("payload-bytes"), int64(len("payload-bytes")))
 	if err != nil {
 		t.Fatalf("upload should succeed on retry: %v (posts=%d)", err, posts.Load())
 	}

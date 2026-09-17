@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"maps"
-	"reflect"
 	"sort"
 	"sync/atomic"
 )
@@ -118,8 +117,8 @@ func (m *RepoMetadata) syncIndexFingerprint(d *derivedState) {
 func (m *RepoMetadata) indexFresh() bool {
 	d := m.derived
 	return d != nil && !d.idxDirty &&
-		sameMap(d.dirsRef, m.dirs) && d.dirsLen == len(m.dirs) &&
-		sameMap(d.filesRef, m.files) && d.filesLen == len(m.files)
+		mapPtr(d.dirsRef) == mapPtr(m.dirs) && d.dirsLen == len(m.dirs) &&
+		mapPtr(d.filesRef) == mapPtr(m.files) && d.filesLen == len(m.files)
 }
 
 // ensureIndexes rebuilds the derived indexes only when they are stale.
@@ -133,35 +132,32 @@ func (m *RepoMetadata) ensureIndexes() {
 // maintenance keeps the indexes fresh across tracked mutations, so this is
 // only needed after untracked structural writes or an explicit
 // invalidation; it stays exported because load/repair paths call it.
+//
+// The size sections AND the pending-asset counts carry over: sections belong
+// to the maps (unchanged by a reindex), and pendingAssets belongs to the
+// chunk/release accounting (dropped counts would undercount AssetCount on
+// the next EnsureRelease drain, e.g. PutChunk-before-EnsureRelease followed
+// by any reindex). RecomputeStats rebuilds pendingAssets from the chunk walk
+// before calling here, so carrying it over is a no-op there and a fix
+// everywhere else.
 func (m *RepoMetadata) RebuildIndexes() {
 	d := &derivedState{owner: m}
 	if m.derived != nil {
 		d.sections = m.derived.sections
+		d.pendingAssets = maps.Clone(m.derived.pendingAssets)
 	}
 	d.filesByInode = make(map[uint64][]string, len(m.files))
-	d.childDirs = make(map[string][]string, len(m.dirs)+1)
-	d.childFiles = make(map[string][]string, len(m.files)+1)
+	d.childDirs = groupByParent(m.dirs)
+	d.childFiles = groupByParent(m.files)
 
-	for path := range m.dirs {
-		parent := parentPath(path)
-		d.childDirs[parent] = append(d.childDirs[parent], path)
-	}
 	for path, file := range m.files {
 		d.filesByInode[file.Inode] = append(d.filesByInode[file.Inode], path)
-		parent := parentPath(path)
-		d.childFiles[parent] = append(d.childFiles[parent], path)
-	}
-	for parent := range d.childDirs {
-		stableSortStrings(d.childDirs[parent])
-	}
-	for parent := range d.childFiles {
-		stableSortStrings(d.childFiles[parent])
 	}
 	// Sort the inode families too: incremental maintenance keeps them in
 	// path order (binary insert), so the full rebuild must match exactly,
 	// not just as a set.
 	for ino := range d.filesByInode {
-		stableSortStrings(d.filesByInode[ino])
+		sort.Strings(d.filesByInode[ino])
 	}
 
 	d.idxDirty = false
@@ -169,14 +165,28 @@ func (m *RepoMetadata) RebuildIndexes() {
 	m.derived = d
 }
 
+// groupByParent buckets every key of entries under its parent directory,
+// sorting each group. It is the shared grouping behind RebuildIndexes and
+// revert's child indexes so both agree on order exactly.
+func groupByParent[V any](entries map[string]V) map[string][]string {
+	out := make(map[string][]string, len(entries)+1)
+	for p := range entries {
+		parent := parentPath(p)
+		out[parent] = append(out[parent], p)
+	}
+	for parent := range out {
+		sort.Strings(out[parent])
+	}
+	return out
+}
+
 // --- incremental index maintenance -------------------------------------
 
 // trackDirPut maintains the childDirs index and the dirs size section after
-// m.dirs[path] was set to cur (hadOld reports whether an entry was
-// replaced). Call AFTER the map write.
-func (m *RepoMetadata) trackDirPut(path string, old DirMeta, hadOld bool, cur DirMeta) {
-	m.sizePutDir(path, old, hadOld, cur)
-	if d := m.indexForIncremental(); d != nil && !hadOld {
+// m.dirs[path] was set (t is the put transition; call AFTER the map write).
+func (m *RepoMetadata) trackDirPut(path string, t entryTransition[DirMeta]) {
+	m.sizePutDir(path, t)
+	if d := m.indexForIncremental(); d != nil && !t.hadOld {
 		parent := parentPath(path)
 		d.childDirs[parent] = insertSortedString(d.childDirs[parent], path)
 		m.syncIndexFingerprint(d)
@@ -200,26 +210,26 @@ func (m *RepoMetadata) trackDirRemove(path string, old DirMeta) {
 }
 
 // trackFilePut maintains the filesByInode/childFiles indexes and the files
-// size section after m.files[name] was set to cur (hadOld reports whether
-// an entry was replaced). Call AFTER the map write.
-func (m *RepoMetadata) trackFilePut(name string, old FileMeta, hadOld bool, cur FileMeta) {
-	m.sizePutFile(name, old, hadOld, cur)
+// size section after m.files[name] was set (t is the put transition; call
+// AFTER the map write).
+func (m *RepoMetadata) trackFilePut(name string, t entryTransition[FileMeta]) {
+	m.sizePutFile(name, t)
 	d := m.indexForIncremental()
 	if d == nil {
 		return
 	}
-	if !hadOld {
+	if !t.hadOld {
 		parent := parentPath(name)
 		d.childFiles[parent] = insertSortedString(d.childFiles[parent], name)
-	} else if old.Inode != cur.Inode {
-		list := removeSortedString(d.filesByInode[old.Inode], name)
+	} else if t.old.Inode != t.cur.Inode {
+		list := removeSortedString(d.filesByInode[t.old.Inode], name)
 		if len(list) == 0 {
-			delete(d.filesByInode, old.Inode)
+			delete(d.filesByInode, t.old.Inode)
 		} else {
-			d.filesByInode[old.Inode] = list
+			d.filesByInode[t.old.Inode] = list
 		}
 	}
-	d.filesByInode[cur.Inode] = insertSortedString(d.filesByInode[cur.Inode], name)
+	d.filesByInode[t.cur.Inode] = insertSortedString(d.filesByInode[t.cur.Inode], name)
 	m.syncIndexFingerprint(d)
 }
 
@@ -266,18 +276,4 @@ func removeSortedString(list []string, name string) []string {
 		return list
 	}
 	return append(list[:i], list[i+1:]...)
-}
-
-// sameMap reports whether both maps are nil or are the very same map. The
-// caller pins the recorded map (the fingerprint holds a reference), so an
-// equal header pointer cannot alias a reallocated map.
-func sameMap[K comparable, V any](a, b map[K]V) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
-}
-
-func stableSortStrings(strs []string) {
-	sort.SliceStable(strs, func(i, j int) bool { return strs[i] < strs[j] })
 }

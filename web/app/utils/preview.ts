@@ -106,6 +106,22 @@ export function classify(bytes: Uint8Array): PreviewKind {
   return looksTextual(bytes) ? 'text' : 'binary'
 }
 
+/**
+ * DUAL save gate, pure for testability (wave-2 specs target this, not the
+ * 1350-line composable): a preview is saveable only when it is genuine text
+ * AND carries a CAS token AND is complete. A truncated 64KB sniff window has
+ * no etag and shown < total, so saving it can never overwrite a file with
+ * its own prefix.
+ */
+export function isPreviewSaveable(args: {
+  editorIsText: boolean
+  etag: string
+  shown: number
+  total: number
+}): boolean {
+  return args.editorIsText && args.etag !== '' && args.shown === args.total
+}
+
 function asciiColumn(slice: Uint8Array): string {
   let out = ''
   for (const b of slice) out += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.'

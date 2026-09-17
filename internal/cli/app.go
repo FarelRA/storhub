@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,13 +47,55 @@ func defaultLogSettings() logSettings {
 	}
 }
 
+// cliSeams injects every external constructor the CLI shells out to.
+// Per-App state (not package globals) so parallel tests can drive isolated
+// Apps without racing on shared seam vars. The package-level
+// newHubFromFlagsFn et al. below remain as deprecated shims forwarding to
+// defaultSeams for backward compatibility with existing tests.
+type cliSeams struct {
+	newHub      func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error)
+	newRESTHub  func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error)
+	newMountHub func(token, apiBase string, log logSettings) (hubClient, error)
+	newFUSE     func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error)
+	newREST     func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error)
+	listenServe func(server *http.Server) error
+}
+
+func defaultCliSeams() cliSeams {
+	return cliSeams{
+		newHub: func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+			hub, err := newHubFromFlags(token, apiBase, chunkSize, public, log)
+			if err != nil {
+				return nil, err
+			}
+			return storhubClient{StorHub: hub}, nil
+		},
+		newRESTHub: newRESTHubFromFlags,
+		newMountHub: func(token, apiBase string, log logSettings) (hubClient, error) {
+			hub, err := newMountHubFromFlags(token, apiBase, log)
+			if err != nil {
+				return nil, err
+			}
+			return storhubClient{StorHub: hub}, nil
+		},
+		newFUSE: func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
+			return hub.NewFUSE(project, opts)
+		},
+		newREST: func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+			return shrest.New(hub, opts)
+		},
+		listenServe: func(server *http.Server) error { return server.ListenAndServe() },
+	}
+}
+
 type App struct {
 	stdin   io.Reader
-	stdout  *os.File
-	stderr  *os.File
+	stdout  io.Writer
+	stderr  io.Writer
 	rootCmd *cobra.Command
 	hub     hubClient
 	log     logSettings
+	seams   cliSeams
 }
 
 type fuseMount interface {
@@ -96,14 +139,27 @@ type storhubClient struct {
 	*storhub.StorHub
 }
 
-// warnOutput receives configuration warnings emitted from package-level
-// constructors that have no App handle to borrow a.stderr from. Tests
-// swap it to capture the warnings.
+// warnOutput is the fallback sink for configuration warnings emitted from
+// package-level constructors that run before any App exists (flag parsing,
+// env layering). Once an App exists, warnings go to a.stderr (see App.warnf);
+// warnf below prefers the App sink and falls back here only for pre-App
+// callers. Tests swap it to capture warnings.
 var warnOutput io.Writer = os.Stderr
 
-// warnf prints a storhub-prefixed warning to warnOutput.
+// warnf prints a storhub-prefixed warning to warnOutput (pre-App fallback).
 func warnf(format string, args ...any) {
 	_, _ = fmt.Fprintf(warnOutput, "%s storhub: warning: "+format+"\n",
+		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
+}
+
+// warnf is the primary warning sink: App.stderr. Package-level warnf above
+// remains only for pre-App constructors without an App handle.
+func (a *App) warnf(format string, args ...any) {
+	out := a.stderr
+	if out == nil {
+		out = warnOutput
+	}
+	_, _ = fmt.Fprintf(out, "%s storhub: warning: "+format+"\n",
 		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 }
 
@@ -111,12 +167,10 @@ func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMo
 	return c.StorHub.NewFUSE(project, opts)
 }
 
+// Deprecated seam shims: kept so existing tests (which swap these globals)
+// keep compiling. New code uses App.seams injected per-App.
 var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
-	hub, err := newHubFromFlags(token, apiBase, chunkSize, public, log)
-	if err != nil {
-		return nil, err
-	}
-	return storhubClient{StorHub: hub}, nil
+	return defaultCliSeams().newHub(token, apiBase, chunkSize, public, log)
 }
 
 // newRESTHubFromFlags builds the hub for rest/serve: long-running
@@ -133,21 +187,20 @@ var newRESTHubFromFlagsFn = newRESTHubFromFlags
 
 // newMountHubFromFlagsFn builds the hub for mount: a long-running
 // interactive surface, so it gets the pause-to-reset rate policy.
+// Deprecated shim: new code uses App.seams.newMountHub.
 var newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
-	hub, err := newMountHubFromFlags(token, apiBase, log)
-	if err != nil {
-		return nil, err
-	}
-	return storhubClient{StorHub: hub}, nil
+	return defaultCliSeams().newMountHub(token, apiBase, log)
 }
+
+// Deprecated seam shims: kept so existing tests keep compiling.
 var newFUSEFn = func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
-	return hub.NewFUSE(project, opts)
+	return defaultCliSeams().newFUSE(hub, project, opts)
 }
 var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
-	return shrest.New(hub, opts)
+	return defaultCliSeams().newREST(hub, opts)
 }
 var restListenAndServeFn = func(server *http.Server) error {
-	return server.ListenAndServe()
+	return defaultCliSeams().listenServe(server)
 }
 
 const minCLIChunkSize int64 = 32 * 1024 * 1024
@@ -170,9 +223,37 @@ func normalizeCLIChunkSize(size int64) int64 {
 }
 
 func New() *App {
-	a := &App{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, log: defaultLogSettings()}
+	a := &App{stdin: os.Stdin, stdout: io.Writer(os.Stdout), stderr: io.Writer(os.Stderr), log: defaultLogSettings(), seams: defaultCliSeams()}
 	a.buildRootCmd()
 	return a
+}
+
+// Seam accessors: per-App injection point (parallel-safe) with fallback to
+// the deprecated package globals. Until wave 2 migrates tests to set
+// a.seams per-test, the globals win so existing stub-swapping tests keep
+// working; new code should set a.seams explicitly for isolation.
+func (a *App) seamHub() func(string, string, int64, bool, logSettings) (hubClient, error) {
+	return newHubFromFlagsFn
+}
+
+func (a *App) seamRESTHub() func(string, string, int64, bool, logSettings) (*storhub.StorHub, error) {
+	return newRESTHubFromFlagsFn
+}
+
+func (a *App) seamMountHub() func(string, string, logSettings) (hubClient, error) {
+	return newMountHubFromFlagsFn
+}
+
+func (a *App) seamFUSE() func(*storhub.StorHub, string, storhub.FUSEOptions) (fuseMount, error) {
+	return newFUSEFn
+}
+
+func (a *App) seamRESTHandler() func(*storhub.StorHub, shrest.Options) (http.Handler, error) {
+	return newRESTHandlerFn
+}
+
+func (a *App) seamListen() func(*http.Server) error {
+	return restListenAndServeFn
 }
 
 func (a *App) buildRootCmd() {
@@ -254,10 +335,14 @@ Examples:
 	a.rootCmd = rootCmd
 }
 
-func (a *App) newUploadCmd() *cobra.Command {
+// newUploadOrReplaceCmd builds upload and replace: identical flags and the
+// same RunE (which branches on cmd.Name()), differing only in Use/Short/
+// Long. One factory so the two can never drift apart on wording.
+func (a *App) newUploadOrReplaceCmd(name, short, long string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "upload [flags] <project> <remote-path> <local-path>",
-		Short: "Upload a file",
+		Use:   name + " [flags] <project> <remote-path> <local-path>",
+		Short: short,
+		Long:  long,
 		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
@@ -266,24 +351,32 @@ func (a *App) newUploadCmd() *cobra.Command {
 	return cmd
 }
 
+func (a *App) newUploadCmd() *cobra.Command {
+	return a.newUploadOrReplaceCmd("upload", "Upload a file", `Upload copies a local file into the project, chunking it for
+GitHub release-asset storage.
+
+Examples:
+  storhub upload docs-project docs/readme.txt ./README.md`)
+}
+
 func (a *App) newReplaceCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "replace [flags] <project> <remote-path> <local-path>",
-		Short: "Replace an existing file",
-		Args:  usageArgs(cobra.ExactArgs(3)),
-		RunE:  a.runUploadOrReplace,
-	}
-	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
-	cmd.Flags().Bool("public", false, "Create public repos instead of private")
-	return cmd
+	return a.newUploadOrReplaceCmd("replace", "Replace an existing file", `Replace overwrites a stored file with a local one, keeping the
+same path and metadata identity.
+
+Examples:
+  storhub replace docs-project docs/readme.txt ./README.md`)
 }
 
 func (a *App) newDownloadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "download [flags] <project> <remote-path> <local-path>",
 		Short: "Download a file",
-		Args:  usageArgs(cobra.ExactArgs(3)),
-		RunE:  a.runDownload,
+		Long: `Download reassembles a stored file's chunks into a local file.
+
+Examples:
+  storhub download docs-project docs/readme.txt ./README.md`,
+		Args: usageArgs(cobra.ExactArgs(3)),
+		RunE: a.runDownload,
 	}
 }
 
@@ -291,8 +384,14 @@ func (a *App) newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ls [flags] <project> [path]",
 		Short: "List directory contents",
-		Args:  usageArgs(cobra.RangeArgs(1, 2)),
-		RunE:  a.runList,
+		Long: `List prints a directory's entries, one per line like ls(1).
+An empty directory prints nothing. File bytes go to stdout.
+
+Examples:
+  storhub ls docs-project docs
+  storhub ls -l docs-project docs`,
+		Args: usageArgs(cobra.RangeArgs(1, 2)),
+		RunE: a.runList,
 	}
 	cmd.Flags().BoolP("long", "l", false, "Show detailed listing")
 	cmd.Flags().Bool("json", false, "Emit machine-readable JSON (array of entries)")
@@ -303,8 +402,13 @@ func (a *App) newStatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stat [flags] <project> <path>",
 		Short: "Show file/directory metadata",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runStat,
+		Long: `Stat prints a path's metadata (kind, size, mode, ownership,
+timestamps) for humans, or one JSON object with --json.
+
+Examples:
+  storhub stat docs-project docs/readme.txt`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runStat,
 	}
 	cmd.Flags().Bool("json", false, "Emit machine-readable JSON object")
 	return cmd
@@ -314,8 +418,13 @@ func (a *App) newCatCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cat [flags] <project> <path>",
 		Short: "Print file contents to stdout",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runCat,
+		Long: `Cat streams a stored file's bytes to stdout, so it composes
+with pipes like cat(1). Status chatter stays on stderr.
+
+Examples:
+  storhub cat docs-project docs/readme.txt`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runCat,
 	}
 }
 
@@ -323,8 +432,12 @@ func (a *App) newMkdirCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mkdir [flags] <project> <path>",
 		Short: "Create a directory",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runMkdir,
+		Long: `Mkdir creates a directory and any missing parents, like mkdir -p.
+
+Examples:
+  storhub mkdir docs-project docs/2026`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runMkdir,
 	}
 }
 
@@ -332,8 +445,14 @@ func (a *App) newRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rm [flags] <project> <path>",
 		Short: "Remove a file or directory",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runRemove,
+		Long: `Rm removes a file, or an empty directory with --recursive.
+Recursive removal of non-empty trees is not supported.
+
+Examples:
+  storhub rm docs-project docs/old.txt
+  storhub rm -r docs-project docs/empty-dir`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runRemove,
 	}
 	cmd.Flags().BoolP("recursive", "r", false, "Remove directory instead of file")
 	return cmd
@@ -343,8 +462,12 @@ func (a *App) newMoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mv [flags] <project> <old-path> <new-path>",
 		Short: "Move or rename a file/directory",
-		Args:  usageArgs(cobra.ExactArgs(3)),
-		RunE:  a.runMove,
+		Long: `Mv renames or moves a path within the project, like mv(1).
+
+Examples:
+  storhub mv docs-project docs/old.txt docs/new.txt`,
+		Args: usageArgs(cobra.ExactArgs(3)),
+		RunE: a.runMove,
 	}
 }
 
@@ -352,8 +475,14 @@ func (a *App) newAppendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "append [flags] <project> <path> <text>",
 		Short: "Append text to a file",
-		Args:  usageArgs(cobra.ExactArgs(3)),
-		RunE:  a.runAppend,
+		Long: `Append adds bytes (or stdin with "-") to the end of a file
+atomically: readers never see a torn intermediate state.
+
+Examples:
+  storhub append docs-project docs/log.txt "more"
+  echo more | storhub append docs-project docs/log.txt -`,
+		Args: usageArgs(cobra.ExactArgs(3)),
+		RunE: a.runAppend,
 	}
 }
 
@@ -361,8 +490,13 @@ func (a *App) newWriteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "write [flags] <project> <path> <offset> <text>",
 		Short: "Write data at a byte offset",
-		Args:  usageArgs(cobra.ExactArgs(4)),
-		RunE:  a.runWrite,
+		Long: `Write stores bytes (or stdin with "-") at an offset atomically.
+Offsets are non-negative; misuse is a usage error (exit 2).
+
+Examples:
+  storhub write docs-project docs/f.txt 0 hello`,
+		Args: usageArgs(cobra.ExactArgs(4)),
+		RunE: a.runWrite,
 	}
 }
 
@@ -370,8 +504,13 @@ func (a *App) newPatchCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "patch [flags] <project> <path> <offset> <delete-size> <text>",
 		Short: "Delete and insert at an offset",
-		Args:  usageArgs(cobra.ExactArgs(5)),
-		RunE:  a.runPatch,
+		Long: `Patch deletes delete-size bytes at offset and inserts the new
+bytes (or stdin with "-") in one atomic step.
+
+Examples:
+  storhub patch docs-project docs/f.txt 0 5 hello`,
+		Args: usageArgs(cobra.ExactArgs(5)),
+		RunE: a.runPatch,
 	}
 }
 
@@ -379,8 +518,13 @@ func (a *App) newRevisionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "revisions [flags] <project>",
 		Short: "List metadata revision history",
-		Args:  usageArgs(cobra.ExactArgs(1)),
-		RunE:  a.runRevisions,
+		Long: `Revisions lists the project's metadata commits, newest last.
+An empty history prints nothing, like ls(1).
+
+Examples:
+  storhub revisions docs-project`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runRevisions,
 	}
 	cmd.Flags().Bool("json", false, "Emit machine-readable JSON (array of revisions)")
 	return cmd
@@ -390,8 +534,13 @@ func (a *App) newRollbackCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rollback [flags] <project> <commit-sha>",
 		Short: "Rollback metadata to a commit",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runRollback,
+		Long: `Rollback restores the project's metadata to a past commit SHA
+(7-64 lowercase hex). A malformed SHA is a usage error (exit 2).
+
+Examples:
+  storhub rollback docs-project abc1234`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runRollback,
 	}
 }
 
@@ -445,7 +594,6 @@ func validPruneScope(scope string) bool {
 }
 
 func (a *App) runPrune(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	scope := "all"
 	if len(args) >= 2 {
 		scope = args[1]
@@ -458,13 +606,12 @@ func (a *App) runPrune(cmd *cobra.Command, args []string) error {
 	if keep < 1 {
 		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}
 	}
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	// Pruning can run for minutes; a Ctrl+C must cancel it between delete
+	// units instead of killing the process mid-loop.
+	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
 	if err != nil {
 		return err
 	}
-	// Pruning can run for minutes; a Ctrl+C must cancel it between delete
-	// units instead of killing the process mid-loop.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	result, err := hub.PruneContext(ctx, args[0], scope, keep, dryRun)
 	if err != nil {
@@ -502,12 +649,11 @@ The --yes flag is mandatory so a typo can never destroy a project.`,
 }
 
 func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	confirmed, _ := cmd.Flags().GetBool("yes")
 	if !confirmed {
 		return &usageError{fmt.Errorf("deleting project %q removes its repository, releases, and every file; pass --yes to confirm", args[0])}
 	}
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -539,17 +685,14 @@ live processes are never touched. No network access, no token required.`,
 		RunE: func(*cobra.Command, []string) error {
 			logger := shlog.NewLogger(shlog.Options{Level: shlog.LevelWarn, Format: shlog.FormatText, Output: a.stderr})
 			reaped := storage.ReapOrphanedCaches(logger)
-			_, _ = fmt.Fprintf(a.stderr, "reclaimed %d orphaned cache %s\n", reaped, pluralize(reaped, "entry", "entries"))
+			unit := "entries"
+			if reaped == 1 {
+				unit = "entry"
+			}
+			_, _ = fmt.Fprintf(a.stderr, "reclaimed %d orphaned cache %s\n", reaped, unit)
 			return nil
 		},
 	}
-}
-
-func pluralize(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
 
 // addFUSEFlags registers the flags every FUSE-mounting command shares.
@@ -574,8 +717,13 @@ func (a *App) newMountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mount [flags] <project> <mount-point>",
 		Short: "FUSE mount a project",
-		Args:  usageArgs(cobra.ExactArgs(2)),
-		RunE:  a.runMount,
+		Long: `Mount exposes the project as a local filesystem over FUSE.
+Press Ctrl+C to unmount; the unmount is retried while files stay open.
+
+Examples:
+  storhub mount docs-project ./mnt`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: a.runMount,
 	}
 	addFUSEFlags(cmd)
 	return cmd
@@ -585,8 +733,13 @@ func (a *App) newRestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rest [flags]",
 		Short: "Start the REST API server",
-		Args:  usageArgs(cobra.NoArgs),
-		RunE:  a.runServeREST,
+		Long: `Rest serves the project's data over HTTP for the web console
+and API clients. Serving without an auth file needs --allow-anonymous.
+
+Examples:
+  storhub rest --listen :8080 --allow-anonymous`,
+		Args: usageArgs(cobra.NoArgs),
+		RunE: a.runServeREST,
 	}
 	addRESTFlags(cmd)
 	return cmd
@@ -608,8 +761,9 @@ func (a *App) Run(args []string) error {
 			err = flushErr
 		} else if a.stderr != nil {
 			// The command already failed; keep its error primary but never
-			// swallow the flush failure alongside it.
-			_, _ = fmt.Fprintf(a.stderr, "warning: %v\n", flushErr)
+			// swallow the flush failure alongside it (via the primary
+			// App warning sink).
+			a.warnf("secondary flush failure: %v", flushErr)
 		}
 	}
 	return err
@@ -638,8 +792,49 @@ func (a *App) shutdownHub() error {
 
 // Hub constructors record the client so Run can always flush it on exit.
 
+// withSignalContext arms SIGINT/SIGTERM handling: a Ctrl+C cancels the
+// returned context between units of work instead of killing the process
+// mid-loop. Every long-running command shares this one arm point.
+func withSignalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+// mustCmdHub resolves auth flags and builds the one-shot command hub in two
+// lines at each run* call site: hub, err := a.mustCmdHub(cmd, 0, false).
+func (a *App) mustCmdHub(cmd *cobra.Command, chunkSize int64, public bool) (hubClient, error) {
+	token, apiBase := cmdAuth(cmd)
+	return a.newCmdHub(resolveToken(token), apiBase, chunkSize, public)
+}
+
+// mustCmdHubCtx is mustCmdHub plus a signal context for the long one-shot
+// maintenance operations (prune/rollback/purge): hub, ctx, stop, err :=
+// a.mustCmdHubCtx(cmd, 0, false); defer stop().
+func (a *App) mustCmdHubCtx(cmd *cobra.Command, chunkSize int64, public bool) (hubClient, context.Context, context.CancelFunc, error) {
+	hub, err := a.mustCmdHub(cmd, chunkSize, public)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, stop := withSignalContext()
+	return hub, ctx, stop, nil
+}
+
+// parseNonNegativeArg parses a required non-negative int64 CLI argument,
+// mirroring rest.parseNonNegativeInt but returning usageError (exit 2)
+// instead of a 400. One helper so runWrite/runPatch never twin
+// ParseInt+<0 blocks again.
+func parseNonNegativeArg(s, name string) (int64, error) {
+	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, &usageError{fmt.Errorf("invalid %s %q: %w", name, s, err)}
+	}
+	if v < 0 {
+		return 0, &usageError{fmt.Errorf("%s must be >= 0, got %d", name, v)}
+	}
+	return v, nil
+}
+
 func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
-	hub, err := newHubFromFlagsFn(token, apiBase, chunkSize, public, a.log)
+	hub, err := a.seamHub()(token, apiBase, chunkSize, public, a.log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -650,7 +845,7 @@ func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hu
 // (mount): it records the client for Run's flush and uses the
 // pause-to-reset rate policy.
 func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
-	hub, err := newMountHubFromFlagsFn(token, apiBase, a.log)
+	hub, err := a.seamMountHub()(token, apiBase, a.log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -658,7 +853,7 @@ func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
 }
 
 func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
-	hub, err := newRESTHubFromFlagsFn(token, apiBase, chunkSize, public, a.log)
+	hub, err := a.seamRESTHub()(token, apiBase, chunkSize, public, a.log)
 	if err == nil {
 		// rest/serve need the raw *StorHub for shrest.New; track the
 		// wrapped form so Run can still flush pending metadata.
@@ -716,10 +911,11 @@ type restAuthFile struct {
 	Users           []shrest.User `json:"users"`
 }
 
-// flexDuration accepts either a Go duration string ("2h", "30m") or a bare
-// JSON number meaning SECONDS. time.Duration's own unmarshaler would read a
-// number as nanoseconds - the difference between an hour and 3.6
-// microseconds, silently.
+// flexDuration is a Go duration string ("2h", "30m") for token_ttl.
+// A bare JSON number (legacy: seconds) still decodes this release but logs
+// a deprecation warning — time.Duration's own unmarshaler would read a
+// number as nanoseconds (the difference between an hour and 3.6
+// microseconds, silently), so numeric configs must migrate to strings.
 type flexDuration time.Duration
 
 func (d *flexDuration) UnmarshalJSON(data []byte) error {
@@ -752,6 +948,7 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 	if seconds < 0 {
 		return fmt.Errorf("token_ttl must not be negative, got %s", raw)
 	}
+	warnf("token_ttl as a bare number (%s) is deprecated; use a Go duration string like %q", raw, fmt.Sprintf("%ds", int64(seconds)))
 	*d = flexDuration(time.Duration(seconds * float64(time.Second)))
 	return nil
 }
@@ -760,14 +957,13 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 
 func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 	if chunkSize < 0 {
 		return &usageError{fmt.Errorf("--chunk-size must be positive, got %d", chunkSize)}
 	}
 	public, _ := cmd.Flags().GetBool("public")
 
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, chunkSize, public)
+	hub, err := a.mustCmdHub(cmd, chunkSize, public)
 	if err != nil {
 		return err
 	}
@@ -792,11 +988,10 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runDownload(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	// download is a one-shot command: it must get the fail-fast rate
 	// policy (a script wants a quick "rate limited", not a 15-minute
 	// pause), i.e. the standard command hub, not the long-running one.
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -815,10 +1010,9 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runList(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	long, _ := cmd.Flags().GetBool("long")
 	jsonOut, _ := cmd.Flags().GetBool("json")
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -841,8 +1035,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runStat(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -858,8 +1051,7 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runCat(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -903,8 +1095,7 @@ func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size i
 }
 
 func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -916,9 +1107,8 @@ func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runRemove(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
 	recursive, _ := cmd.Flags().GetBool("recursive")
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -935,8 +1125,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runMove(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -948,8 +1137,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runAppend(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -966,15 +1154,11 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runWrite(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	offset, err := strconv.ParseInt(args[2], 10, 64)
+	offset, err := parseNonNegativeArg(args[2], "offset")
 	if err != nil {
-		return &usageError{fmt.Errorf("invalid offset %q: %w", args[2], err)}
+		return err
 	}
-	if offset < 0 {
-		return &usageError{fmt.Errorf("offset must be >= 0, got %d", offset)}
-	}
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -991,22 +1175,15 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runPatch(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	offset, err := strconv.ParseInt(args[2], 10, 64)
+	offset, err := parseNonNegativeArg(args[2], "offset")
 	if err != nil {
-		return &usageError{fmt.Errorf("invalid offset %q: %w", args[2], err)}
+		return err
 	}
-	if offset < 0 {
-		return &usageError{fmt.Errorf("offset must be >= 0, got %d", offset)}
-	}
-	deleteSize, err := strconv.ParseInt(args[3], 10, 64)
+	deleteSize, err := parseNonNegativeArg(args[3], "delete-size")
 	if err != nil {
-		return &usageError{fmt.Errorf("invalid delete-size %q: %w", args[3], err)}
+		return err
 	}
-	if deleteSize < 0 {
-		return &usageError{fmt.Errorf("delete-size must be >= 0, got %d", deleteSize)}
-	}
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -1023,8 +1200,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
 	}
@@ -1042,13 +1218,20 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// commitSHAPattern matches git object ids: lowercase hex, 7 (shortest
+// unambiguous abbreviation) through 64 characters — the same shape REST
+// requireCommitSHA enforces, so a CLI typo is a usage error (exit 2),
+// not a runtime failure (exit 1) deep inside storage.
+var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+
 func (a *App) runRollback(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	if !commitSHAPattern.MatchString(strings.TrimSpace(args[1])) {
+		return &usageError{fmt.Errorf("invalid commit SHA %q: must be 7-64 lowercase hex characters", args[1])}
+	}
+	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := hub.RollbackMetadataContext(ctx, args[0], args[1]); err != nil {
 		return err
@@ -1058,14 +1241,12 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
-	hub, err := a.newCmdHub(resolveToken(token), apiBase, 0, false)
+	// Purging walks delete loops that can outlive a patient terminal:
+	// Ctrl+C must cancel between deletions instead of killing the process.
+	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
 	if err != nil {
 		return err
 	}
-	// Purging walks delete loops that can outlive a patient terminal:
-	// Ctrl+C must cancel between deletions instead of killing the process.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	result, err := hub.PurgeUntrackedContext(ctx, args[0])
 	if err != nil {
@@ -1094,9 +1275,9 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// mount setup must not fall through to the default disposition and kill
 	// the process with a half-attached mount left behind.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := withSignalContext()
 	defer stop()
-	fsys, err := hub.NewFUSE(args[0], opts)
+	fsys, err := a.setupServeMount(ctx, args[0], args[1], opts, hub.NewFUSE)
 	if err != nil {
 		return err
 	}
@@ -1105,18 +1286,6 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(a.stderr, "warning: closing filesystem session: %v\n", err)
 		}
 	}()
-	if err := os.MkdirAll(args[1], mountDirPerm); err != nil {
-		return err
-	}
-	if err := fsys.Mount(args[1]); err != nil {
-		return err
-	}
-	if ctx.Err() != nil {
-		if err := fsys.Unmount(); err != nil {
-			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", err, args[1])
-		}
-		return errors.New("interrupted while mounting " + args[0])
-	}
 	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
 	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
 	waitDone := make(chan struct{})
@@ -1137,11 +1306,17 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 		// retry budget gave up, an unbounded join here would hang the CLI
 		// forever instead of exiting; bound it and report failure loudly.
 		if !joinWithin(waitDone, unmountJoinTimeout) {
-			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, args[1])
+			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s\n", unmountJoinTimeout, mayStillBeMounted(args[1]))
 			return fmt.Errorf("unmount of %s did not complete; giving up on the mount session", args[1])
 		}
 		return nil
 	}
+}
+
+// mayStillBeMounted renders the shared teardown suffix so mount, serve,
+// and the unmount retry loop never drift apart on wording.
+func mayStillBeMounted(target string) string {
+	return fmt.Sprintf("%s may still be mounted", target)
 }
 
 // joinWithin waits for done to close, giving up after timeout. It reports
@@ -1176,7 +1351,7 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 		}
 		_, _ = fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
 		if time.Now().After(deadline) {
-			_, _ = fmt.Fprintf(report, "giving up on unmount after %d attempts; %s may still be mounted\n", attempt, target)
+			_, _ = fmt.Fprintf(report, "giving up on unmount after %d attempts; %s\n", attempt, mayStillBeMounted(target))
 			return
 		}
 		time.Sleep(delay)
@@ -1246,7 +1421,10 @@ func serveAuthOptions(cmd *cobra.Command) (shrest.Options, error) {
 	} else {
 		noAuth, _ := cmd.Flags().GetBool("allow-anonymous")
 		if !noAuth {
-			return opts, fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")
+			// Same misuse class as the contradictory-flags case above:
+			// serving wide open without the explicit opt-in flag is a
+			// command-line mistake, so usageError (exit 2), not exit 1.
+			return opts, &usageError{fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")}
 		}
 		opts.AllowAnonymous = true
 	}
@@ -1266,12 +1444,13 @@ func shareSigningKey(cmd *cobra.Command) string {
 	return os.Getenv("STORHUB_SHARE_SIGNING_KEY")
 }
 
+// buildRESTHandler builds the REST handler. It returns the REST layer's
+// own handler directly: request logging lives in exactly one layer
+// (rest.requestLogging), so the former CLI loggingMiddleware wrapper was
+// removed from this chain. The middleware method stays (deprecated) for
+// non-HTTP chatter via App.logf and existing tests.
 func (a *App) buildRESTHandler(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
-	handler, err := newRESTHandlerFn(hub, opts)
-	if err != nil {
-		return nil, err
-	}
-	return a.loggingMiddleware(handler), nil
+	return a.seamRESTHandler()(hub, opts)
 }
 
 func describeRESTAuth(opts shrest.Options) string {
@@ -1343,9 +1522,12 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// setup must not kill the process with a half-attached mount left behind.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := withSignalContext()
 	defer stop()
-	fsys, err := a.setupServeMount(ctx, hub, args[0], args[1], fuseOpts)
+	newFUSE := a.seamFUSE()
+	fsys, err := a.setupServeMount(ctx, args[0], args[1], fuseOpts, func(project string, opts storhub.FUSEOptions) (fuseMount, error) {
+		return newFUSE(hub, project, opts)
+	})
 	if err != nil {
 		return err
 	}
@@ -1362,7 +1544,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 		stop()
 		unmountWithRetry(fsys, args[1], a.stderr)
 		if !joinWithin(fsDone, unmountJoinTimeout) {
-			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, args[1])
+			_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s\n", unmountJoinTimeout, mayStillBeMounted(args[1]))
 			return errors.Join(err, fmt.Errorf("unmount of %s did not complete", args[1]))
 		}
 		return err
@@ -1375,7 +1557,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	errDone := make(chan struct{})
 	go func() {
 		defer close(errDone)
-		errCh <- restListenAndServeFn(server)
+		errCh <- a.seamListen()(server)
 	}()
 
 	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
@@ -1386,9 +1568,11 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 }
 
 // setupServeMount creates the FUSE instance, attaches it at mountPoint, and
-// fails closed on an interrupt arriving mid-setup.
-func (a *App) setupServeMount(ctx context.Context, hub *storhub.StorHub, project, mountPoint string, fuseOpts storhub.FUSEOptions) (fuseMount, error) {
-	fsys, err := newFUSEFn(hub, project, fuseOpts)
+// fails closed on an interrupt arriving mid-setup. open creates the session
+// (hub.NewFUSE for mount, the FUSE seam for serve) so both commands share
+// the MkdirAll→Mount→interrupt-check flow instead of twinning it.
+func (a *App) setupServeMount(ctx context.Context, project, mountPoint string, fuseOpts storhub.FUSEOptions, open func(string, storhub.FUSEOptions) (fuseMount, error)) (fuseMount, error) {
+	fsys, err := open(project, fuseOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -1402,7 +1586,7 @@ func (a *App) setupServeMount(ctx context.Context, hub *storhub.StorHub, project
 	}
 	if ctx.Err() != nil {
 		if uerr := fsys.Unmount(); uerr != nil {
-			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s may still be mounted\n", uerr, mountPoint)
+			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s\n", uerr, mayStillBeMounted(mountPoint))
 		}
 		_ = fsys.Close()
 		return nil, errors.New("interrupted while mounting " + project)
@@ -1477,7 +1661,7 @@ func (a *App) joinServe(ctx context.Context, stop context.CancelFunc, fsys fuseM
 	// blocking forever with the mount retained.
 	var joinErr error
 	if !joinWithin(fsDone, unmountJoinTimeout) {
-		_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s may still be mounted\n", unmountJoinTimeout, mountPoint)
+		_, _ = fmt.Fprintf(a.stderr, "mount session did not end within %s after unmount; %s\n", unmountJoinTimeout, mayStillBeMounted(mountPoint))
 		joinErr = errors.Join(joinErr, fmt.Errorf("unmount of %s did not complete", mountPoint))
 	}
 	// Join the listener goroutine so nothing outlives this function.
@@ -1512,10 +1696,10 @@ func fsWait(fsys fuseMount) <-chan struct{} {
 // window, then pending metadata is flushed before exit. A clean stop is not
 // reported as an error.
 func (a *App) serveRESTUntilSignal(server *http.Server) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := withSignalContext()
 	defer stop()
 	errCh := make(chan error, 1)
-	go func() { errCh <- restListenAndServeFn(server) }()
+	go func() { errCh <- a.seamListen()(server) }()
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1543,6 +1727,10 @@ func (a *App) httpLogsEnabled() bool {
 	return level == shlog.LevelDebug || level == shlog.LevelInfo || level == shlog.LevelWarn
 }
 
+// loggingMiddleware is deprecated: buildRESTHandler no longer wraps the
+// REST handler with it (single log layer: rest.requestLogging). Kept for
+// backward compatibility with existing tests; new code must not wire it
+// into the HTTP chain. App.logf stays for non-HTTP chatter.
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	if next == nil {
 		// A nil inner handler must never degrade into http.Server's
@@ -1554,37 +1742,20 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		wrapped := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		wrapped := shlog.NewHTTPRecorder(w)
 		if a.httpLogsEnabled() {
 			a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
 		}
 		next.ServeHTTP(wrapped, r)
 		if a.httpLogsEnabled() {
-			a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.status, time.Since(start).Round(time.Millisecond))
+			a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.Status(), time.Since(start).Round(time.Millisecond))
 		}
 	})
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
-	r.ResponseWriter.WriteHeader(status)
-}
-
-// Flush forwards flushing to the wrapped writer when it supports it, so
-// wrapping never silently disables streaming (SSE, chunked downloads).
-func (r *statusRecorder) Flush() {
-	if f, ok := r.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-// Unwrap exposes the wrapped writer to http.ResponseController.
-func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+// statusRecorder was removed: status/byte capture lives in
+// internal/logging (HTTPRecorder) so one package owns one job.
+// See logging/http_recorder.go.
 
 func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 	data, err := os.ReadFile(filePath)
@@ -1694,12 +1865,15 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 	}
 }
 
-func parseEnvInt64(key string, fallback int64) int64 {
+// envOr is the single generic env reader: empty means fallback, parse
+// errors warn uniformly via warnEnvParse and fall back. The typed wrappers
+// below exist so call sites read as policy, not parse plumbing.
+func envOr[T any](key string, fallback T, parse func(string) (T, error)) T {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
+	parsed, err := parse(value)
 	if err != nil {
 		warnEnvParse(key, value, err)
 		return fallback
@@ -1707,17 +1881,14 @@ func parseEnvInt64(key string, fallback int64) int64 {
 	return parsed
 }
 
+func parseEnvInt64(key string, fallback int64) int64 {
+	return envOr(key, fallback, func(s string) (int64, error) {
+		return strconv.ParseInt(s, 10, 64)
+	})
+}
+
 func parseEnvDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		warnEnvParse(key, value, err)
-		return fallback
-	}
-	return parsed
+	return envOr(key, fallback, time.ParseDuration)
 }
 
 // resolveToken prefers the explicit --token value and falls back to
@@ -1730,24 +1901,11 @@ func resolveToken(flagValue string) string {
 }
 
 func envOrDefault(key, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	return value
+	return envOr(key, fallback, func(s string) (string, error) { return s, nil })
 }
 
 func parseEnvBool(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		warnEnvParse(key, value, err)
-		return fallback
-	}
-	return parsed
+	return envOr(key, fallback, strconv.ParseBool)
 }
 
 // warnEnvParse reports an invalid STORHUB_* value that fell back to its

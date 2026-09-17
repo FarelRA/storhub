@@ -10,6 +10,25 @@ export default withNuxt(
     },
   },
   {
+    // Auto-import everywhere: display/format helpers come from Nuxt
+    // auto-import (~/composables/use-format), never from manual imports in
+    // SFCs. Two import styles for the same helper caused drift before.
+    files: ['app/components/**/*.vue', 'app/pages/**/*.vue'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['~/composables/use-format', '@/composables/use-format'],
+              message: 'Use the Nuxt auto-imported helper instead of importing use-format manually.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     ignores: ['dist/**', '.output/**', '.nuxt/**'],
   },
 )

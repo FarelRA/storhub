@@ -157,7 +157,10 @@ func Default() Config {
 		RateContentPerMin:     60,
 		MaxConcurrentRequests: 16,
 		TransferThroughput:    1 << 20,
-		LogOutput:             os.Stderr,
+		// Nil: the caller opts into a destination by setting LogOutput
+		// (or supplying Logger). NewLogger falls back to os.Stderr for
+		// a nil Output, so library import alone never opens a stream.
+		LogOutput: nil,
 		// Warn, not debug: a mount performs thousands of FS operations
 		// per minute, and a debug-level default turns every one of them
 		// into formatted stderr traffic (the "looks idle but burns"
@@ -187,6 +190,26 @@ func Default() Config {
 // nonsense like ChunkSize: -1 with a default hides embedder typos before
 // Validate ever sees them. Negative values pass through untouched so
 // Validate rejects them loudly.
+//
+// Fields intentionally NOT filled here (zero is a live value with a
+// documented downstream default — no silent third state):
+//   - MaxRetries: zero is kept as-is (zero retries downstream);
+//     negative fails Validate.
+//   - RevivalTimeout: zero takes the library default (5s) downstream.
+//   - RateReserve: negative restores the client default (25); zero is a
+//     live "no headroom floor" setting, not unset.
+//   - RateMaxWait: zero takes the library default (15m); negative opts
+//     into fail-fast.
+//   - RatePointsPerMin/RateContentPerMin/MaxConcurrentRequests: <=0 takes
+//     the library defaults (720/60/16) downstream.
+//   - TransferThroughput: zero takes the library default (1 MiB/s).
+//   - JournalDir: empty disables journaling; the CLI opts in beneath
+//     CacheBase, embedders set it explicitly.
+//   - StrictConflicts/DisableGitBackend/CreatePublicRepo: booleans where
+//     false is the meaningful default.
+//   - HistoryWarnObjects: zero is the documented "disabled" value (the
+//     storage consumer checks it), so overwriting it would make the
+//     disable path unreachable. Default() still enables the warning.
 func (c Config) WithDefaults() Config {
 	defaults := Default()
 	if c.APIBaseURL == "" {
@@ -241,10 +264,7 @@ func (c Config) WithDefaults() Config {
 	if c.ObjectCacheMaxEntries == 0 {
 		c.ObjectCacheMaxEntries = defaults.ObjectCacheMaxEntries
 	}
-	// HistoryWarnObjects is deliberately NOT zero-filled: zero is the
-	// documented "disabled" value (the storage consumer checks it), so
-	// overwriting it would make the disable path unreachable. Default()
-	// still enables the warning for callers that start from it.
+	// HistoryWarnObjects: see the WithDefaults godoc — zero disables.
 	if c.Now == nil {
 		c.Now = defaults.Now
 	}
@@ -273,16 +293,27 @@ func (c Config) resolveLogger() Config {
 	return c
 }
 
-// CacheBase returns the root directory for storhub's local caches:
-// $STORHUB_CACHE_DIR when set, otherwise the platform user cache dir
-// (~/.cache/storhub on Linux per XDG), falling back to a temp
-// directory when no home is available. Component caches live beneath
-// it: git/ for backend working repos, journal/ for the write-ahead
-// op journal, fuse/<project>/ for overlays.
+// CacheBase returns the root directory for storhub's local caches.
+// Component caches live beneath it: git/ for backend working repos,
+// journal/ for the write-ahead op journal, fuse/<project>/ for overlays.
 func CacheBase() string {
-	if custom := strings.TrimSpace(os.Getenv("STORHUB_CACHE_DIR")); custom != "" {
+	if custom := cacheBaseFromEnv(); custom != "" {
 		return custom
 	}
+	return defaultCacheBase()
+}
+
+// cacheBaseFromEnv reports $STORHUB_CACHE_DIR (trimmed), or "" when unset:
+// the explicit operator override, checked first.
+func cacheBaseFromEnv() string {
+	return strings.TrimSpace(os.Getenv("STORHUB_CACHE_DIR"))
+}
+
+// defaultCacheBase is the platform user cache dir (~/.cache/storhub on
+// Linux per XDG), falling back to a temp directory when no home is
+// available. Split out of CacheBase so the env override and the platform
+// default read as separate steps.
+func defaultCacheBase() string {
 	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
 		return filepath.Join(userCache, "storhub")
 	}

@@ -165,7 +165,7 @@ func TestUploadAssetRetriesAfterRateLimit(t *testing.T) {
 	cfg.RateMaxWait = time.Minute
 	c := NewClient("t", cfg)
 
-	assetID, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("payload-bytes"), int64(len("payload-bytes")))
+	assetID, err := c.UploadAsset(context.Background(), server.URL+"/upload", "chunk.bin", strings.NewReader("payload-bytes"), int64(len("payload-bytes")))
 	if err != nil {
 		t.Fatalf("upload should succeed on retry: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestUploadAssetFailsFastOnDistantReset(t *testing.T) {
 	cfg.RateMaxWait = 0
 	c := NewClient("t", cfg)
 
-	_, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
+	_, err := c.UploadAsset(context.Background(), server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
 	apiErr := &APIError{}
 	if !errors.As(err, &apiErr) || !apiErr.Primary {
 		t.Fatalf("expected primary rate-limit error, got %v", err)
@@ -226,7 +226,7 @@ func TestUploadAssetRetriesOnHeaderlessRateLimit(t *testing.T) {
 	cfg.RateMaxWait = 2 * time.Minute
 	c := NewClient("t", cfg)
 
-	assetID, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
+	assetID, err := c.UploadAsset(context.Background(), server.URL+"/upload", "chunk.bin", strings.NewReader("x"), 1)
 	if err != nil {
 		t.Fatalf("header-less rate-limit rejection must be retried: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
 	low.Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Hour).Unix()))
 	c.governor.observe(low)
 	for i := 0; i < 20; i++ {
-		if _, err := c.UploadAsset(context.Background(), "o", "p", "tag", server.URL+"/upload", fmt.Sprintf("chunk-%d.bin", i), strings.NewReader("x"), 1); err != nil {
+		if _, err := c.UploadAsset(context.Background(), server.URL+"/upload", fmt.Sprintf("chunk-%d.bin", i), strings.NewReader("x"), 1); err != nil {
 			t.Fatalf("upload %d failed while server healthy (posts=%d): %v", i, posts.Load(), err)
 		}
 	}

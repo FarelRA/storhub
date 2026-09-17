@@ -3,10 +3,16 @@
 # web/node_modules (~367MB), the nuxt build dirs, .git, and the
 # goreleaser dist/ output all ride along and churn the cache.
 # Note: internal/rest/static/dist (the committed console embed) must
-# stay IN the context; these patterns never match it.
+# stay IN the context. The output patterns below are anchored to the
+# context root on purpose: a bare `dist` would match that basename at ANY
+# depth (dockerignore has no keep-unless-anchored intuition) and drop the
+# embed `go build` needs. The negation re-includes it explicitly; it works
+# because no parent directory of the embed is excluded.
 .git
 .gitignore
-dist
+/dist/
+web/dist
+!/internal/rest/static/dist
 web/node_modules
 web/.nuxt
 web/.output

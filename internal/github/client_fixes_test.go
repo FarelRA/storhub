@@ -77,10 +77,10 @@ func TestAssetUploadStillDrawsFromContentWindow(t *testing.T) {
 	cfg.RateMaxWait = -1
 	c := NewClient("t", cfg)
 	ctx := context.Background()
-	if _, err := c.UploadAsset(ctx, "o", "p", "tag", server.URL+"/upload", "a.bin", strings.NewReader("x"), 1); err != nil {
+	if _, err := c.UploadAsset(ctx, server.URL+"/upload", "a.bin", strings.NewReader("x"), 1); err != nil {
 		t.Fatalf("first upload: %v", err)
 	}
-	if _, err := c.UploadAsset(ctx, "o", "p", "tag", server.URL+"/upload", "b.bin", strings.NewReader("x"), 1); err == nil {
+	if _, err := c.UploadAsset(ctx, server.URL+"/upload", "b.bin", strings.NewReader("x"), 1); err == nil {
 		t.Fatal("second upload must hit the content window")
 	}
 }

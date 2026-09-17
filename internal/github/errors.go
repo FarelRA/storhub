@@ -57,16 +57,36 @@ func (e *APIError) NotFound() bool { return e != nil && e.StatusCode == http.Sta
 // field when field != "". Prose-only bodies never match, so message
 // variants ("file_count limited to 1000...", "too many ...") classify
 // only through the code GitHub actually assigned.
+//
+// Empty code and/or field act as wildcards, giving full 3x3 matrix
+// semantics on the SAME detail entry: code "" matches any code,
+// field "" matches any field. ("already_exists","") narrows by code
+// only; ("","file_count") narrows by field only (the storage
+// file-count path calls with an empty code); ("","") matches any 422
+// that carries at least one detail. A 422 with zero details never
+// matches, and non-422 statuses never match.
 func (e *APIError) IsValidationIssue(code, field string) bool {
 	if e == nil || e.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
 	for _, d := range e.Details {
-		if strings.EqualFold(d.Code, code) && (field == "" || strings.EqualFold(d.Field, field)) {
+		if (code == "" || strings.EqualFold(d.Code, code)) && (field == "" || strings.EqualFold(d.Field, field)) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsSHANotSupplied matches the contents-API 422 for a sha-less create onto
+// an existing path: `Invalid request. "sha" wasn't supplied.` GitHub sends
+// NO structured errors[] entry for this case (unlike already_exists), so
+// the status + exact message sentence IS the structural signature —
+// matched on the full quoted sentence, never a bare keyword. A concurrent
+// writer having created the path first is success for idempotent writes:
+// callers verify upstream content and adopt it.
+func (e *APIError) IsSHANotSupplied() bool {
+	return e != nil && e.StatusCode == http.StatusUnprocessableEntity &&
+		strings.Contains(e.Message, `"sha" wasn't supplied`)
 }
 
 // StatusSignedURLExpired is GitHub's non-standard status from
@@ -131,6 +151,21 @@ func uploadErrorBody(err error) string {
 	return apiErr.BodySnippet()
 }
 
+// IsRetryable reports whether the failed request is worth another
+// attempt after backoff.
+//
+// Uniform retry doctrine (shared with CDNError.Transient, which uses the
+// same 5xx range):
+//   - 429 and any RateLimited rejection: retryable. Rate waits are honored
+//     exactly; the maxWait ceiling refuses excessive waits upstream.
+//   - 5xx (500-599, all of them): retryable transient server trouble.
+//     Earlier code listed only 500/502/503/504, which made 501/505-511
+//     terminal on the API path while retryable on the CDN path.
+//   - 403: retryable ONLY when classified RateLimited (secondary-limit
+//     prose); a bare 403 is a permission denial and is terminal.
+//   - 404/409/422/400/401 and everything else: terminal. The caller must
+//     resolve the condition (re-read, rebase, rename) instead of
+//     re-sending the same doomed request.
 func (e *APIError) IsRetryable() bool {
 	if e == nil {
 		return false
@@ -141,13 +176,14 @@ func (e *APIError) IsRetryable() bool {
 	if e.RateLimited {
 		return true
 	}
+	if e.StatusCode >= 500 && e.StatusCode <= 599 {
+		return true
+	}
 	switch e.StatusCode {
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
 	case http.StatusForbidden:
+		// Reached only when !RateLimited (handled above): a bare 403 is
+		// a permission denial, never a throttle.
 		return e.RateLimited
-	case http.StatusInternalServerError:
-		return true
 	default:
 		return false
 	}

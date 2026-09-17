@@ -38,10 +38,61 @@ type windowReader struct {
 
 var errWindowOverrun = errors.New("window reader: live stream overran window")
 
+// errWindowSeekAhead rejects a Seek past the mirrored high-water mark: the
+// bytes there were never pulled from the live stream, so a forward seek
+// then Read would WriteAt the next live byte at the wrong absolute offset,
+// leaving an unwritten hole that later replays as zeros (audit 18). The
+// uploader's only real use is Seek(0, Start) between transport retries,
+// which always satisfies target <= mirrored.
+var errWindowSeekAhead = errors.New("window reader: seek ahead of mirrored bytes")
+
+// spoolBase returns the upload-spool directory: <CacheBase>/rest (flat
+// upload-* files, no per-upload dirs).
+//
+// History: this was once <CacheBase>/storhub/rest (double "storhub" —
+// CacheBase already ends in storhub via XDG). The old path migrates via a
+// symlink shim: if <base>/storhub/rest exists and <base>/rest does not,
+// it is renamed into place and a symlink is left at the old location so
+// older binaries still find their spools. New code writes only the new
+// path. NOTE for wave-2 tests: TestSpoolLayout pins the old path and must
+// move to <STORHUB_CACHE_DIR>/rest.
+//
+// Config.CacheDir precedence (explicit > env > XDG > temp) and the
+// Config.SpoolBase/ObjectCacheDir/CacheBase accessors are the config
+// owner's slice (internal/config); this file consumes storcfg.CacheBase()
+// and must switch to cfg.SpoolBase() once it lands.
+func spoolBase() (string, error) {
+	base := storcfg.CacheBase()
+	rest := filepath.Join(base, "rest")
+	if err := os.MkdirAll(rest, 0o755); err != nil {
+		return "", fmt.Errorf("create spool base dir: %w", err)
+	}
+	legacy := filepath.Join(base, "storhub", "rest")
+	if info, err := os.Lstat(legacy); err == nil && info.IsDir() && !isSymlink(info) {
+		// Legacy dir from a previous version: migrate contents one entry
+		// at a time (best-effort), then leave a symlink shim.
+		entries, _ := os.ReadDir(legacy)
+		moved := true
+		for _, e := range entries {
+			if err := os.Rename(filepath.Join(legacy, e.Name()), filepath.Join(rest, e.Name())); err != nil {
+				moved = false
+				break
+			}
+		}
+		if moved {
+			_ = os.Remove(legacy)
+			_ = os.Symlink(rest, legacy)
+		}
+	}
+	return rest, nil
+}
+
+func isSymlink(info os.FileInfo) bool { return info.Mode()&os.ModeSymlink != 0 }
+
 func newWindowReader(live io.Reader, size int64) (*windowReader, func(), error) {
-	base := filepath.Join(storcfg.CacheBase(), "storhub", "rest")
-	if err := mkdirAll(base); err != nil {
-		return nil, nil, fmt.Errorf("create spool base dir: %w", err)
+	base, err := spoolBase()
+	if err != nil {
+		return nil, nil, err
 	}
 	// Flat layout: the spool IS a file named upload-<id>. No per-upload dirs.
 	file, err := os.CreateTemp(base, "upload-*")
@@ -84,7 +135,7 @@ func (w *windowReader) Read(p []byte) (int, error) {
 
 		default: // pull from live, tee to spool at absolute offset
 			buf := p[total:]
-			n, err := w.live.Read(buf[:minInt(len(buf), int(w.size-w.pos))])
+			n, err := w.live.Read(buf[:min(len(buf), int(w.size-w.pos))])
 			if n > 0 {
 				if _, werr := w.spool.WriteAt(buf[:n], w.pos); werr != nil {
 					return total, werr
@@ -114,7 +165,11 @@ func (w *windowReader) Read(p []byte) (int, error) {
 }
 
 // Seek supports the rewind GitHub's uploader performs between attempts
-// (Seek(0, Start)); arbitrary offsets are provided for completeness.
+// (Seek(0, Start)). Targets past `mirrored` are hard-rejected
+// (errWindowSeekAhead): seeking ahead then Reading would tee the next live
+// byte at the wrong absolute offset and corrupt the window with a zero
+// hole. Targets within [0, mirrored] replay from spool; [mirrored, size]
+// resumes the live stream exactly where it left off.
 func (w *windowReader) Seek(offset int64, whence int) (int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -132,19 +187,14 @@ func (w *windowReader) Seek(offset int64, whence int) (int64, error) {
 	if target < 0 || target > w.size {
 		return 0, errWindowOverrun
 	}
+	if target > w.mirrored {
+		return 0, fmt.Errorf("%w: seek to %d with only %d bytes mirrored", errWindowSeekAhead, target, w.mirrored)
+	}
 	w.pos = target
 	return w.pos, nil
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // NOTE: windowReader deliberately does NOT implement io.Closer -
 // http.Client closes request bodies after every response, which would kill
 // the spool file between rename attempts. Lifecycle is owned exclusively by
 // the cleanup func returned by newWindowReader.
-func mkdirAll(dir string) error { return os.MkdirAll(dir, 0o755) }

@@ -80,7 +80,7 @@ func TestWindowReaderReplayAfterFailure(t *testing.T) {
 }
 
 // TestSpoolLayout pins the location + flat-file convention:
-// <CacheBase>/storhub/rest/upload-<id> is a regular file, nothing else.
+// <CacheBase>/rest/upload-<id> is a regular file, nothing else.
 func TestSpoolLayout(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cache")
 	t.Setenv("STORHUB_CACHE_DIR", dir)
@@ -91,7 +91,7 @@ func TestSpoolLayout(t *testing.T) {
 		t.Fatalf("newWindowReader: %v", err)
 	}
 
-	base := filepath.Join(dir, "storhub", "rest")
+	base := filepath.Join(dir, "rest")
 	entries, err := os.ReadDir(base)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("expected exactly one spool entry under %s: err=%v entries=%d", base, err, len(entries))

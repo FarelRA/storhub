@@ -17,8 +17,12 @@ func sampleTree(t *testing.T) *RepoMetadata {
 	m.EnsureDirectory("docs", now)
 	m.EnsureDirectory("docs/2024", now)
 	m.EnsureDirectory("photos", now)
-	m.EnsureRelease("v1", now)
-	m.EnsureRelease("v2", now+10)
+	if _, err := m.EnsureRelease("v1", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
+	if _, err := m.EnsureRelease("v2", now+10); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 
 	m.UpsertFile("docs/readme.md", FileMeta{
 		Size: 4, Mode: 0o644, UploadedAt: now, ModifiedAt: now,
@@ -200,7 +204,9 @@ func TestMerkleChunkBucketsByIndex(t *testing.T) {
 	now := int64(700)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", now)
-	m.EnsureRelease("v1", now)
+	if _, err := m.EnsureRelease("v1", now); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	// One chunk in bucket 0, one in bucket 1, one in bucket 2.
 	ids := []int64{5, ChunkBucketSize + 7, 2*ChunkBucketSize + 9}
 	for _, id := range ids {

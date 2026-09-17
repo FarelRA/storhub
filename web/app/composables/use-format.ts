@@ -1,4 +1,11 @@
-/** Human-friendly formatting shared across the console. */
+/**
+ * Human-friendly display formatting shared across the console.
+ * Path helpers live in `~/utils/path`; they are re-exported here so
+ * existing import sites (and specs) keep working. Nuxt therefore sees the
+ * same name twice and warns once per helper, resolving bare uses to
+ * `~/utils/path`: benign, since both point at the identical implementation.
+ */
+export { normalizePath, parentPath } from '~/utils/path'
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const
 
@@ -7,10 +14,9 @@ export function formatBytes(value: number | undefined | null): string {
   if (value < 1024) return `${value} B`
   let amount = value
   let unit: (typeof BYTE_UNITS)[number] = 'B'
-  for (const candidate of BYTE_UNITS) {
-    unit = candidate
-    if (amount < 1024) break
-    if (candidate !== BYTE_UNITS.at(-1)) amount /= 1024
+  while (amount >= 1024 && unit !== BYTE_UNITS.at(-1)) {
+    amount /= 1024
+    unit = BYTE_UNITS[BYTE_UNITS.indexOf(unit) + 1] ?? unit
   }
   const digits = amount >= 100 ? 0 : 1
   return `${amount.toFixed(digits)} ${unit}`
@@ -75,22 +81,4 @@ export function toDatetimeLocal(input: number | undefined): string {
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
     `T${pad(date.getHours())}:${pad(date.getMinutes())}`
   )
-}
-
-export function normalizePath(path: string): string {
-  const clean: string[] = []
-  for (const part of path.split('/')) {
-    if (!part || part === '.') continue
-    if (part === '..') {
-      clean.pop()
-      continue
-    }
-    clean.push(part)
-  }
-  return clean.join('/')
-}
-
-export function parentPath(path: string): string {
-  const current = normalizePath(path)
-  return current.split('/').slice(0, -1).join('/')
 }

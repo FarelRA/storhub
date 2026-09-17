@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -52,9 +53,79 @@ type storhubHandle struct {
 // pinnedContent is an immutable, self-contained view of one file's data
 // layout. Chunk assets are content-addressed, so the descriptors stay
 // valid for the handle's lifetime regardless of later metadata changes.
+// Pins are shared across handles with the same key (see pinnedKey): the
+// struct and its chunk map are never mutated after publication, so
+// concurrent readers need no lock.
 type pinnedContent struct {
 	file   metadata.FileMeta
 	chunks map[int64]metadata.ChunkInfo
+}
+
+// pinnedKey identifies one shareable open-time content layout: the file's
+// path plus its version (inode, size, mtime, ctime). Identical keys imply
+// identical chunk layouts: any content change through the tracked mutators
+// bumps size, mtime, or ctime (and replace/rename paths drop the key
+// outright via dropPinnedForPath).
+type pinnedKey struct {
+	project  string
+	path     string
+	inode    uint64
+	size     int64
+	modified int64
+	changed  int64
+}
+
+// maxPinnedEntries caps the shared pin cache: each entry is metadata only
+// (a FileMeta plus one descriptor per chunk), but K concurrent opens of a
+// many-chunk file must not grow it without bound. Inserts past the cap
+// evict one arbitrary entry; the next open re-pins.
+const maxPinnedEntries = 256
+
+func pinnedKeyFor(project, targetPath string, file *metadata.FileMeta) pinnedKey {
+	return pinnedKey{
+		project:  project,
+		path:     targetPath,
+		inode:    file.Inode,
+		size:     file.Size,
+		modified: file.ModifiedAt,
+		changed:  file.ChangedAt,
+	}
+}
+
+func (s *Filesystem) pinnedFor(key pinnedKey) (*pinnedContent, bool) {
+	s.pinnedMu.Lock()
+	defer s.pinnedMu.Unlock()
+	pin, ok := s.pinned[key]
+	return pin, ok
+}
+
+func (s *Filesystem) storePinned(key pinnedKey, pin *pinnedContent) {
+	s.pinnedMu.Lock()
+	defer s.pinnedMu.Unlock()
+	if s.pinned == nil {
+		s.pinned = make(map[pinnedKey]*pinnedContent)
+	}
+	if _, ok := s.pinned[key]; !ok && len(s.pinned) >= maxPinnedEntries {
+		for old := range s.pinned {
+			delete(s.pinned, old)
+			break
+		}
+	}
+	s.pinned[key] = pin
+}
+
+// dropPinnedForPath forgets cached layouts at targetPath or below it after
+// a rename, unlink, rmdir, or content commit. Version keys already
+// self-heal (the next open misses and re-pins), so this is hygiene: it
+// keeps churn from pinning dead layouts until cap eviction.
+func (s *Filesystem) dropPinnedForPath(targetPath string) {
+	s.pinnedMu.Lock()
+	defer s.pinnedMu.Unlock()
+	for key := range s.pinned {
+		if key.path == targetPath || strings.HasPrefix(key.path, targetPath+"/") {
+			delete(s.pinned, key)
+		}
+	}
 }
 
 func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
@@ -74,12 +145,13 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if entry.IsSymlink {
 		return nil, 0, syscall.ELOOP
 	}
-	// Pin the content layout at open time from the (cached) readonly
-	// metadata view: a file entry clone plus the chunk descriptors it
-	// references. Pure metadata copying - no network beyond what the
-	// stat already did. If the file vanished between stat and pin, the
-	// open fails with ENOENT rather than degrading to path-live reads,
-	// which would reintroduce the rename-over race this pin prevents.
+	// Pin the content layout at open time, shared across handles that
+	// open the same version (see pinnedKeyFor): a file entry clone plus
+	// the chunk descriptors it references. Pure metadata copying - no
+	// network beyond what the stat already did. If the file vanished
+	// between stat and pin, the open fails with ENOENT rather than
+	// degrading to path-live reads, which would reintroduce the
+	// rename-over race this pin prevents.
 	repoMeta, _, metaErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
 	if metaErr != nil {
 		return nil, 0, errnoFromError(metaErr)
@@ -94,20 +166,45 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	// through the overlay commit path. Requests without a kernel caller
 	// identity are direct library use (the local process on its own
 	// repository) and are not multi-user surfaces.
-	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 && shfs.IdentityPresent(ctx) {
-		if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-			n.fs.debugf("open denied path=%s step=dac err=%v", targetPath, err)
-			return nil, 0, errnoFromError(err)
+	if shfs.IdentityPresent(ctx) {
+		// Open-ONLY read gate: any open that is not write-only must carry
+		// read permission on the file. Reads through the handle stay fast
+		// (no per-Read re-check): the open-time pin below captures the
+		// content layout, and the commit-time write DAC still guards the
+		// overlay path independently.
+		if flags&syscall.O_ACCMODE != syscall.O_WRONLY {
+			if err := shfs.CheckReadAccess(ctx, repoMeta, targetPath); err != nil {
+				n.fs.debugf("open denied path=%s step=read-dac err=%v", targetPath, err)
+				return nil, 0, errnoFromError(err)
+			}
+		}
+		if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
+			if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
+				n.fs.debugf("open denied path=%s step=dac err=%v", targetPath, err)
+				return nil, 0, errnoFromError(err)
+			}
 		}
 	}
-	pin := &pinnedContent{
-		file:   file.Clone(),
-		chunks: make(map[int64]metadata.ChunkInfo, len(file.Chunks)),
-	}
-	for _, id := range file.Chunks {
-		if chunk, ok := repoMeta.Chunks()[id]; ok {
-			pin.chunks[id] = chunk
+	// Pin the content layout at open time, shared across handles that
+	// open the same version: a file entry clone plus the chunk descriptors
+	// it references. Pure metadata copying - no network beyond what the
+	// stat already did. If the file vanished between stat and pin, the
+	// open fails with ENOENT rather than degrading to path-live reads,
+	// which would reintroduce the rename-over race this pin prevents.
+	key := pinnedKeyFor(n.fs.project, targetPath, file)
+	pin, ok := n.fs.pinnedFor(key)
+	if !ok {
+		fresh := &pinnedContent{
+			file:   file.Clone(),
+			chunks: make(map[int64]metadata.ChunkInfo, len(file.Chunks)),
 		}
+		for _, id := range file.Chunks {
+			if chunk, ok := repoMeta.Chunks()[id]; ok {
+				fresh.chunks[id] = chunk
+			}
+		}
+		n.fs.storePinned(key, fresh)
+		pin = fresh
 	}
 	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
 	if err != nil {
@@ -132,10 +229,8 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		return nil, nil, 0, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
-	entry := entryInfoFromFile(file, childPath, nlink)
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	fillEntryOut(out, entry, n.fs.opts)
+	entry := shfs.EntryFromFile(file, childPath, nlink)
+	ino := n.attachEntry(ctx, entry, out)
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
 		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
@@ -210,7 +305,7 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 		h.mu.Unlock()
 		return nil
 	}
-	temp, err := os.CreateTemp(h.fs.cacheDir, "handle-*")
+	temp, err := h.fs.newOverlayTemp("handle-*")
 	if err != nil {
 		h.mu.Unlock()
 		return err
@@ -241,10 +336,10 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 	if entry.Size > 0 {
 		if dlErr := h.fs.hub.DownloadFileContext(ctx, h.fs.project, targetPath, temp.Name()); dlErr != nil {
 			if err := temp.Close(); err != nil {
-				logging.Error(nil, "failed to close temp file after download error", "path", temp.Name(), "err", err)
+				logging.Error(h.fs.log(), "failed to close temp file after download error", "path", temp.Name(), "err", err)
 			}
 			if err := os.Remove(temp.Name()); err != nil {
-				logging.Error(nil, "failed to remove temp file after download error", "path", temp.Name(), "err", err)
+				logging.Error(h.fs.log(), "failed to remove temp file after download error", "path", temp.Name(), "err", err)
 			}
 			h.mu.Lock()
 			h.temp = nil
@@ -486,12 +581,12 @@ func (h *storhubHandle) closeTemp() {
 	h.closed = true
 	if h.temp != nil {
 		if err := h.temp.Close(); err != nil {
-			logging.Error(nil, "failed to close handle temp file", "err", err)
+			logging.Error(h.fs.log(), "failed to close handle temp file", "err", err)
 		}
 	}
 	if h.tempPath != "" {
 		if err := os.Remove(h.tempPath); err != nil {
-			logging.Error(nil, "failed to remove handle temp file", "path", h.tempPath, "err", err)
+			logging.Error(h.fs.log(), "failed to remove handle temp file", "path", h.tempPath, "err", err)
 		}
 	}
 }

@@ -249,9 +249,12 @@ bun run build:embed  # generate + copy bundle into internal/rest/static/dist
 ```
 
 Committing regenerated `dist` output alongside `web/` source changes keeps
-Go-only CI green and binaries reproducible; the `web` CI job rebuilds the
-embed and fails if the committed `dist` drifts from `web/` source, and the
-nightly/release workflows rebuild it from source before goreleaser runs.
+Go-only checkouts and `go build` working with a live console. The `web` CI
+job rebuilds the embed but only asserts the fresh bundle is non-empty
+(`index.html` plus at least one `_nuxt/*.js` chunk): the bundle is not
+hermetic (chunk hashes drift by CPU arch and toolchain, `index.html` embeds
+a random buildId), so a byte-for-byte drift gate would false-fail. The
+nightly/release workflows rebuild the embed from source before goreleaser runs.
 
 ## API Guide
 
@@ -585,8 +588,9 @@ Environment gates:
 
 CI runs every gate above except the FUSE and live smoke tests (runners have
 no usable FUSE setup, and live tests create real repositories), plus lint,
-cross-builds, the console job, and an embed/source sync check that fails if
-the committed `internal/rest/static/dist` drifts from `web/` source.
+cross-builds, and the console job (which rebuilds the embed and asserts only
+that the fresh bundle is non-empty, not that it matches the committed
+`internal/rest/static/dist` byte for byte).
 `govulncheck` runs in the nightly workflow rather than per-push. See
 `.github/CONTRIBUTING.md` for the full local gate list and the one-time
 branch-protection runbook that makes the `ci` jobs required on `main`.

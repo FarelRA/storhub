@@ -101,21 +101,6 @@ type Commit struct {
 	CommittedAt time.Time
 }
 
-type requestOptions struct { //nolint:revive // internal request options bundle
-	stream      bool
-	contentType string
-	accept      string
-	contentSize int64
-	rangeHeader string
-	retryable   bool
-	// assetUpload marks content-generating release-asset POSTs, which
-	// draw from the governor's stricter content-creation window.
-	assetUpload bool
-	// noFollow returns redirect responses to the caller instead of
-	// following them, used to capture signed asset CDN URLs.
-	noFollow bool
-}
-
 type cachedAssetURL struct {
 	url     string
 	expires time.Time
@@ -253,18 +238,9 @@ func (c *Client) RepoExists(ctx context.Context, owner, project string) (bool, e
 }
 
 func (c *Client) ListReleases(ctx context.Context, owner, project string) ([]Release, error) {
-	releases := make([]Release, 0)
-	for page := 1; ; page++ {
-		var batch []Release
-		endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/releases?per_page=%d&page=%d", owner, project, pageSize, page))
-		if err := c.getJSON(ctx, endpoint, &batch); err != nil {
-			return nil, err
-		}
-		releases = append(releases, batch...)
-		if len(batch) < pageSize {
-			return releases, nil
-		}
-	}
+	return paginateGET[Release](ctx, c, func(page int) string {
+		return c.apiURL(fmt.Sprintf("/repos/%s/%s/releases?per_page=%d&page=%d", owner, project, pageSize, page))
+	})
 }
 
 // ListReleaseAssets returns every asset of one release, paginating through
@@ -272,16 +248,25 @@ func (c *Client) ListReleases(ctx context.Context, owner, project string) ([]Rel
 // truncated near the ceiling (storhub-web v18: 980 embedded vs 1000 true),
 // so capacity decisions must use this, never len(release.Assets).
 func (c *Client) ListReleaseAssets(ctx context.Context, owner, project string, releaseID int64) ([]Asset, error) {
-	assets := make([]Asset, 0)
+	return paginateGET[Asset](ctx, c, func(page int) string {
+		return c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d/assets?per_page=%d&page=%d", owner, project, releaseID, pageSize, page))
+	})
+}
+
+// paginateGET follows per_page/page pagination until a short (or empty)
+// page terminates the listing, appending every item. The endpoint closure
+// receives the 1-based page number. Exact multiples still terminate:
+// the API answers the first past-the-end page with an empty batch.
+func paginateGET[T any](ctx context.Context, c *Client, endpoint func(page int) string) ([]T, error) {
+	out := make([]T, 0)
 	for page := 1; ; page++ {
-		var batch []Asset
-		endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d/assets?per_page=%d&page=%d", owner, project, releaseID, pageSize, page))
-		if err := c.getJSON(ctx, endpoint, &batch); err != nil {
+		var batch []T
+		if err := c.getJSON(ctx, endpoint(page), &batch); err != nil {
 			return nil, err
 		}
-		assets = append(assets, batch...)
+		out = append(out, batch...)
 		if len(batch) < pageSize {
-			return assets, nil
+			return out, nil
 		}
 	}
 }
@@ -310,20 +295,21 @@ func (c *Client) CreateRelease(ctx context.Context, owner, project, tag, name st
 }
 
 func (c *Client) DeleteReleaseByID(ctx context.Context, owner, project string, releaseID int64) error {
-	resp, err := c.doRequest(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d", owner, project, releaseID)), func() (io.Reader, error) {
-		return nil, nil
-	}, requestOptions{retryable: true})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return nil
+	return c.deleteByURL(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/%d", owner, project, releaseID)))
 }
 
 func (c *Client) DeleteAssetByID(ctx context.Context, owner, project string, assetID int64) error {
-	resp, err := c.doRequest(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
+	return c.deleteByURL(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)))
+}
+
+// deleteByURL performs one retryable DELETE with no body. The two
+// resource deletes differed only in their URL format string; sharing
+// this keeps the retryable-delete profile (read class, default accept,
+// no content type) in exactly one place.
+func (c *Client) deleteByURL(ctx context.Context, endpoint string) error {
+	resp, err := c.doRequest(ctx, http.MethodDelete, endpoint, func() (io.Reader, error) {
 		return nil, nil
-	}, requestOptions{retryable: true})
+	}, requestRead, true, "", "", "", 0, false)
 	if err != nil {
 		return err
 	}
@@ -349,7 +335,11 @@ func (c *Client) DeleteRepo(ctx context.Context, owner, project string) error {
 	return nil
 }
 
-func (c *Client) UploadAsset(ctx context.Context, owner, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
+// UploadAsset uploads one release asset to the fully-qualified uploadURL
+// (taken from the release's UploadURL template, with the asset name set
+// as the ?name= query parameter). The endpoint alone determines the
+// destination: there are no owner/project/releaseTag parameters.
+func (c *Client) UploadAsset(ctx context.Context, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
 	cleanURL := strings.Split(uploadURL, "{")[0]
 	parsed, err := url.Parse(cleanURL)
 	if err != nil {
@@ -407,9 +397,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			c.invalidateAssetURL(assetID)
 			logging.Warn(c.logger, "cached asset URL rejected; re-resolving via API", "asset", assetID, "status", status)
 		}
-		resp, err := c.doRequest(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), func() (io.Reader, error) {
-			return nil, nil
-		}, requestOptions{accept: "application/octet-stream", rangeHeader: rangeHeader, retryable: true, stream: true, noFollow: true})
+		resp, err := c.doCDNResolve(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s/releases/assets/%d", owner, project, assetID)), "application/octet-stream", rangeHeader)
 		if err != nil {
 			return nil, 0, fmt.Errorf("download asset: %w", err)
 		}
@@ -644,10 +632,16 @@ func signedURLExpiry(parsed *url.URL) (time.Time, bool) {
 	return earliest, found
 }
 
-// sasExpiry parses the Azure SAS 'se' expiry (RFC3339).
+// sasExpiry parses the Azure SAS 'se' expiry. GitHub mints it with
+// fractional seconds (RFC3339Nano, e.g. ...00.000Z); parsing RFC3339
+// only silently failed on those and fell back to the JWT/fallback TTL,
+// causing extra re-resolves. Try Nano first, then plain RFC3339.
 func sasExpiry(se string) (time.Time, bool) {
 	if se == "" {
 		return time.Time{}, false
+	}
+	if exp, err := time.Parse(time.RFC3339Nano, se); err == nil {
+		return exp, true
 	}
 	exp, err := time.Parse(time.RFC3339, se)
 	if err != nil {
@@ -700,10 +694,7 @@ func (c *Client) GetFileContent(ctx context.Context, owner, project, filePath, r
 	if ref != "" {
 		endpoint += "?ref=" + url.QueryEscape(ref)
 	}
-	resp, err := c.doRequest(ctx, http.MethodGet, endpoint, func() (io.Reader, error) { return nil, nil }, requestOptions{
-		accept:    "application/vnd.github.raw",
-		retryable: true,
-	})
+	resp, err := c.doCDNResolve(ctx, endpoint, "application/vnd.github.raw", "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -737,23 +728,12 @@ func computeGitBlobSHA(data []byte) string {
 // loop rebases. Disabling retries for creates instead would forfeit the
 // 429/5xx retry that rate-limited metadata commits depend on.
 func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath string, payload []byte, previousSHA, message string) (string, string, error) {
-	body, err := json.Marshal(putFileRequest{
+	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
+	resp, err := c.doJSONWithRetryable(ctx, http.MethodPut, endpoint, putFileRequest{
 		Message: message,
 		SHA:     previousSHA,
 		Content: base64.StdEncoding.EncodeToString(payload),
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("marshal put-file request: %w", err)
-	}
-	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
-	resp, err := c.doRequest(ctx, http.MethodPut, endpoint, func() (io.Reader, error) {
-		return bytes.NewReader(body), nil
-	}, requestOptions{
-		contentType: "application/json",
-		accept:      "application/vnd.github+json",
-		contentSize: int64(len(body)),
-		retryable:   true,
-	})
+	}, true)
 	if err != nil {
 		return "", "", err
 	}
@@ -766,21 +746,18 @@ func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath st
 }
 
 func (c *Client) ListFileCommits(ctx context.Context, owner, project, filePath string) ([]Commit, error) {
-	commits := make([]Commit, 0)
 	escapedPath := url.QueryEscape(filePath)
-	for page := 1; ; page++ {
-		var batch []commitResponse
-		endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/commits?path=%s&per_page=%d&page=%d", owner, project, escapedPath, pageSize, page))
-		if err := c.getJSON(ctx, endpoint, &batch); err != nil {
-			return nil, err
-		}
-		for _, item := range batch {
-			commits = append(commits, Commit{SHA: item.SHA, Message: item.Commit.Message, CommittedAt: item.Commit.Author.Date.UTC()})
-		}
-		if len(batch) < pageSize {
-			return commits, nil
-		}
+	batchCommits, err := paginateGET[commitResponse](ctx, c, func(page int) string {
+		return c.apiURL(fmt.Sprintf("/repos/%s/%s/commits?path=%s&per_page=%d&page=%d", owner, project, escapedPath, pageSize, page))
+	})
+	if err != nil {
+		return nil, err
 	}
+	commits := make([]Commit, 0, len(batchCommits))
+	for _, item := range batchCommits {
+		commits = append(commits, Commit{SHA: item.SHA, Message: item.Commit.Message, CommittedAt: item.Commit.Author.Date.UTC()})
+	}
+	return commits, nil
 }
 
 // ContentEntry is one item in a contents-API directory listing.
@@ -806,19 +783,8 @@ func (c *Client) ListDir(ctx context.Context, owner, project, dirPath string) ([
 // DeleteFileContent removes filePath, using sha as the optimistic-concurrency
 // precondition (GitHub requires the current blob sha). Returns the commit SHA.
 func (c *Client) DeleteFileContent(ctx context.Context, owner, project, filePath, sha, message string) (string, error) {
-	body, err := json.Marshal(deleteFileRequest{Message: message, SHA: sha})
-	if err != nil {
-		return "", fmt.Errorf("marshal delete-file request: %w", err)
-	}
 	endpoint := c.apiURL(fmt.Sprintf("/repos/%s/%s/contents/%s", owner, project, escapeContentPath(filePath)))
-	resp, err := c.doRequest(ctx, http.MethodDelete, endpoint, func() (io.Reader, error) {
-		return bytes.NewReader(body), nil
-	}, requestOptions{
-		contentType: "application/json",
-		accept:      "application/vnd.github+json",
-		contentSize: int64(len(body)),
-		retryable:   true,
-	})
+	resp, err := c.doJSONWithRetryable(ctx, http.MethodDelete, endpoint, deleteFileRequest{Message: message, SHA: sha}, true)
 	if err != nil {
 		return "", err
 	}
@@ -867,12 +833,38 @@ func (c *Client) doJSONWithRetryable(ctx context.Context, method, endpoint strin
 			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
 	}
+	// The JSON family never uploads assets, so classification reduces to
+	// the method+endpoint rule (contents writes draw from the content
+	// window); the old inline OR-expression lives in classifyRequest now.
+	class := classifyRequest(method, endpoint, false)
 	return c.doRequest(ctx, method, endpoint, func() (io.Reader, error) {
 		if payload == nil {
 			return nil, nil
 		}
 		return bytes.NewReader(payload), nil
-	}, requestOptions{contentType: "application/json", accept: "application/vnd.github+json", contentSize: int64(len(payload)), retryable: retryable})
+	}, class, retryable, "application/json", "application/vnd.github+json", "", int64(len(payload)), false)
+}
+
+// doStream performs a sized octet-stream release-asset upload: POST with
+// the upload class (both per-minute windows, no hourly pacing), a
+// size-scaled transfer deadline, and a timeout-free transport. Retries
+// rewind via bodyFactory (see uploadAssetAttempt).
+func (c *Client) doStream(ctx context.Context, endpoint string, bodyFactory func() (io.Reader, error), size int64) (*http.Response, error) {
+	return c.doRequest(ctx, http.MethodPost, endpoint, bodyFactory, requestUpload, true, "application/octet-stream", "application/vnd.github+json", "", size, false)
+}
+
+// doCDNResolve performs an API GET that surfaces redirect responses
+// instead of following them, so the caller can capture the signed asset
+// CDN URL from Location. It also serves plain raw-accept contents GETs
+// (GetFileContent): the contents API never redirects, so surfacing
+// redirects is immaterial there, and the timeout-free transport matches
+// the sized-transfer doctrine (a large raw read must not be amputated by
+// the 5-minute client timeout either — the same bug class fixed for
+// uploads).
+func (c *Client) doCDNResolve(ctx context.Context, endpoint, accept, rangeHeader string) (*http.Response, error) {
+	return c.doRequest(ctx, http.MethodGet, endpoint, func() (io.Reader, error) {
+		return nil, nil
+	}, requestRead, true, "", accept, rangeHeader, 0, true)
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
@@ -887,128 +879,163 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
 	return nil
 }
 
-func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFactory func() (io.Reader, error), opts requestOptions) (*http.Response, error) {
-	var lastErr error
+// doRequest is the shared retry loop: it runs governed attempts until
+// classifyAndWait reports success or a terminal error. The request
+// profile arrives as explicit scalars — class selects the governor
+// windows, retryable gates retries, the header strings and contentSize
+// are pure data, and noFollow selects the redirect-surfacing transport
+// for CDN resolution. Only the three explicit entry points above (plus
+// deleteByURL) construct profiles; there is no flag bundle.
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFactory func() (io.Reader, error), class requestClass, retryable bool, contentType, accept, rangeHeader string, contentSize int64, noFollow bool) (*http.Response, error) {
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
-		started := time.Now().UTC()
-		logging.Debug(c.logger, "http request start", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", opts.retryable)
-		// GitHub's ~80/min content-generation secondary window counts
-		// every request that creates repository content: asset uploads
-		// AND contents-API PUT/DELETE (metadata commits). Passing only
-		// assetUpload here let a metadata-chatty mount burst past the
-		// window and eat real secondary penalties.
-		release, err := c.governor.acquire(ctx, methodCost(method), opts.assetUpload || isContentsWrite(method, endpoint), opts.assetUpload)
+		resp, sendErr := c.sendOnce(ctx, method, endpoint, bodyFactory, class, contentType, accept, rangeHeader, contentSize, noFollow)
+		out, retry, err := c.classifyAndWait(ctx, method, endpoint, attempt, resp, sendErr, retryable)
 		if err != nil {
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && attempt < c.maxRetries && opts.retryable && apiErr.IsRetryable() {
-				delay := c.retryDelay(attempt, apiErr)
-				if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
-					return nil, err
-				}
-				logging.Warn(c.logger, "rate governor throttled, retrying", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay, "err", err)
-				if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
-					return nil, sleepErr
-				}
-				continue
-			}
 			return nil, err
 		}
-		reader, err := bodyFactory()
-		if err != nil {
-			release()
-			return nil, err
+		if !retry {
+			return out, nil
 		}
-		if opts.contentSize == 0 && reader != nil {
-			reader = http.NoBody
-		}
-		req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-		if err != nil {
-			release()
-			return nil, fmt.Errorf("create request: %w", err)
-		}
-		c.applyHeaders(req, opts)
-		if opts.contentSize >= 0 {
-			req.ContentLength = opts.contentSize
-		}
-		client := c.client
-		if opts.noFollow {
-			client = c.noFollow
-		}
-		if opts.stream || opts.assetUpload {
-			// Sized transfers are bounded by transferDeadline below, not
-			// by the client-wide timeout that amputates large payloads.
-			// Applies on top of noFollow too: the legacy direct-200
-			// streaming path (no redirect) must not stay bounded by the
-			// 5-minute client timeout either.
-			noTimeout := *client
-			noTimeout.Timeout = 0
-			client = &noTimeout
-		}
-		// Per-attempt transfer context: derived from the caller's ctx (never
-		// from a previous attempt's) and canceled explicitly once this
-		// attempt's response arrives, so retries always get a full deadline
-		// and timers never pile up on a loop-shared defer.
-		cancel := context.CancelFunc(func() {})
-		if opts.assetUpload && opts.contentSize > 0 {
-			var reqCtx context.Context
-			reqCtx, cancel = context.WithTimeout(ctx, c.transferDeadline(opts.contentSize))
-			req = req.WithContext(reqCtx)
-		}
-		resp, err := client.Do(req)
-		cancel()
+	}
+	return nil, fmt.Errorf("github request %s %s: retry loop exhausted (maxRetries=%d)", method, endpoint, c.maxRetries)
+}
+
+// sendOnce performs a single governed HTTP exchange: governor admission,
+// request build, transport, and header observation. It returns the
+// response on transport success (whatever the status — classification
+// belongs to classifyAndWait) or an error that is either a governor
+// admission refusal (*APIError, subject to the same rate-limit wait
+// discipline as server rejections) or a transport failure.
+func (c *Client) sendOnce(ctx context.Context, method, endpoint string, bodyFactory func() (io.Reader, error), class requestClass, contentType, accept, rangeHeader string, contentSize int64, noFollow bool) (*http.Response, error) {
+	release, err := c.governor.acquireClass(ctx, methodCost(method), class)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := bodyFactory()
+	if err != nil {
 		release()
-		if err == nil {
-			c.governor.observe(resp.Header)
-			apiErr := decodeAPIError(resp)
-			if apiErr == nil {
-				logging.Debug(c.logger, "http request complete", "method", method, "url", endpoint, "attempt", attempt+1, "status", resp.StatusCode, "elapsed", time.Now().UTC().Sub(started))
-				return resp, nil
-			}
-			_ = resp.Body.Close()
-			lastErr = apiErr
-			// Endpoints without rate-limit headers (uploads) still get an
-			// accurate reset time from the governor's last snapshot.
-			if apiErr.RateLimited && apiErr.RateLimitReset.IsZero() {
-				if snap := c.governor.snapshot(); snap.seen && c.governor.now().Before(snap.resetAt) {
-					apiErr.RateLimitReset = snap.resetAt
-					if snap.remaining <= c.governor.cfg.reserve {
-						apiErr.Primary = true
-					}
-				}
-			}
-			logging.Warn(c.logger, "http request api error", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "elapsed", time.Now().UTC().Sub(started), "retryable", apiErr.IsRetryable(), "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "body", apiErr.BodySnippet(), "err", apiErr)
-			if attempt == c.maxRetries || !opts.retryable || !apiErr.IsRetryable() {
-				return nil, apiErr
-			}
-			delay := c.retryDelay(attempt, apiErr)
-			// Primary exhaustion is not a backoff situation: the budget
-			// is gone until reset. Waiting longer than maxWait allows is
-			// refused up front instead of pretending an 8s retry helps.
-			if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
-				return nil, apiErr
-			}
-			logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
-			if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
-				return nil, sleepErr
-			}
-			continue
+		return nil, err
+	}
+	if contentSize == 0 && reader != nil {
+		reader = http.NoBody
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.applyHeaders(req, contentType, accept, rangeHeader)
+	if contentSize >= 0 {
+		req.ContentLength = contentSize
+	}
+	client := c.client
+	if noFollow {
+		client = c.noFollow
+	}
+	if class == requestUpload || noFollow {
+		// Sized transfers are bounded by transferDeadline below, not
+		// by the client-wide timeout that amputates large payloads.
+		// Applies on top of noFollow too: the legacy direct-200
+		// streaming path (no redirect) must not stay bounded by the
+		// 5-minute client timeout either.
+		noTimeout := *client
+		noTimeout.Timeout = 0
+		client = &noTimeout
+	}
+	// Per-attempt transfer context: derived from the caller's ctx (never
+	// from a previous attempt's) and canceled explicitly once this
+	// attempt's response arrives, so retries always get a full deadline
+	// and timers never pile up on a loop-shared defer.
+	cancel := context.CancelFunc(func() {})
+	if class == requestUpload && contentSize > 0 {
+		var reqCtx context.Context
+		reqCtx, cancel = context.WithTimeout(ctx, c.transferDeadline(contentSize))
+		req = req.WithContext(reqCtx)
+	}
+	resp, err := client.Do(req)
+	cancel()
+	release()
+	if err != nil {
+		return nil, fmt.Errorf("perform request: %w", err)
+	}
+	c.governor.observe(resp.Header)
+	return resp, nil
+}
+
+// classifyAndWait decodes one attempt's outcome and either returns the
+// successful response, sleeps the computed wait and asks for another
+// attempt, or returns the terminal error.
+//
+// Log discipline: Warn fires ONLY when actually sleeping before a retry
+// (actionable: someone waits); the final failure — terminal rejection,
+// exhausted retries, refused wait, or failed sleep — logs at Debug with
+// the status and body snippet attached. Per-attempt start/complete
+// chatter is gone: the hot read path no longer spams the log to prove
+// it is working.
+func (c *Client) classifyAndWait(ctx context.Context, method, endpoint string, attempt int, resp *http.Response, sendErr error, retryable bool) (*http.Response, bool, error) {
+	// sleepOrRetry applies the terminal-or-sleep decision for an *APIError
+	// from any source (governor refusal or decoded response). It returns
+	// (true, nil) after sleeping, or (false, err) for terminal outcomes.
+	sleepOrRetry := func(apiErr *APIError) (bool, error) {
+		if attempt >= c.maxRetries || !retryable || !apiErr.IsRetryable() {
+			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "body", apiErr.BodySnippet(), "err", apiErr)
+			return false, apiErr
 		}
-		lastErr = fmt.Errorf("perform request: %w", err)
-		logging.Warn(c.logger, "http request transport error", "method", method, "url", endpoint, "attempt", attempt+1, "elapsed", time.Now().UTC().Sub(started), "retryable", isRetryableNetworkError(err), "err", err)
-		if attempt == c.maxRetries || !opts.retryable || !isRetryableNetworkError(err) {
-			return nil, lastErr
+		delay := c.retryDelay(attempt, apiErr)
+		// Primary exhaustion is not a backoff situation: the budget
+		// is gone until reset. Waiting longer than maxWait allows is
+		// refused up front instead of pretending an 8s retry helps.
+		if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
+			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "delay", delay, "max_wait", c.governor.cfg.maxWait, "body", apiErr.BodySnippet(), "err", apiErr)
+			return false, apiErr
+		}
+		logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay, "status", apiErr.StatusCode)
+		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
+			return false, sleepErr
+		}
+		return true, nil
+	}
+
+	if sendErr != nil {
+		var denied *APIError
+		if errors.As(sendErr, &denied) {
+			// Governor admission refusal: same rate-limit wait
+			// discipline as a server rejection.
+			retry, err := sleepOrRetry(denied)
+			return nil, retry, err
+		}
+		if attempt >= c.maxRetries || !retryable || !isRetryableNetworkError(sendErr) {
+			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", false, "err", sendErr)
+			return nil, false, sendErr
 		}
 		delay := c.retryDelay(attempt, nil)
 		logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
 		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
-			return nil, sleepErr
+			return nil, false, sleepErr
+		}
+		return nil, true, nil
+	}
+	apiErr := c.decodeAPIError(resp)
+	if apiErr == nil {
+		return resp, false, nil
+	}
+	_ = resp.Body.Close()
+	// Endpoints without rate-limit headers (uploads) still get an
+	// accurate reset time from the governor's last snapshot.
+	if apiErr.RateLimited && apiErr.RateLimitReset.IsZero() {
+		if snap := c.governor.snapshot(); snap.seen && c.governor.now().Before(snap.resetAt) {
+			apiErr.RateLimitReset = snap.resetAt
+			if snap.remaining <= c.governor.cfg.reserve {
+				apiErr.Primary = true
+			}
 		}
 	}
-	return nil, lastErr
+	retry, err := sleepOrRetry(apiErr)
+	return nil, retry, err
 }
 
 func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
-	resp, err := c.doRequest(ctx, http.MethodPost, endpoint, func() (io.Reader, error) {
+	resp, err := c.doStream(ctx, endpoint, func() (io.Reader, error) {
 		if _, err := reader.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind upload reader: %w", err)
 		}
@@ -1018,7 +1045,7 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 		// rewinds the reader for every attempt. A lost response after
 		// finalize can leave an orphan under this attempt's random name;
 		// unreferenced assets are exactly what PurgeUntracked removes.
-	}, requestOptions{contentType: "application/octet-stream", accept: "application/vnd.github+json", contentSize: size, retryable: true, assetUpload: true})
+	}, size)
 	if err != nil {
 		return 0, err
 	}
@@ -1035,19 +1062,18 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 	return asset.ID, nil
 }
 
-func (c *Client) applyHeaders(req *http.Request, opts requestOptions) {
-	accept := opts.accept
+func (c *Client) applyHeaders(req *http.Request, contentType, accept, rangeHeader string) {
 	if accept == "" {
 		accept = "application/vnd.github+json"
 	}
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("X-GitHub-Api-Version", c.apiVersion)
-	if opts.contentType != "" {
-		req.Header.Set("Content-Type", opts.contentType)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
-	if opts.rangeHeader != "" {
-		req.Header.Set("Range", opts.rangeHeader)
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
 	}
 }
 
@@ -1061,7 +1087,20 @@ var rateLimitMarkers = []string{
 	"abuse detection mechanism",
 }
 
+// decodeAPIError classifies one HTTP error response on the client's
+// single (injectable) clock, so HTTP-date Retry-After values compute
+// against the same now() that reset waits in rateWait use. Fake-clock
+// tests that freeze time must not see the wall clock leak in through
+// this branch (the numeric-seconds Retry-After path is clock-free).
+func (c *Client) decodeAPIError(resp *http.Response) *APIError {
+	return decodeAPIErrorAt(resp, c.now())
+}
+
 func decodeAPIError(resp *http.Response) *APIError {
+	return decodeAPIErrorAt(resp, time.Now())
+}
+
+func decodeAPIErrorAt(resp *http.Response, now time.Time) *APIError {
 	if resp.StatusCode < http.StatusBadRequest {
 		return nil
 	}
@@ -1072,7 +1111,7 @@ func decodeAPIError(resp *http.Response) *APIError {
 	}
 	_ = json.Unmarshal(body, &payload)
 	err := &APIError{StatusCode: resp.StatusCode, Message: payload.Message, Body: string(body), Headers: resp.Header.Clone(), Details: payload.Errors}
-	if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); retryAfter > 0 {
+	if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), now); retryAfter > 0 {
 		err.RetryAfter = retryAfter
 	}
 	marker := containsAny(strings.ToLower(payload.Message+" "+string(body)), rateLimitMarkers)
@@ -1110,36 +1149,64 @@ func containsAny(haystack string, needles []string) bool {
 	return false
 }
 
-// retryDelay computes the wait before the next attempt. Rate-limit
-// rejections follow GitHub's documented guidance instead of the generic
-// exponential backoff: primary exhaustion means waiting for
+// Secondary-limit wait guidance: a bare secondary rejection (no reset,
+// no Retry-After) waits at least secondaryBackoffBase with exponential
+// growth, never past secondaryBackoffCap; the shift is clamped at
+// secondaryBackoffMaxShift so wild attempt counts cannot overflow it.
+// Every branch is jittered (see addJitter) so a synchronized fleet does
+// not thunder-herd. Values preserved from the pre-split retryDelay.
+const (
+	secondaryBackoffBase     = 60 * time.Second
+	secondaryBackoffCap      = 15 * time.Minute
+	secondaryBackoffMaxShift = 10
+)
+
+// retryDelay dispatches to the rate-limit vs generic wait calculators.
+// It is kept (same name, same values) because governor and client tests
+// pin it directly; new code may call rateWait/backoffWait explicitly.
+func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
+	if apiErr != nil && apiErr.RateLimited {
+		return c.rateWait(attempt, apiErr)
+	}
+	return c.backoffWait(attempt, apiErr)
+}
+
+// rateWait computes the wait before the next attempt for rate-limit
+// rejections, following GitHub's documented guidance instead of the
+// generic exponential backoff: primary exhaustion means waiting for
 // x-ratelimit-reset (the doRequest caller refuses waits beyond maxWait),
 // a rate-limited Retry-After is honored exactly (GitHub's secondary-limit
 // hints run 30-120s; truncating them to maxRetryDelay manufactures repeat
 // rejections and burns the point window - the maxWait ceiling is what
-// refuses an excessive wait, mirroring the reset branch), other
-// Retry-After hints are bounded by maxRetryDelay, and bare secondary
-// rejections wait at least one minute with exponential growth. Every
-// branch is bounded and jittered so a hostile header or a synchronized
-// fleet cannot stall or thunder-herd callers.
-func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
-	if apiErr != nil && apiErr.RateLimited {
-		if !apiErr.RateLimitReset.IsZero() {
-			// Wait for the documented reset exactly: the server dictates the
-			// resume instant, so jitter/caps here only overshoot it. Pinned
-			// by TestRateLimitAwareRetry — the floor only prevents a hot
-			// loop when the clock has already passed reset. The client's
-			// single (injectable) clock keeps fake-clock tests honest.
-			return nonNegativeDelay(apiErr.RateLimitReset.Sub(c.now()))
-		}
-		if apiErr.RetryAfter > 0 {
-			return nonNegativeDelay(apiErr.RetryAfter)
-		}
-		if attempt > 10 {
-			attempt = 10 // keep the shift below from overflowing on wild input
-		}
-		return addJitter(minDuration(60*time.Second<<attempt, 15*time.Minute))
+// refuses an excessive wait, mirroring the reset branch), and bare
+// secondary rejections wait at least one minute with exponential growth.
+// Every branch is bounded and jittered so a hostile header or a
+// synchronized fleet cannot stall or thunder-herd callers.
+func (c *Client) rateWait(attempt int, apiErr *APIError) time.Duration {
+	if !apiErr.RateLimitReset.IsZero() {
+		// Wait for the documented reset exactly: the server dictates the
+		// resume instant, so jitter/caps here only overshoot it. Pinned
+		// by TestRateLimitAwareRetry — the floor only prevents a hot
+		// loop when the clock has already passed reset. The client's
+		// single (injectable) clock keeps fake-clock tests honest.
+		return nonNegativeDelay(apiErr.RateLimitReset.Sub(c.now()))
 	}
+	if apiErr.RetryAfter > 0 {
+		return nonNegativeDelay(apiErr.RetryAfter)
+	}
+	if attempt > secondaryBackoffMaxShift {
+		attempt = secondaryBackoffMaxShift // keep the shift below from overflowing on wild input
+	}
+	return addJitter(minDuration(secondaryBackoffBase<<attempt, secondaryBackoffCap))
+}
+
+// backoffWait computes the wait for non-rate-limit retries: a plain
+// Retry-After hint bounded by maxRetryDelay (so a hostile or
+// misconfigured header cannot stall callers invisibly for minutes),
+// otherwise exponential backoff with jitter. Rate-limit waits do not
+// pass through here: they are honored exactly and refused up front by
+// the maxWait ceiling in doRequest.
+func (c *Client) backoffWait(attempt int, apiErr *APIError) time.Duration {
 	if apiErr != nil && apiErr.RetryAfter > 0 {
 		return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
 	}
@@ -1173,6 +1240,24 @@ func isRetrySafeMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+// classifyRequest is the single landing for governor window
+// classification. GitHub's ~80/min content-generation secondary window
+// counts every request that creates repository content: asset uploads
+// AND contents-API PUT/DELETE (metadata commits). Classifying only
+// assetUpload here once let a metadata-chatty mount burst past the
+// window and eat real secondary penalties, so the contents-write rule
+// lives here alongside the upload rule — never as an OR-expression at a
+// call site.
+func classifyRequest(method, endpoint string, assetUpload bool) requestClass {
+	if assetUpload {
+		return requestUpload
+	}
+	if isContentsWrite(method, endpoint) {
+		return requestContent
+	}
+	return requestRead
 }
 
 // isContentsWrite reports whether a request mutates repository content
@@ -1228,6 +1313,52 @@ func addJitter(d time.Duration) time.Duration {
 	return d + time.Duration(rand.Int63n(quarter+1))
 }
 
+// IsTimeout reports whether err represents a client-side transfer
+// timeout (as opposed to the caller's own deadline or cancellation).
+// It is nil-safe and checks, in order:
+//
+//  1. Primary: net.Error.Timeout() (including *url.Error, whose Timeout
+//     delegates to the wrapped error) — a genuine stalled transfer.
+//  2. Fallback: the "Client.Timeout exceeded" substring http.Client
+//     embeds when its own timeout fires.
+//
+// A bare context.DeadlineExceeded WITHOUT that marker is the caller's
+// own deadline (context.WithTimeout/WithDeadline) and is NOT a timeout
+// by this definition: retrying it burns the governor's budget against a
+// decision the caller already made. context.Canceled is never a timeout.
+//
+// CONTRACT for the storage pipeline agent: internal/storage/retry.go's
+// isRetryableNetworkError duplicates the DeadlineExceeded-vs-timeout
+// distinction with its own strings.Contains check. Replace that arm with
+// ghapi.IsTimeout (import already present as ghapi): inside the
+// errors.Is(err, context.DeadlineExceeded) branch, return
+// ghapi.IsTimeout(err). Keep the surrounding Canceled/DNS/net.Error
+// structure identical.
+func IsTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// http.Client's own timeout surfaces as the same wrapped
+		// context.DeadlineExceeded but carries the marker — a stalled
+		// transfer is exactly what retries exist to absorb. A bare
+		// DeadlineExceeded is the caller's deadline: not a timeout.
+		return strings.Contains(err.Error(), "Client.Timeout exceeded")
+	}
+	var urlErr *url.Error
+	if errorAs(err, &urlErr) && urlErr.Timeout() {
+		return true
+	}
+	var netErr net.Error
+	if errorAs(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return strings.Contains(err.Error(), "Client.Timeout exceeded")
+}
+
 // isRetryableNetworkError reports whether a transport failure is worth
 // another attempt. User cancellation and caller deadlines are never
 // retried; timeouts, torn connections and reset/aborted connections are,
@@ -1238,19 +1369,17 @@ func addJitter(d time.Duration) time.Duration {
 // refused too: no retry resolves a name that does not exist.
 //
 // The semantic is shared with the storage layer's isRetryableNetworkError;
-// keep the two identical.
+// keep the two identical (see the IsTimeout contract above).
 func isRetryableNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	// A *url.Error always satisfies net.Error, so the deadline check must
-	// come first: a caller deadline is the caller's decision and must not
-	// burn the governor's budget on retries. http.Client's own timeout
-	// surfaces as the same wrapped context.DeadlineExceeded but carries
-	// the "Client.Timeout exceeded" marker - a stalled transfer is
-	// exactly what retries exist to absorb.
+	// A *url.Error always satisfies net.Error, so the deadline/timeout
+	// check must come first: a caller deadline is the caller's decision
+	// and must not burn the governor's budget on retries. The timeout
+	// verdict itself lives in IsTimeout (single definition).
 	if errors.Is(err, context.DeadlineExceeded) {
-		return strings.Contains(err.Error(), "Client.Timeout exceeded")
+		return IsTimeout(err)
 	}
 	var dnsErr *net.DNSError
 	if errorAs(err, &dnsErr) && dnsErr.IsNotFound {
@@ -1292,11 +1421,20 @@ func (c *Client) boundedWait(d time.Duration) time.Duration {
 // escapeContentPath URL-escapes each path segment; raw '#', '?' or '%'
 // characters in filenames would otherwise truncate or rewrite the request.
 //
-// Segments normalize instead of reject: "" and "." drop out, ".." pops
-// the previous segment clamped at the repo root (it can never escape
-// into the URL the way path.Clean's leading ".." did). An empty result
-// means the input named nothing addressable.
+// The name stays (callers and tests use it); the work splits into
+// cleanSegments (normalize: "" and "." drop out, ".." pops the previous
+// segment clamped at the repo root so it can never escape into the URL
+// the way path.Clean's leading ".." did) plus escapeSegments (escape
+// each survivor and join). An empty result means the input named nothing
+// addressable.
 func escapeContentPath(filePath string) string {
+	return escapeSegments(cleanSegments(filePath))
+}
+
+// cleanSegments splits a content path into raw segments, dropping ""
+// and ".", resolving ".." against the survivors clamped at the repo
+// root. Leading slashes never produce a leading empty segment.
+func cleanSegments(filePath string) []string {
 	var kept []string
 	for _, seg := range strings.Split(strings.TrimLeft(filePath, "/"), "/") {
 		switch seg {
@@ -1307,8 +1445,18 @@ func escapeContentPath(filePath string) string {
 				kept = kept[:len(kept)-1]
 			}
 		default:
-			kept = append(kept, url.PathEscape(seg))
+			kept = append(kept, seg)
 		}
 	}
-	return strings.Join(kept, "/")
+	return kept
+}
+
+// escapeSegments URL-escapes each segment and joins them back into a
+// request path.
+func escapeSegments(kept []string) string {
+	escaped := make([]string, 0, len(kept))
+	for _, seg := range kept {
+		escaped = append(escaped, url.PathEscape(seg))
+	}
+	return strings.Join(escaped, "/")
 }

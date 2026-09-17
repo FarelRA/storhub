@@ -13,6 +13,7 @@ import (
 )
 
 func TestDefaultConfigProvidesUsableDefaults(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	if cfg.APIBaseURL != defaultAPIBaseURL {
 		t.Fatalf("unexpected api base: %q", cfg.APIBaseURL)
@@ -41,6 +42,7 @@ func TestDefaultConfigProvidesUsableDefaults(t *testing.T) {
 }
 
 func TestWithDefaultsPreservesExplicitValuesAndFillsGaps(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(123, 0).UTC()
 	sleep := func(context.Context, time.Duration) error { return nil }
 	customClient := newDefaultHTTPClient()
@@ -69,10 +71,15 @@ func TestWithDefaultsPreservesExplicitValuesAndFillsGaps(t *testing.T) {
 	}
 }
 
-func TestWithDefaultsHandlesZeroAndNegativeValues(t *testing.T) {
+// TestWithDefaultsPreservesNegativesForValidate pins the contract: only
+// exact zero counts as "unset". A negative must survive WithDefaults so
+// Validate can reject it loudly instead of a typo silently uploading with
+// default-sized chunks. (Merged with the former
+// TestWithDefaultsHandlesZeroAndNegativeValues: same contract, one table.)
+func TestWithDefaultsPreservesNegativesForValidate(t *testing.T) {
+	t.Parallel()
+	// Scalar case with the retry-delay defaults + zero-config spot checks.
 	got := (Config{MaxRetries: -2}).WithDefaults()
-	// Negative values are preserved for Validate to reject loudly instead
-	// of being silently clamped.
 	if got.MaxRetries != -2 {
 		t.Fatalf("expected negative retries preserved for validation, got %d", got.MaxRetries)
 	}
@@ -86,13 +93,6 @@ func TestWithDefaultsHandlesZeroAndNegativeValues(t *testing.T) {
 	if zero.APIBaseURL != Default().APIBaseURL || zero.BufferSize != Default().BufferSize {
 		t.Fatalf("expected full zero-config defaults, got %+v", zero)
 	}
-}
-
-// TestWithDefaultsPreservesNegativesForValidate pins the contract: only
-// exact zero counts as "unset". A negative must survive WithDefaults so
-// Validate can reject it loudly instead of a typo silently uploading with
-// default-sized chunks.
-func TestWithDefaultsPreservesNegativesForValidate(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
 		"ChunkSize":             func(c *Config) { c.ChunkSize = -1 },
 		"BufferSize":            func(c *Config) { c.BufferSize = -1 },
@@ -114,6 +114,7 @@ func TestWithDefaultsPreservesNegativesForValidate(t *testing.T) {
 // larger than one release asset would make the chunker's plan and the
 // uploader's windows disagree, so it must fail validation, not storage.
 func TestValidateRejectsChunkSizeAboveAssetCeiling(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.ChunkSize = chunking.MaxReleaseAssetSize + 1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ceiling") {
@@ -129,6 +130,7 @@ func TestValidateRejectsChunkSizeAboveAssetCeiling(t *testing.T) {
 // pooled operation, so an unbounded value is an instant OOM waiting to
 // happen and must be rejected up front.
 func TestValidateCapsBufferSize(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.BufferSize = MaxBufferSize + 1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "BufferSize") {
@@ -144,6 +146,7 @@ func TestValidateCapsBufferSize(t *testing.T) {
 // the documented disable value (the storage consumer honors it), so
 // WithDefaults must not overwrite it with the default threshold.
 func TestHistoryWarnObjectsZeroDisablesWarning(t *testing.T) {
+	t.Parallel()
 	if got := (Config{HistoryWarnObjects: 0}).WithDefaults(); got.HistoryWarnObjects != 0 {
 		t.Fatalf("explicit zero must survive as the disable value, got %d", got.HistoryWarnObjects)
 	}
@@ -153,6 +156,7 @@ func TestHistoryWarnObjectsZeroDisablesWarning(t *testing.T) {
 }
 
 func TestSleepWithContext(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := SleepWithContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
@@ -169,6 +173,7 @@ func TestSleepWithContext(t *testing.T) {
 // built Logger and clears them, keeping Validate's single-mechanism
 // invariant true for every defaulted config.
 func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
+	t.Parallel()
 	filled := Config{}.WithDefaults()
 	defaults := Default()
 	checks := map[string]struct{ got, want any }{
@@ -201,6 +206,7 @@ func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
 // TestValidateRejectsUnknownLogSettings pins the loud-failure contract for
 // unknown log levels and formats after normalization.
 func TestValidateRejectsUnknownLogSettings(t *testing.T) {
+	t.Parallel()
 	defaulted := Config{}.WithDefaults()
 	if err := defaulted.Validate(); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
@@ -221,6 +227,7 @@ func TestValidateRejectsUnknownLogSettings(t *testing.T) {
 // supplying Logger together with any log knob fails loudly instead of
 // silently picking a winner.
 func TestValidateRejectsLoggerWithKnobs(t *testing.T) {
+	t.Parallel()
 	logger := logging.NewLogger(logging.Options{})
 	base := Config{Logger: logger}
 	for name, mutate := range map[string]func(*Config){

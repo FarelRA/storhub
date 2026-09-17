@@ -30,7 +30,9 @@ func TestStoreRepoMetadataPreservesPendingWork(t *testing.T) {
 	remote.EnsureDirectory("docs", 1700000000)
 	remote.Chunks()[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 1}
 	remote.UpsertFile("docs/a.txt", FileMeta{Size: 4, Mode: 0o644, Inode: 2, Chunks: []int64{1}, UploadedAt: 1700000000, ModifiedAt: 1700000000, AccessedAt: 1700000000, ChangedAt: 1700000000}, 1700000000)
-	remote.EnsureRelease("v1", 1700000000)
+	if _, err := remote.EnsureRelease("v1", 1700000000); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
 	remote.Normalize("guard", 1700000000)
 
 	hub.storeRepoMetadata("guard", remote, "remote-sha-token", nil, 0)

@@ -43,30 +43,45 @@ func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]
 			mode = syscall.S_IFLNK
 		}
 		result = append(result, fuse.DirEntry{Name: entry.Name, Ino: entry.Inode, Mode: mode})
-		infos[entry.Name] = dirEntryToEntryInfo(entry, path.Join(dirPath, entry.Name))
+		infos[entry.Name] = shfs.EntryFromDirEntry(entry, path.Join(dirPath, entry.Name))
 	}
 	return result, infos, 0
 }
 
-// dirEntryToEntryInfo lifts a listing row into the full attribute view the
-// kernel's entry cache wants. The listing already carries mode, owner,
-// link count and timestamps (see shfs.DirEntry), so no re-stat is needed.
-func dirEntryToEntryInfo(e shfs.DirEntry, childPath string) *shfs.EntryInfo {
-	return &shfs.EntryInfo{
-		Path:       childPath,
-		Kind:       e.Kind,
-		IsDir:      e.IsDir,
-		IsSymlink:  e.IsSymlink,
-		Size:       e.Size,
-		Inode:      e.Inode,
-		Mode:       e.Mode,
-		UID:        e.UID,
-		GID:        e.GID,
-		NLink:      e.NLink,
-		CreatedAt:  e.CreatedAt,
-		ModifiedAt: e.ModifiedAt,
-		AccessedAt: e.AccessedAt,
-		ChangedAt:  e.ChangedAt,
+// attachEntry registers entry under n and fills the kernel's entry cache
+// line. It is the shared ensure+attach+fill tail of Mkdir/Create/Symlink/
+// Link.
+func (n *storhubNode) attachEntry(ctx context.Context, entry *shfs.EntryInfo, out *fuse.EntryOut) *gofusefs.Inode {
+	child := n.fs.ensureNode(ctx, entry)
+	ino := n.attachChild(ctx, child)
+	fillEntryOut(out, entry, n.fs.opts)
+	return ino
+}
+
+// publishEntry invalidates the parent namespace after a successful child
+// creation, so the new name is visible before EntryTimeout expires.
+func (s *Filesystem) publishEntry(parentPath, name string) {
+	s.notifyEntryForPath(parentPath, name)
+}
+
+// evictChild drops path bookkeeping for a removed child, rebinds open
+// handles to POSIX detached semantics, and issues the delete notification.
+func (n *storhubNode) evictChild(name, childPath string, inode uint64) {
+	remaining := n.fs.dropPath(inode, childPath)
+	n.fs.rebindHandlesAfterPathChange(inode, childPath, remaining)
+	n.notifyDelete(name, inode)
+}
+
+// notifyNamespaceChange evicts both parents' cached namespace after a
+// rename. Both the source and the destination parent cached the old
+// namespace; without both invalidations lookups serve the pre-rename tree
+// until EntryTimeout expires.
+func (s *Filesystem) notifyNamespaceChange(oldPath, newPath string) {
+	oldDir, oldBase := shfs.ParentPath(oldPath), path.Base(oldPath)
+	newDir, newBase := shfs.ParentPath(newPath), path.Base(newPath)
+	s.notifyEntryForPath(oldDir, oldBase)
+	if newDir != oldDir || newBase != oldBase {
+		s.notifyEntryForPath(newDir, newBase)
 	}
 }
 
@@ -181,10 +196,8 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	if err != nil {
 		return nil, errnoFromError(err)
 	}
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(parentPath, name)
+	ino := n.attachEntry(ctx, entry, out)
+	n.fs.publishEntry(parentPath, name)
 	n.fs.debugf("mkdir path=%s mode=%#o", childPath, mode)
 	return ino, 0
 }
@@ -205,10 +218,9 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if err := n.fs.hub.UnlinkContext(ctx, n.fs.project, childPath); err != nil {
 		return errnoFromError(err)
 	}
+	n.fs.dropPinnedForPath(childPath)
 	if entry != nil {
-		remaining := n.fs.dropPath(entry.Inode, childPath)
-		n.fs.rebindHandlesAfterPathChange(entry.Inode, childPath, remaining)
-		n.notifyDelete(name, entry.Inode)
+		n.evictChild(name, childPath, entry.Inode)
 	} else {
 		n.notifyEntry(name)
 	}
@@ -227,9 +239,9 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if err := n.fs.hub.RmdirContext(ctx, n.fs.project, childPath); err != nil {
 		return errnoFromError(err)
 	}
+	n.fs.dropPinnedForPath(childPath)
 	if entry != nil {
-		n.fs.dropPath(entry.Inode, childPath)
-		n.notifyDelete(name, entry.Inode)
+		n.evictChild(name, childPath, entry.Inode)
 	} else {
 		n.notifyEntry(name)
 	}
@@ -279,6 +291,10 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath, renameOpts...); err != nil {
 		return errnoFromError(err)
 	}
+	// The namespace moved: cached layouts keyed by either path are stale
+	// (open handles keep their own pin pointers and are unaffected).
+	n.fs.dropPinnedForPath(oldPath)
+	n.fs.dropPinnedForPath(newPath)
 	if oldEntry != nil {
 		n.fs.remapPaths(oldPath, newPath)
 	}
@@ -301,12 +317,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	}
 	// Both parents cached the old namespace; evict both or lookups serve
 	// the pre-rename tree until EntryTimeout expires.
-	oldDir, oldBase := shfs.ParentPath(oldPath), path.Base(oldPath)
-	newDir, newBase := shfs.ParentPath(newPath), path.Base(newPath)
-	n.fs.notifyEntryForPath(oldDir, oldBase)
-	if newDir != oldDir || newBase != oldBase {
-		n.fs.notifyEntryForPath(newDir, newBase)
-	}
+	n.fs.notifyNamespaceChange(oldPath, newPath)
 	n.fs.debugf("rename old=%s new=%s flags=%#x", oldPath, newPath, flags)
 	return 0
 }

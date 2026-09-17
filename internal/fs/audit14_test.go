@@ -26,6 +26,7 @@ func (c *countingBackend) LoadRepoMetadataReadonlyContext(ctx context.Context, p
 // O(files+chunks) aggregate is served from cache while nothing moved, and
 // a mutation through the Service invalidates it immediately.
 func TestStatFSContextCachesAndInvalidates(t *testing.T) {
+	t.Parallel()
 	backend := &countingBackend{testBackend: newTestBackend(400)}
 	backend.seedDir("docs")
 	backend.seedFile("docs/a.txt", []byte("hello"))
@@ -56,6 +57,7 @@ func TestStatFSContextCachesAndInvalidates(t *testing.T) {
 // through every DAC check without cloning or sorting the group slice
 // again, while unnormalized input still canonicalizes.
 func TestNormalizeIdentityFastPath(t *testing.T) {
+	t.Parallel()
 	id := Identity{UID: 5, GID: 7, Groups: []uint32{3, 7}}
 	normalized := normalizeIdentity(id)
 	if !slices.IsSorted(normalized.Groups) || len(normalized.Groups) != 2 {
@@ -84,6 +86,7 @@ func TestNormalizeIdentityFastPath(t *testing.T) {
 // leak through the link), while the plain check on the concrete key alone
 // would miss it.
 func TestCheckAccessResolvedConsumesTraversedChain(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(500)
 	backend.seedDir("pub")
 	backend.seedFile("pub/x.txt", []byte("data"))
@@ -126,6 +129,7 @@ func TestCheckAccessResolvedConsumesTraversedChain(t *testing.T) {
 // absolute links reset the cursor, and relative links splice against the
 // link's parent - all while the traversed chain stays in walk order.
 func TestResolveAccessPathPhysicalSemantics(t *testing.T) {
+	t.Parallel()
 	backend := newTestBackend(600)
 	backend.seedDir("a")
 	backend.seedDir("a/b")

@@ -582,3 +582,46 @@ func TestPublicAPIOnlyMutationCycle(t *testing.T) {
 		t.Fatal("expected API traffic from public-API-only cycle")
 	}
 }
+
+// An 8-level deep tree must round-trip through upload, stat, and read:
+// parent recursion, content-path escaping, and journal replay all walk
+// every level, and the deepest fixture elsewhere is only depth 2.
+func TestDeepTreeUploadStatRoundTrip(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	ctx := context.Background()
+	const project = "project-deep-tree"
+	deep := "a/b/c/d/e/f/g/h.txt"
+	payload := []byte("deep payload")
+	// Uploads do not mkdir -p (POSIX open(O_CREAT) semantics: the parent
+	// must exist); ancestors are created explicitly first so the test
+	// pins traversal depth, not implicit directory creation.
+	for _, dir := range []string{"a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e", "a/b/c/d/e/f", "a/b/c/d/e/f/g"} {
+		if err := hub.MkdirContext(ctx, project, dir); err != nil {
+			t.Fatalf("mkdir ancestor %s: %v", dir, err)
+		}
+	}
+	if _, err := hub.UploadFileContext(ctx, project, deep, writeTempFile(t, t.TempDir(), "h.txt", payload)); err != nil {
+		t.Fatalf("upload deep path: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush deep tree: %v", err)
+	}
+	entry, err := hub.StatPathContext(ctx, project, deep)
+	if err != nil {
+		t.Fatalf("stat deep path: %v", err)
+	}
+	if entry.Size != int64(len(payload)) || entry.Path != deep {
+		t.Fatalf("unexpected deep entry: %+v", entry)
+	}
+	for _, dir := range []string{"a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e", "a/b/c/d/e/f", "a/b/c/d/e/f/g"} {
+		if _, err := hub.StatPathContext(ctx, project, dir); err != nil {
+			t.Fatalf("stat ancestor %s: %v", dir, err)
+		}
+	}
+	data, err := hub.ReadFileAtContext(ctx, project, deep, 0, int64(len(payload)))
+	if err != nil || string(data) != string(payload) {
+		t.Fatalf("read deep path: %q %v", data, err)
+	}
+}

@@ -77,9 +77,15 @@ func (h *StorHub) newChunkSink(ctx context.Context, project, releaseTag, uploadU
 // the bytes, which may differ from the sink's initial target after a
 // rotation. Partial results stay in s.results for the caller to compensate
 // on error; put itself never deletes.
+//
+// Rotation is capped at maxReleaseRotations (central tunables, client.go):
+// each rotation re-resolves against a fresh server list, so a repeat pick
+// means a concurrent writer filled it in the race window — but a
+// persistently-full set (many concurrent writers, no headroom) previously
+// re-listed + re-uploaded forever. Exceeding the cap fails loudly instead.
 func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
-	const maxNameRetries = 5
 	nameRetries := 0
+	rotations := 0
 	for {
 		assetName, err := s.namer.Next()
 		if err != nil {
@@ -91,7 +97,11 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 			return nil
 		}
 		if isReleaseFull(err) {
-			s.hub.debugf("upload release full, rotating release=%s uploaded=%d/%d", s.releaseTag, len(s.results), s.total)
+			rotations++
+			if rotations > maxReleaseRotations {
+				return fmt.Errorf("upload chunk (offset %d): release %s full after %d rotations; concurrent writers hold every release at the %d-asset ceiling, retry the upload", offset, s.releaseTag, maxReleaseRotations, releaseAssetCap)
+			}
+			s.hub.debugf("upload release full, rotating release=%s uploaded=%d/%d rotation=%d", s.releaseTag, len(s.results), s.total, rotations)
 			s.hub.invalidateReleaseCache(s.project)
 			tag, url, err := s.prepare(s.total - len(s.results))
 			if err != nil {
@@ -142,9 +152,9 @@ func (h *StorHub) repoExists(ctx context.Context, project string) (bool, error) 
 	if err := h.ensureOwner(ctx); err != nil {
 		return false, err
 	}
-	h.repoMu.Lock()
+	h.repoMu.RLock()
 	exists, ok := h.repoState[project]
-	h.repoMu.Unlock()
+	h.repoMu.RUnlock()
 	if ok {
 		return exists, nil
 	}
@@ -333,39 +343,19 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 }
 
 // readIndexRevision fetches the manifest or metadata blob at a specific commit
-// SHA. Callers distinguish the layout with meta.IsManifest(data).
+// SHA. Callers distinguish the layout with meta.IsManifest(data). Dispatches
+// through readIndexDoc (index.go), the single git-vs-REST point.
 func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA string) ([]byte, bool, error) {
-	if repo := h.getGitRepo(project); repo != nil {
-		if d, err := repo.readFileRef(ctx, commitSHA, indexFilePath); err == nil {
-			return d, true, nil
-		} else if !isMetadataNotFound(err) {
-			return nil, false, err
-		}
-		d, err := repo.readFileRef(ctx, commitSHA, metadataFilePath)
-		if err == nil {
-			return d, true, nil
-		}
-		if isMetadataNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	d, _, err := h.gh.GetFileContent(ctx, h.owner, project, indexFilePath, commitSHA)
-	if err == nil {
+	if d, _, ok, rerr := h.readIndexDoc(ctx, project, indexFilePath, commitSHA); rerr != nil {
+		return nil, false, rerr
+	} else if ok {
 		return d, true, nil
 	}
-	var apiErr *ghapi.APIError
-	if !errors.As(err, &apiErr) || !apiErr.NotFound() {
-		return nil, false, err
+	d, _, ok, rerr := h.readIndexDoc(ctx, project, metadataFilePath, commitSHA)
+	if rerr != nil {
+		return nil, false, rerr
 	}
-	d, _, err = h.gh.GetFileContent(ctx, h.owner, project, metadataFilePath, commitSHA)
-	if err == nil {
-		return d, true, nil
-	}
-	if e, ok := err.(*ghapi.APIError); ok && e.NotFound() {
-		return nil, false, nil
-	}
-	return nil, false, err
+	return d, ok, nil
 }
 
 // loadIndexTreeAtRef materializes a revision's tree, detecting the layout by
@@ -393,22 +383,15 @@ func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, d
 }
 
 // fetchObjectAtRef loads one index object pinned to a commit SHA (cache is
-// content-addressed and layout-agnostic, so it serves any ref).
+// content-addressed and layout-agnostic, so it serves any ref). Backend
+// bytes come from readObjectBytes (objects.go); the ref-pinned error
+// wording is preserved.
 func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string) ([]byte, error) {
 	cache := h.objectCacheFor(project)
 	if data, ok := cache.get(sha); ok {
 		return data, nil
 	}
-	var data []byte
-	var err error
-	if repo := h.getGitRepo(project); repo != nil {
-		data, err = repo.readFileRef(ctx, ref, objectRepoPath(sha))
-	} else {
-		if err = h.ensureOwner(ctx); err != nil {
-			return nil, err
-		}
-		data, _, err = h.gh.GetFileContent(ctx, h.owner, project, objectRepoPath(sha), ref)
-	}
+	data, err := h.readObjectBytes(ctx, project, ref, sha)
 	if err != nil {
 		return nil, fmt.Errorf("fetch object %s at %s: %w", shortSHA(sha), shortSHA(ref), err)
 	}
@@ -419,14 +402,25 @@ func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string
 	return data, nil
 }
 
-// validateMetadataSnapshot checks a snapshot against live server state
-// before a rollback/revert commits it. Structural validation is total;
-// asset existence is checked LAZILY and TARGETED: only releases the
-// snapshot references are examined, and a release's full asset list is
-// paginated only when its embedded view is untrustworthy (at/above the
-// truncation danger band, or an expected ID is missing from it). The old
-// form built an index over every asset of every release - O(total assets)
-// transient memory per call, three calls per rollback.
+// validateSnapshotRefs checks a snapshot against live server state before
+// a rollback/revert commits it. Structural validation is total; asset
+// existence is checked LAZILY and TARGETED: only releases the snapshot
+// references are examined, and a release's full asset list is paginated
+// only when its embedded view is untrustworthy (at/above the truncation
+// danger band, or an expected ID is missing from it). The old form built
+// an index over every asset of every release - O(total assets) transient
+// memory per call, three calls per rollback.
+//
+// op names the caller ("rollback"/"revert") and prefixes every error so a
+// shared validator does not misattribute failures to rollback when it also
+// serves the revert path (audit 24).
+//
+// Range geometry is enforced, not just membership (audit 18): a reverted
+// chunk pointing at a live asset with an out-of-range window previously
+// committed successfully and failed later as a 416 at read time. Every
+// chunk must satisfy AssetOffset >= 0 and AssetOffset+Size <= asset Size.
+// Sizes ride the same targeted listing as membership (embedded view when
+// trusted, paginated ListReleaseAssets otherwise).
 //
 // The release list itself stays a fresh (uncached) listReleases: the point
 // of the re-checks around the commit is to catch deletions that landed
@@ -434,12 +428,12 @@ func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string
 // NEEDS-INTEGRATION(13): a targeted GET /releases/assets/{id} would replace
 // the per-release fallback entirely; the ghapi client exposes no such
 // method today, so the fallback paginates ListReleaseAssets instead.
-func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
+func (h *StorHub) validateSnapshotRefs(ctx context.Context, project, op string, metadata *RepoMetadata) error {
 	// Structural validation first - chunk/file size consistency
 	// (chunks beyond EOF, negative geometry, dangling references,
 	// totals) is verified here, not assumed from elsewhere.
 	if err := metadata.Validate(); err != nil {
-		return fmt.Errorf("rollback metadata failed validation: %w", err)
+		return fmt.Errorf("%s metadata failed validation: %w", op, err)
 	}
 	releases, err := h.listReleases(ctx, project)
 	if err != nil {
@@ -449,8 +443,14 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 	for _, release := range releases {
 		releaseIndex[release.TagName] = release
 	}
-	// Collect the asset IDs the snapshot actually references, per release.
+	// Collect the asset IDs the snapshot actually references, per release,
+	// plus every chunk's (assetID -> window end) for the geometry check.
+	type chunkWindow struct {
+		assetID int64
+		end     int64 // AssetOffset+Size; AssetOffset<0 handled by Validate above
+	}
 	referenced := make(map[string]map[int64]struct{})
+	windows := make(map[string][]chunkWindow)
 	for path, file := range metadata.Files() {
 		for _, chunkName := range file.Chunks {
 			// A dangling chunk reference must fail validation outright.
@@ -458,12 +458,12 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 			// downloaded after commit.
 			chunk, ok := metadata.Chunks()[chunkName]
 			if !ok {
-				return fmt.Errorf("rollback metadata references missing chunk %d (file %s)", chunkName, path)
+				return fmt.Errorf("%s metadata references missing chunk %d (file %s)", op, chunkName, path)
 			}
 			// Structural size/offset sanity beyond Validate(): negative
 			// geometry can never address real bytes.
-			if chunk.Size < 0 || chunk.Offset < 0 {
-				return fmt.Errorf("rollback metadata chunk %d has invalid geometry (offset %d, size %d)", chunkName, chunk.Offset, chunk.Size)
+			if chunk.Size < 0 || chunk.Offset < 0 || chunk.AssetOffset < 0 {
+				return fmt.Errorf("%s metadata chunk %d has invalid geometry (offset %d, size %d, assetOffset %d)", op, chunkName, chunk.Offset, chunk.Size, chunk.AssetOffset)
 			}
 			ids := referenced[chunk.Release]
 			if ids == nil {
@@ -471,20 +471,21 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 				referenced[chunk.Release] = ids
 			}
 			ids[chunk.AssetID] = struct{}{}
+			windows[chunk.Release] = append(windows[chunk.Release], chunkWindow{assetID: chunk.AssetID, end: chunk.AssetOffset + chunk.Size})
 		}
 	}
 	for tag, ids := range referenced {
 		release, ok := releaseIndex[tag]
 		if !ok {
-			return fmt.Errorf("rollback metadata references missing release: %s", tag)
+			return fmt.Errorf("%s metadata references missing release: %s", op, tag)
 		}
-		present := make(map[int64]struct{}, len(release.Assets))
+		sizes := make(map[int64]int64, len(release.Assets))
 		for _, asset := range release.Assets {
-			present[asset.ID] = struct{}{}
+			sizes[asset.ID] = asset.Size
 		}
 		missing := false
 		for id := range ids {
-			if _, ok := present[id]; !ok {
+			if _, ok := sizes[id]; !ok {
 				missing = true
 				break
 			}
@@ -497,18 +498,35 @@ func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, 
 			if err != nil {
 				return fmt.Errorf("verify assets of release %s: %w", tag, err)
 			}
-			present = make(map[int64]struct{}, len(assets))
+			sizes = make(map[int64]int64, len(assets))
 			for _, asset := range assets {
-				present[asset.ID] = struct{}{}
+				sizes[asset.ID] = asset.Size
 			}
 		}
 		for id := range ids {
-			if _, ok := present[id]; !ok {
-				return fmt.Errorf("rollback metadata references missing asset %d in release %s", id, tag)
+			if _, ok := sizes[id]; !ok {
+				return fmt.Errorf("%s metadata references missing asset %d in release %s", op, id, tag)
+			}
+		}
+		// Hard reject out-of-range windows against the resolved sizes.
+		for _, w := range windows[tag] {
+			size, ok := sizes[w.assetID]
+			if !ok {
+				continue // already reported as missing above
+			}
+			if w.end > size {
+				return fmt.Errorf("%s metadata chunk window [..%d) exceeds asset %d size %d in release %s", op, w.end, w.assetID, size, tag)
 			}
 		}
 	}
 	return nil
+}
+
+// validateMetadataSnapshot is the rollback-facing entry point, retained for
+// callers outside this slice (verbs.go calls it five times): it validates
+// with the "rollback" op prefix.
+func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
+	return h.validateSnapshotRefs(ctx, project, "rollback", metadata)
 }
 
 // sortReleasesOldestFirst orders releases by numeric v tag ascending so
@@ -545,8 +563,11 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	// independent of listing order. Non-numeric tags sort last, stable.
 	releases = sortReleasesOldestFirst(releases)
 	if requiredSlots <= 0 {
-		for _, r := range releases {
-			metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
+		if len(releases) > 0 {
+			r := releases[0]
+			if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().Unix()); err != nil {
+				return "", "", err
+			}
 			return r.TagName, r.UploadURL, nil
 		}
 	} else {
@@ -555,8 +576,10 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 			if err != nil {
 				return "", "", err
 			}
-			if count+requiredSlots <= 1000 {
-				metadata.EnsureRelease(r.TagName, h.config.Now().Unix())
+			if count+requiredSlots <= releaseAssetCap {
+				if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().Unix()); err != nil {
+					return "", "", err
+				}
 				return r.TagName, r.UploadURL, nil
 			}
 		}
@@ -569,7 +592,9 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	if err != nil {
 		return "", "", err
 	}
-	metadata.EnsureRelease(tag, h.config.Now().Unix())
+	if _, err := metadata.EnsureRelease(tag, h.config.Now().Unix()); err != nil {
+		return "", "", err
+	}
 	return tag, release.UploadURL, nil
 }
 
@@ -578,15 +603,25 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 // rollback validation can resolve chunk references. Rotation may spread one
 // file's chunks across releases; ensuring only the originally targeted tag
 // would strand the rotated chunks.
-func ensureChunkReleases(meta *RepoMetadata, chunks []ChunkInfo, now int64) {
+func ensureChunkReleases(meta *RepoMetadata, chunks []ChunkInfo, now int64) error {
 	seen := make(map[string]struct{}, len(chunks))
 	for _, c := range chunks {
 		if _, ok := seen[c.Release]; ok {
 			continue
 		}
 		seen[c.Release] = struct{}{}
-		meta.EnsureRelease(c.Release, now)
+		// A chunk with no release tag is not in any release: ensuring
+		// "" would only create a junk catalog entry (EnsureRelease
+		// rejects it). Callers pass release-tagged chunks; the skip
+		// keeps one degenerate record from failing the whole mutation.
+		if c.Release == "" {
+			continue
+		}
+		if _, err := meta.EnsureRelease(c.Release, now); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // embeddedAssetTrustLimit bounds how far the asset array embedded in a
@@ -735,7 +770,7 @@ func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag,
 	if err := h.ensureOwner(ctx); err != nil {
 		return 0, err
 	}
-	assetID, err := h.gh.UploadAsset(ctx, h.owner, project, releaseTag, uploadURL, assetName, reader, size)
+	assetID, err := h.gh.UploadAsset(ctx, uploadURL, assetName, reader, size)
 	if err != nil {
 		return 0, err
 	}
@@ -767,37 +802,25 @@ func (h *StorHub) fillAssetRange(ctx context.Context, project string, chunk Chun
 }
 
 func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chunk ChunkInfo, fn func(io.Reader) error) error {
-	for attempt := 0; attempt <= h.config.MaxRetries; attempt++ {
+	// Single-attempt closure over the open→read→close sequence; withRetry
+	// (retry.go) owns the backoff/sleep shape shared with purgeRetry and
+	// downloadChunkWithRetry. Both open and read errors gate on
+	// isRetryableDownloadError, preserving the old two-phase semantics.
+	attempt := func() error {
 		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
-			if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
-				return err
-			}
-			delay := h.retryDelay(attempt, extractAPIError(err))
-			h.debugf("asset range open retry project=%s asset=%d attempt=%d delay=%s err=%v", project, chunk.AssetID, attempt+1, delay, err)
-			if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
-				return sleepErr
-			}
-			continue
-		}
-		err = fn(reader)
-		closeErr := reader.Close()
-		if err == nil && closeErr != nil {
-			err = closeErr
-		}
-		if err == nil {
-			return nil
-		}
-		if !isRetryableDownloadError(err) || attempt == h.config.MaxRetries {
 			return err
 		}
-		delay := h.retryDelay(attempt, extractAPIError(err))
-		h.debugf("asset range read retry project=%s asset=%d attempt=%d delay=%s err=%v", project, chunk.AssetID, attempt+1, delay, err)
-		if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
-			return sleepErr
+		err = fn(reader)
+		if closeErr := reader.Close(); err == nil {
+			err = closeErr
 		}
+		return err
 	}
-	return errors.New("asset range read exhausted retries")
+	// The old "exhausted retries" fallthrough was unreachable (the last
+	// attempt returns its error directly); withRetry preserves that by
+	// returning the final attempt's error.
+	return h.withRetry(ctx, "asset-range", h.config.MaxRetries+1, isRetryableDownloadError, attempt)
 }
 
 func (h *StorHub) setRepoState(project string, exists bool) {
@@ -832,36 +855,37 @@ func (h *StorHub) releaseProjectResidue(project string) {
 			logging.Warn(h.projectLogger(project), "release git mirror on eviction failed", "err", err)
 		}
 	}
+	// Free the in-memory handle first, then remove its disk dir best-effort
+	// (audit 17/31): evicted/deleted projects previously accumulated
+	// objects/<owner__proj>/ dirs until the next process-start
+	// ReapOrphanedCaches, unbounded across churn despite the per-project
+	// count+byte caps. I/O runs after the map lock, matching the git
+	// mirror above. A concurrent objectCacheFor may recreate the dir;
+	// RemoveAll on a live path is still safe (cache misses refetch).
 	h.objCacheMu.Lock()
+	objCache := h.objCaches[project]
 	delete(h.objCaches, project)
 	h.objCacheMu.Unlock()
+	if objCache != nil {
+		// Best-effort: eviction must not fail on a wedged disk.
+		_ = os.RemoveAll(objCache.dir)
+	}
 	h.forgetRepoState(project)
 	h.invalidateReleaseCache(project)
 	// Drop the cached per-project logger too, so project churn cannot grow
 	// the logger cache without bound.
 	h.loggers.Delete(project)
+	// Close the op-journal handle/file: eviction must not leak one open FD
+	// plus map entries per churned project until Shutdown.
+	h.closeProjectJournal(project)
 }
 
-func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, bool) {
-	h.metaMu.RLock()
-	entry, ok := h.metaCache[project]
-	h.metaMu.RUnlock()
-	if !ok {
-		return nil, "", false
-	}
-	// Share the immutable current pointer: published trees are never
-	// mutated in place (cowTree/publishTreeLocked discipline), so a reader
-	// holding the pointer after releasing the lock sees a frozen snapshot.
-	// Cloning here was a full deep copy per read (O(tree) allocations); the
-	// indexes were built at store/publish time and stay valid.
-	entry.mu.RLock()
-	meta := entry.meta
-	sha := entry.sha
-	entry.mu.RUnlock()
-	return meta, sha, true
-}
-
-func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, string, bool) {
+// cachedMeta is the single home of the shared-pointer cache read:
+// requireHydrated=false serves any resident entry (loadRepoMetadata path),
+// requireHydrated=true misses on unhydrated entries whose EMPTY tree is not
+// remote truth (loadRepoMetadataReadonly path). cachedRepoMetadata and
+// cachedRepoMetadataReadonly are thin wrappers (verbs.go calls both).
+func (h *StorHub) cachedMeta(project string, requireHydrated bool) (*RepoMetadata, string, bool) {
 	h.metaMu.RLock()
 	pm, ok := h.metaCache[project]
 	h.metaMu.RUnlock()
@@ -869,20 +893,32 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 		return nil, "", false
 	}
 	pm.mu.RLock()
-	// An unhydrated entry carries an EMPTY tree that is not remote truth;
-	// serving it lets a cold-cache mutation commit over real remote state.
-	// Miss instead: the caller falls through to a fresh load.
-	if !pm.hydrated {
-		pm.mu.RUnlock()
+	defer pm.mu.RUnlock()
+	if requireHydrated && !pm.hydrated {
+		// An unhydrated entry carries an EMPTY tree that is not remote
+		// truth; serving it lets a cold-cache mutation commit over real
+		// remote state. Miss instead: the caller falls through to a
+		// fresh load.
 		return nil, "", false
 	}
-	meta := pm.meta
-	sha := pm.sha
-	pm.mu.RUnlock()
-	return meta, sha, true
+	// Share the immutable current pointer: published trees are never
+	// mutated in place (cloneForWrite/publishTreeLocked discipline), so a
+	// reader holding the pointer after releasing the lock sees a frozen
+	// snapshot. Cloning here was a full deep copy per read (O(tree)
+	// allocations); the indexes were built at store/publish time and
+	// stay valid.
+	return pm.meta, pm.sha, true
 }
 
-// cowTree returns a private, mutable copy of a published metadata tree.
+func (h *StorHub) cachedRepoMetadata(project string) (*RepoMetadata, string, bool) {
+	return h.cachedMeta(project, false)
+}
+
+func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, string, bool) {
+	return h.cachedMeta(project, true)
+}
+
+// cloneForWrite returns a private, mutable copy of a published metadata tree.
 //
 // Published trees (pm.meta) are shared with lock-free readers, so no code
 // may mutate one in place. Mutation sites take a copy here, apply their
@@ -892,9 +928,15 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 // the copy is cheap. The first tracked mutation drops the copy to a private
 // dirty derived state (the engine's owner/mapsShared guard), never writing
 // into maps the published tree still reads.
+func cloneForWrite(m *RepoMetadata) *RepoMetadata {
+	return m.Clone()
+}
+
+// cowTree is the historical spelling of cloneForWrite, retained for
+// callers outside this slice (commit.go, verbs.go, runtime.go): new code
+// uses cloneForWrite.
 func cowTree(m *RepoMetadata) *RepoMetadata {
-	c := m.Clone()
-	return c
+	return cloneForWrite(m)
 }
 
 // publishTreeLocked swaps a mutated COW copy in as the new shared truth.
@@ -1004,8 +1046,10 @@ func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op 
 // a commit leaves committed ops in the file, and a cold replay would then
 // assert them over entries the world has since moved past. An op whose
 // timestamp predates the change time of the entry it targets is stale and is
-// dropped; ops without a resolvable single target (renames, catalog ops) are
-// kept - replay applies them defensively.
+// dropped; renames consult renameSupersededByUpstream (rebase.go: a stale
+// rename would clobber a newer target unconditionally at apply time);
+// catalog ops without a resolvable target are kept - replay applies them
+// defensively.
 func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, ops []Op) []Op {
 	kept := make([]Op, 0, len(ops))
 	for _, op := range ops {
@@ -1022,6 +1066,18 @@ func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, 
 				changedAt, exists = f.ChangedAt, true
 			}
 		default:
+			// Renames overwrite their target unconditionally at apply
+			// time, so a stale one is destructive (unlike single-target
+			// state ops, which the timestamp guard already drops).
+			if op.Type == OpRename && renameSupersededByUpstream(meta, op) {
+				to := ""
+				if len(op.Paths) == 2 {
+					to = op.Paths[1]
+				}
+				logging.Warn(logger, "op journal rename superseded by newer remote state; skipped",
+					"project", project, "op", op.Type, "to", to, "op_ts", op.Timestamp)
+				continue
+			}
 			kept = append(kept, op)
 			continue
 		}

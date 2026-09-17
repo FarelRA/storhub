@@ -8,6 +8,7 @@ import (
 )
 
 func TestNormalizeLevel(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"", LevelInfo},
 		{"DEBUG", LevelDebug},
@@ -24,6 +25,7 @@ func TestNormalizeLevel(t *testing.T) {
 }
 
 func TestValidLevelAndFormat(t *testing.T) {
+	t.Parallel()
 	if !ValidLevel("") || !ValidLevel("debug") || ValidLevel("loud") {
 		t.Fatal("level validation broken")
 	}
@@ -38,6 +40,7 @@ func TestValidLevelAndFormat(t *testing.T) {
 }
 
 func TestNewLoggerHonorsLevel(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := NewLogger(Options{Level: LevelError, Format: FormatText, Output: &buf})
 	logger.Info("dropped")
@@ -51,6 +54,7 @@ func TestNewLoggerHonorsLevel(t *testing.T) {
 }
 
 func TestNilLoggerWrappersNeverDrop(t *testing.T) {
+	t.Parallel()
 	// The nil-logger fallback is slog.Default(); these calls must not
 	// panic and must not silently discard the record.
 	Info(nil, "via default")
@@ -60,6 +64,7 @@ func TestNilLoggerWrappersNeverDrop(t *testing.T) {
 }
 
 func TestWithComponentTagsRecords(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	base := NewLogger(Options{Level: LevelDebug, Format: FormatText, Output: &buf})
 	tagged := WithComponent(base, "rest")
@@ -77,6 +82,7 @@ func TestWithComponentTagsRecords(t *testing.T) {
 }
 
 func TestResolveFallsBackToDefault(t *testing.T) {
+	t.Parallel()
 	if resolve(nil) != slog.Default() {
 		t.Fatal("nil logger must resolve to slog.Default()")
 	}

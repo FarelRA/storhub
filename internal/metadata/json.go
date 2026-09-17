@@ -44,10 +44,12 @@ func (m *RepoMetadata) toShadow() repoMetadataJSON {
 	}
 }
 
-// MarshalJSON serializes the blob document. Value receiver so both
-// RepoMetadata and *RepoMetadata satisfy json.Marshaler (a pointer-only
-// method would silently fall back to reflection - and drop the unexported
-// maps - when a value is marshaled directly).
+// MarshalJSON serializes the blob document. Pointer receiver only:
+// RepoMetadata embeds noCopy, so a value receiver (an implicit struct copy)
+// is a `go vet` copylocks error. Marshal through a *RepoMetadata always;
+// marshaling a bare value falls back to reflection and drops the unexported
+// maps, which UnmarshalJSON's strict version gate then rejects on the way
+// back in instead of silently yielding an empty tree.
 func (m *RepoMetadata) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.toShadow())
 }
@@ -96,11 +98,8 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 // root is a truncated manifest, not a blob, and decoding it as one would
 // hand the next commit an empty tree over the real index.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {
-	var probe struct {
-		V        *int   `json:"v"`
-		TreeRoot string `json:"tr"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	probe, err := probeVersion(data)
+	if err != nil {
 		return fmt.Errorf("metadata probe: %w", err)
 	}
 	if probe.V == nil {

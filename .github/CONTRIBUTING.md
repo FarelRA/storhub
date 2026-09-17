@@ -2,11 +2,10 @@
 
 ## Branch protection on `main` (maintainer action, one time)
 
-CI alone is not a merge gate: without branch protection, a merge (including
-Dependabot's "update-lockfile" PRs, whose only check is the lockfile
-regeneration job, not a compile or test) can land on `main` with zero `ci`
-check runs. The `ci` workflow has already proven it bites (run 34910039786
-failed all Go jobs on 4d9c77a), so it must be required.
+CI alone is not a merge gate: without branch protection, a merge can land
+on `main` with zero `ci` check runs. The `ci` workflow has already proven
+it bites (run 34910039786 failed all Go jobs on 4d9c77a), so it must be
+required.
 
 This cannot be set from a file in the repo. A maintainer with admin rights
 must enable it once, via the UI (Settings, Branches, Branch protection
@@ -70,8 +69,11 @@ bun run build:embed
 ```
 
 and commit the regenerated `dist` alongside the source change. The `web` CI
-job rebuilds the embed from `web/` source and fails if the committed `dist`
-drifts, so a forgotten `build:embed` is caught, not shipped silently.
+job rebuilds the embed from `web/` source but only asserts the fresh bundle
+is non-empty (`index.html` plus at least one `_nuxt/*.js` chunk): the build
+is not hermetic (`index.html` embeds a random buildId and chunk hashes drift
+by arch and toolchain), so a byte-for-byte drift gate would false-fail. Only
+the hashed `_nuxt/*` filenames are stable across rebuilds.
 
 ## Commit hygiene
 
@@ -93,5 +95,9 @@ go mod tidy -diff
 golangci-lint run
 shellcheck examples/cli/demo.sh scripts/install.sh
 cd web && bun install --frozen-lockfile && bun run lint && bun run test && bun run typecheck && bun run build:embed
-git diff --exit-code internal/rest/static/dist
+# Same non-empty guard the `web` CI job asserts (never a byte-for-byte diff:
+# the bundle is not hermetic, see above).
+test -s internal/rest/static/dist/index.html
+chunks=$(ls internal/rest/static/dist/_nuxt/*.js 2>/dev/null | wc -l | tr -d ' ')
+test "${chunks:-0}" -ge 1
 ```

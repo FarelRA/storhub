@@ -64,7 +64,10 @@ export function useApi() {
       if (value !== undefined) query.set(key, value)
     }
     const text = query.toString()
-    return `${config.basePath}${path}${text ? `?${text}` : ''}`
+    // Delegate to the same normalizer request() uses: callers pass bare
+    // routes here and the result feeds back into request(), so both must
+    // agree on base-path resolution (no silent double-prefixing).
+    return joinApiPath(config.basePath, text ? `${path}?${text}` : path)
   }
 
   async function getJSON<T>(path: string): Promise<T> {

@@ -2,7 +2,6 @@ package rest
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/FarelRA/storhub/internal/logging"
 	"github.com/go-chi/chi/v5"
@@ -27,7 +26,7 @@ type pruneRequest struct {
 func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req rollbackRequest
-	if err := h.decodeJSON(r, &req); err != nil {
+	if err := h.decodeJSON(r, &req, false); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -71,7 +70,7 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req revertPathRequest
-	if err := h.decodeJSON(r, &req); err != nil {
+	if err := h.decodeJSON(r, &req, false); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -108,23 +107,27 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	var req pruneRequest
 	// Like purge, prune accepts a bodyless POST: an empty body means the
 	// defaults (scope=all, keep=0, dry_run=false).
-	if err := h.decodeJSONOptional(r, &req); err != nil {
+	if err := h.decodeJSON(r, &req, true); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	scope := strings.TrimSpace(req.Scope)
-	if scope == "" {
-		scope = "all"
-	}
-	if !validPruneScope(scope) {
-		h.writeMappedError(w, errBadRequest(`prune scope must be one of "objects", "assets", "history", "all"`))
+	scope, err := parsePruneScope(req.Scope)
+	if err != nil {
+		h.writeMappedError(w, err)
 		return
 	}
 	if req.Keep < 0 {
 		h.writeMappedError(w, errBadRequest("keep must be non-negative"))
 		return
 	}
-	result, err := h.clientFor(r).PruneContext(r.Context(), project, scope, req.Keep, req.DryRun)
+	// History compaction supports only keep<=1 (storage coerces keep<1 to
+	// 1); keep>1 would pass through to a generic 500, so reject it as 400
+	// here. Storage keeps its own backstop error.
+	if req.Keep > 1 {
+		h.writeMappedError(w, errBadRequest("keep must be <= 1: history compaction retains exactly one checkpoint"))
+		return
+	}
+	result, err := h.clientFor(r).PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)
 	if err != nil {
 		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)

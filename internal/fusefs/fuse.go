@@ -120,6 +120,11 @@ type Filesystem struct {
 	// backpressure, and unbounded notify goroutines would queue faster
 	// than they drain.
 	notifySlots chan struct{}
+	// pinnedMu guards pinned, the shared open-time content layouts (see
+	// pinnedKey in fuse_file.go). Sharing one immutable layout across
+	// handles of the same file version bounds the per-open metadata cost.
+	pinnedMu sync.Mutex
+	pinned   map[pinnedKey]*pinnedContent
 }
 
 // maxConcurrentNotifies bounds in-flight kernel cache notifications per
@@ -157,11 +162,14 @@ func (s *Filesystem) forgetNodeBookkeeping(n *storhubNode) {
 		return // superseded by a newer incarnation for this inode number
 	}
 	delete(s.nodes, n.inode)
-	delete(s.inodePaths, n.inode)
-	for p, ino := range s.pathToInode {
-		if ino == n.inode {
+	// Delete via the reverse index: O(paths-of-inode), not O(tracked
+	// paths). Scanning the whole pathToInode map per forget turned every
+	// kernel forget into a full-map pass under s.mu.
+	if paths, ok := s.inodePaths[n.inode]; ok {
+		for p := range paths {
 			delete(s.pathToInode, p)
 		}
+		delete(s.inodePaths, n.inode)
 	}
 	// Lock records die with the node only once nothing can still exercise
 	// them: no open handle and no pending write state.
@@ -361,15 +369,9 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		}
 		opts.Logger = logging.WithComponent(logging.NewLogger(logging.Options{Level: level, Format: logging.FormatPretty, Color: true, Output: os.Stderr}), "fuse")
 	}
-	cacheDir := opts.CacheDir
-	if strings.TrimSpace(cacheDir) == "" {
-		cacheDir = path.Join(storcfg.CacheBase(), "fuse", project)
-	}
-	// 0700: the overlay temps are 0600, but their names and timestamps in
-	// a world-readable directory would still leak activity; match the
-	// recovery directory's mode.
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create fuse cache dir: %w", err)
+	cacheDir, err := resolveCacheDir(opts.CacheDir, project)
+	if err != nil {
+		return nil, err
 	}
 	// Claim the directory before touching its contents. The sweep below
 	// deletes leftover temps unconditionally, so without the lock a second
@@ -380,30 +382,56 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Startup sweep: handle-* and inode-* flat files from a crashed
-	// previous mount may hold the only copy of SIGKILL-before-commit
-	// data, so they are QUARANTINED into recovery/ instead of deleted.
-	// Nothing can reference them (no file is open yet), but the bytes
-	// survive for manual recovery. The recovery/ directory itself is
-	// preserved by design.
 	// Construction past this point cannot fail, so no failed New leaves a
 	// claim behind; Close releases it.
-	if entries, err := os.ReadDir(cacheDir); err != nil {
-		// A sweep that could not run must be loud: leftover dirty temps
-		// from a crashed mount stay unreported otherwise.
-		logging.Error(opts.Logger, "startup sweep skipped; cache dir unreadable", "dir", cacheDir, "err", err)
-	} else {
-		for _, entry := range entries {
-			name := entry.Name()
-			if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
-				continue
-			}
-			quarantinePath(path.Join(cacheDir, name), opts.Logger)
-		}
-	}
+	sweepCacheDir(cacheDir, opts.Logger)
 	// Startup replay: surface whatever earlier crashes quarantined so
 	// operators (and RecoveryInventory callers) see it immediately.
 	logRecoveryInventory(path.Join(cacheDir, "recovery"), opts.Logger)
+	return newBareFilesystem(hub, project, opts, cacheDir, lockFile), nil
+}
+
+// resolveCacheDir applies the default cache directory and creates it with
+// the overlay-appropriate mode.
+func resolveCacheDir(cacheDir, project string) (string, error) {
+	if strings.TrimSpace(cacheDir) == "" {
+		cacheDir = path.Join(storcfg.CacheBase(), "fuse", project)
+	}
+	// 0700: the overlay temps are 0600, but their names and timestamps in
+	// a world-readable directory would still leak activity; match the
+	// recovery directory's mode.
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("create fuse cache dir: %w", err)
+	}
+	return cacheDir, nil
+}
+
+// sweepCacheDir quarantines leftover overlay temps from a crashed previous
+// mount into recovery/ instead of deleting them: handle-* and inode-*
+// flat files may hold the only copy of SIGKILL-before-commit data.
+// Nothing can reference them (no file is open yet), but the bytes survive
+// for manual recovery. The recovery/ directory itself is preserved.
+func sweepCacheDir(cacheDir string, logger *slog.Logger) {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		// A sweep that could not run must be loud: leftover dirty temps
+		// from a crashed mount stay unreported otherwise.
+		logging.Error(logger, "startup sweep skipped; cache dir unreadable", "dir", cacheDir, "err", err)
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
+			continue
+		}
+		quarantinePath(path.Join(cacheDir, name), logger)
+	}
+}
+
+// newBareFilesystem builds the unmounted Filesystem value: maps, root
+// node, and lock condition. New orchestrates validation, cache claiming,
+// and recovery replay around it.
+func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, lockFile *os.File) *Filesystem {
 	fsys := &Filesystem{
 		hub:          hub,
 		project:      project,
@@ -418,11 +446,12 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 		lockFile:     lockFile,
 		notifyQueued: make(map[notifyKey]struct{}),
 		notifySlots:  make(chan struct{}, maxConcurrentNotifies),
+		pinned:       make(map[pinnedKey]*pinnedContent),
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
 	fsys.lockCond = sync.NewCond(&fsys.mu)
-	return fsys, nil
+	return fsys
 }
 
 func (s *Filesystem) Mount(mountPoint string) error {
@@ -553,6 +582,16 @@ func (s *Filesystem) debugf(format string, args ...any) {
 	logging.Debug(s.opts.Logger, fmt.Sprintf(format, args...))
 }
 
+// log returns the mount logger, never nil. Operational failures must
+// never be silently dropped, and several paths historically logged with a
+// nil *slog.Logger (which routes nowhere useful); thread this instead.
+func (s *Filesystem) log() *slog.Logger {
+	if s == nil || s.opts.Logger == nil {
+		return slog.Default()
+	}
+	return s.opts.Logger
+}
+
 // errorf logs at error level even when no injected logger is configured:
 // operational failures like data preservation must never be silently dropped.
 func (s *Filesystem) errorf(format string, args ...any) {
@@ -605,8 +644,7 @@ func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger 
 		return ""
 	}
 	if err := os.MkdirAll(recoveryDir, 0o700); err != nil {
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	// Flush the payload before the rename moves it: otherwise a crash
 	// between rename and page writeback loses acknowledged writes.
@@ -614,12 +652,10 @@ func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger 
 		syncErr := f.Sync()
 		closeErr := f.Close()
 		if syncErr != nil || closeErr != nil {
-			logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "syncErr", syncErr, "closeErr", closeErr)
-			return ""
+			return failQuarantine(logger, tempPath, "syncErr", syncErr, "closeErr", closeErr)
 		}
 	} else {
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	stamp := time.Now().UnixNano()
 	target := path.Join(recoveryDir, fmt.Sprintf("%s.%d", path.Base(tempPath), stamp))
@@ -634,47 +670,48 @@ func quarantineIntoDir(tempPath, recoveryDir, targetPath, reason string, logger 
 	}
 	manifest, err := json.Marshal(entry)
 	if err != nil {
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	manifestTmp, err := os.CreateTemp(recoveryDir, ".manifest-*.tmp")
 	if err != nil {
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	manifestTmpName := manifestTmp.Name()
 	if _, err := manifestTmp.Write(append(manifest, '\n')); err != nil {
 		_ = manifestTmp.Close()
 		_ = os.Remove(manifestTmpName)
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	if err := manifestTmp.Sync(); err != nil {
 		_ = manifestTmp.Close()
 		_ = os.Remove(manifestTmpName)
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	if err := manifestTmp.Close(); err != nil {
 		_ = os.Remove(manifestTmpName)
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	if err := os.Rename(manifestTmpName, target+".json"); err != nil {
 		_ = os.Remove(manifestTmpName)
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	if err := os.Rename(tempPath, target); err != nil {
 		// The manifest is already durable; remove it so a manifest
 		// never points at data that did not arrive.
 		_ = os.Remove(target + ".json")
-		logging.Error(logger, "quarantine failed; dirty overlay left in cache", "path", tempPath, "err", err)
-		return ""
+		return failQuarantine(logger, tempPath, "err", err)
 	}
 	syncDir(recoveryDir)
 	logging.Warn(logger, "quarantined dirty overlay for manual recovery", "path", tempPath, "saved", target, "reason", reason)
 	return target
+}
+
+// failQuarantine logs a quarantine failure (the dirty overlay stays in
+// the cache for the next sweep) and returns "".
+func failQuarantine(logger *slog.Logger, tempPath string, args ...any) string {
+	args = append([]any{"path", tempPath}, args...)
+	logging.Error(logger, "quarantine failed; dirty overlay left in cache", args...)
+	return ""
 }
 
 // syncDir fsyncs a directory so preceding renames inside it survive a
@@ -1070,9 +1107,9 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 
 // errnoFromError maps storage-layer errors onto POSIX errnos. The ladder
 // is ordered most-specific first: raw Errno passthrough (except ECANCELED,
-// which the kernel must see as EINTR), context cancellation/deadline,
-// then the fs sentinel family, with EIO as the honest catch-all for
-// anything unmapped (never success, never ENOENT).
+// which the kernel must see as EINTR), context cancellation/deadline via
+// errors.Is, then the fs sentinel family, with EIO as the honest catch-all
+// for anything unmapped (never success, never ENOENT).
 func errnoFromError(err error) syscall.Errno {
 	if err == nil {
 		return 0
@@ -1094,7 +1131,9 @@ func errnoFromError(err error) syscall.Errno {
 		return syscall.ETIMEDOUT
 	}
 	// Cancellations and timeouts that lost their error chain (%v
-	// formatting, status strings) still read as what they are.
+	// formatting, status strings) still read as what they are. This stays
+	// behind the errors.Is checks above: chained errors never reach the
+	// string scan.
 	lowered := strings.ToLower(err.Error())
 	if strings.Contains(lowered, "context canceled") {
 		return syscall.EINTR

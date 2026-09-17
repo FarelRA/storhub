@@ -121,7 +121,7 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 		{name: "write", args: []string{"write", "project", "path", "0", "text"}, want: "missing GitHub token"},
 		{name: "patch", args: []string{"patch", "project", "path", "0", "0", "text"}, want: "missing GitHub token"},
 		{name: "revisions", args: []string{"revisions", "project"}, want: "missing GitHub token"},
-		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "missing GitHub token"},
+		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "invalid commit SHA"},
 		{name: "rest", args: []string{"rest"}, want: "missing GitHub token"},
 		{name: "serve", args: []string{"serve", "project", t.TempDir()}, want: "missing GitHub token"},
 		{name: "mount", args: []string{"mount", "project", t.TempDir()}, want: "missing GitHub token"},
@@ -346,6 +346,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 }
 
 func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
+	t.Parallel()
 	if got := normalizeCLIChunkSize(0); got != 0 {
 		t.Fatalf("expected zero chunk size to remain unset, got %d", got)
 	}
@@ -364,6 +365,7 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 // above the GitHub release-asset ceiling must clamp DOWN, so the chunker's
 // plan and the uploader's windows agree instead of failing mid-upload.
 func TestNormalizeCLIChunkSizeCeilingClamp(t *testing.T) {
+	t.Parallel()
 	if got := normalizeCLIChunkSize(9999999999); got != chunking.MaxReleaseAssetSize {
 		t.Fatalf("expected ceiling clamp to %d, got %d", chunking.MaxReleaseAssetSize, got)
 	}
@@ -566,6 +568,7 @@ func TestRunPropagatesFlushFailure(t *testing.T) {
 // TestFlexDurationRejectsNonFinite pins the NaN/Inf nit: JSON's extended
 // number grammar parses NaN/Infinity cleanly but they are nonsense TTLs.
 func TestFlexDurationRejectsNonFinite(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{"NaN", "Infinity", "-Infinity", "-30", `"1h"`} {
 		var d flexDuration
 		err := d.UnmarshalJSON([]byte(raw))
@@ -604,6 +607,7 @@ func TestServeRejectsAnonymousWithAuthFile(t *testing.T) {
 // TestAuthFileRejectsUnknownFields pins the typo nit: a misspelled key in
 // the auth JSON (e.g. token_ttl) must fail loudly, not silently default.
 func TestAuthFileRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.json")
 	if err := os.WriteFile(path, []byte(`{"token_signing_key":"k","token_ttl":"1h","users_typo":[]}`), 0o600); err != nil {

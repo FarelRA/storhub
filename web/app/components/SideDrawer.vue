@@ -4,27 +4,11 @@ const emit = defineEmits<{ close: [] }>()
 
 // Below lg the closed drawer is translated off-screen but still rendered;
 // without `inert` it stays in the tab order for keyboard/AT users. At lg+
-// it is a visible column and must never be inert.
-const isDesktop = ref(false)
-function updateIsDesktop() {
-  isDesktop.value = window.matchMedia('(min-width: 1024px)').matches
-}
+// it is a visible column and must never be inert. The breakpoint comes from
+// the shared oracle so the drawer, the entry list, and the CSS agree.
+const { isDesktop } = useBreakpoint()
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
-}
-
-let query: MediaQueryList | null = null
-onMounted(() => {
-  updateIsDesktop()
-  query = window.matchMedia('(min-width: 1024px)')
-  query.addEventListener('change', updateIsDesktop)
-  window.addEventListener('keydown', onKeydown)
-})
-onUnmounted(() => {
-  query?.removeEventListener('change', updateIsDesktop)
-  window.removeEventListener('keydown', onKeydown)
-})
+useEscape(() => emit('close'))
 </script>
 
 <template>

@@ -87,13 +87,13 @@ func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 		return errnoFromError(err)
 	}
 	need := 0
-	if mask&0x4 != 0 {
+	if mask&uint32(shfs.AccessRead) != 0 {
 		need |= shfs.AccessRead
 	}
-	if mask&0x2 != 0 {
+	if mask&uint32(shfs.AccessWrite) != 0 {
 		need |= shfs.AccessWrite
 	}
-	if mask&0x1 != 0 {
+	if mask&uint32(shfs.AccessExec) != 0 {
 		need |= shfs.AccessExec
 	}
 	if need == 0 {
@@ -168,183 +168,244 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	if stale != 0 {
 		return stale
 	}
-	usedLocalSize := false
-	localSize := int64(0)
-	// The overlay is honored only for a caller who may drive it. A
-	// handle attached to the write state is the common case; a path-based
-	// setattr (no fh) still reaches the overlay when the caller is the
-	// single writer who owns that inode's active state (a legitimate
-	// ftruncate on an open file arrives handleless from some clients). A
-	// non-owner's handleless truncate falls through to the hub verbs, which
-	// enforce DAC against the *requesting* caller, so a stranger's
-	// truncate/chmod is never deferred into the owner's next commit.
-	var state *inodeWriteState
+	state, errno := n.setattrOverlayState(ctx, f)
+	if errno != 0 {
+		return errno
+	}
+	usedLocalSize, localSize, errno := n.setattrSize(ctx, targetPath, in, state)
+	if errno != 0 {
+		return errno
+	}
+	if errno := n.setattrMode(ctx, targetPath, in, state); errno != 0 {
+		return errno
+	}
+	if errno := n.setattrOwner(ctx, targetPath, in, state); errno != 0 {
+		return errno
+	}
+	if errno := n.setattrTimes(ctx, targetPath, in, state); errno != 0 {
+		return errno
+	}
+	return n.finishSetattr(ctx, targetPath, state, usedLocalSize, localSize, out, in.Valid)
+}
+
+// setattrOverlayState resolves the write state this setattr may drive.
+// The overlay is honored only for a caller who may drive it. A
+// handle attached to the write state is the common case; a path-based
+// setattr (no fh) still reaches the overlay when the caller is the
+// single writer who owns that inode's active state (a legitimate
+// ftruncate on an open file arrives handleless from some clients). A
+// non-owner's handleless truncate falls through to the hub verbs, which
+// enforce DAC against the *requesting* caller, so a stranger's
+// truncate/chmod is never deferred into the owner's next commit.
+// A nil state means "go to the hub verbs".
+func (n *storhubNode) setattrOverlayState(ctx context.Context, f gofusefs.FileHandle) (*inodeWriteState, syscall.Errno) {
 	if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
-		state = handle.writeState
 		if errno := handle.checkOverlayCaller(ctx); errno != 0 {
-			return errno
+			return nil, errno
 		}
-	} else if st := n.fs.writeStateForInode(n.inode); st != nil && n.fs.callerMayDriveOverlay(ctx, st) {
-		state = st
+		return handle.writeState, 0
 	}
-	if size, ok := in.GetSize(); ok && !n.isDir {
-		if state != nil {
-			state.opMu.Lock()
-			state.mu.Lock()
-			if state.poisoned {
-				state.mu.Unlock()
-				state.opMu.Unlock()
-				return syscall.EIO
-			}
-			err := state.setSizeLocked(int64(size))
-			if err == nil {
-				usedLocalSize = true
-				localSize = state.logicalSize
-			}
+	if st := n.fs.writeStateForInode(n.inode); st != nil && n.fs.callerMayDriveOverlay(ctx, st) {
+		return st, 0
+	}
+	return nil, 0
+}
+
+// setattrSize applies a size change: into the overlay when one is drivable,
+// else via the hub truncate verb. It reports whether the reply must use the
+// overlay's local size instead of the post-commit hub stat.
+func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fuse.SetAttrIn, state *inodeWriteState) (bool, int64, syscall.Errno) {
+	size, ok := in.GetSize()
+	if !ok || n.isDir {
+		return false, 0, 0
+	}
+	if state != nil {
+		state.opMu.Lock()
+		state.mu.Lock()
+		if state.poisoned {
 			state.mu.Unlock()
 			state.opMu.Unlock()
-			if err != nil {
-				return errnoFromError(err)
-			}
-		} else {
-			if _, err := n.fs.hub.TruncateFileContext(ctx, n.fs.project, targetPath, int64(size)); err != nil {
+			return false, 0, syscall.EIO
+		}
+		err := state.setSizeLocked(int64(size))
+		var localSize int64
+		if err == nil {
+			localSize = state.logicalSize
+		}
+		state.mu.Unlock()
+		state.opMu.Unlock()
+		if err != nil {
+			return false, 0, errnoFromError(err)
+		}
+		return true, localSize, 0
+	}
+	if _, err := n.fs.hub.TruncateFileContext(ctx, n.fs.project, targetPath, int64(size)); err != nil {
+		return false, 0, errnoFromError(err)
+	}
+	return false, 0, 0
+}
+
+// setattrMode applies a mode change: staged into the overlay's pending
+// patch (with the ownership DAC at call time) or via the hub chmod verb.
+func (n *storhubNode) setattrMode(ctx context.Context, targetPath string, in *fuse.SetAttrIn, state *inodeWriteState) syscall.Errno {
+	mode, ok := in.GetMode()
+	if !ok {
+		return 0
+	}
+	if state != nil && !n.isDir {
+		entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
+		if err != nil {
+			return errnoFromError(err)
+		}
+		// fchmod still needs the ownership DAC at call
+		// time, not just at open.
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanChmod(ctx, entry); err != nil {
 				return errnoFromError(err)
 			}
 		}
-	}
-	if mode, ok := in.GetMode(); ok {
-		if state != nil && !n.isDir {
-			entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
-			if err != nil {
-				return errnoFromError(err)
-			}
-			// fchmod still needs the ownership DAC at call
-			// time, not just at open.
-			if shfs.IdentityPresent(ctx) {
-				if err := shfs.CanChmod(ctx, entry); err != nil {
-					return errnoFromError(err)
-				}
-			}
-			state.opMu.Lock()
-			state.mu.Lock()
-			if state.poisoned {
-				state.mu.Unlock()
-				state.opMu.Unlock()
-				return syscall.EIO
-			}
-			state.pending.HasMode = true
-			state.pending.Mode = mode & 0o7777
+		state.opMu.Lock()
+		state.mu.Lock()
+		if state.poisoned {
 			state.mu.Unlock()
 			state.opMu.Unlock()
-		} else {
-			if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
-				return errnoFromError(err)
-			}
+			return syscall.EIO
 		}
+		state.pending.HasMode = true
+		state.pending.Mode = mode & 0o7777
+		state.mu.Unlock()
+		state.opMu.Unlock()
+		return 0
 	}
+	if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
+		return errnoFromError(err)
+	}
+	return 0
+}
+
+// setattrOwner applies a uid/gid change: staged into the overlay's pending
+// patch (with the hub's chown DAC now, under the caller's identity) or via
+// the hub chown verb.
+func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *fuse.SetAttrIn, state *inodeWriteState) syscall.Errno {
 	uid, uidOK := in.GetUID()
 	gid, gidOK := in.GetGID()
-	if uidOK || gidOK {
-		entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
-		if err != nil {
-			return errnoFromError(err)
-		}
-		if state != nil && !n.isDir {
-			// Chown via the overlay must satisfy the hub's chown
-			// DAC now, under the caller's identity - not silently at the
-			// state owner's next flush.
-			if shfs.IdentityPresent(ctx) {
-				if err := shfs.CanChown(ctx, entry, uid, gid); err != nil {
-					return errnoFromError(err)
-				}
-			}
-			state.opMu.Lock()
-			state.mu.Lock()
-			if state.poisoned {
-				state.mu.Unlock()
-				state.opMu.Unlock()
-				return syscall.EIO
-			}
-			state.overlayEntryLocked(entry)
-			if !uidOK {
-				uid = entry.UID
-			}
-			if !gidOK {
-				gid = entry.GID
-			}
-			state.pending.HasOwner = true
-			state.pending.UID = uid
-			state.pending.GID = gid
-			state.mu.Unlock()
-			state.opMu.Unlock()
-		} else {
-			if !uidOK {
-				uid = entry.UID
-			}
-			if !gidOK {
-				gid = entry.GID
-			}
-			if err := n.fs.hub.ChownContext(ctx, n.fs.project, targetPath, uid, gid); err != nil {
+	if !uidOK && !gidOK {
+		return 0
+	}
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
+	if err != nil {
+		return errnoFromError(err)
+	}
+	if state != nil && !n.isDir {
+		// Chown via the overlay must satisfy the hub's chown
+		// DAC now, under the caller's identity - not silently at the
+		// state owner's next flush.
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanChown(ctx, entry, uid, gid); err != nil {
 				return errnoFromError(err)
 			}
 		}
+		state.opMu.Lock()
+		state.mu.Lock()
+		if state.poisoned {
+			state.mu.Unlock()
+			state.opMu.Unlock()
+			return syscall.EIO
+		}
+		state.overlayEntryLocked(entry)
+		if !uidOK {
+			uid = entry.UID
+		}
+		if !gidOK {
+			gid = entry.GID
+		}
+		state.pending.HasOwner = true
+		state.pending.UID = uid
+		state.pending.GID = gid
+		state.mu.Unlock()
+		state.opMu.Unlock()
+		return 0
 	}
+	if !uidOK {
+		uid = entry.UID
+	}
+	if !gidOK {
+		gid = entry.GID
+	}
+	if err := n.fs.hub.ChownContext(ctx, n.fs.project, targetPath, uid, gid); err != nil {
+		return errnoFromError(err)
+	}
+	return 0
+}
+
+// setattrTimes applies an atime/mtime change: staged into the overlay's
+// pending patch or via the hub chtimes verb. go-fuse already resolves
+// UTIME_NOW to time.Now(); ok=false is UTIME_OMIT. Passing pointers
+// preserves explicit epoch timestamps that ChtimesContext's omit-on-zero
+// would rewrite.
+func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *fuse.SetAttrIn, state *inodeWriteState) syscall.Errno {
 	atime, atimeOK := in.GetATime()
 	mtime, mtimeOK := in.GetMTime()
-	if atimeOK || mtimeOK {
-		entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
-		if err != nil {
-			return errnoFromError(err)
+	if !atimeOK && !mtimeOK {
+		return 0
+	}
+	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
+	if err != nil {
+		return errnoFromError(err)
+	}
+	if !atimeOK {
+		atime = time.Unix(entry.AccessedAt, 0)
+	}
+	if !mtimeOK {
+		mtime = time.Unix(entry.ModifiedAt, 0)
+	}
+	if state != nil && !n.isDir {
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanSetTimes(ctx, entry); err != nil {
+				return errnoFromError(err)
+			}
 		}
+		state.opMu.Lock()
+		state.mu.Lock()
+		if state.poisoned {
+			state.mu.Unlock()
+			state.opMu.Unlock()
+			return syscall.EIO
+		}
+		state.overlayEntryLocked(entry)
 		if !atimeOK {
 			atime = time.Unix(entry.AccessedAt, 0)
 		}
 		if !mtimeOK {
 			mtime = time.Unix(entry.ModifiedAt, 0)
 		}
-		if state != nil && !n.isDir {
-			if shfs.IdentityPresent(ctx) {
-				if err := shfs.CanSetTimes(ctx, entry); err != nil {
-					return errnoFromError(err)
-				}
-			}
-			state.opMu.Lock()
-			state.mu.Lock()
-			if state.poisoned {
-				state.mu.Unlock()
-				state.opMu.Unlock()
-				return syscall.EIO
-			}
-			state.overlayEntryLocked(entry)
-			if !atimeOK {
-				atime = time.Unix(entry.AccessedAt, 0)
-			}
-			if !mtimeOK {
-				mtime = time.Unix(entry.ModifiedAt, 0)
-			}
-			state.pending.HasTimes = true
-			state.pending.ATime = atime
-			state.pending.MTime = mtime
-			state.mu.Unlock()
-			state.opMu.Unlock()
-		} else {
-			// go-fuse already resolves UTIME_NOW to time.Now(); ok=false
-			// is UTIME_OMIT. Passing pointers preserves explicit epoch
-			// timestamps that ChtimesContext's omit-on-zero would rewrite.
-			var atimePtr, mtimePtr *time.Time
-			if atimeOK {
-				t := atime
-				atimePtr = &t
-			}
-			if mtimeOK {
-				t := mtime
-				mtimePtr = &t
-			}
-			if err := n.fs.hub.ChtimesExplicitContext(ctx, n.fs.project, targetPath, atimePtr, mtimePtr); err != nil {
-				return errnoFromError(err)
-			}
-		}
+		state.pending.HasTimes = true
+		state.pending.ATime = atime
+		state.pending.MTime = mtime
+		state.mu.Unlock()
+		state.opMu.Unlock()
+		return 0
 	}
+	var atimePtr, mtimePtr *time.Time
+	if atimeOK {
+		t := atime
+		atimePtr = &t
+	}
+	if mtimeOK {
+		t := mtime
+		mtimePtr = &t
+	}
+	if err := n.fs.hub.ChtimesExplicitContext(ctx, n.fs.project, targetPath, atimePtr, mtimePtr); err != nil {
+		return errnoFromError(err)
+	}
+	return 0
+}
+
+// finishSetattr stats the result (overlaying the local size when the size
+// came from the overlay), refreshes the overlay's cached entry, and
+// invalidates the kernel copies. It is the single stat+overlay+notify tail
+// for every setattr path above.
+func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, state *inodeWriteState, usedLocalSize bool, localSize int64, out *fuse.AttrOut, valid uint32) syscall.Errno {
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)
@@ -364,7 +425,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	// The attr response updates this handle's cache line, but other cached
 	// copies (other nodes, readdir-plus) expire only via invalidation.
 	n.fs.notifyKernelContentChanged(n.inode)
-	n.fs.debugf("setattr path=%s valid=%#x", targetPath, in.Valid)
+	n.fs.debugf("setattr path=%s valid=%#x", targetPath, valid)
 	return 0
 }
 
@@ -380,11 +441,9 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 		return nil, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
-	entry := entryInfoFromFile(file, childPath, nlink)
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(parentPath, name)
+	entry := shfs.EntryFromFile(file, childPath, nlink)
+	ino := n.attachEntry(ctx, entry, out)
+	n.fs.publishEntry(parentPath, name)
 	return ino, 0
 }
 
@@ -422,15 +481,13 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	}
 	if linked == nil {
 		// A hub that reports success without an entry (e.g. a
-		// directory source) must not be dereferenced by entryInfoFromFile.
+		// directory source) must not be dereferenced by the constructor.
 		return nil, syscall.EPERM
 	}
 	nlink := n.fs.nlinkForEntry(ctx, linkPath)
-	entry := entryInfoFromFile(linked, linkPath, nlink)
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.notifyEntryForPath(parentPath, name)
+	entry := shfs.EntryFromFile(linked, linkPath, nlink)
+	ino := n.attachEntry(ctx, entry, out)
+	n.fs.publishEntry(parentPath, name)
 	return ino, 0
 }
 
@@ -486,25 +543,8 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	attr.Mode = mode
 }
 
+// entryInfoFromFile is kept for existing callers (including tests); it
+// delegates to the single shfs constructor.
 func entryInfoFromFile(file *metadata.FileMeta, path string, nlink int) *shfs.EntryInfo {
-	kind := metadata.NodeKindFile
-	if file.Symlink != "" {
-		kind = metadata.NodeKindSymlink
-	}
-	return &shfs.EntryInfo{
-		Path:          path,
-		Kind:          kind,
-		IsSymlink:     file.Symlink != "",
-		Size:          file.Size,
-		Inode:         file.Inode,
-		Mode:          file.Mode,
-		UID:           file.UID,
-		GID:           file.GID,
-		NLink:         uint32(nlink),
-		CreatedAt:     file.UploadedAt,
-		ModifiedAt:    file.ModifiedAt,
-		AccessedAt:    file.AccessedAt,
-		ChangedAt:     file.ChangedAt,
-		SymlinkTarget: file.Symlink,
-	}
+	return shfs.EntryFromFile(file, path, nlink)
 }

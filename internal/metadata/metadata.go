@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -87,10 +86,6 @@ type ReleaseRef struct {
 	CreatedAt  int64 `json:"cr"`
 }
 
-func (r ReleaseRef) Clone() ReleaseRef {
-	return r
-}
-
 type RepoMetadata struct {
 	Version    int    `json:"v"`
 	Project    string `json:"p"`
@@ -171,38 +166,32 @@ func NewRepoMetadata(project string) *RepoMetadata {
 	}
 }
 
-// Clone produces an independent snapshot of the tree. The four stored maps
-// are copied (so entry insert/remove/replace on either side is invisible to
-// the other), but the ENTRY VALUES are shared: a stored FileMeta/DirMeta is
-// treated as immutable once written - every in-package mutation replaces the
-// map entry with a fresh value (UpsertFile clones its input; Normalize and
-// the identity helpers never mutate a stored Chunks backing array or XAttrs
-// map in place). Callers that want to mutate an entry obtained from a map
-// must FileMeta.Clone/DirMeta.Clone it first, which every existing caller
-// already does. Only Root is deep-copied (it is a single value, and callers
-// mutate its XAttrs through the returned pointer).
-//
-// A clean derived index is SHARED (the read-only maps are referenced, not
-// rebuilt) with the source: reads on the snapshot (DirectoryChildren,
-// NLink, ...) hit the shared index with zero rebuild, and the first tracked
-// mutation on either side drops to a dirty state instead of writing into
-// shared maps. This is what makes a per-operation snapshot cheap.
-// Dirs returns the stored directory map. READ-ONLY: this is the live backing
-// store, so a write through it would silently corrupt the derived index and
-// the serialized-size cache. Mutate through EnsureDirectory, WriteDirDirect,
-// RemoveDirectory.
+// newBareRepoMetadata is the canonical bare-tree constructor: empty stored
+// maps, no derived state, no stamps. Migration (migrateV1ToV2,
+// migrateV3ToV4) and LoadTree share it so wholesale-construction paths start
+// from one shape; NewRepoMetadata above is the stamped public variant.
+func newBareRepoMetadata() *RepoMetadata {
+	return &RepoMetadata{
+		dirs:     make(map[string]DirMeta),
+		files:    make(map[string]FileMeta),
+		chunks:   make(map[int64]ChunkInfo),
+		releases: make(map[string]ReleaseRef),
+	}
+}
+
+// Clone produces an independent snapshot of the tree. See Clone for the
+// sharing contract.
+// Dirs returns the stored directory map. READ-ONLY: do not write through it.
 func (m *RepoMetadata) Dirs() map[string]DirMeta { return m.dirs }
 
-// Files returns the stored file map. READ-ONLY: see Dirs. Mutate through
-// UpsertFile, WriteFileDirect, ReplaceFile, RemoveFile.
+// Files returns the stored file map. READ-ONLY: do not write through it.
 func (m *RepoMetadata) Files() map[string]FileMeta { return m.files }
 
-// Chunks returns the stored chunk map. READ-ONLY: see Dirs. Mutate through
-// PutChunk / DeleteChunk.
+// Chunks returns the stored chunk map. READ-ONLY: do not write through it.
 func (m *RepoMetadata) Chunks() map[int64]ChunkInfo { return m.chunks }
 
-// Releases returns the stored release map. READ-ONLY: see Dirs. Mutate
-// through EnsureRelease, PutRelease, RemoveRelease.
+// Releases returns the stored release map. READ-ONLY: do not write through
+// it.
 func (m *RepoMetadata) Releases() map[string]ReleaseRef { return m.releases }
 
 // Chunk returns one chunk record and whether it exists.
@@ -212,6 +201,25 @@ func (m *RepoMetadata) Chunk(id int64) (ChunkInfo, bool) {
 }
 
 func (m *RepoMetadata) Clone() *RepoMetadata {
+	// Sharing contract: the four stored maps are copied (so entry
+	// insert/remove/replace on either side is invisible to the other), but
+	// the ENTRY VALUES are shared: a stored FileMeta/DirMeta is treated as
+	// immutable once written - every in-package mutation replaces the map
+	// entry with a fresh value (UpsertFile clones its input; Normalize and
+	// the identity helpers never mutate a stored Chunks backing array or
+	// XAttrs map in place). Callers that want to mutate an entry obtained
+	// from a map must FileMeta.Clone/DirMeta.Clone it first, which every
+	// existing caller already does. Only Root is deep-copied (it is a
+	// single value, and callers mutate its XAttrs through the returned
+	// pointer).
+	//
+	// A clean derived index is SHARED (the read-only maps are referenced,
+	// not rebuilt) with the source: reads on the snapshot
+	// (DirectoryChildren, NLink, ...) hit the shared index with zero
+	// rebuild, and the first tracked mutation on either side drops to a
+	// dirty state instead of writing into shared maps. This is what makes
+	// a per-operation snapshot cheap.
+	//
 	// Explicit construction, not a struct copy: RepoMetadata embeds noCopy,
 	// so copying it is a vet error. Clone is the one sanctioned copy path.
 	clone := &RepoMetadata{
@@ -221,10 +229,10 @@ func (m *RepoMetadata) Clone() *RepoMetadata {
 		TotalSize:   m.TotalSize,
 		LastMod:     m.LastMod,
 		Root:        m.Root.Clone(),
-		dirs:        cloneDirMetaMap(m.dirs),
-		files:       cloneFileMetaMap(m.files),
-		chunks:      cloneChunkInfoMap(m.chunks),
-		releases:    cloneReleaseRefMap(m.releases),
+		dirs:        cloneMap(m.dirs),
+		files:       cloneMap(m.files),
+		chunks:      cloneMap(m.chunks),
+		releases:    cloneMap(m.releases),
 		NextInode:   m.NextInode,
 		NextChunkID: m.NextChunkID,
 	}
@@ -251,50 +259,17 @@ func (m *RepoMetadata) Clone() *RepoMetadata {
 	return clone
 }
 
-// cloneDirMetaMap copies the map; DirMeta values are copied by struct and
-// share their (immutable-by-contract) XAttrs maps.
-func cloneDirMetaMap(src map[string]DirMeta) map[string]DirMeta {
+// cloneMap copies a stored map. Values are copied by struct assignment and
+// share their (immutable-by-contract) backing storage: Chunks arrays, XAttrs
+// maps - exactly what Clone's sharing contract requires. A nil map stays
+// nil so wire shape (omitted vs {}) round-trips.
+func cloneMap[K comparable, V any](src map[K]V) map[K]V {
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]DirMeta, len(src))
+	dst := make(map[K]V, len(src))
 	for k, v := range src {
 		dst[k] = v
-	}
-	return dst
-}
-
-// cloneFileMetaMap copies the map; FileMeta values are copied by struct and
-// share their (immutable-by-contract) Chunks backing array and XAttrs map.
-func cloneFileMetaMap(src map[string]FileMeta) map[string]FileMeta {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]FileMeta, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func cloneChunkInfoMap(src map[int64]ChunkInfo) map[int64]ChunkInfo {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[int64]ChunkInfo, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func cloneReleaseRefMap(src map[string]ReleaseRef) map[string]ReleaseRef {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]ReleaseRef, len(src))
-	for k, v := range src {
-		dst[k] = v.Clone()
 	}
 	return dst
 }
@@ -346,7 +321,7 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 	// or will become), never forced here: a legacy blob stays maxBlobVersion
 	// until written as a split document, a split/new tree is maxMetadataVersion.
 	m.Project = chooseNonEmpty(m.Project, project)
-	m.normalizeRoot(now)
+	m.normalizeRoot()
 	if m.dirs == nil {
 		m.dirs = make(map[string]DirMeta)
 	}
@@ -365,18 +340,24 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 	// rebuild or re-marshalling happens here.
 	for path, dir := range m.dirs {
 		original := dir
-		dir.Normalize(now)
-		if !dirMetaEqual(original, dir) {
+		dir.Normalize()
+		if !dirMetaEqual(original, dir) ||
+			(original.XAttrs == nil) != (dir.XAttrs == nil) {
+			// The second clause persists the nil-collapse Normalize
+			// guarantees: lenient equality alone would leave an
+			// empty-but-non-nil map stored.
 			m.dirs[path] = dir
-			m.sizePutDir(path, original, true, dir)
+			m.sizePutDir(path, putTransition(original, true, dir))
 		}
 	}
 	for path, file := range m.files {
 		original := file
-		file.Normalize(now)
-		if !fileMetaEqual(original, file) {
+		file.Normalize()
+		if !fileMetaEqual(original, file) ||
+			(original.Chunks == nil) != (file.Chunks == nil) ||
+			(original.XAttrs == nil) != (file.XAttrs == nil) {
 			m.files[path] = file
-			m.sizePutFile(path, original, true, file)
+			m.sizePutFile(path, putTransition(original, true, file))
 		}
 	}
 	m.sortFileChunksByOffset()
@@ -385,15 +366,14 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 			original := ref
 			ref.CreatedAt = now
 			m.releases[tag] = ref
-			m.sizePutRelease(tag, original, true, ref)
+			m.sizePutRelease(tag, putTransition(original, true, ref))
 		}
 	}
 	m.RecomputeStats()
 	if m.LastMod == 0 {
 		m.LastMod = now
 	}
-	// RecomputeStats already rebuilt the indexes; a second full rebuild
-	// here was pure duplicated O((F+D) log) work.
+	// Indexes are rebuilt by RecomputeStats above; no second rebuild here.
 }
 
 func (m *RepoMetadata) RecomputeStats() {
@@ -425,7 +405,7 @@ func (m *RepoMetadata) RecomputeStats() {
 			original := ref
 			ref.AssetCount = assetCounts[tag]
 			m.releases[tag] = ref
-			m.sizePutRelease(tag, original, true, ref)
+			m.sizePutRelease(tag, putTransition(original, true, ref))
 		}
 	}
 	for _, chunk := range m.chunks {
@@ -474,18 +454,17 @@ func (m *RepoMetadata) PruneUnreferencedChunks() int {
 	return removed
 }
 
-func (d *DirMeta) Normalize(now int64) {
+func (d *DirMeta) Normalize() {
 	if d.Mode == 0 {
 		d.Mode = defaultDirMode()
 	}
 	// Timestamps are NOT repaired here: the v4 contract is complete,
 	// authoritative values (the stacked migrator completes legacy docs;
 	// creation paths stamp real times). Zeros are real epoch values.
-	_ = now
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
-func (f *FileMeta) Normalize(now int64) {
+func (f *FileMeta) Normalize() {
 	if f.Mode == 0 {
 		f.Mode = defaultFileMode(nodeKindOf(f))
 	}
@@ -550,9 +529,9 @@ func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 		CreatedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now,
 		Mode: defaultDirMode(), UID: uid, GID: gid, Inode: m.allocateInode(),
 	}
-	dir.Normalize(now)
+	dir.Normalize()
 	m.dirs[path] = dir
-	m.trackDirPut(path, DirMeta{}, false, dir)
+	m.trackDirPut(path, putTransition(DirMeta{}, false, dir))
 	m.recordDirPut(path, DirMeta{}, false)
 }
 
@@ -587,26 +566,40 @@ func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	return cloneStrings(d.childDirs[path]), cloneStrings(d.childFiles[path])
 }
 
-func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) *ReleaseRef {
+func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) (*ReleaseRef, error) {
 	// Snapshot footgun (same as FindFile/GetRelease): the returned pointer
 	// targets a copy, so mutating its fields never reaches stored state.
 	// The pointer is a read convenience only; write through this method or a
 	// transaction.
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, fmt.Errorf("release tag is required")
+	}
+	if createdAt == 0 {
+		return nil, fmt.Errorf("release %q: CreatedAt is required (epoch zero is not a timestamp)", tag)
+	}
 	if ref, ok := m.releases[tag]; ok {
-		return &ref
+		return &ref, nil
 	}
 	ref := ReleaseRef{CreatedAt: createdAt}
 	if d := m.derived; d != nil {
 		// Chunks may reference this tag before the release exists (replay
 		// order, or a put racing the release op): their counts waited in
-		// pendingAssets and land here, keeping AssetCount exact.
+		// pendingAssets and land here, keeping AssetCount exact. Pending
+		// cannot go negative through the tracked mutators (puts and deletes
+		// balance), but a defensive check keeps a drifted negative from
+		// persisting as a negative AssetCount that Validate would reject
+		// with less context.
 		ref.AssetCount = d.pendingAssets[tag]
 		delete(d.pendingAssets, tag)
+		if ref.AssetCount < 0 {
+			return nil, fmt.Errorf("release %q: asset count went negative (%d) after draining pending", tag, ref.AssetCount)
+		}
 	}
 	m.releases[tag] = ref
-	m.sizePutRelease(tag, ReleaseRef{}, false, ref)
+	m.sizePutRelease(tag, putTransition(ReleaseRef{}, false, ref))
 	m.recordReleasePut(tag, ReleaseRef{}, false)
-	return &ref
+	return &ref, nil
 }
 
 func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
@@ -629,10 +622,10 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	} else {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
-	file.Normalize(createdAt)
+	file.Normalize()
 	m.files[name] = file
-	m.trackFilePut(name, existing, existed, file)
-	m.statsFilePut(existing, existed, file)
+	m.trackFilePut(name, putTransition(existing, existed, file))
+	m.statsFilePut(putTransition(existing, existed, file))
 	m.recordFilePut(name, existing, existed)
 }
 
@@ -658,7 +651,7 @@ func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
 		original := file
 		file.AccessedAt = atime
 		m.files[name] = file
-		m.sizePutFile(name, original, true, file)
+		m.sizePutFile(name, putTransition(original, true, file))
 		m.recordFilePut(name, original, true)
 		return true
 	}
@@ -673,7 +666,7 @@ func (m *RepoMetadata) SetDirAtime(path string, atime int64) bool {
 		original := dir
 		dir.AccessedAt = atime
 		m.dirs[path] = dir
-		m.sizePutDir(path, original, true, dir)
+		m.sizePutDir(path, putTransition(original, true, dir))
 		m.recordDirPut(path, original, true)
 		return true
 	}
@@ -697,10 +690,13 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
 	name = normalizeStoredPath(name)
 	existing, existed := m.files[name]
-	file.Normalize(file.ChangedAt)
+	// Clone the caller's value (mirroring UpsertFile): without this a
+	// caller-retained Chunks slice aliases the stored entry.
+	file = file.Clone()
+	file.Normalize()
 	m.files[name] = file
-	m.trackFilePut(name, existing, existed, file)
-	m.statsFilePut(existing, existed, file)
+	m.trackFilePut(name, putTransition(existing, existed, file))
+	m.statsFilePut(putTransition(existing, existed, file))
 	m.recordFilePut(name, existing, existed)
 }
 
@@ -710,9 +706,9 @@ func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
 func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
 	path = normalizeStoredPath(path)
 	existing, existed := m.dirs[path]
-	dir.Normalize(dir.ChangedAt)
+	dir.Normalize()
 	m.dirs[path] = dir
-	m.trackDirPut(path, existing, existed, dir)
+	m.trackDirPut(path, putTransition(existing, existed, dir))
 	m.recordDirPut(path, existing, existed)
 }
 
@@ -729,43 +725,8 @@ func (m *RepoMetadata) RemoveFile(name string) bool {
 	return true
 }
 
-// AllocateInode returns the next inode number. It has no hidden side effects;
-// callers normalize metadata at commit/load boundaries.
-func (m *RepoMetadata) AllocateInode() uint64 {
-	return m.allocateInode()
-}
-
-// AllocateChunkID returns the next chunk identifier.
-func (m *RepoMetadata) AllocateChunkID() int64 {
-	return m.allocateChunkID()
-}
-
-// InitializeNewFileIdentity materializes a complete identity (inode, mode,
-// owner, timestamps) for a newly created file entry.
-func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
-	initializeNewFileIdentity(meta, file, now)
-}
-
-// InitializeNewFileIdentityFields applies creation defaults (mode, owner,
-// timestamps) without minting an inode. Callers that later create the node
-// against the authoritative metadata must let InitializeNewFileIdentity
-// allocate there, so the inode counter bumps exactly once.
-func InitializeNewFileIdentityFields(file *FileMeta, now int64) {
-	initializeNewFileIdentityFields(file, now)
-}
-
-// PreserveFileIdentity carries the existing node's stable identity onto an
-// updated entry. A type change (regular file <-> symlink) carries nothing.
-func PreserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
-	preserveFileIdentity(file, existing, now)
-}
-
-// ParseNumericReleaseTag extracts the numeric part of a "v<N>" release tag.
-func ParseNumericReleaseTag(tag string) (int, bool) {
-	return parseNumericReleaseTag(tag)
-}
-
 func (m *RepoMetadata) RemoveRelease(tag string) bool {
+	tag = strings.TrimSpace(tag)
 	old, ok := m.releases[tag]
 	if !ok {
 		return false
@@ -774,19 +735,45 @@ func (m *RepoMetadata) RemoveRelease(tag string) bool {
 	// Releases are not part of the derived indexes; only the size cache
 	// needs the removal.
 	m.sizeRemoveRelease(tag, old)
-	m.recordReleaseRemove(tag)
+	// The released count is not forgotten: chunks still referencing the tag
+	// keep their records, so the count waits in pendingAssets for the next
+	// EnsureRelease/PutRelease to drain. RemoveRelease+EnsureRelease
+	// round-trips AssetCount exactly instead of undercounting (or, with
+	// interleaved puts, going negative).
+	d := m.ensureDerived()
+	if d.pendingAssets == nil {
+		d.pendingAssets = make(map[string]int)
+	}
+	d.pendingAssets[tag] += old.AssetCount
+	m.recordReleaseRemove(tag, old)
 	return true
 }
 
-// PutChunk stores a chunk record verbatim, maintaining the serialized-size
-// cache incrementally. Direct `meta.chunks[id] = info` writes bypass the
-// size accounting when they overwrite an existing id (a new id is still
-// caught by the length fingerprint), so tracked writers should use this.
-// The stored ChunkInfo is a pure value type; no cloning is needed.
-func (m *RepoMetadata) PutChunk(id int64, info ChunkInfo) {
+// PutChunk stores a chunk record, maintaining the serialized-size cache and
+// the release asset count incrementally. Direct `meta.chunks[id] = info`
+// writes bypass both, so tracked writers must use this. The stored ChunkInfo
+// is a pure value type; no cloning is needed.
+//
+// The tag is trimmed and negative sizes/offsets/asset fields are rejected:
+// an advisory-only contract let corrupt records in that Validate then had to
+// chase. Callers replaying untrusted data must handle the error.
+func (m *RepoMetadata) PutChunk(id int64, info ChunkInfo) error {
+	info.Release = strings.TrimSpace(info.Release)
+	if info.Size < 0 {
+		return fmt.Errorf("chunk %d: negative size %d", id, info.Size)
+	}
+	if info.Offset < 0 {
+		return fmt.Errorf("chunk %d: negative offset %d", id, info.Offset)
+	}
+	if info.AssetOffset < 0 {
+		return fmt.Errorf("chunk %d: negative asset offset %d", id, info.AssetOffset)
+	}
+	if info.AssetID < 0 {
+		return fmt.Errorf("chunk %d: negative asset id %d", id, info.AssetID)
+	}
 	old, existed := m.chunks[id]
 	m.chunks[id] = info
-	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, old, existed, info, true)
+	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, putTransition(old, existed, info))
 	if existed && old.Release != info.Release {
 		m.countAsset(old.Release, -1)
 	}
@@ -794,6 +781,7 @@ func (m *RepoMetadata) PutChunk(id int64, info ChunkInfo) {
 		m.countAsset(info.Release, +1)
 	}
 	m.recordChunkPut(id, existed)
+	return nil
 }
 
 // DeleteChunk removes a chunk record, maintaining the serialized-size cache
@@ -804,28 +792,50 @@ func (m *RepoMetadata) DeleteChunk(id int64) bool {
 		return false
 	}
 	delete(m.chunks, id)
-	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, old, true, ChunkInfo{}, false)
+	sizeApplySection(&m.ensureDerived().sections[secChunks], m.chunks, id, removeTransition(old))
 	m.countAsset(old.Release, -1)
 	m.recordChunkDelete(id)
 	return true
 }
 
-// PutRelease stores a release ref verbatim, maintaining the serialized-size
-// cache incrementally (the release mirror of PutChunk). Direct
+// PutRelease stores a release ref, maintaining the serialized-size cache
+// incrementally (the release mirror of PutChunk). Direct
 // `meta.releases[tag] = ref` writes bypass size accounting when they
 // overwrite an existing tag (a new tag is still caught by the length
 // fingerprint), so tracked writers must use this.
-func (m *RepoMetadata) PutRelease(tag string, ref ReleaseRef) {
+//
+// The tag is trimmed, a zero CreatedAt is rejected (Normalize treats it as
+// non-canonical), and a negative AssetCount is rejected: refs are
+// authoritative counts, not deltas.
+func (m *RepoMetadata) PutRelease(tag string, ref ReleaseRef) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return fmt.Errorf("release tag is required")
+	}
+	if ref.CreatedAt == 0 {
+		return fmt.Errorf("release %q: CreatedAt is required (epoch zero is not a timestamp)", tag)
+	}
+	if ref.AssetCount < 0 {
+		return fmt.Errorf("release %q: negative asset count %d", tag, ref.AssetCount)
+	}
 	old, existed := m.releases[tag]
 	if d := m.derived; d != nil {
 		// Fold in counts that arrived while the tag had no ref, exactly
 		// like EnsureRelease; then the stored ref is authoritative.
+		// The sum must stay non-negative: a negative pending (more removals
+		// than puts while unreferenced) means the stored snapshot and the
+		// chunk walk already diverged, and persisting a negative count
+		// would only trip Validate later with less context.
 		ref.AssetCount += d.pendingAssets[tag]
 		delete(d.pendingAssets, tag)
+		if ref.AssetCount < 0 {
+			return fmt.Errorf("release %q: asset count went negative (%d) after draining pending", tag, ref.AssetCount)
+		}
 	}
 	m.releases[tag] = ref
-	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, old, existed, ref, true)
+	sizeApplySection(&m.ensureDerived().sections[secReleases], m.releases, tag, putTransition(old, existed, ref))
 	m.recordReleasePut(tag, old, existed)
+	return nil
 }
 
 func (m *RepoMetadata) AllFiles() []FileMeta {
@@ -894,12 +904,12 @@ func cloneStrings(src []string) []string {
 
 // --- value equality helpers ----------------------------------------------
 
-// xAttrsEqual is strict about nil vs empty so callers that write back
-// normalized values cannot skip the nil-collapse Normalize guarantees.
+// xAttrsEqual compares by length and content: nil and empty are EQUAL. Go's
+// encoding/json omits both nil and len-0 maps under omitempty, so the two
+// serialize identically and distinguishing them only causes spurious cache
+// misses (and skipped canonical write-backs, which Normalize triggers
+// explicitly instead).
 func xAttrsEqual(a, b XAttrMap) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil && len(a) == len(b)
-	}
 	if len(a) != len(b) {
 		return false
 	}
@@ -926,15 +936,19 @@ func fileMetaEqual(a, b FileMeta) bool {
 		a.GID != b.GID || a.Inode != b.Inode {
 		return false
 	}
-	if (a.Chunks == nil) != (b.Chunks == nil) {
-		return false
-	}
+	// Chunks compare by content only (slices.Equal treats nil and empty as
+	// equal): both serialize identically under omitempty, so the
+	// distinction only causes spurious cache misses. Normalize triggers
+	// canonical write-backs explicitly (see its loops), so collapsing here
+	// cannot leave a non-canonical entry stored.
 	if !slices.Equal(a.Chunks, b.Chunks) {
 		return false
 	}
 	return xAttrsEqual(a.XAttrs, b.XAttrs)
 }
 
+// preserveFileIdentity carries the existing node's stable identity onto an
+// updated entry. A type change (regular file <-> symlink) carries nothing.
 func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 	// A type change (regular file <-> symlink) replaces the whole node rather
 	// than updating it: no identity carries over. In particular the old
@@ -957,27 +971,63 @@ func preserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
 		file.GID = existing.GID
 	}
 	if file.UploadedAt == 0 {
-		file.UploadedAt = chooseNonZeroTime(existing.UploadedAt, now)
+		file.UploadedAt = existing.UploadedAt
+		if file.UploadedAt == 0 {
+			file.UploadedAt = now
+		}
 	}
 	if file.ModifiedAt == 0 {
-		file.ModifiedAt = chooseNonZeroTime(now, existing.ModifiedAt, file.UploadedAt)
+		file.ModifiedAt = now
+		if file.ModifiedAt == 0 {
+			file.ModifiedAt = existing.ModifiedAt
+		}
+		if file.ModifiedAt == 0 {
+			file.ModifiedAt = file.UploadedAt
+		}
 	}
 	if file.AccessedAt == 0 {
-		file.AccessedAt = chooseNonZeroTime(existing.AccessedAt, file.ModifiedAt)
+		file.AccessedAt = existing.AccessedAt
+		if file.AccessedAt == 0 {
+			file.AccessedAt = file.ModifiedAt
+		}
 	}
 	if file.ChangedAt == 0 {
-		file.ChangedAt = chooseNonZeroTime(now, existing.ChangedAt, file.ModifiedAt)
+		file.ChangedAt = now
+		if file.ChangedAt == 0 {
+			file.ChangedAt = existing.ChangedAt
+		}
+		if file.ChangedAt == 0 {
+			file.ChangedAt = file.ModifiedAt
+		}
 	}
 	if len(file.XAttrs) == 0 && len(existing.XAttrs) > 0 {
 		file.XAttrs = existing.XAttrs.Clone()
 	}
 }
 
+// PreserveFileIdentity carries the existing node's stable identity onto an
+// updated entry. Exported because POSIX update paths outside this package
+// assemble entries before storing them through the tracked mutators; the
+// carry-over rule stays owned here.
+func PreserveFileIdentity(file *FileMeta, existing *FileMeta, now int64) {
+	preserveFileIdentity(file, existing, now)
+}
+
+// initializeNewFileIdentity materializes a complete identity (inode, mode,
+// owner, timestamps) for a newly created file entry.
 func initializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 	if file.Inode == 0 {
 		file.Inode = meta.allocateInode()
 	}
 	initializeNewFileIdentityFields(file, now)
+}
+
+// InitializeNewFileIdentity materializes a complete identity for a newly
+// created file entry against this tree. Exported for the same reason as
+// InitializeNewFileIdentityFields: upload paths assemble entries before
+// storing them; the counter rule in AllocateInode applies.
+func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
+	initializeNewFileIdentity(meta, file, now)
 }
 
 // initializeNewFileIdentityFields applies every creation default EXCEPT the
@@ -1016,7 +1066,26 @@ func initializeNewFileIdentityFields(file *FileMeta, now int64) {
 	}
 }
 
-func (m *RepoMetadata) normalizeRoot(now int64) {
+// InitializeNewFileIdentityFields applies every creation default EXCEPT the
+// inode: mode, owner, and the full timestamp set. Exported because upload
+// paths outside this package assemble entries before storing them; the
+// inode itself is minted by initializeNewFileIdentity (via UpsertFile) so
+// the counter rule above stays intact.
+func InitializeNewFileIdentityFields(file *FileMeta, now int64) {
+	initializeNewFileIdentityFields(file, now)
+}
+
+func (m *RepoMetadata) normalizeRoot() {
+	m.normalizeRootFast()
+	m.reconcileCounters()
+}
+
+// normalizeRootFast applies the O(1) root touch-ups (inode/mode defaults,
+// xattr normalization) without the O(files+dirs+chunks) counter
+// reconciliation. normalizeRoot (load/normalize paths) adds the
+// reconciliation; SealTransaction uses only this fast path so sealing stays
+// O(1) per transaction.
+func (m *RepoMetadata) normalizeRootFast() {
 	if m.Root.Inode == 0 {
 		m.Root.Inode = 1
 	}
@@ -1025,239 +1094,45 @@ func (m *RepoMetadata) normalizeRoot(now int64) {
 	}
 	// Root timestamps are authoritative under v4 (see DirMeta.Normalize).
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
-	m.reconcileCounters()
 }
 
+// allocateInode mints the next inode number and bumps the counter. It
+// trusts the counter unconditionally; load paths reconcile it first via
+// reconcileCounters.
 func (m *RepoMetadata) allocateInode() uint64 {
 	ino := m.NextInode
 	m.NextInode++
 	return ino
 }
 
+// AllocateInode mints a fresh inode against this tree. Call it ONLY on the
+// tree that will be published (the UpdateRepoMetadataContext candidate, or a
+// working copy swapped in on success) while holding the owner's
+// authoritative lock. Minting against a throwaway clone silently skips the
+// counter bump and the next allocation re-issues the same inode, so the
+// counter lives on exactly one authoritative RepoMetadata per project.
+func (m *RepoMetadata) AllocateInode() uint64 {
+	return m.allocateInode()
+}
+
+// allocateChunkID mints the next chunk identifier and bumps the counter,
+// mirroring allocateInode.
 func (m *RepoMetadata) allocateChunkID() int64 {
 	id := m.NextChunkID
 	m.NextChunkID++
 	return id
 }
 
-func (m *RepoMetadata) migrateV1(data []byte) error {
-	var v1 struct {
-		Version      int       `json:"version"`
-		Project      string    `json:"project"`
-		NextInode    uint64    `json:"next_inode,omitempty"`
-		TotalFiles   int       `json:"total_files"`
-		TotalSize    int64     `json:"total_size"`
-		LastModified time.Time `json:"last_modified"`
-		Root         struct {
-			Inode      uint64            `json:"inode"`
-			Mode       uint32            `json:"mode"`
-			UID        uint32            `json:"uid"`
-			GID        uint32            `json:"gid"`
-			NLink      uint32            `json:"nlink"`
-			CreatedAt  time.Time         `json:"created_at"`
-			ModifiedAt time.Time         `json:"modified_at"`
-			AccessedAt time.Time         `json:"accessed_at"`
-			ChangedAt  time.Time         `json:"changed_at"`
-			XAttrs     map[string]string `json:"xattrs,omitempty"`
-		} `json:"root"`
-		Directories []struct {
-			Path       string            `json:"path"`
-			CreatedAt  time.Time         `json:"created_at"`
-			ModifiedAt time.Time         `json:"modified_at"`
-			AccessedAt time.Time         `json:"accessed_at,omitempty"`
-			ChangedAt  time.Time         `json:"changed_at,omitempty"`
-			Mode       uint32            `json:"mode,omitempty"`
-			UID        uint32            `json:"uid,omitempty"`
-			GID        uint32            `json:"gid,omitempty"`
-			Inode      uint64            `json:"inode,omitempty"`
-			NLink      uint32            `json:"nlink,omitempty"`
-			XAttrs     map[string]string `json:"xattrs,omitempty"`
-		} `json:"directories"`
-		Releases []struct {
-			Tag        string    `json:"tag"`
-			AssetCount int       `json:"asset_count"`
-			CreatedAt  time.Time `json:"created_at"`
-			Files      []struct {
-				Name          string            `json:"name"`
-				Kind          string            `json:"kind,omitempty"`
-				Size          int64             `json:"size"`
-				Release       string            `json:"release"`
-				UploadedAt    time.Time         `json:"uploaded_at"`
-				ModifiedAt    time.Time         `json:"modified_at,omitempty"`
-				AccessedAt    time.Time         `json:"accessed_at,omitempty"`
-				ChangedAt     time.Time         `json:"changed_at,omitempty"`
-				Mode          uint32            `json:"mode,omitempty"`
-				UID           uint32            `json:"uid,omitempty"`
-				GID           uint32            `json:"gid,omitempty"`
-				Inode         uint64            `json:"inode,omitempty"`
-				NLink         uint32            `json:"nlink,omitempty"`
-				SymlinkTarget string            `json:"symlink_target,omitempty"`
-				XAttrs        map[string]string `json:"xattrs,omitempty"`
-				Chunks        []struct {
-					Name        string `json:"name"`
-					Size        int64  `json:"size"`
-					Index       int    `json:"index"`
-					Offset      int64  `json:"offset"`
-					Release     string `json:"release"`
-					AssetOffset int64  `json:"asset_offset"`
-					AssetID     int64  `json:"asset_id"`
-				} `json:"chunks"`
-			} `json:"files"`
-		} `json:"releases"`
-	}
-	if err := json.Unmarshal(data, &v1); err != nil {
-		return fmt.Errorf("unmarshal v1 metadata: %w", err)
-	}
-
-	m.Version = maxBlobVersion
-	m.Project = v1.Project
-	m.TotalFiles = v1.TotalFiles
-	m.TotalSize = v1.TotalSize
-	m.LastMod = timeToUnix(v1.LastModified)
-	// Seed the inode counter past everything the document declares so
-	// allocations during migration (synthesized parents) can never mint a
-	// colliding or zero inode.
-	maxInode := v1.Root.Inode
-	if v1.NextInode > maxInode {
-		maxInode = v1.NextInode
-	}
-	for _, d := range v1.Directories {
-		if d.Inode > maxInode {
-			maxInode = d.Inode
-		}
-	}
-	for _, r := range v1.Releases {
-		for _, f := range r.Files {
-			if f.Inode > maxInode {
-				maxInode = f.Inode
-			}
-		}
-	}
-	// +1: allocateInode returns the counter and then increments, so seeding
-	// with maxInode itself would mint a duplicate of the highest inode.
-	m.NextInode = maxInode + 1
-	// Chunk IDs start at 1; the live maximum is raised by allocation below.
-	m.NextChunkID = 1
-
-	m.Root = DirMeta{
-		CreatedAt: timeToUnix(v1.Root.CreatedAt), ModifiedAt: timeToUnix(v1.Root.ModifiedAt),
-		AccessedAt: timeToUnix(v1.Root.AccessedAt), ChangedAt: timeToUnix(v1.Root.ChangedAt),
-		Mode: v1.Root.Mode, UID: v1.Root.UID, GID: v1.Root.GID,
-		Inode: v1.Root.Inode, XAttrs: xattrMapFromStrings(v1.Root.XAttrs),
-	}
-
-	m.dirs = make(map[string]DirMeta, len(v1.Directories))
-	for _, d := range v1.Directories {
-		dirMeta := DirMeta{
-			CreatedAt: timeToUnix(d.CreatedAt), ModifiedAt: timeToUnix(d.ModifiedAt),
-			AccessedAt: timeToUnix(d.AccessedAt), ChangedAt: timeToUnix(d.ChangedAt),
-			Mode: d.Mode, UID: d.UID, GID: d.GID,
-			Inode: d.Inode, XAttrs: xattrMapFromStrings(d.XAttrs),
-		}
-		if dirMeta.Inode == 0 {
-			dirMeta.Inode = m.allocateInode()
-		}
-		m.dirs[d.Path] = dirMeta
-	}
-
-	m.files = make(map[string]FileMeta)
-	m.chunks = make(map[int64]ChunkInfo)
-	m.releases = make(map[string]ReleaseRef)
-
-	// A path must map to exactly one node; v1 documents carrying the same
-	// name twice are corrupt, and silently keeping one copy would hide
-	// which bytes survived.
-	seenFiles := make(map[string]struct{})
-
-	// ensureAncestors synthesizes any directory components a migrated path
-	// needs but the v1 document never listed, so Validate cannot trip over
-	// dangling parents.
-	now := timeToUnix(v1.LastModified)
-	ensureAncestors := func(path string) {
-		for dir := parentPath(path); dir != "" && dir != "."; dir = parentPath(dir) {
-			if _, ok := m.dirs[dir]; ok {
-				return
-			}
-			m.dirs[dir] = DirMeta{
-				Inode:      m.allocateInode(),
-				CreatedAt:  now,
-				ModifiedAt: now,
-				AccessedAt: now,
-				ChangedAt:  now,
-			}
-		}
-	}
-
-	for _, r := range v1.Releases {
-		ref := ReleaseRef{
-			AssetCount: r.AssetCount,
-			CreatedAt:  timeToUnix(r.CreatedAt),
-		}
-		m.releases[r.Tag] = ref
-
-		for _, f := range r.Files {
-			if _, dup := seenFiles[f.Name]; dup {
-				return fmt.Errorf("v1 metadata lists %q more than once; refusing to guess which copy is real", f.Name)
-			}
-			seenFiles[f.Name] = struct{}{}
-			symlink := ""
-			if f.Kind == "symlink" || f.SymlinkTarget != "" {
-				symlink = f.SymlinkTarget
-			}
-
-			chunkIDs := make([]int64, 0, len(f.Chunks))
-			for _, c := range f.Chunks {
-				chunkID := m.allocateChunkID()
-				chunkIDs = append(chunkIDs, chunkID)
-				ci := ChunkInfo{
-					Size: c.Size, Offset: c.Offset, Release: chooseNonEmpty(c.Release, f.Release, r.Tag),
-					AssetOffset: c.AssetOffset, AssetID: c.AssetID,
-				}
-				m.chunks[chunkID] = ci
-			}
-
-			fileMeta := FileMeta{
-				Chunks:     chunkIDs,
-				Size:       f.Size,
-				Symlink:    symlink,
-				UploadedAt: timeToUnix(f.UploadedAt),
-				ModifiedAt: timeToUnix(f.ModifiedAt),
-				AccessedAt: timeToUnix(f.AccessedAt),
-				ChangedAt:  timeToUnix(f.ChangedAt),
-				Mode:       f.Mode,
-				UID:        f.UID,
-				GID:        f.GID,
-				Inode:      f.Inode,
-				XAttrs:     xattrMapFromStrings(f.XAttrs),
-			}
-			if symlink != "" {
-				fileMeta.Size = int64(len(symlink))
-				fileMeta.Chunks = nil
-			}
-			if fileMeta.Inode == 0 {
-				fileMeta.Inode = m.allocateInode()
-			}
-			ensureAncestors(f.Name)
-			m.files[f.Name] = fileMeta
-		}
-	}
-
-	// Declared directories may also sit under undeclared parents.
-	dirPaths := make([]string, 0, len(m.dirs))
-	for dir := range m.dirs {
-		dirPaths = append(dirPaths, dir)
-	}
-	sort.Strings(dirPaths) // parents before children via lexicographic order
-	for _, dir := range dirPaths {
-		ensureAncestors(dir)
-	}
-
-	// The v1 counters may be stale or absent; recompute from what actually
-	// migrated so Validate compares against reality.
-	m.RecomputeStats()
-	return nil
+// AllocateChunkID mints a fresh chunk identifier against this tree. Same
+// ownership rule as AllocateInode: the tree that will be published, under
+// the authoritative lock. Rebase collision remapping and upload chunk-ID
+// assignment need concrete IDs before any store call, which is why this
+// cannot be folded into PutChunk.
+func (m *RepoMetadata) AllocateChunkID() int64 {
+	return m.allocateChunkID()
 }
 
+// parseNumericReleaseTag extracts the numeric part of a "v<N>" release tag.
 func parseNumericReleaseTag(tag string) (int, bool) {
 	trimmed := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tag)), "v")
 	if trimmed == "" || trimmed == "-" || trimmed[0] < '0' || trimmed[0] > '9' {
@@ -1268,6 +1143,13 @@ func parseNumericReleaseTag(tag string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// ParseNumericReleaseTag extracts the numeric part of a "v<N>" release tag.
+// Exported because release-rotation code outside this package walks the
+// catalog by number; the parsing rule stays owned here.
+func ParseNumericReleaseTag(tag string) (int, bool) {
+	return parseNumericReleaseTag(tag)
 }
 
 // chooseNonEmpty returns the first value that is non-blank, trimmed.
@@ -1291,10 +1173,10 @@ func (m *RepoMetadata) ReplaceFile(name string, file FileMeta) bool {
 		return false
 	}
 	replacement := file.Clone()
-	replacement.Normalize(replacement.ChangedAt)
+	replacement.Normalize()
 	m.files[name] = replacement
-	m.trackFilePut(name, existing, true, replacement)
-	m.statsFilePut(existing, true, replacement)
+	m.trackFilePut(name, putTransition(existing, true, replacement))
+	m.statsFilePut(putTransition(existing, true, replacement))
 	m.recordFilePut(name, existing, true)
 	return true
 }
