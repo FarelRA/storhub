@@ -651,6 +651,69 @@ func (w *inodeWriteState) overlayEntryLocked(entry *shfs.EntryInfo) {
 	entry.ChangedAt = max(entry.ChangedAt, w.fs.hub.Now())
 }
 
+// privClearBits is the setuid+setgid mask a data write clears for
+// non-admin callers (POSIX CAP_FSETID semantics: only a privileged writer
+// keeps the bits).
+const privClearBits = 0o6000
+
+// stagePrivClearLocked stages the cleared form of effective into the overlay
+// pending patch when effective carries setuid/setgid and the caller is
+// non-admin. Admin writers leave the bits untouched. An explicit fchmod
+// afterwards overwrites pending wholesale, so staged clears compose: a
+// later write re-clears from the staged mode, and a later chmod sets
+// exactly what was requested, never ORing cleared bits back. Caller must
+// hold state.opMu and state.mu.
+func stagePrivClearLocked(ctx context.Context, state *inodeWriteState, effective uint32) {
+	if shfs.IdentityPresent(ctx) && shfs.IdentityFromContext(ctx).Admin {
+		return
+	}
+	if effective&privClearBits == 0 {
+		return
+	}
+	state.pending.HasMode = true
+	state.pending.Mode = effective &^ privClearBits
+}
+
+// stagePrivClearForDataWrite resolves the overlay-visible mode and stages
+// its cleared form when a data write (handle Write or overlay ftruncate)
+// lands on setuid/setgid bits for a non-admin caller. Staging into pending
+// is what makes pre-commit stat (Getattr/Lookup overlay the pending patch)
+// and exec (kernel mode from Getattr) observe cleared bits before the hub
+// verbs sanitize at commit time. Caller must hold state.opMu and state.mu;
+// the hub stat for the unstaged case runs with mu released while opMu stays
+// held, so no commit or competing mutation interleaves (same pattern as the
+// dirty-range backfill). ctx must already carry the caller identity.
+func (s *Filesystem) stagePrivClearForDataWrite(ctx context.Context, state *inodeWriteState, targetPath string) {
+	if shfs.IdentityPresent(ctx) && shfs.IdentityFromContext(ctx).Admin {
+		return
+	}
+	if state.pending.HasMode {
+		stagePrivClearLocked(ctx, state, state.pending.Mode)
+		return
+	}
+	if targetPath == "" {
+		// Detached (unlinked) handle: no path to stat, and the commit
+		// discards anyway. Staging a mode derived from the wrong entry
+		// (e.g. root) would corrupt the handle's own stat view.
+		return
+	}
+	state.mu.Unlock()
+	entry, err := s.hub.StatPathContext(ctx, s.project, targetPath)
+	state.mu.Lock()
+	if err != nil || entry == nil {
+		s.debugf("priv-clear stat failed path=%s err=%v", targetPath, err)
+		return
+	}
+	if state.poisoned || state.deleted {
+		return
+	}
+	effective := entry.Mode
+	if state.pending.HasMode {
+		effective = state.pending.Mode
+	}
+	stagePrivClearLocked(ctx, state, effective)
+}
+
 func (w *inodeWriteState) plannedRangesLocked() []ByteRange {
 	chunkSize := normalizedChunkSize(w.fs.hub.ChunkSize())
 	planned := make([]ByteRange, 0, len(w.dirtyRanges))
@@ -1117,6 +1180,12 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err := h.writeState.ensureDirtyBounded(ctx); err != nil {
 		return uint32(n), errnoFromError(err)
 	}
+	// POSIX privilege clearing is overlay-immediate, not commit-deferred:
+	// a non-admin data write stages the cleared mode into pending now, so
+	// pre-commit stat and exec already observe it. The commit-time hub
+	// verbs sanitize again; this staging must never resurrect bits, only
+	// clear them (see stagePrivClearLocked).
+	h.fs.stagePrivClearForDataWrite(h.fs.callerContext(ctx), h.writeState, h.writeState.path)
 	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
 	return uint32(n), 0
 }

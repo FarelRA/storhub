@@ -288,6 +288,11 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 				s.mu.Unlock()
 				return nil, err
 			}
+			// O_TRUNC is a data write for privilege purposes: stage
+			// the cleared mode immediately for non-admin openers.
+			// ctx already carries the caller identity (bound in
+			// Open/Create).
+			s.stagePrivClearForDataWrite(ctx, writeState, writeState.path)
 			writeState.mu.Unlock()
 			writeState.opMu.Unlock()
 		}

@@ -231,6 +231,11 @@ func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fu
 		var localSize int64
 		if err == nil {
 			localSize = state.logicalSize
+			// An overlay ftruncate is a data write for privilege
+			// purposes: stage the cleared mode immediately so
+			// pre-commit stat and exec observe it. ctx already
+			// carries the caller identity (bound in Setattr).
+			n.fs.stagePrivClearForDataWrite(ctx, state, targetPath)
 		}
 		state.mu.Unlock()
 		state.opMu.Unlock()

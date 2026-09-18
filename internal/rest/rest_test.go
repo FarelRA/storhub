@@ -731,6 +731,7 @@ func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, fileP
 	} else if int64(len(node.data.bytes)) < size {
 		node.data.bytes = append(append([]byte(nil), node.data.bytes...), make([]byte, size-int64(len(node.data.bytes)))...)
 	}
+	node.entry.Mode &^= 0o6000
 	p, err := c.getExistingProject(project)
 	if err != nil {
 		return nil, err
@@ -752,6 +753,7 @@ func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePat
 		return nil, err
 	}
 	node.data.bytes = append(node.data.bytes, data...)
+	node.entry.Mode &^= 0o6000
 	p, err := c.getExistingProject(project)
 	if err != nil {
 		return nil, err
@@ -787,6 +789,7 @@ func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePa
 	}
 	copy(content[offset:end], data)
 	node.data.bytes = content
+	node.entry.Mode &^= 0o6000
 	p, err := c.getExistingProject(project)
 	if err != nil {
 		return nil, err
@@ -836,6 +839,7 @@ func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath
 	}
 	patched := append(append(content[:offset:offset], edit...), content[offset+deleteSize:]...)
 	node.data.bytes = patched
+	node.entry.Mode &^= 0o6000
 	p, err := c.getExistingProject(project)
 	if err != nil {
 		return nil, err
@@ -1042,6 +1046,7 @@ func (c *fakeRESTClient) ChownContext(ctx context.Context, project, targetPath s
 	now := c.tick()
 	node.entry.UID = uid
 	node.entry.GID = gid
+	node.entry.Mode &^= 0o6000
 	node.entry.ChangedAt = now
 	return nil
 }
