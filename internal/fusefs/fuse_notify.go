@@ -12,9 +12,10 @@ var (
 	notifyDeleteFunc = func(parent *storhubNode, name string, child *storhubNode) {
 		_ = parent.NotifyDelete(name, child.EmbeddedInode())
 	}
+	notifyContentFunc = func(node *storhubNode) { _ = node.NotifyContent(0, 0) }
 )
 
-// notifyKey identifies one pending entry/delete notification.
+// notifyKey identifies one pending entry/delete/content notification.
 type notifyKey struct {
 	kind uint8 // notifyKindEntry or notifyKindDelete
 	node *storhubNode
@@ -24,6 +25,7 @@ type notifyKey struct {
 const (
 	notifyKindEntry uint8 = iota
 	notifyKindDelete
+	notifyKindContent
 )
 
 func (s *Filesystem) notifyEntryForPath(dirPath, name string) {
@@ -49,11 +51,55 @@ func (n *storhubNode) notifyDelete(name string, childInode uint64) {
 }
 
 func (s *Filesystem) notifyKernelContentChanged(inode uint64) {
+	// Async through the notify slots, never a synchronous kernel write on
+	// the caller: commit paths must not hold the inode opMu across a
+	// NotifyContent round trip (see commitNotifies), and the slot bound
+	// keeps backpressure gentle instead of piling up goroutines.
 	s.invalCount.Add(1)
-	s.mu.Lock()
+	s.mu.RLock()
 	node := s.nodes[inode]
-	s.mu.Unlock()
-	safeNotifyContent(node)
+	s.mu.RUnlock()
+	safeNotifyContentAsync(node)
+}
+
+// commitNotifies collects kernel-cache invalidation intents DURING a
+// commit while the inode opMu (and the state mu) is held, for emission
+// AFTER both are released. The commit cycle this breaks: commit held opMu
+// across synchronous NotifyContent, while the kernel reverse-invalidate
+// waited on page writeback whose Write handler needs opMu, wedging mounts.
+// Emitting after unlock through the async slots keeps the same set of
+// invalidations (redundant ones are acceptable and coalesce in flight;
+// missed ones are not, so every path that notified before must append
+// here and the committer must emit on every success return).
+type commitNotifies struct {
+	contents []uint64
+	entries  [][2]string
+}
+
+func (c *commitNotifies) addContent(inode uint64) {
+	if c == nil {
+		return
+	}
+	c.contents = append(c.contents, inode)
+}
+
+func (c *commitNotifies) addEntry(dir, name string) {
+	if c == nil {
+		return
+	}
+	c.entries = append(c.entries, [2]string{dir, name})
+}
+
+func (c *commitNotifies) emit(fs *Filesystem) {
+	if c == nil || fs == nil {
+		return
+	}
+	for _, inode := range c.contents {
+		fs.notifyKernelContentChanged(inode)
+	}
+	for _, e := range c.entries {
+		fs.notifyEntryForPath(e[0], e[1])
+	}
 }
 
 // fsConnected reports whether the filesystem is currently served over a
@@ -91,7 +137,18 @@ func safeNotifyContent(node *storhubNode) {
 	if node == nil || !fsConnected(node.fs) {
 		return
 	}
-	_ = node.NotifyContent(0, 0)
+	notifyContentFunc(node)
+}
+
+func safeNotifyContentAsync(node *storhubNode) {
+	if node == nil || !fsConnected(node.fs) {
+		return
+	}
+	contentFn := notifyContentFunc
+	fs := node.fs
+	fs.notifyAsync(notifyKey{kind: notifyKindContent, node: node}, "NotifyContent", func() {
+		contentFn(node)
+	})
 }
 
 // beginNotify marks a notification pending and takes a concurrency slot.

@@ -1173,6 +1173,8 @@ type stubHub struct {
 	downloads       int
 	patchRangeCalls int
 	patchRangeEdits [][]shfs.RangeEdit
+	drainFn         func(context.Context, string) error
+	drainCalls      int
 	now             int64
 	chunkSize       int64
 }
@@ -1368,6 +1370,13 @@ func (s *stubHub) PatchFileRangesContext(_ context.Context, _, _ string, edits [
 	}
 	base.Size += totalInsert - totalDelete
 	return base, nil
+}
+func (s *stubHub) DrainProjectContext(ctx context.Context, project string) error {
+	s.drainCalls++
+	if s.drainFn != nil {
+		return s.drainFn(ctx, project)
+	}
+	return nil
 }
 func (s *stubHub) Now() int64 {
 	if s.now == 0 {
@@ -1700,7 +1709,7 @@ func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
 	// Caller contract: hold state.mu on entry; commitChunkRewrite releases
 	// it on every return path.
 	state.mu.Lock()
-	errno := h.commitChunkRewrite(context.Background(), "ranges.bin", 32, append([]ByteRange(nil), planned...), shfs.MetadataPatch{})
+	errno := h.commitChunkRewrite(context.Background(), "ranges.bin", 32, append([]ByteRange(nil), planned...), shfs.MetadataPatch{}, &commitNotifies{})
 	if errno != 0 {
 		t.Fatalf("chunk-rewrite commit: %v", errno)
 	}
@@ -1957,7 +1966,7 @@ func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
 	// Caller contract: hold state.mu on entry; commitPatch releases it on
 	// every return path.
 	state.mu.Lock()
-	errno := h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), planned...), shfs.MetadataPatch{})
+	errno := h.commitPatch(context.Background(), "patch.bin", 4, 12, append([]ByteRange(nil), planned...), shfs.MetadataPatch{}, &commitNotifies{})
 	if errno == 0 {
 		t.Fatal("expected the injected batch failure to surface")
 	}
@@ -1974,7 +1983,7 @@ func TestCommitPatchBatchRetryAfterFailure(t *testing.T) {
 
 	// Retry: the identical batch is replayed and succeeds.
 	state.mu.Lock()
-	errno = h.commitPatch(context.Background(), "patch.bin", 4, 12, remaining, shfs.MetadataPatch{})
+	errno = h.commitPatch(context.Background(), "patch.bin", 4, 12, remaining, shfs.MetadataPatch{}, &commitNotifies{})
 	if errno != 0 {
 		t.Fatalf("retry failed: %v", errno)
 	}
@@ -2027,7 +2036,7 @@ func TestCommitPatchCancellationKeepsRangesResumable(t *testing.T) {
 
 	cancel()
 	state.mu.Lock()
-	errno := h.commitPatch(ctx, "patch.bin", 4, 8, []ByteRange{{Start: 4, End: 8}}, shfs.MetadataPatch{})
+	errno := h.commitPatch(ctx, "patch.bin", 4, 8, []ByteRange{{Start: 4, End: 8}}, shfs.MetadataPatch{}, &commitNotifies{})
 	if errno == 0 {
 		t.Fatal("cancelled commit must fail")
 	}

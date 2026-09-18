@@ -265,7 +265,7 @@ func TestCommitPatchSurvivesConcurrentQuarantine(t *testing.T) {
 	done := make(chan syscall.Errno, 1)
 	go func() {
 		state.mu.Lock()
-		done <- h.commitPatch(context.Background(), "race.bin", 4, 8, []ByteRange{{Start: 4, End: 8}}, shfs.MetadataPatch{})
+		done <- h.commitPatch(context.Background(), "race.bin", 4, 8, []ByteRange{{Start: 4, End: 8}}, shfs.MetadataPatch{}, &commitNotifies{})
 	}()
 	<-entered
 	// Quarantine while commitPatch is inside its unlocked network window.

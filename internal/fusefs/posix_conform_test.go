@@ -861,6 +861,8 @@ func (h *pcHub) removeFileLocked(p string) error {
 	return nil
 }
 
+func (h *pcHub) DrainProjectContext(context.Context, string) error { return nil }
+
 func (h *pcHub) Now() int64 {
 	return time.Now().Unix()
 }

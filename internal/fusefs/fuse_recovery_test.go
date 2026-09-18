@@ -145,7 +145,7 @@ func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
 	h.path = "shrink.bin"
 
 	state.mu.Lock()
-	errno := h.commitPatch(context.Background(), "shrink.bin", 12, 8, []ByteRange{{Start: 8, End: 12}}, shfs.MetadataPatch{})
+	errno := h.commitPatch(context.Background(), "shrink.bin", 12, 8, []ByteRange{{Start: 8, End: 12}}, shfs.MetadataPatch{}, &commitNotifies{})
 	if errno == 0 {
 		t.Fatal("expected the injected truncate failure to surface")
 	}
@@ -162,7 +162,7 @@ func TestRecoveryCommitKeepsRangesDirtyUntilTruncateSucceeds(t *testing.T) {
 
 	failTruncate = false
 	state.mu.Lock()
-	errno = h.commitPatch(context.Background(), "shrink.bin", 12, 8, append([]ByteRange(nil), dirtyLeft...), shfs.MetadataPatch{})
+	errno = h.commitPatch(context.Background(), "shrink.bin", 12, 8, append([]ByteRange(nil), dirtyLeft...), shfs.MetadataPatch{}, &commitNotifies{})
 	if errno != 0 {
 		t.Fatalf("retry failed: %v", errno)
 	}

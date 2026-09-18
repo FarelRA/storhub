@@ -297,6 +297,7 @@ type Hub interface {
 	UpdateRepoMetadataContext(context.Context, string, func(*metadata.RepoMetadata) error, string) (*metadata.RepoMetadata, error)
 	RewriteFileRangesWithMetadataContext(context.Context, string, string, string, *metadata.RepoMetadata, *metadata.FileMeta, int64, []ByteRange) (*metadata.FileMeta, error)
 	RenameContext(context.Context, string, string, string, ...shfs.MutateOption) error
+	DrainProjectContext(context.Context, string) error
 	Now() int64
 	ChunkSize() int64
 }

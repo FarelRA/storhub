@@ -620,15 +620,17 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 // The mount enables writeback caching, so close(2) may be the only
 // durability signal the kernel sends for buffered writes: a no-op Flush
 // would acknowledge data the next crash loses. Commit is idempotent, so
-// the later Release commit is a no-op when Flush already pushed.
+// the later Release commit is a no-op when Flush already pushed. The
+// drain after a successful commit waits for remote durability; a drain
+// failure returns EIO without quarantining (see drainProject).
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
-	return h.commit(ctx)
+	return h.commitAndDrain(ctx)
 }
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
 	h.fs.debugf("fsync path=%s inode=%d", h.path, h.inode)
-	return h.commit(ctx)
+	return h.commitAndDrain(ctx)
 }
 
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
@@ -645,6 +647,15 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		if h.writeState != nil && h.fs.soleWriteStateRef(h.writeState) {
 			h.writeState.quarantineTemps()
 		}
+	} else if drainErrno := h.drainProject(ctx); drainErrno != 0 {
+		// The commit published but the drain did not confirm remote
+		// durability: return EIO WITHOUT quarantining the overlay. The
+		// bytes are uploaded and published and the journal retains the
+		// dirty state for retry; quarantining here would double-replay
+		// the same bytes via redrive plus the quarantined overlay.
+		// Cleanup follows the success path (close, do not preserve).
+		h.closeTemp()
+		errno = drainErrno
 	} else {
 		h.closeTemp()
 	}

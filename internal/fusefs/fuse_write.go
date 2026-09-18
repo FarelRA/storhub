@@ -1138,13 +1138,13 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		return 0, syscall.EIO
 	}
 	h.writeState.opMu.Lock()
-	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
-	defer h.writeState.mu.Unlock()
 	// A quarantined (poisoned) overlay no longer holds the bytes its
 	// dirty ranges claimed. Accepting new writes would resurrect an empty
 	// temp and commit zeros over remote data.
 	if h.writeState.poisoned {
+		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		return 0, syscall.EIO
 	}
 	if h.flags&syscall.O_APPEND != 0 && off >= h.writeState.logicalSize {
@@ -1159,25 +1159,37 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	}
 	if h.writeState.temp == nil {
 		if err := h.writeState.ensureTempLocked(); err != nil {
-			return 0, errnoFromError(err)
+			errno := errnoFromError(err)
+			h.writeState.mu.Unlock()
+			h.writeState.opMu.Unlock()
+			return 0, errno
 		}
 	}
 	if off > h.writeState.logicalSize {
 		h.writeState.markDirtyLocked(h.writeState.logicalSize, off)
 		if err := h.writeState.temp.Truncate(off); err != nil {
-			return 0, errnoFromError(err)
+			errno := errnoFromError(err)
+			h.writeState.mu.Unlock()
+			h.writeState.opMu.Unlock()
+			return 0, errno
 		}
 		h.writeState.logicalSize = off
 	}
 	n, err := h.writeState.temp.WriteAt(data, off)
 	if err != nil {
-		return uint32(n), errnoFromError(err)
+		errno := errnoFromError(err)
+		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
+		return uint32(n), errno
 	}
 	end := off + int64(n)
 	if end > h.writeState.logicalSize {
 		h.writeState.logicalSize = end
 		if err := h.writeState.temp.Truncate(end); err != nil {
-			return uint32(n), errnoFromError(err)
+			errno := errnoFromError(err)
+			h.writeState.mu.Unlock()
+			h.writeState.opMu.Unlock()
+			return uint32(n), errno
 		}
 	}
 	h.writeState.markDirtyLocked(off, end)
@@ -1185,7 +1197,10 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// collapse into one authoritative span (with base backfill) instead
 	// of growing the slice until commit.
 	if err := h.writeState.ensureDirtyBounded(ctx); err != nil {
-		return uint32(n), errnoFromError(err)
+		errno := errnoFromError(err)
+		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
+		return uint32(n), errno
 	}
 	// POSIX privilege clearing is overlay-immediate, not commit-deferred:
 	// a non-admin data write stages the cleared mode into pending now, so
@@ -1193,7 +1208,28 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// verbs sanitize again; this staging must never resurrect bits, only
 	// clear them (see stagePrivClearLocked).
 	h.fs.stagePrivClearForDataWrite(h.fs.callerContext(ctx), h.writeState, h.writeState.path)
+	syncWrite := h.flags&syncWriteFlags != 0
 	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", h.writeState.path, h.inode, off, n)
+	h.writeState.mu.Unlock()
+	h.writeState.opMu.Unlock()
+	if !syncWrite {
+		// Buffered path: durability waits for Flush/Fsync/Release, so
+		// this write pays zero added latency (no drain here).
+		return uint32(n), 0
+	}
+	// O_SYNC (decision: HONOR): commit plus drain synchronously per write
+	// before acknowledging, so the bytes are remote-durable on return.
+	// Cost is the point: correct but slow. O_DSYNC is treated identically
+	// (on linux; see syncWriteFlags for other platforms) because our
+	// commit granularity cannot distinguish data from metadata durability:
+	// every commit pushes data plus size plus the pending metadata patch
+	// as one unit, so a data-only barrier is still a full commit plus
+	// drain. On failure report 0/EIO (the staged bytes stay dirty for a
+	// later fsync or close to retry); a drain-only failure publishes
+	// without quarantining (see drainProject).
+	if errno := h.commitAndDrain(ctx); errno != 0 {
+		return 0, errno
+	}
 	return uint32(n), 0
 }
 
@@ -1210,19 +1246,21 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	handlePath := h.path
 	h.mu.Unlock()
 	h.writeState.opMu.Lock()
-	defer h.writeState.opMu.Unlock()
 	h.writeState.mu.Lock()
 	if h.writeState.poisoned {
 		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		// The overlay was quarantined; committing would upload zeros.
 		return syscall.EIO
 	}
 	if len(h.writeState.dirtyRanges) == 0 && h.writeState.logicalSize == h.writeState.baseSize && !h.writeState.hasPendingMetadataLocked() {
 		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		return 0
 	}
 	if h.writeState.deleted || handlePath == "" {
 		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		// POSIX unlinked-open-handle semantics: writes via an open fd
 		// succeed and reads are served from the temp overlay; the data
 		// is discarded at Release (link count zero). Pinned by
@@ -1242,11 +1280,13 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	h.writeState.mu.Lock()
 	if errno != 0 {
 		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		return errno
 	}
 	// Re-validate under the lock: the DAC check released it.
 	if h.writeState.deleted || h.writeState.poisoned {
 		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
 		if h.writeState.poisoned {
 			return syscall.EIO
 		}
@@ -1256,7 +1296,45 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	baseSize := h.writeState.baseSize
 	logicalSize := h.writeState.logicalSize
 	pending := h.writeState.pending
-	return h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending)
+	// Collect notification intents while opMu/mu are held; emit only
+	// after both are released (see commitNotifies). Every success return
+	// below records its intents before returning, so none are dropped;
+	// failure returns record nothing and emit nothing.
+	var notifies commitNotifies
+	errno = h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending, &notifies)
+	h.writeState.opMu.Unlock()
+	if errno == 0 {
+		notifies.emit(h.fs)
+	}
+	return errno
+}
+
+// drainProject blocks until everything published before the call lands in
+// the remote commit. It runs only on the durability paths (Flush, Fsync,
+// Release, O_SYNC writes); normal buffered writes never drain, so they
+// pay zero added latency.
+func (h *storhubHandle) drainProject(ctx context.Context) syscall.Errno {
+	// On drain failure return EIO WITHOUT quarantining the overlay: the
+	// bytes are already uploaded and published, and the journal retains
+	// the dirty state for retry. Quarantining here would double-replay
+	// the same bytes via redrive plus the quarantined overlay.
+	if err := h.fs.hub.DrainProjectContext(ctx, h.fs.project); err != nil {
+		h.fs.errorf("drain failed path=%s inode=%d err=%v", h.path, h.inode, err)
+		return syscall.EIO
+	}
+	return 0
+}
+
+// commitAndDrain pushes the overlay (commit) and then waits for remote
+// durability (drain). A commit failure returns its errno and leaves the
+// overlay dirty for the caller's quarantine decision; a drain failure
+// returns EIO with the overlay already published, so the caller must not
+// quarantine (see drainProject).
+func (h *storhubHandle) commitAndDrain(ctx context.Context) syscall.Errno {
+	if errno := h.commit(ctx); errno != 0 {
+		return errno
+	}
+	return h.drainProject(ctx)
 }
 
 // checkCommitWriteAccess enforces the file-level write DAC against the
@@ -1301,7 +1379,7 @@ func (h *storhubHandle) checkCommitWriteAccess(ctx context.Context, targetPath s
 // under the target fingerprint CAS) recommits what the next mount can
 // prove untouched. Anything the CAS cannot prove stays quarantined for
 // manual recovery.
-func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseSize, logicalSize int64, pending shfs.MetadataPatch) syscall.Errno {
+func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseSize, logicalSize int64, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	if len(h.writeState.dirtyRanges) == 0 {
 		h.writeState.mu.Unlock()
 		if logicalSize != baseSize {
@@ -1317,12 +1395,14 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 		h.writeState.mu.Lock()
 		h.writeState.commitCacheRefreshLocked(logicalSize)
 		h.writeState.mu.Unlock()
-		h.fs.notifyKernelContentChanged(h.inode)
+		// Deferred: opMu is held by commit(); the emission runs after
+		// its release (see commitNotifies).
+		notifies.addContent(h.inode)
 		h.writeState.mu.Lock()
 		h.writeState.pending = shfs.MetadataPatch{}
 		h.writeState.mu.Unlock()
 		h.fs.dropPinnedForPath(targetPath)
-		h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
+		notifies.addEntry(shfs.ParentPath(targetPath), path.Base(targetPath))
 		return 0
 	}
 	planned := h.writeState.plannedRangesLocked()
@@ -1331,17 +1411,17 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 	// modest; full replace when the ladder in shouldReplaceLocked says
 	// ranged work cannot pay; otherwise patch each dirty range in place.
 	if h.writeState.shouldChunkRewriteLocked(planned) {
-		return h.commitChunkRewrite(ctx, targetPath, logicalSize, planned, pending)
+		return h.commitChunkRewrite(ctx, targetPath, logicalSize, planned, pending, notifies)
 	}
 	if h.writeState.shouldReplaceLocked(planned) {
-		return h.commitReplace(ctx, targetPath, logicalSize, planned, pending)
+		return h.commitReplace(ctx, targetPath, logicalSize, planned, pending, notifies)
 	}
-	return h.commitPatch(ctx, targetPath, baseSize, logicalSize, h.writeState.dirtyRanges, pending)
+	return h.commitPatch(ctx, targetPath, baseSize, logicalSize, h.writeState.dirtyRanges, pending, notifies)
 }
 
 // commitChunkRewrite handles the chunk-rewrite path.
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
-func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	snapshotPath, err := h.writeState.createRangeSnapshotLocked(ctx, planned)
 	baseSize := h.writeState.baseSize
 	h.writeState.mu.Unlock()
@@ -1370,12 +1450,12 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 	h.writeState.mu.Lock()
 	h.writeState.commitCacheRefreshLocked(logicalSize)
 	h.writeState.mu.Unlock()
-	return h.commitPostUpdate(ctx, targetPath, pending)
+	return h.commitPostUpdate(ctx, targetPath, pending, notifies)
 }
 
 // commitReplace handles the full-file replace path.
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
-func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	snapshotPath, cleanupSnapshot, err := h.writeState.replaceInputPathLocked(ctx)
 	baseSize := h.writeState.baseSize
 	dirtyCount := len(h.writeState.dirtyRanges)
@@ -1396,7 +1476,7 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	h.writeState.mu.Lock()
 	h.writeState.commitCacheRefreshLocked(logicalSize)
 	h.writeState.mu.Unlock()
-	return h.commitPostUpdate(ctx, targetPath, pending)
+	return h.commitPostUpdate(ctx, targetPath, pending, notifies)
 }
 
 // removeDirtyRangeLocked drops [start,end) from the dirty set after a range
@@ -1421,7 +1501,7 @@ func (w *inodeWriteState) removeDirtyRangeLocked(start, end int64) {
 
 // commitPatch handles the partial patch path.
 // Caller must hold h.writeState.mu. Releases and re-acquires h.writeState.mu.
-func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch) syscall.Errno {
+func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	edits := make([]shfs.RangeEdit, 0, len(planned))
 	for _, dirty := range planned {
 		buf := make([]byte, dirty.End-dirty.Start)
@@ -1504,9 +1584,13 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		h.writeState.mu.Unlock()
 		return errnoFromError(err)
 	}
-	h.fs.notifyKernelContentChanged(h.inode)
+	// Deferred: opMu is held by commit(); the emission runs after its
+	// release (see commitNotifies). The post-update below appends its own
+	// content+entry pair, so a patch commit emits two content intents;
+	// that redundancy is acceptable and coalesces in flight.
+	notifies.addContent(h.inode)
 	h.writeState.mu.Unlock()
-	return h.commitPostUpdate(ctx, targetPath, pending)
+	return h.commitPostUpdate(ctx, targetPath, pending, notifies)
 }
 
 // commitCacheRefreshLocked updates the cached write state after a successful remote write.
@@ -1522,9 +1606,12 @@ func (w *inodeWriteState) commitCacheRefreshLocked(logicalSize int64) {
 
 // commitPostUpdate applies pending metadata, clears it, evicts the shared
 // pin for the path (the version changed, so open handles re-pin on next
-// open), and notifies.
-// Caller must NOT hold h.writeState.mu.
-func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string, pending shfs.MetadataPatch) syscall.Errno {
+// open), and records notifications.
+// Caller must NOT hold h.writeState.mu. Notifications are only recorded
+// into notifies; the committer emits them after releasing opMu (see
+// commitNotifies). Every success return records exactly one content plus
+// one entry intent, so no invalidation is dropped on this path.
+func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	if errno := h.applyMetadataPatch(ctx, targetPath, pending); errno != 0 {
 		return errno
 	}
@@ -1532,8 +1619,8 @@ func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string,
 	h.writeState.pending = shfs.MetadataPatch{}
 	h.writeState.mu.Unlock()
 	h.fs.dropPinnedForPath(targetPath)
-	h.fs.notifyKernelContentChanged(h.inode)
-	h.fs.notifyEntryForPath(shfs.ParentPath(targetPath), path.Base(targetPath))
+	notifies.addContent(h.inode)
+	notifies.addEntry(shfs.ParentPath(targetPath), path.Base(targetPath))
 	return 0
 }
 
