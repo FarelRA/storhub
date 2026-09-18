@@ -92,6 +92,12 @@ type StorHub struct {
 	flightMu sync.Mutex
 	flights  map[string]*loadFlight
 
+	// Open-session table (Phase 2B). Lives on the hub so sessions die
+	// with it: restarts drop everything, and no global registry can pin
+	// dead hubs. Lazily created under sessionMu.
+	sessionMu sync.Mutex
+	sessions  *sessionHubState
+
 	// Release list cache to avoid per-upload ListReleases (secondary rate limit)
 	releaseMu    sync.RWMutex
 	releaseCache map[string]releaseCacheEntry
