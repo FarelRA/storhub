@@ -734,3 +734,56 @@ func (h *StorHub) drainDirtyMetadata(ctx context.Context) error {
 	}
 	return errors.Join(errs...)
 }
+
+// drainMaxRounds bounds how many commit rounds one DrainProjectContext
+// chases a concurrent writer's flood. Rounds past the first only happen
+// when a mutation landed mid-drain; each round lands everything published
+// before it started, so the loop converges unless writers outpace commits
+// indefinitely, and then it fails loud instead of parking the caller.
+const drainMaxRounds = 3
+
+// DrainProjectContext blocks until everything published before the call
+// has landed in the remote commit, or fails loudly. It is the shared
+// durability primitive behind fsync, O_SYNC, and the REST/CLI sync
+// opt-in. Semantics are fsync-class: pre-call data is durable on
+// success; a concurrent writer's later mutations may ride along in the
+// same commit or wait for a later one, but they can never strand the
+// caller past drainMaxRounds. A clean project costs no network (the
+// commit is a cheap no-op); a failed push retains dirty state for retry
+// exactly like the commit loop and reports the error naming the project.
+func (h *StorHub) DrainProjectContext(ctx context.Context, project string) error {
+	if err := validateProject(project); err != nil {
+		return err
+	}
+	pm := h.getOrCreateProjectMeta(project)
+	// Snapshot the frontier under mu: every op at or below target was
+	// published before this call. A successful commit clears through its
+	// own snapshot (taken later, so a superset), so anything left dirty
+	// afterwards is strictly newer.
+	pm.mu.Lock()
+	target := pm.opStack.maxSeq()
+	pm.mu.Unlock()
+	for round := 0; round < drainMaxRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("drain %s: %w", project, err)
+		}
+		if err := h.commitProjectMetadata(ctx, project, pm); err != nil {
+			h.recoverMetadataCommitFailure(project, err)
+			return fmt.Errorf("drain %s: %w", project, err)
+		}
+		pm.mu.Lock()
+		dirty := pm.dirty
+		stale := false
+		for _, op := range pm.opStack.ops {
+			if op.Seq <= target {
+				stale = true
+				break
+			}
+		}
+		pm.mu.Unlock()
+		if !dirty || !stale {
+			return nil
+		}
+	}
+	return fmt.Errorf("drain %s: still dirty after %d rounds", project, drainMaxRounds)
+}
