@@ -1,0 +1,132 @@
+package posixconform
+
+import "errors"
+
+// OpenMode selects the access mode of a Handle returned by Open.
+type OpenMode int
+
+const (
+	// OpenReadOnly allows reads and denies writes.
+	OpenReadOnly OpenMode = iota + 1
+	// OpenWriteOnly allows writes and denies reads.
+	OpenWriteOnly
+	// OpenReadWrite allows both reads and writes.
+	OpenReadWrite
+	// OpenAppend is write-only with the cursor forced to the end on every cursor write.
+	OpenAppend
+	// OpenTruncate is write-only and empties an existing file on open.
+	OpenTruncate
+)
+
+// Permission bits honored by Chmod and Stat for the setuid/setgid scenarios.
+const (
+	// SetUIDBit is the set-user-ID bit (0o4000).
+	SetUIDBit uint32 = 0o4000
+	// SetGIDBit is the set-group-ID bit (0o2000).
+	SetGIDBit uint32 = 0o2000
+)
+
+// Stat describes a regular file after symlink resolution.
+type Stat struct {
+	Size  int64
+	Mode  uint32
+	UID   uint32
+	GID   uint32
+	MTime int64 // Unix nanoseconds, set by Utimens or by the implementation clock.
+}
+
+// Handle is an open file description: reads see the handle's own prior
+// writes, and each handle carries an independent cursor.
+type Handle interface {
+	// PRead reads at an offset like pread() without moving the cursor.
+	PRead(offset int64, length int) ([]byte, error)
+	// PWrite writes at an offset like pwrite() without moving the cursor and clears setuid/setgid.
+	PWrite(offset int64, data []byte) (int, error)
+	// Read reads from the cursor like read() and advances it, returning empty at EOF.
+	Read(length int) ([]byte, error)
+	// Write writes at the cursor like write(), at the end for append mode, and clears setuid/setgid.
+	Write(data []byte) (int, error)
+	// Truncate resizes the open file like ftruncate(), zero-filling growth.
+	Truncate(size int64) error
+	// Sync flushes the open file like fsync().
+	Sync() error
+	// Close releases the handle like close(); use after close fails with ErrClosed.
+	Close() error
+}
+
+var (
+	// ErrNotFound reports a missing path, like ENOENT.
+	ErrNotFound = errors.New("posixconform: no such file or directory")
+	// ErrExists reports a collision, like EEXIST.
+	ErrExists = errors.New("posixconform: file exists")
+	// ErrIsDir reports a directory where a file was required, like EISDIR.
+	ErrIsDir = errors.New("posixconform: is a directory")
+	// ErrNotDir reports a non-directory where a directory was required, like ENOTDIR.
+	ErrNotDir = errors.New("posixconform: not a directory")
+	// ErrNotEmpty reports a non-empty directory on Rmdir, like ENOTEMPTY.
+	ErrNotEmpty = errors.New("posixconform: directory not empty")
+	// ErrLoop reports a symlink loop, the ELOOP equivalent.
+	ErrLoop = errors.New("posixconform: too many levels of symbolic links")
+	// ErrUnsatisfiableRange reports an out-of-range read, the ERANGE/416 equivalent.
+	ErrUnsatisfiableRange = errors.New("posixconform: range not satisfiable")
+	// ErrClosed reports use of a closed handle, like EBADF.
+	ErrClosed = errors.New("posixconform: handle is closed")
+	// ErrAccess reports an operation denied by the handle open mode, like EBADF.
+	ErrAccess = errors.New("posixconform: operation not permitted by open mode")
+	// ErrInvalid reports a bad argument such as a negative offset, like EINVAL.
+	ErrInvalid = errors.New("posixconform: invalid argument")
+)
+
+// ErrPrecondition reports a stale CAS token from CompareAndWrite; match it with errors.As.
+type ErrPrecondition struct {
+	Expected uint64
+	Actual   uint64
+}
+
+// Error implements the error interface.
+func (e ErrPrecondition) Error() string {
+	return "posixconform: precondition failed: version mismatch"
+}
+
+// Surface is the semantic file-operation contract every adapter (FUSE mount,
+// REST API, CLI) must implement. Paths are absolute POSIX paths. Methods that
+// resolve symlinks report ErrLoop on a loop; Unlink, Rename, Readlink, Mkdir,
+// and Rmdir act on the link or directory name itself.
+type Surface interface {
+	// CreateFile creates a file like O_CREAT; exclusive adds O_EXCL so a duplicate fails with ErrExists.
+	CreateFile(path string, perm uint32, exclusive bool) error
+	// Open returns a handle with an independent cursor; read-only open of a missing path fails with ErrNotFound.
+	Open(path string, mode OpenMode) (Handle, error)
+	// Stat reports size, mode, ownership, and mtime of the resolved path like stat().
+	Stat(path string) (Stat, error)
+	// Truncate resizes by path like truncate(), zero-filling any extension.
+	Truncate(path string, size int64) error
+	// Chmod replaces permission bits including setuid/setgid like chmod().
+	Chmod(path string, mode uint32) error
+	// Chown replaces owner and group and clears setuid/setgid like chown by a non-privileged user.
+	Chown(path string, uid, gid uint32) error
+	// Utimens sets mtime explicitly like utimensat().
+	Utimens(path string, mtime int64) error
+	// Unlink removes the name like unlink(); open handles keep working while the name is gone.
+	Unlink(path string) error
+	// Rename moves a name like rename(); noReplace adds RENAME_NOREPLACE so clobbering fails with ErrExists.
+	Rename(oldPath, newPath string, noReplace bool) error
+	// Mkdir creates a directory like mkdir(), failing with ErrExists when present.
+	Mkdir(path string, perm uint32) error
+	// Rmdir removes an empty directory like rmdir(), failing with ErrNotEmpty when occupied.
+	Rmdir(path string) error
+	// Symlink creates a symlink like symlink(); dangling targets are allowed.
+	Symlink(target, linkPath string) error
+	// Readlink returns the link target like readlink() without resolving it.
+	Readlink(linkPath string) (string, error)
+	// ReadRange returns an offset slice like a ranged GET; offsets at or past EOF fail with ErrUnsatisfiableRange.
+	ReadRange(path string, offset, length int64) ([]byte, error)
+	// Append atomically adds bytes at the end like O_APPEND writes on an existing file.
+	Append(path string, data []byte) error
+	// Sync flushes durability like fsync() and reports success with nil.
+	Sync(path string) error
+	// CompareAndWrite writes only when token matches the current revision like a CAS store, else ErrPrecondition.
+	CompareAndWrite(path string, offset int64, data []byte, token uint64) error
+	// Revision returns the current CAS token, advanced by every data mutation.
+	Revision(path string) (uint64, error)
+}
