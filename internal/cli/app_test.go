@@ -772,6 +772,7 @@ type fakeHub struct {
 	shutdownErr       error
 	drainCalls        []string
 	drainErr          error
+	sess              *cliSessionStore
 }
 
 // DrainProjectContext records the call so sync tests can assert draining

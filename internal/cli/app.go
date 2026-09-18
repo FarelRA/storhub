@@ -134,6 +134,19 @@ type hubClient interface {
 	// the --sync opt-in on every mutating command via drainIfSyncRequested.
 	DrainProjectContext(ctx context.Context, project string) error
 
+	// OpenSession opens a stateful file handle (Phase 2B sessions). The
+	// signatures mirror *storage.StorHub directly so storhubClient satisfies
+	// them through its embedded hub with no adapter; commands pass
+	// cmd.Context() unchanged and never synthesize a caller identity.
+	OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error)
+	ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error)
+	WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error)
+	TruncateSession(ctx context.Context, handleID string, size int64) error
+	StatSession(ctx context.Context, handleID string) (storage.SessionStat, error)
+	SyncSession(ctx context.Context, handleID string) error
+	LinkSession(ctx context.Context, handleID, path string) error
+	CloseSession(ctx context.Context, handleID string) error
+
 	// Shutdown drains the asynchronous metadata writer. Part of the
 	// contract on purpose: every implementation - including test fakes -
 	// must be drainable, and App.Run is the single caller.
@@ -314,6 +327,7 @@ Examples:
 	rootCmd.AddCommand(a.newPruneCmd())
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
+	rootCmd.AddCommand(a.newSessionCmd())
 	rootCmd.AddCommand(a.newMountCmd())
 	rootCmd.AddCommand(a.newRestCmd())
 	rootCmd.AddCommand(a.newServeCmd())

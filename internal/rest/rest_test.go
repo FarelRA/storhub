@@ -308,6 +308,13 @@ type fakeRESTClient struct {
 	failReplaceFromReader error
 	revision              string
 	optErr                error
+	// Session emulation (rest_sessions_test.go): live handles plus policy
+	// knobs. Zero knobs mean the storage defaults.
+	sessions       map[string]*fakeSession
+	nextSession    int
+	sessionTTL     time.Duration
+	maxSessProject int
+	maxSessUser    int
 }
 
 // recordIdentityLocked captures the caller identity the storage layer would

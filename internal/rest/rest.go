@@ -120,6 +120,18 @@ type Client interface {
 	// lands in the remote commit (the storage fsync primitive). It backs
 	// the ?sync=1 opt-in on every mutating endpoint via maybeDrain.
 	DrainProjectContext(ctx context.Context, project string) error
+	// OpenSession opens a stateful file handle (Phase 2B sessions). The
+	// signatures mirror *storage.StorHub directly so the real hub satisfies
+	// this interface with no adapter; handlers must forward the request
+	// context unchanged so the manager sees the authenticated identity.
+	OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error)
+	ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error)
+	WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error)
+	TruncateSession(ctx context.Context, handleID string, size int64) error
+	StatSession(ctx context.Context, handleID string) (storage.SessionStat, error)
+	SyncSession(ctx context.Context, handleID string) error
+	LinkSession(ctx context.Context, handleID, path string) error
+	CloseSession(ctx context.Context, handleID string) error
 }
 
 type restHandler struct {
@@ -275,10 +287,16 @@ func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
 			r.Route(basePath+"/projects/{project}", func(r chi.Router) {
 				h.registerProjectRoutes(r)
 			})
+			r.Route(basePath+"/handles", func(r chi.Router) {
+				h.registerSessionRoutes(r)
+			})
 		})
 	} else {
 		r.Route(basePath+"/projects/{project}", func(r chi.Router) {
 			h.registerProjectRoutes(r)
+		})
+		r.Route(basePath+"/handles", func(r chi.Router) {
+			h.registerSessionRoutes(r)
 		})
 	}
 
