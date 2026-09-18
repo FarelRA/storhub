@@ -18,8 +18,10 @@ type MemSurface struct {
 
 // Compile-time conformance checks.
 var (
-	_ Surface = (*MemSurface)(nil)
-	_ Handle  = (*memHandle)(nil)
+	_ Surface    = (*MemSurface)(nil)
+	_ PunchHoler = (*MemSurface)(nil)
+	_ Handle     = (*memHandle)(nil)
+	_ SeekHandle = (*memHandle)(nil)
 )
 
 type memFile struct {
@@ -134,12 +136,15 @@ func (m *MemSurface) CreateFile(path string, perm uint32, exclusive bool) error 
 	return nil
 }
 
-// Open implements Surface.Open.
+// Open implements Surface.Open. OpenPath is the perm-free open: like the
+// oracle having no permission checks at all, it succeeds on any existing
+// path (and reports ErrNotFound on a missing one without creating it),
+// while the handle itself carries no I/O rights.
 func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	switch mode {
-	case OpenReadOnly, OpenWriteOnly, OpenReadWrite, OpenAppend, OpenTruncate:
+	case OpenReadOnly, OpenWriteOnly, OpenReadWrite, OpenAppend, OpenTruncate, OpenPath:
 	default:
 		return nil, ErrInvalid
 	}
@@ -148,7 +153,7 @@ func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {
-		if err != ErrNotFound || mode == OpenReadOnly {
+		if err != ErrNotFound || mode == OpenReadOnly || mode == OpenPath {
 			return nil, err
 		}
 		if _, ok := m.dirs[parentOf(path)]; !ok {
@@ -639,5 +644,74 @@ func (h *memHandle) Close() error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
 	h.closed = true
+	return nil
+}
+
+// SeekData implements SeekHandle.SeekData over dense bytes: every offset
+// below the size is data, so in-range offsets return themselves and
+// anything at or past EOF fails with ErrUnsatisfiableRange (ENXIO).
+func (h *memHandle) SeekData(off int64) (int64, error) {
+	h.mem.mu.Lock()
+	defer h.mem.mu.Unlock()
+	if h.closed {
+		return 0, ErrClosed
+	}
+	if off < 0 {
+		return 0, ErrInvalid
+	}
+	if off >= int64(len(h.file.data)) {
+		return 0, ErrUnsatisfiableRange
+	}
+	return off, nil
+}
+
+// SeekHole implements SeekHandle.SeekHole over dense bytes: the only hole
+// is at the size itself, so every offset at or below the size reports the
+// size and anything past it fails with ErrUnsatisfiableRange (ENXIO).
+func (h *memHandle) SeekHole(off int64) (int64, error) {
+	h.mem.mu.Lock()
+	defer h.mem.mu.Unlock()
+	if h.closed {
+		return 0, ErrClosed
+	}
+	if off < 0 {
+		return 0, ErrInvalid
+	}
+	size := int64(len(h.file.data))
+	if off > size {
+		return 0, ErrUnsatisfiableRange
+	}
+	return size, nil
+}
+
+// PunchHole implements PunchHoler by zero-filling: on dense bytes a
+// deallocated span reads back as zeros, observably equal to a real hole
+// punch, so the oracle emulates the bytes rather than failing. Like every
+// other data mutation it clears setuid/setgid and advances the revision.
+func (m *MemSurface) PunchHole(path string, off, length int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validPath(path) {
+		return ErrInvalid
+	}
+	if off < 0 || length < 0 {
+		return ErrInvalid
+	}
+	f, err := m.resolveLocked(path)
+	if err != nil {
+		return err
+	}
+	if length == 0 || off >= int64(len(f.data)) {
+		return nil
+	}
+	end := off + length
+	if end > int64(len(f.data)) {
+		end = int64(len(f.data))
+	}
+	for i := off; i < end; i++ {
+		f.data[i] = 0
+	}
+	f.mode &^= SetUIDBit | SetGIDBit
+	m.bumpLocked(f)
 	return nil
 }

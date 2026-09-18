@@ -16,6 +16,12 @@ const (
 	OpenAppend
 	// OpenTruncate is write-only and empties an existing file on open.
 	OpenTruncate
+	// OpenPath opens a path without requiring read or write permission
+	// and without creating anything, like O_PATH on Linux: the handle
+	// cannot do I/O (reads and writes fail with ErrAccess). Only
+	// surfaces that can express permission-free opens implement it;
+	// scenarios using it are SurfaceFUSE-only (see Filter).
+	OpenPath
 )
 
 // Permission bits honored by Chmod and Stat for the setuid/setgid scenarios.
@@ -75,7 +81,41 @@ var (
 	ErrAccess = errors.New("posixconform: operation not permitted by open mode")
 	// ErrInvalid reports a bad argument such as a negative offset, like EINVAL.
 	ErrInvalid = errors.New("posixconform: invalid argument")
+	// ErrUnsupported reports an operation the surface honestly cannot
+	// perform, like EOPNOTSUPP. Scenarios accept it only where the
+	// scenario documents both the unsupported and the emulated outcome.
+	ErrUnsupported = errors.New("posixconform: operation not supported")
 )
+
+// SeekHandle is an optional Handle capability for SEEK_DATA and SEEK_HOLE.
+// It stays optional (rather than growing Handle) so existing adapters keep
+// compiling untouched: dense-byte surfaces report the hole at the file size
+// and clamp data offsets into range, while surfaces that cannot express
+// seeks simply do not implement it and FUSE-only scenarios never run there
+// (see Filter). Offsets at or past the end fail SEEK_DATA with
+// ErrUnsatisfiableRange (ENXIO); offsets past the end fail SEEK_HOLE the
+// same way; negative offsets fail with ErrInvalid.
+type SeekHandle interface {
+	// SeekData returns the next data offset at or after off, like
+	// lseek(SEEK_DATA).
+	SeekData(off int64) (int64, error)
+	// SeekHole returns the next hole offset at or after off, like
+	// lseek(SEEK_HOLE).
+	SeekHole(off int64) (int64, error)
+}
+
+// PunchHoler is an optional Surface capability for deallocating a byte
+// range. It stays optional (rather than growing Surface) so existing
+// adapters keep compiling untouched. Dense-byte surfaces may emulate a
+// punch by zero-filling, which reads back identically on dense bytes;
+// surfaces whose backend cannot express it fail with ErrUnsupported
+// instead of faking success.
+type PunchHoler interface {
+	// PunchHole deallocates [off, off+length) like
+	// fallocate(PUNCH_HOLE|KEEP_SIZE), or zero-fills it on dense-byte
+	// surfaces, or fails with ErrUnsupported.
+	PunchHole(path string, off, length int64) error
+}
 
 // ErrPrecondition reports a stale CAS token from CompareAndWrite; match it with errors.As.
 type ErrPrecondition struct {

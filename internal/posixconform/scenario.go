@@ -1099,4 +1099,172 @@ var Table = []Scenario{
 			return nil
 		},
 	},
+	{
+		Name:     "open-path-no-perm-required",
+		Surfaces: SurfaceFUSE,
+		Run: func(s Surface) error {
+			p := "/pc-open-path"
+			if err := s.CreateFile(p, 0o644, false); err != nil {
+				return fmt.Errorf("create: %v", err)
+			}
+			if err := s.Append(p, []byte("data")); err != nil {
+				return fmt.Errorf("append: %v", err)
+			}
+			// Mode 007 leaves the owner with zero permission bits while
+			// surviving the metadata round-trip (mode 0 is the unset
+			// sentinel and normalizes back to 644, so 000 cannot express
+			// "no permission" here). The opener is the file owner, so a
+			// read open is genuinely denied and only a permission-free
+			// O_PATH-style open may succeed.
+			if err := s.Chmod(p, 0o007); err != nil {
+				return fmt.Errorf("chmod: %v", err)
+			}
+			// An O_PATH-style open requires no permission on the file.
+			h, err := s.Open(p, OpenPath)
+			if err != nil {
+				return fmt.Errorf("O_PATH open without permission: %v", err)
+			}
+			// ...but carries no I/O rights either.
+			if _, err := h.Read(1); !errors.Is(err, ErrAccess) {
+				_ = h.Close()
+				return fmt.Errorf("read on O_PATH handle: want ErrAccess, got %v", err)
+			}
+			if _, err := h.PRead(0, 1); !errors.Is(err, ErrAccess) {
+				_ = h.Close()
+				return fmt.Errorf("pread on O_PATH handle: want ErrAccess, got %v", err)
+			}
+			if _, err := h.Write([]byte("x")); !errors.Is(err, ErrAccess) {
+				_ = h.Close()
+				return fmt.Errorf("write on O_PATH handle: want ErrAccess, got %v", err)
+			}
+			if _, err := h.PWrite(0, []byte("x")); !errors.Is(err, ErrAccess) {
+				_ = h.Close()
+				return fmt.Errorf("pwrite on O_PATH handle: want ErrAccess, got %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			// Restore access and prove the bytes survived untouched.
+			if err := s.Chmod(p, 0o644); err != nil {
+				return fmt.Errorf("restore chmod: %v", err)
+			}
+			got, err := s.ReadRange(p, 0, 4)
+			if err != nil {
+				return fmt.Errorf("ranged read: %v", err)
+			}
+			if string(got) != "data" {
+				return fmt.Errorf("content: want %q, got %q", "data", got)
+			}
+			// A missing path still reports not-found, never bare success.
+			if _, err := s.Open("/pc-open-path-missing", OpenPath); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("O_PATH open missing: want ErrNotFound, got %v", err)
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "seek-data-hole-basic",
+		Surfaces: SurfaceFUSE,
+		Run: func(s Surface) error {
+			p := "/pc-seek-basic"
+			if err := s.CreateFile(p, 0o644, false); err != nil {
+				return fmt.Errorf("create: %v", err)
+			}
+			if err := s.Append(p, []byte("0123456789")); err != nil {
+				return fmt.Errorf("append: %v", err)
+			}
+			h, err := s.Open(p, OpenReadOnly)
+			if err != nil {
+				return fmt.Errorf("open: %v", err)
+			}
+			defer func() { _ = h.Close() }()
+			seeker, ok := h.(SeekHandle)
+			if !ok {
+				return fmt.Errorf("seek: %w: handle cannot SEEK_DATA/SEEK_HOLE", ErrUnsupported)
+			}
+			if got, err := seeker.SeekData(0); err != nil || got != 0 {
+				return fmt.Errorf("seek data 0: want 0, got %d, err %v", got, err)
+			}
+			if got, err := seeker.SeekData(4); err != nil || got != 4 {
+				return fmt.Errorf("seek data 4: want 4, got %d, err %v", got, err)
+			}
+			if _, err := seeker.SeekData(10); !errors.Is(err, ErrUnsatisfiableRange) {
+				return fmt.Errorf("seek data at EOF: want ErrUnsatisfiableRange, got %v", err)
+			}
+			if _, err := seeker.SeekData(99); !errors.Is(err, ErrUnsatisfiableRange) {
+				return fmt.Errorf("seek data past EOF: want ErrUnsatisfiableRange, got %v", err)
+			}
+			if _, err := seeker.SeekData(-1); !errors.Is(err, ErrInvalid) {
+				return fmt.Errorf("seek data negative: want ErrInvalid, got %v", err)
+			}
+			if got, err := seeker.SeekHole(0); err != nil || got != 10 {
+				return fmt.Errorf("seek hole 0: want 10, got %d, err %v", got, err)
+			}
+			if got, err := seeker.SeekHole(7); err != nil || got != 10 {
+				return fmt.Errorf("seek hole 7: want 10, got %d, err %v", got, err)
+			}
+			if got, err := seeker.SeekHole(10); err != nil || got != 10 {
+				return fmt.Errorf("seek hole at EOF: want 10, got %d, err %v", got, err)
+			}
+			if _, err := seeker.SeekHole(11); !errors.Is(err, ErrUnsatisfiableRange) {
+				return fmt.Errorf("seek hole past EOF: want ErrUnsatisfiableRange, got %v", err)
+			}
+			if _, err := seeker.SeekHole(-1); !errors.Is(err, ErrInvalid) {
+				return fmt.Errorf("seek hole negative: want ErrInvalid, got %v", err)
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "fallocate-punch-hole-unsupported",
+		Surfaces: SurfaceFUSE,
+		Run: func(s Surface) error {
+			p := "/pc-punch-hole"
+			const original = "0123456789ABCDEF"
+			if err := s.CreateFile(p, 0o644, false); err != nil {
+				return fmt.Errorf("create: %v", err)
+			}
+			if err := s.Append(p, []byte(original)); err != nil {
+				return fmt.Errorf("append: %v", err)
+			}
+			puncher, ok := s.(PunchHoler)
+			if !ok {
+				return fmt.Errorf("punch hole: %w: surface cannot punch holes", ErrUnsupported)
+			}
+			switch err := puncher.PunchHole(p, 4, 8); {
+			case err == nil:
+				// Zero-fill emulation: the punched span reads back as
+				// zeros (observably equal to a real hole punch on dense
+				// bytes) while the edges stay intact.
+				got, rerr := s.ReadRange(p, 0, 16)
+				if rerr != nil {
+					return fmt.Errorf("ranged read after punch: %v", rerr)
+				}
+				want := append([]byte("0123"), bytes.Repeat([]byte{0}, 8)...)
+				want = append(want, "CDEF"...)
+				if !bytes.Equal(got, want) {
+					return fmt.Errorf("punched content: want %q, got %q", want, got)
+				}
+			case errors.Is(err, ErrUnsupported):
+				// Honest EOPNOTSUPP: the content must be unchanged.
+				got, rerr := s.ReadRange(p, 0, 16)
+				if rerr != nil {
+					return fmt.Errorf("ranged read after refused punch: %v", rerr)
+				}
+				if string(got) != original {
+					return fmt.Errorf("refused punch changed content: want %q, got %q", original, got)
+				}
+			default:
+				return fmt.Errorf("punch hole: want nil or ErrUnsupported, got %v", err)
+			}
+			// Negative args are invalid on every surface.
+			if err := puncher.PunchHole(p, -1, 4); !errors.Is(err, ErrInvalid) {
+				return fmt.Errorf("punch negative offset: want ErrInvalid, got %v", err)
+			}
+			if err := puncher.PunchHole(p, 0, -4); !errors.Is(err, ErrInvalid) {
+				return fmt.Errorf("punch negative length: want ErrInvalid, got %v", err)
+			}
+			return nil
+		},
+	},
 }

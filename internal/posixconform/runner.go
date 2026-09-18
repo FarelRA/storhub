@@ -43,6 +43,21 @@ func runOne(s Surface, sc Scenario) (r Result) {
 	return r
 }
 
+// Filter returns the scenarios in table that apply to the given surface
+// bitmask (SurfaceFUSE, SurfaceREST, SurfaceCLI). Adapters run only their
+// slice, so FUSE-only scenarios (O_PATH opens, seeks, fallocate modes)
+// never execute where the surface cannot express them; the in-memory
+// oracle runs the full table unfiltered.
+func Filter(table []Scenario, surface uint32) []Scenario {
+	out := make([]Scenario, 0, len(table))
+	for _, sc := range table {
+		if sc.Surfaces&surface != 0 {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
 // Summary counts passed and failed results.
 func Summary(results []Result) (passed, failed int) {
 	for _, r := range results {
