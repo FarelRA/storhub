@@ -120,6 +120,14 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 		{name: "append", args: []string{"append", "project", "path", "text"}, want: "missing GitHub token"},
 		{name: "write", args: []string{"write", "project", "path", "0", "text"}, want: "missing GitHub token"},
 		{name: "patch", args: []string{"patch", "project", "path", "0", "0", "text"}, want: "missing GitHub token"},
+		{name: "truncate", args: []string{"truncate", "project", "path", "0"}, want: "missing GitHub token"},
+		{name: "chmod", args: []string{"chmod", "project", "path", "640"}, want: "missing GitHub token"},
+		{name: "chown", args: []string{"chown", "project", "path", "1", "2"}, want: "missing GitHub token"},
+		{name: "touch", args: []string{"touch", "project", "path"}, want: "missing GitHub token"},
+		{name: "symlink", args: []string{"symlink", "project", "target", "link"}, want: "missing GitHub token"},
+		{name: "readlink", args: []string{"readlink", "project", "path"}, want: "missing GitHub token"},
+		{name: "link", args: []string{"link", "project", "old", "new"}, want: "missing GitHub token"},
+		{name: "sync", args: []string{"sync", "project"}, want: "missing GitHub token"},
 		{name: "revisions", args: []string{"revisions", "project"}, want: "missing GitHub token"},
 		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "invalid commit SHA"},
 		{name: "rest", args: []string{"rest"}, want: "missing GitHub token"},
@@ -193,6 +201,14 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"append", "--token", "x", "demo", "docs/readme.txt", "tail"},
 		{"write", "--token", "x", "demo", "docs/readme.txt", "1", "x"},
 		{"patch", "--token", "x", "demo", "docs/readme.txt", "1", "2", "x"},
+		{"truncate", "--token", "x", "demo", "docs/readme.txt", "3"},
+		{"chmod", "--token", "x", "demo", "docs/readme.txt", "640"},
+		{"chown", "--token", "x", "demo", "docs/readme.txt", "1", "2"},
+		{"touch", "--token", "x", "demo", "docs/readme.txt"},
+		{"symlink", "--token", "x", "demo", "docs/readme.txt", "docs/alias.txt"},
+		{"readlink", "--token", "x", "demo", "docs/alias.txt"},
+		{"link", "--token", "x", "demo", "docs/readme.txt", "docs/hard.txt"},
+		{"sync", "--token", "x", "demo"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
 		{"prune", "--token", "x", "demo", "objects", "--dry-run"},
@@ -207,7 +223,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	// Status chatter belongs on stderr; stdout carries only data.
 	chatter := stderr()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "rolled back demo to deadbeef", "would prune demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "truncated", "changed mode of docs/readme.txt to 0640", "changed ownership of docs/readme.txt to 1:2", "touched docs/readme.txt", "symlinked", "linked", "synced demo", "rolled back demo to deadbeef", "would prune demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
 		if !strings.Contains(chatter, want) {
 			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
@@ -843,6 +859,22 @@ func (h *fakeHub) WriteFileAt(project, filePath string, offset int64, data []byt
 }
 func (h *fakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
 	return &storhub.FileMetadata{Size: 9, Inode: 4, Mode: 0o644}, nil
+}
+func (h *fakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: 0, Inode: 5, Mode: 0o644}, nil
+}
+func (h *fakeHub) TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: size, Inode: 6, Mode: 0o644}, nil
+}
+func (h *fakeHub) Chmod(project, targetPath string, mode uint32) error          { return nil }
+func (h *fakeHub) Chown(project, targetPath string, uid, gid uint32) error      { return nil }
+func (h *fakeHub) Chtimes(project, targetPath string, atime, mtime int64) error { return nil }
+func (h *fakeHub) Symlink(project, target, linkPath string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: int64(len(target)), Inode: 7, Mode: 0o777}, nil
+}
+func (h *fakeHub) Readlink(project, linkPath string) (string, error) { return "target", nil }
+func (h *fakeHub) Link(project, existingPath, newPath string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: 11, Inode: 1, Mode: 0o644}, nil
 }
 func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: 1}}, nil

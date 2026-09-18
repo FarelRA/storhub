@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -79,6 +80,7 @@ type sessionStatResponse struct {
 	Path    string `json:"path"`
 	Size    int64  `json:"size"`
 	Dirty   bool   `json:"dirty"`
+	Stale   bool   `json:"stale"`
 	Mode    string `json:"mode"`
 }
 
@@ -112,8 +114,18 @@ func statSessionResponse(handle string, stat storage.SessionStat) sessionStatRes
 		Path:    stat.Path,
 		Size:    stat.Size,
 		Dirty:   stat.Dirty,
+		Stale:   sessionStatIsStale(stat),
 		Mode:    stat.Mode.String(),
 	}
+}
+
+// sessionStatIsStale reports the handle's staleness bit (pin revision vs
+// current HEAD). The Stale field on storage.SessionStat lands from a
+// parallel change; reflection keeps this compiling before and after,
+// and absent means not stale.
+func sessionStatIsStale(stat storage.SessionStat) bool {
+	f := reflect.ValueOf(stat).FieldByName("Stale")
+	return f.IsValid() && f.Kind() == reflect.Bool && f.Bool()
 }
 
 // writeSessionError maps session failures to status codes before falling

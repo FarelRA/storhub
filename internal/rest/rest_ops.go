@@ -34,6 +34,11 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	// Rollback republishes history without a target node: the guard is the
+	// project revision (412 when the caller decided on a moved HEAD).
+	if !h.preconditionForProjectOp(w, r, project) {
+		return
+	}
 	if err := h.clientFor(r).RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -55,6 +60,9 @@ type purgeResponse struct {
 
 func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	if !h.preconditionForProjectOp(w, r, project) {
+		return
+	}
 	result, err := h.clientFor(r).PurgeUntrackedContext(r.Context(), project)
 	if err != nil {
 		logging.Error(h.logger, "purge failed", "project", project, "err", err, "status", mappedStatus(err))
@@ -86,6 +94,9 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := requireCommitSHA(req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
 	if err := h.clientFor(r).RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
@@ -134,6 +145,9 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	// here. Storage keeps its own backstop error.
 	if req.Keep > 1 {
 		h.writeMappedError(w, errBadRequest("keep must be <= 1: history compaction retains exactly one checkpoint"))
+		return
+	}
+	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
 	result, err := h.clientFor(r).PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)

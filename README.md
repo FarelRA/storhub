@@ -464,6 +464,16 @@ The REST handler uses HTTP preconditions where they help UNIX-like workflows:
 - `If-None-Match: *` supports create-only full-file uploads
 - `Range: bytes=...` supports partial reads for large files
 
+Compare-and-swap over REST (recipe): read the revision, mutate with
+`If-Match`, retry on `412`.
+
+```bash
+REV=$(curl -sI http://localhost:8080/api/v1/projects/demo/nodes?path=docs/log.txt | grep -i x-storhub-revision | awk '{print $2}' | tr -d '\r')
+curl -X PATCH 'http://localhost:8080/api/v1/projects/demo/content?path=docs/log.txt&op=append' \
+  --data-binary 'new entry' -H "If-Match: $REV"
+# 412 means HEAD moved under you: refetch REV and retry.
+```
+
 ## Examples
 
 Every example deletes the GitHub repository it created once it finishes,

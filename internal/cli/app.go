@@ -119,6 +119,17 @@ type hubClient interface {
 	AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error)
 	WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error)
 	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
+	// POSIX verbs backing the truncate/chmod/chown/touch/symlink/readlink/
+	// link/sync commands. Signatures mirror *storage.StorHub directly so
+	// storhubClient satisfies them through its embedded hub.
+	CreateFile(project, filePath string) (*storhub.FileMetadata, error)
+	TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error)
+	Chmod(project, targetPath string, mode uint32) error
+	Chown(project, targetPath string, uid, gid uint32) error
+	Chtimes(project, targetPath string, atime, mtime int64) error
+	Symlink(project, target, linkPath string) (*storhub.FileMetadata, error)
+	Readlink(project, linkPath string) (string, error)
+	Link(project, existingPath, newPath string) (*storhub.FileMetadata, error)
 	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
 	// The long one-shot maintenance operations take a context so a
 	// Ctrl+C cancels them between units of work instead of killing the
@@ -321,6 +332,14 @@ Examples:
 	rootCmd.AddCommand(a.newAppendCmd())
 	rootCmd.AddCommand(a.newWriteCmd())
 	rootCmd.AddCommand(a.newPatchCmd())
+	rootCmd.AddCommand(a.newTruncateCmd())
+	rootCmd.AddCommand(a.newChmodCmd())
+	rootCmd.AddCommand(a.newChownCmd())
+	rootCmd.AddCommand(a.newTouchCmd())
+	rootCmd.AddCommand(a.newSymlinkCmd())
+	rootCmd.AddCommand(a.newReadlinkCmd())
+	rootCmd.AddCommand(a.newLinkCmd())
+	rootCmd.AddCommand(a.newSyncCmd())
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
@@ -372,19 +391,23 @@ func (a *App) newUploadOrReplaceCmd(name, short, long string) *cobra.Command {
 }
 
 func (a *App) newUploadCmd() *cobra.Command {
-	return a.newUploadOrReplaceCmd("upload", "Upload a file", `Upload copies a local file into the project, chunking it for
+	cmd := a.newUploadOrReplaceCmd("upload", "Upload a file", `Upload copies a local file into the project, chunking it for
 GitHub release-asset storage.
 
 Examples:
   storhub upload docs-project docs/readme.txt ./README.md`)
+	cmd.Flags().Bool("exclusive", false, "Fail if the remote path already exists instead of overwriting (atomic create gate)")
+	return cmd
 }
 
 func (a *App) newReplaceCmd() *cobra.Command {
-	return a.newUploadOrReplaceCmd("replace", "Replace an existing file", `Replace overwrites a stored file with a local one, keeping the
+	cmd := a.newUploadOrReplaceCmd("replace", "Replace an existing file", `Replace overwrites a stored file with a local one, keeping the
 same path and metadata identity.
 
 Examples:
   storhub replace docs-project docs/readme.txt ./README.md`)
+	addRevisionFlag(cmd)
+	return cmd
 }
 
 func (a *App) newDownloadCmd() *cobra.Command {
@@ -478,6 +501,7 @@ Examples:
 	}
 	cmd.Flags().BoolP("recursive", "r", false, "Remove directory instead of file")
 	addSyncFlag(cmd)
+	addRevisionFlag(cmd)
 	return cmd
 }
 
@@ -492,7 +516,9 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(3)),
 		RunE: a.runMove,
 	}
+	cmd.Flags().Bool("no-replace", false, "Fail if the destination already exists (RENAME_NOREPLACE, atomic)")
 	addSyncFlag(cmd)
+	addRevisionFlag(cmd)
 	return cmd
 }
 
@@ -505,11 +531,12 @@ atomically: readers never see a torn intermediate state.
 
 Examples:
   storhub append docs-project docs/log.txt "more"
-  echo more | storhub append docs-project docs/log.txt -`,
+   echo more | storhub append docs-project docs/log.txt -`,
 		Args: usageArgs(cobra.ExactArgs(3)),
 		RunE: a.runAppend,
 	}
 	addSyncFlag(cmd)
+	addRevisionFlag(cmd)
 	return cmd
 }
 
@@ -521,11 +548,12 @@ func (a *App) newWriteCmd() *cobra.Command {
 Offsets are non-negative; misuse is a usage error (exit 2).
 
 Examples:
-  storhub write docs-project docs/f.txt 0 hello`,
+   storhub write docs-project docs/f.txt 0 hello`,
 		Args: usageArgs(cobra.ExactArgs(4)),
 		RunE: a.runWrite,
 	}
 	addSyncFlag(cmd)
+	addRevisionFlag(cmd)
 	return cmd
 }
 
@@ -537,11 +565,12 @@ func (a *App) newPatchCmd() *cobra.Command {
 bytes (or stdin with "-") in one atomic step.
 
 Examples:
-  storhub patch docs-project docs/f.txt 0 5 hello`,
+   storhub patch docs-project docs/f.txt 0 5 hello`,
 		Args: usageArgs(cobra.ExactArgs(5)),
 		RunE: a.runPatch,
 	}
 	addSyncFlag(cmd)
+	addRevisionFlag(cmd)
 	return cmd
 }
 
@@ -1042,9 +1071,9 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	project, remotePath, localPath := args[0], args[1], args[2]
 	var meta *storhub.FileMetadata
 	if replace {
-		meta, err = hub.ReplaceFile(project, remotePath, localPath)
+		meta, err = replaceWithFlags(cmd.Context(), hub, project, remotePath, localPath, cmd)
 	} else {
-		meta, err = hub.UploadFile(project, remotePath, localPath)
+		meta, err = uploadWithFlags(cmd.Context(), hub, project, remotePath, localPath, cmd)
 	}
 	if err != nil {
 		return err
@@ -1188,12 +1217,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if recursive {
-		err = hub.Rmdir(args[0], args[1])
-	} else {
-		err = hub.DeleteFile(args[0], args[1])
-	}
-	if err != nil {
+	if err := removeWithFlags(cmd.Context(), hub, args[0], args[1], recursive, cmd); err != nil {
 		return err
 	}
 	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
@@ -1208,7 +1232,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := hub.Rename(args[0], args[1], args[2]); err != nil {
+	if err := renameWithFlags(cmd.Context(), hub, args[0], args[1], args[2], cmd); err != nil {
 		return err
 	}
 	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
@@ -1227,7 +1251,7 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.AppendFile(args[0], args[1], payload)
+	meta, err := appendWithFlags(cmd.Context(), hub, args[0], args[1], payload, cmd)
 	if err != nil {
 		return err
 	}
@@ -1251,7 +1275,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.WriteFileAt(args[0], args[1], offset, payload)
+	meta, err := writeWithFlags(cmd.Context(), hub, args[0], args[1], offset, payload, cmd)
 	if err != nil {
 		return err
 	}
@@ -1279,7 +1303,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	meta, err := hub.PatchFile(args[0], args[1], offset, deleteSize, edit)
+	meta, err := patchWithFlags(cmd.Context(), hub, args[0], args[1], offset, deleteSize, edit, cmd)
 	if err != nil {
 		return err
 	}

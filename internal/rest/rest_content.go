@@ -578,6 +578,10 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// SetXAttrContext takes no mutate options: freshness only.
+	if _, ok := h.preconditionForUpdate(w, r, project, targetPath); !ok {
+		return
+	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -603,6 +607,10 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 	targetPath := r.URL.Query().Get("path")
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
+		return
+	}
+	// RemoveXAttrContext takes no mutate options: freshness only.
+	if _, ok := h.preconditionForUpdate(w, r, project, targetPath); !ok {
 		return
 	}
 	if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {

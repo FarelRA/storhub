@@ -27,6 +27,11 @@ func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 // handleProjectDelete serves DELETE /projects/{project}.
 func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	// Deleting the whole project has no target node: the guard is the
+	// project revision (412 when the caller decided on a moved HEAD).
+	if !h.preconditionForProjectOp(w, r, project) {
+		return
+	}
 	if err := h.clientFor(r).DeleteProjectContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return

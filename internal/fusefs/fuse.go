@@ -1328,7 +1328,12 @@ const defaultCallerUmask = 0o022
 func (s *Filesystem) callerContext(ctx context.Context) context.Context {
 	ctx = shfs.WithSuppressedAtime(ctx)
 	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
-		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Umask: s.opts.EffectiveUmask(), Admin: caller.Uid == 0})
+		// Supplementary groups come from the host NSS lookup: the FUSE
+		// protocol carries uid/gid only, and without them the DAC judges
+		// a multi-group caller by primary group alone. The lookup fails
+		// open (empty groups on error), so this line never newly denies.
+		groups, _ := shfs.LookupUserGroups(caller.Uid)
+		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Groups: groups, Umask: s.opts.EffectiveUmask(), Admin: caller.Uid == 0})
 	}
 	return ctx
 }

@@ -547,7 +547,7 @@ func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath stri
 	return nil
 }
 
-func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
+func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -563,7 +563,12 @@ func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, ne
 		return err
 	}
 	if _, ok := p.files[newClean]; ok {
-		return shfs.AlreadyExists(newClean)
+		// RENAME_NOREPLACE is enforced here; plain renames replace the
+		// destination like the real backend.
+		if shfs.ApplyMutateOptions(opts).NoReplace() {
+			return shfs.AlreadyExists(newClean)
+		}
+		delete(p.files, newClean)
 	}
 	if _, ok := p.dirs[newClean]; ok {
 		return shfs.AlreadyExists(newClean)

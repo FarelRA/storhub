@@ -278,6 +278,7 @@ type sessionStatDoc struct {
 	Path    string `json:"path"`
 	Size    int64  `json:"size"`
 	Dirty   bool   `json:"dirty"`
+	Stale   bool   `json:"stale"`
 	Mode    string `json:"mode"`
 }
 
@@ -313,13 +314,14 @@ func (a *App) runSessionStat(cmd *cobra.Command, args []string) error {
 		Path:    stat.Path,
 		Size:    stat.Size,
 		Dirty:   stat.Dirty,
+		Stale:   sessionIsStale(stat),
 		Mode:    stat.Mode.String(),
 	}
 	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
 		return json.NewEncoder(a.stdout).Encode(doc)
 	}
-	_, _ = fmt.Fprintf(a.stdout, "handle: %s\nproject: %s\npath: %s\nsize: %d bytes\ndirty: %t\nmode: %s\n",
-		doc.Handle, doc.Project, doc.Path, doc.Size, doc.Dirty, doc.Mode)
+	_, _ = fmt.Fprintf(a.stdout, "handle: %s\nproject: %s\npath: %s\nsize: %d bytes\ndirty: %t\nstale: %t\nmode: %s\n",
+		doc.Handle, doc.Project, doc.Path, doc.Size, doc.Dirty, doc.Stale, doc.Mode)
 	return nil
 }
 

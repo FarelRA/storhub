@@ -4,33 +4,48 @@ package cli
 // the shared table in internal/posixconform executes against CLI commands.
 //
 // Mapping (honest, gaps fail loudly):
-//   CreateFile      -> `stat --json` + `upload` of an empty temp file (no
-//                      truncate when present; exclusive is check-then-act,
-//                      NOT atomic; perm bits ignored, CLI has no mode flag)
-//   Open            -> `stat --json` (+ `upload` empty to create missing for
-//                      every mode except OpenReadOnly); OpenTruncate has no
-//                      CLI equivalent and reports a gap error
+//   CreateFile      -> `touch` (never truncates, so non-exclusive create
+//                      is idempotent) with `--exclusive` for O_EXCL (atomic
+//                      create gate in storage, no check-then-act); perm
+//                      bits ignored, CLI has no mode flag
+//   Open            -> `stat --json` (+ `touch` to create missing for every
+//                      mode except OpenReadOnly) with `truncate 0` for
+//                      OpenTruncate; links resolved through readlink
 //   Handle cursors  -> adapter state (allowed by the harness contract);
 //                      PRead/Read via `cat`, Write/PWrite via `write`,
-//                      append-mode Write via `append`
-//   Stat            -> `stat --json` parsed back into posixconform.Stat
-//   ReadRange       -> `cat` plus client-side windowing (the CLI exposes no
-//                      ranged-read flag); range error semantics enforced here
+//                      append-mode Write via `append`, Truncate via
+//                      `truncate`, Sync via `sync`
+//   Stat            -> `stat --json` following a final symlink through
+//                      `readlink` (lstat semantics in, stat semantics out)
+//   ReadRange       -> resolved path via `cat` plus client-side windowing
+//                      (the CLI exposes no ranged-read flag); range error
+//                      semantics enforced here
 //   Append          -> `append` (missing path stays ErrNotFound, like real)
-//   Unlink/Rename   -> `rm` / `mv` (no --no-replace flag, so noReplace=true
-//                      reports a gap error)
+//   Truncate        -> `truncate` (zero-filling growth in the backend)
+//   Chmod/Chown     -> `chmod` / `chown` (-1 keeps an id)
+//   Utimens         -> `touch --mtime-ns/--atime-ns` (ns precision through
+//                      the fake; the real backend stores seconds)
+//   Unlink/Rename   -> `rm` / `mv` with --no-replace for RENAME_NOREPLACE
+//                      (atomic in the storage transaction)
 //   Mkdir/Rmdir     -> `mkdir` / `rm -r`
-//   Truncate/Chmod/Chown/Utimens/Symlink/Readlink/Sync/Revision/
-//   CompareAndWrite -> explicit gap errors: the CLI command tree has no
-//                      truncate, chmod, chown, utimens/touch, symlink,
-//                      readlink, fsync, or CAS/etag facility, so these are
-//                      reported, never simulated.
+//   Symlink         -> `symlink`; Readlink -> `readlink` (ErrInvalid on
+//                      non-links, ELOOP past the hop cap)
+//   Sync            -> `sync` (project drain, the --sync flag standalone)
+//   Revision        -> `stat --json` ChangedAt token;
+//                      CompareAndWrite -> `write --expected-revision`
+//                      (stale tokens answer ErrPrecondition with Actual)
 //
 // Backend: the package-global one-shot hub seam (newHubFromFlagsFn, the same
 // seam app_test.go swaps) is pointed at an in-memory fake for the duration
 // of the test. Every byte the adapter sees still travels through a real
-// cobra command RunE path (upload/write/append/cat/stat/rm/mv/mkdir); the
-// fake only stands in for the networked GitHub storage behind the CLI.
+// cobra command RunE path; the fake only stands in for the networked
+// GitHub storage behind the CLI.
+//
+// Refused (fail loudly, documented cause): unlink-while-open and
+// rename-while-open need open-file descriptions that keep serving an
+// unlinked/renamed inode, but every CLI read/write re-resolves its path
+// per invocation, so a handle cannot outlive its name. Returning cached
+// bytes would fake POSIX instead of implementing it.
 
 import (
 	"bytes"
@@ -60,22 +75,28 @@ var (
 // In-memory fake hub behind the CLI seam.
 // ---------------------------------------------------------------------------
 
-// pcFile is one stored regular file.
+// pcFile is one stored regular file. Timestamps are nanoseconds since the
+// epoch (the fake preserves ns precision so touch round-trips exactly;
+// atime/mtime are independent fields).
 type pcFile struct {
 	data  []byte
 	mode  uint32
 	uid   uint32
 	gid   uint32
 	mtime int64
+	atime int64
 }
 
 // pcFakeHub implements hubClient with textbook in-memory semantics and
 // shfs/syscall-style errors, mirroring what the real backend reports
 // (NotFound on missing append/write targets, AlreadyExists on duplicate
-// mkdir, ELOOP-free since symlinks cannot be created through hubClient).
+// mkdir, lstat-style StatPath with ELOOP-free... no: loops report
+// syscall.ELOOP via the adapter's own link follower, since the fake
+// returns link entries exactly like the real lstat backend).
 type pcFakeHub struct {
 	mu    sync.Mutex
 	files map[string]*pcFile
+	links map[string]string
 	dirs  map[string]bool
 	clock int64
 }
@@ -83,6 +104,7 @@ type pcFakeHub struct {
 func newPCFakeHub() *pcFakeHub {
 	return &pcFakeHub{
 		files: make(map[string]*pcFile),
+		links: make(map[string]string),
 		dirs:  map[string]bool{"": true},
 		clock: 1700000000000000000,
 	}
@@ -126,10 +148,13 @@ func (h *pcFakeHub) UploadFile(project, remotePath, localPath string) (*storhub.
 		cp := append([]byte(nil), data...)
 		f.data = cp
 		f.mtime = h.tick()
+		f.atime = f.mtime
 		return &storhub.FileMetadata{Size: int64(len(cp)), Mode: f.mode, Inode: 1}, nil
 	}
+	now := h.tick()
 	cp := append([]byte(nil), data...)
-	h.files[p] = &pcFile{data: cp, mode: 0o644, mtime: h.tick()}
+	h.files[p] = &pcFile{data: cp, mode: 0o644, mtime: now, atime: now}
+	delete(h.links, p)
 	return &storhub.FileMetadata{Size: int64(len(cp)), Mode: 0o644, Inode: 1}, nil
 }
 
@@ -201,7 +226,15 @@ func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, er
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(targetPath, "/")
 	if h.dirs[p] {
-		return &storhub.EntryInfo{Path: targetPath, IsDir: true, Mode: 0o755, ModifiedAt: h.clock}, nil
+		return &storhub.EntryInfo{Path: targetPath, IsDir: true, Mode: 0o755, ModifiedAt: h.clock, AccessedAt: h.clock, ChangedAt: h.clock}, nil
+	}
+	if target, ok := h.links[p]; ok {
+		// lstat semantics like the real backend: a terminal symlink
+		// reports itself; the CLI adapter follows through readlink.
+		return &storhub.EntryInfo{
+			Path: targetPath, Size: int64(len(target)), Mode: 0o777, NLink: 1, Inode: 1,
+			IsSymlink: true, SymlinkTarget: target, ModifiedAt: h.clock, AccessedAt: h.clock, ChangedAt: h.clock,
+		}, nil
 	}
 	f, ok := h.files[p]
 	if !ok {
@@ -210,7 +243,7 @@ func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, er
 	return &storhub.EntryInfo{
 		Path: targetPath, Size: int64(len(f.data)), Mode: f.mode,
 		UID: f.uid, GID: f.gid, NLink: 1, Inode: 1, ModifiedAt: f.mtime,
-		AccessedAt: f.mtime, ChangedAt: f.mtime,
+		AccessedAt: f.atime, ChangedAt: f.mtime,
 	}, nil
 }
 
@@ -260,6 +293,11 @@ func (h *pcFakeHub) DeleteFile(project, filePath string) error {
 	if h.dirs[p] {
 		return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
 	}
+	// rm on a symlink removes the link itself, never the target.
+	if _, ok := h.links[p]; ok {
+		delete(h.links, p)
+		return nil
+	}
 	if _, ok := h.files[p]; !ok {
 		return fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
 	}
@@ -297,21 +335,7 @@ func (h *pcFakeHub) Rename(project, oldPath, newPath string) error {
 	defer h.mu.Unlock()
 	o := strings.TrimPrefix(oldPath, "/")
 	n := strings.TrimPrefix(newPath, "/")
-	if h.dirs[o] {
-		return fmt.Errorf("pcFakeHub: directory rename not implemented: %s", o)
-	}
-	f, ok := h.files[o]
-	if !ok {
-		return fmt.Errorf("%w: %s", shfs.ErrNotFound, o)
-	}
-	if h.dirs[n] {
-		return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, n)
-	}
-	delete(h.files, n)
-	h.ensureParentsLocked(n)
-	h.files[n] = f
-	delete(h.files, o)
-	return nil
+	return h.renameLocked(o, n)
 }
 
 func (h *pcFakeHub) AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error) {
@@ -361,6 +385,249 @@ func (h *pcFakeHub) WriteFileAt(project, filePath string, offset int64, data []b
 
 func (h *pcFakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
 	return nil, errors.New("pcFakeHub: patch not implemented")
+}
+
+// CreateFile is atomic O_CREAT|O_EXCL like the real backend: it fails
+// with AlreadyExists when anything (file, dir, link) occupies the path.
+func (h *pcFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(filePath, "/")
+	if h.dirs[p] || h.files[p] != nil {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
+	}
+	if _, ok := h.links[p]; ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
+	}
+	h.ensureParentsLocked(p)
+	now := h.tick()
+	h.files[p] = &pcFile{data: []byte{}, mode: 0o644, mtime: now, atime: now}
+	return &storhub.FileMetadata{Size: 0, Mode: 0o644, Inode: 1}, nil
+}
+
+// TruncateFile resizes with zero-filling growth, ticking mtime like a
+// real data mutation (which also advances the CAS token).
+func (h *pcFakeHub) TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(filePath, "/")
+	if h.dirs[p] {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
+	}
+	if _, ok := h.links[p]; ok {
+		return nil, fmt.Errorf("not a regular file: %s", p)
+	}
+	f, ok := h.files[p]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+	}
+	if size < 0 {
+		return nil, errors.New("truncate size must be non-negative")
+	}
+	if int64(len(f.data)) < size {
+		nb := make([]byte, size)
+		copy(nb, f.data)
+		f.data = nb
+	} else {
+		f.data = append([]byte(nil), f.data[:size]...)
+	}
+	f.mtime = h.tick()
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+}
+
+func (h *pcFakeHub) Chmod(project, targetPath string, mode uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(targetPath, "/")
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("chmod on symlink has no meaning here: %s", p)
+	}
+	if h.dirs[p] {
+		return nil
+	}
+	f, ok := h.files[p]
+	if !ok {
+		return fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+	}
+	f.mode = mode & 0o7777
+	f.mtime = h.tick()
+	return nil
+}
+
+// Chown replaces owner/group and clears setuid/setgid, like a
+// non-privileged chown that succeeds. Uid/gid arrive as decided by the
+// CLI's -1 sentinel mapping.
+func (h *pcFakeHub) Chown(project, targetPath string, uid, gid uint32) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(targetPath, "/")
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("chown on symlink has no meaning here: %s", p)
+	}
+	if h.dirs[p] {
+		return nil
+	}
+	f, ok := h.files[p]
+	if !ok {
+		return fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+	}
+	f.uid, f.gid = uid, gid
+	f.mode &^= 0o6000
+	f.mtime = h.tick()
+	return nil
+}
+
+// Chtimes sets both stamps at nanosecond precision (the fake preserves
+// ns so touch round-trips exactly; the real backend is second-precision).
+func (h *pcFakeHub) Chtimes(project, targetPath string, atime, mtime int64) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(targetPath, "/")
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("touch on symlink has no meaning here: %s", p)
+	}
+	if h.dirs[p] {
+		return nil
+	}
+	f, ok := h.files[p]
+	if !ok {
+		return fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+	}
+	f.atime, f.mtime = atime, mtime
+	return nil
+}
+
+func (h *pcFakeHub) Symlink(project, target, linkPath string) (*storhub.FileMetadata, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(linkPath, "/")
+	if h.dirs[p] || h.files[p] != nil {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
+	}
+	if _, ok := h.links[p]; ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
+	}
+	h.ensureParentsLocked(p)
+	h.links[p] = target
+	h.tick()
+	return &storhub.FileMetadata{Size: int64(len(target)), Mode: 0o777, Inode: 1}, nil
+}
+
+func (h *pcFakeHub) Readlink(project, linkPath string) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(linkPath, "/")
+	if target, ok := h.links[p]; ok {
+		return target, nil
+	}
+	if h.dirs[p] || h.files[p] != nil {
+		return "", fmt.Errorf("not a symlink: %s", p)
+	}
+	return "", fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+}
+
+// Link aliases newPath to the same bytes (regular files only).
+func (h *pcFakeHub) Link(project, existingPath, newPath string) (*storhub.FileMetadata, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	o := strings.TrimPrefix(existingPath, "/")
+	n := strings.TrimPrefix(newPath, "/")
+	if h.dirs[o] {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrIsDirectory, o)
+	}
+	src, ok := h.files[o]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, o)
+	}
+	if h.dirs[n] || h.files[n] != nil {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, n)
+	}
+	if _, ok := h.links[n]; ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, n)
+	}
+	h.ensureParentsLocked(n)
+	h.files[n] = &pcFile{data: append([]byte(nil), src.data...), mode: src.mode, uid: src.uid, gid: src.gid, mtime: h.tick(), atime: src.atime}
+	return &storhub.FileMetadata{Size: int64(len(src.data)), Mode: src.mode, Inode: 1}, nil
+}
+
+// WriteFileAtContext enforces --expected-revision against the file's
+// ChangedAt token (the adapter's Revision source): a token from before
+// any intervening mutation fails with ErrPreconditionFailed.
+func (h *pcFakeHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := strings.TrimPrefix(filePath, "/")
+	f, ok := h.files[p]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+	}
+	if rev := shfs.ApplyMutateOptions(opts).ExpectedRevision(); rev != "" && rev != strconv.FormatInt(f.mtime, 10) {
+		return nil, fmt.Errorf("%w: revision %s does not match %d", shfs.ErrPreconditionFailed, rev, f.mtime)
+	}
+	if offset < 0 {
+		return nil, errors.New("write offset must be non-negative")
+	}
+	if len(data) > 0 {
+		end := offset + int64(len(data))
+		if end > int64(len(f.data)) {
+			nb := make([]byte, end)
+			copy(nb, f.data)
+			f.data = nb
+		}
+		copy(f.data[offset:], data)
+		f.mode &^= 0o6000
+		f.mtime = h.tick()
+	}
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+}
+
+// RenameContext enforces RENAME_NOREPLACE inside the fake's mutex (no
+// TOCTOU), mirroring the real transaction check; plain renames replace.
+func (h *pcFakeHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	o := strings.TrimPrefix(oldPath, "/")
+	n := strings.TrimPrefix(newPath, "/")
+	dstExists := h.files[n] != nil || h.dirs[n]
+	if _, ok := h.links[n]; ok {
+		dstExists = true
+	}
+	if shfs.ApplyMutateOptions(opts).NoReplace() && dstExists {
+		return fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, n)
+	}
+	return h.renameLocked(o, n)
+}
+
+// renameLocked is the pre-existing replace rename, extracted so the
+// NoReplace branch above shares it.
+func (h *pcFakeHub) renameLocked(o, n string) error {
+	if h.dirs[o] {
+		return fmt.Errorf("pcFakeHub: directory rename not implemented: %s", o)
+	}
+	f, ok := h.files[o]
+	if !ok {
+		if target, isLink := h.links[o]; isLink {
+			if h.dirs[n] {
+				return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, n)
+			}
+			delete(h.links, n)
+			delete(h.files, n)
+			h.ensureParentsLocked(n)
+			h.links[n] = target
+			delete(h.links, o)
+			return nil
+		}
+		return fmt.Errorf("%w: %s", shfs.ErrNotFound, o)
+	}
+	if h.dirs[n] {
+		return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, n)
+	}
+	delete(h.files, n)
+	delete(h.links, n)
+	h.ensureParentsLocked(n)
+	h.files[n] = f
+	delete(h.files, o)
+	return nil
 }
 
 func (h *pcFakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
@@ -480,39 +747,14 @@ func (s *cliPOSIXSurface) CreateFile(path string, perm uint32, exclusive bool) e
 	if err != nil {
 		return err
 	}
-	// Existence probe through the CLI. Exclusive create is NOT mapped onto
-	// upload: the CLI offers no O_CREAT|O_EXCL primitive, so any
-	// check-then-act here would be racy and could fake atomicity under the
-	// exclusive-race scenario. An exclusive create over an existing file
-	// truthfully reports ErrExists; an exclusive create of a missing file
-	// reports the gap instead of pretending.
+	// touch never truncates, so non-exclusive create is idempotent, and
+	// --exclusive gates on the atomic storage create (exactly one
+	// concurrent winner), never check-then-act.
+	args := []string{"touch", "--token", "x", s.project, rel}
 	if exclusive {
-		if _, statErr := s.statViaCLI(path); statErr == nil {
-			return fmt.Errorf("%w: cli stat shows %s already exists", posixconform.ErrExists, path)
-		} else if !errors.Is(statErr, posixconform.ErrNotFound) {
-			return statErr
-		}
-		return fmt.Errorf("cli: exclusive CreateFile of %s has no CLI equivalent (upload has no O_EXCL flag; check-then-act would fake atomicity); refusing to fake it", path)
+		args = append(args, "--exclusive")
 	}
-	if _, statErr := s.statViaCLI(path); statErr == nil {
-		return nil
-	} else if !errors.Is(statErr, posixconform.ErrNotFound) {
-		return statErr
-	}
-	tmp, err := os.CreateTemp("", "storhub-pc-create-*.bin")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := s.runCLI([]string{"upload", "--token", "x", s.project, rel, tmpName}); err != nil {
-		if errors.Is(err, shfs.ErrAlreadyExists) {
-			return fmt.Errorf("%w: cli upload raced on %s", posixconform.ErrExists, path)
-		}
+	if _, err := s.runCLI(args); err != nil {
 		return pcTranslateErr(err)
 	}
 	return nil
@@ -528,7 +770,9 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 	if _, err := cliPath(path); err != nil {
 		return nil, err
 	}
-	entry, err := s.statViaCLI(path)
+	// Open follows a final symlink like open(2): resolve first so the
+	// handle addresses the target, and loops surface ErrLoop here.
+	resolved, entry, err := s.followLinks(path)
 	if err != nil {
 		if !errors.Is(err, posixconform.ErrNotFound) {
 			return nil, err
@@ -538,34 +782,69 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 		}
 		// Every other mode creates a missing file, so materialize it
 		// through the CLI before handing out the cursor.
-		if cErr := s.CreateFile(path, 0o644, false); cErr != nil {
+		if cErr := s.CreateFile(resolved, 0o644, false); cErr != nil {
 			return nil, cErr
 		}
-	} else if entry.IsDir {
-		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
-	} else if mode == posixconform.OpenTruncate {
-		return nil, errors.New("cli: OpenTruncate has no CLI equivalent (no truncate/ftruncate command); refusing to fake it")
+		if resolved, entry, err = s.followLinks(resolved); err != nil {
+			return nil, err
+		}
 	}
-	h := &cliHandle{surface: s, path: path, mode: mode}
+	if entry.IsDir {
+		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
+	}
+	if mode == posixconform.OpenTruncate {
+		rel, _ := cliPath(resolved)
+		if _, err := s.runCLI([]string{"truncate", "--token", "x", s.project, rel, "0"}); err != nil {
+			return nil, pcTranslateErr(err)
+		}
+		if resolved, entry, err = s.followLinks(resolved); err != nil {
+			return nil, err
+		}
+	}
+	h := &cliHandle{surface: s, path: resolved, mode: mode}
 	if mode == posixconform.OpenAppend {
-		st, err := s.statViaCLI(path)
+		st, err := s.statViaCLI(resolved)
 		if err != nil {
 			return nil, err
 		}
 		h.cursor = st.Size
 	}
+	_ = entry
 	return h, nil
 }
 
+// maxFollowHops caps adapter-side symlink resolution, matching the
+// backend's own loop bound: past it the path reports ELOOP, never a hang.
+const maxFollowHops = 40
+
+// followLinks resolves path through a final symlink chain like open(2),
+// returning the resolved absolute path and its entry. Dangling targets
+// report ErrNotFound; chains past maxFollowHops report ErrLoop.
+func (s *cliPOSIXSurface) followLinks(path string) (string, *storhub.EntryInfo, error) {
+	current := path
+	for i := 0; i < maxFollowHops; i++ {
+		entry, err := s.statViaCLI(current)
+		if err != nil {
+			return current, nil, err
+		}
+		if !entry.IsSymlink {
+			return current, entry, nil
+		}
+		target := entry.SymlinkTarget
+		if strings.HasPrefix(target, "/") {
+			current = target
+			continue
+		}
+		dir := current[:strings.LastIndex(current, "/")]
+		current = dir + "/" + target
+	}
+	return current, nil, fmt.Errorf("%w: too many levels resolving %s", posixconform.ErrLoop, path)
+}
+
 func (s *cliPOSIXSurface) Stat(path string) (posixconform.Stat, error) {
-	entry, err := s.statViaCLI(path)
+	_, entry, err := s.followLinks(path)
 	if err != nil {
 		return posixconform.Stat{}, err
-	}
-	if entry.IsSymlink {
-		// No readlink resolution is attempted here; without symlink
-		// creation through the CLI this arm only documents intent.
-		return posixconform.Stat{}, errors.New("cli: Stat through symlink has no CLI equivalent (no symlink/readlink commands)")
 	}
 	if entry.IsDir {
 		return posixconform.Stat{}, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
@@ -576,34 +855,51 @@ func (s *cliPOSIXSurface) Stat(path string) (posixconform.Stat, error) {
 }
 
 func (s *cliPOSIXSurface) Truncate(path string, size int64) error {
-	if _, err := cliPath(path); err != nil {
+	rel, err := cliPath(path)
+	if err != nil {
 		return err
 	}
 	if size < 0 {
 		return posixconform.ErrInvalid
 	}
-	return errors.New("cli: Truncate has no CLI equivalent (no truncate command; patch cannot express grow-with-zero-fill); refusing to fake it")
+	if _, err := s.runCLI([]string{"truncate", "--token", "x", s.project, rel, strconv.FormatInt(size, 10)}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (s *cliPOSIXSurface) Chmod(path string, mode uint32) error {
-	if _, err := cliPath(path); err != nil {
+	rel, err := cliPath(path)
+	if err != nil {
 		return err
 	}
-	return errors.New("cli: Chmod has no CLI equivalent (no chmod command); refusing to fake it")
+	if _, err := s.runCLI([]string{"chmod", "--token", "x", s.project, rel, strconv.FormatUint(uint64(mode&0o7777), 8)}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (s *cliPOSIXSurface) Chown(path string, uid, gid uint32) error {
-	if _, err := cliPath(path); err != nil {
+	rel, err := cliPath(path)
+	if err != nil {
 		return err
 	}
-	return errors.New("cli: Chown has no CLI equivalent (no chown command, so setuid/setgid clearing on chown is unobservable); refusing to fake it")
+	if _, err := s.runCLI([]string{"chown", "--token", "x", s.project, rel, strconv.FormatUint(uint64(uid), 10), strconv.FormatUint(uint64(gid), 10)}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (s *cliPOSIXSurface) Utimens(path string, mtime int64) error {
-	if _, err := cliPath(path); err != nil {
+	rel, err := cliPath(path)
+	if err != nil {
 		return err
 	}
-	return errors.New("cli: Utimens has no CLI equivalent (no touch/utimens command); refusing to fake it")
+	stamp := strconv.FormatInt(mtime, 10)
+	if _, err := s.runCLI([]string{"touch", "--token", "x", s.project, rel, "--mtime-ns", stamp, "--atime-ns", stamp}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (s *cliPOSIXSurface) Unlink(path string) error {
@@ -626,10 +922,11 @@ func (s *cliPOSIXSurface) Rename(oldPath, newPath string, noReplace bool) error 
 	if err != nil {
 		return err
 	}
+	args := []string{"mv", "--token", "x", s.project, oldRel, newRel}
 	if noReplace {
-		return errors.New("cli: Rename with noReplace has no CLI equivalent (mv has no --no-replace flag); refusing to fake atomicity")
+		args = append(args, "--no-replace")
 	}
-	if _, err := s.runCLI([]string{"mv", "--token", "x", s.project, oldRel, newRel}); err != nil {
+	if _, err := s.runCLI(args); err != nil {
 		return pcTranslateErr(err)
 	}
 	return nil
@@ -658,26 +955,45 @@ func (s *cliPOSIXSurface) Rmdir(path string) error {
 }
 
 func (s *cliPOSIXSurface) Symlink(target, linkPath string) error {
-	if _, err := cliPath(linkPath); err != nil {
+	rel, err := cliPath(linkPath)
+	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(target) == "" {
 		return posixconform.ErrInvalid
 	}
-	return errors.New("cli: Symlink has no CLI equivalent (no symlink/ln command); refusing to fake it")
+	if _, err := s.runCLI([]string{"symlink", "--token", "x", s.project, target, rel}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (s *cliPOSIXSurface) Readlink(linkPath string) (string, error) {
 	if _, err := cliPath(linkPath); err != nil {
 		return "", err
 	}
-	return "", errors.New("cli: Readlink has no CLI equivalent (no readlink command); refusing to fake it")
+	// Classify first: missing paths report NotFound, non-links ErrInvalid,
+	// and only true links reach the readlink command.
+	entry, err := s.statViaCLI(linkPath)
+	if err != nil {
+		return "", err
+	}
+	if !entry.IsSymlink {
+		return "", fmt.Errorf("%w: cli stat shows %s is not a symlink", posixconform.ErrInvalid, linkPath)
+	}
+	rel, _ := cliPath(linkPath)
+	out, err := s.runCLI([]string{"readlink", "--token", "x", s.project, rel})
+	if err != nil {
+		return "", pcTranslateErr(err)
+	}
+	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
-// ReadRange fetches through `cat` (the CLI has no ranged-read flag) and
-// windows client-side. Existence, type, and size come from `stat --json`,
-// so missing paths, directories, and loops surface their CLI errors while
-// the unsatisfiable/negative range rules are enforced here.
+// ReadRange resolves a final symlink (reads follow links) and fetches
+// through `cat` (the CLI has no ranged-read flag), windowing client-side.
+// Existence, type, and size come from `stat --json`, so missing paths,
+// directories, and loops surface their CLI errors while the
+// unsatisfiable/negative range rules are enforced here.
 func (s *cliPOSIXSurface) ReadRange(path string, offset, length int64) ([]byte, error) {
 	if _, err := cliPath(path); err != nil {
 		return nil, err
@@ -685,7 +1001,7 @@ func (s *cliPOSIXSurface) ReadRange(path string, offset, length int64) ([]byte, 
 	if offset < 0 || length < 0 {
 		return nil, posixconform.ErrInvalid
 	}
-	entry, err := s.statViaCLI(path)
+	resolved, entry, err := s.followLinks(path)
 	if err != nil {
 		return nil, err
 	}
@@ -695,7 +1011,7 @@ func (s *cliPOSIXSurface) ReadRange(path string, offset, length int64) ([]byte, 
 	if offset >= entry.Size {
 		return nil, fmt.Errorf("%w: offset %d at or past size %d", posixconform.ErrUnsatisfiableRange, offset, entry.Size)
 	}
-	rel, _ := cliPath(path)
+	rel, _ := cliPath(resolved)
 	data, err := s.runCLI([]string{"cat", "--token", "x", s.project, rel})
 	if err != nil {
 		return nil, pcTranslateErr(err)
@@ -725,24 +1041,45 @@ func (s *cliPOSIXSurface) Sync(path string) error {
 	if _, err := cliPath(path); err != nil {
 		return err
 	}
-	return errors.New("cli: Sync has no CLI equivalent (no fsync command); returning success would fake durability, so this fails")
+	// The standalone sync command drains the project (the --sync flag's
+	// standalone form), which is exactly fsync-class durability here.
+	if _, err := s.runCLI([]string{"sync", "--token", "x", s.project}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
+}
+
+// Revision reports the file's ChangedAt clock as the CAS token: every
+// data or metadata mutation ticks it, so it advances exactly when the
+// content a CompareAndWrite guards moves.
+func (s *cliPOSIXSurface) Revision(path string) (uint64, error) {
+	_, entry, err := s.followLinks(path)
+	if err != nil {
+		return 0, err
+	}
+	return uint64(entry.ChangedAt), nil
 }
 
 func (s *cliPOSIXSurface) CompareAndWrite(path string, offset int64, data []byte, token uint64) error {
-	if _, err := cliPath(path); err != nil {
+	rel, err := cliPath(path)
+	if err != nil {
 		return err
 	}
 	if offset < 0 {
 		return posixconform.ErrInvalid
 	}
-	return errors.New("cli: CompareAndWrite has no CLI equivalent (write/append/patch expose no etag/if-match guard); refusing to fake CAS")
-}
-
-func (s *cliPOSIXSurface) Revision(path string) (uint64, error) {
-	if _, err := cliPath(path); err != nil {
-		return 0, err
+	rev := strconv.FormatUint(token, 10)
+	if _, err := s.runCLI([]string{"write", "--token", "x", "--expected-revision", rev, s.project, rel, strconv.FormatInt(offset, 10), string(data)}); err != nil {
+		if errors.Is(err, shfs.ErrPreconditionFailed) {
+			current, statErr := s.Revision(path)
+			if statErr != nil {
+				return statErr
+			}
+			return posixconform.ErrPrecondition{Expected: token, Actual: current}
+		}
+		return pcTranslateErr(err)
 	}
-	return 0, errors.New("cli: Revision has no CLI equivalent (revisions lists metadata commits, not per-file CAS tokens); refusing to fake it")
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -901,7 +1238,14 @@ func (h *cliHandle) Truncate(size int64) error {
 	if size < 0 {
 		return posixconform.ErrInvalid
 	}
-	return errors.New("cli: Handle.Truncate has no CLI equivalent (no ftruncate command); refusing to fake it")
+	rel, err := cliPath(h.path)
+	if err != nil {
+		return err
+	}
+	if _, err := h.surface.runCLI([]string{"truncate", "--token", "x", h.surface.project, rel, strconv.FormatInt(size, 10)}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (h *cliHandle) Sync() error {
@@ -910,7 +1254,12 @@ func (h *cliHandle) Sync() error {
 	if h.closed {
 		return posixconform.ErrClosed
 	}
-	return errors.New("cli: Handle.Sync has no CLI equivalent (no fsync command); returning success would fake durability, so this fails")
+	// Drain the project like Surface.Sync: the handle's writes commit
+	// immediately, so durability is the journal drain.
+	if _, err := h.surface.runCLI([]string{"sync", "--token", "x", h.surface.project}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
 }
 
 func (h *cliHandle) Close() error {

@@ -162,6 +162,34 @@ func (a *restConformAdapter) statEntry(pcPath string) (*EntryInfo, string, error
 	return nr.Entry, etag, nil
 }
 
+// restMaxFollowHops caps adapter-side symlink resolution, matching the
+// backend's own loop bound: past it the path reports ErrLoop, never a hang.
+const restMaxFollowHops = 40
+
+// resolve follows a final symlink chain like open(2), because nodes stat
+// with lstat semantics (a terminal link reports itself). It returns the
+// resolved absolute path with its entry and ETag. Dangling targets report
+// ErrNotFound; chains past restMaxFollowHops report ErrLoop.
+func (a *restConformAdapter) resolve(pcPath string) (string, *EntryInfo, string, error) {
+	current := pcPath
+	for i := 0; i < restMaxFollowHops; i++ {
+		entry, etag, err := a.statEntry(current)
+		if err != nil {
+			return current, nil, "", err
+		}
+		if !entry.IsSymlink {
+			return current, entry, etag, nil
+		}
+		target := entry.SymlinkTarget
+		if !strings.HasPrefix(target, "/") {
+			dir := current[:strings.LastIndex(current, "/")]
+			target = dir + "/" + target
+		}
+		current = target
+	}
+	return current, nil, "", fmt.Errorf("too many levels resolving %s: %w", pcPath, posixconform.ErrLoop)
+}
+
 func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool) error {
 	_ = perm
 	rp := trimPCPath(path)
@@ -185,7 +213,7 @@ func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool
 }
 
 func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posixconform.Handle, error) {
-	entry, _, statErr := a.statEntry(path)
+	resolved, entry, _, statErr := a.resolve(path)
 	if statErr != nil {
 		if !errors.Is(statErr, posixconform.ErrNotFound) {
 			return nil, statErr
@@ -198,7 +226,7 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 				return nil, err
 			}
 		}
-		if _, _, statErr = a.statEntry(path); statErr != nil {
+		if resolved, _, _, statErr = a.resolve(path); statErr != nil {
 			return nil, statErr
 		}
 	} else {
@@ -207,18 +235,18 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 		}
 	}
 	if mode == posixconform.OpenTruncate {
-		rp := trimPCPath(path)
+		rp := trimPCPath(resolved)
 		target := pcBase(a.project) + "/content?path=" + url.QueryEscape(rp) + "&op=truncate&size=0"
 		status, _, data := a.do(http.MethodPatch, target, nil, nil)
 		if status != http.StatusOK {
 			return nil, mapPCStatus(status, data, "open truncate "+path)
 		}
 	}
-	return &restConformHandle{adapter: a, rest: trimPCPath(path), mode: mode}, nil
+	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode}, nil
 }
 
 func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
-	entry, _, err := a.statEntry(path)
+	_, entry, _, err := a.resolve(path)
 	if err != nil {
 		return posixconform.Stat{}, err
 	}
@@ -286,9 +314,8 @@ func (a *restConformAdapter) Unlink(path string) error {
 }
 
 func (a *restConformAdapter) Rename(oldPath, newPath string, noReplace bool) error {
-	_ = noReplace
 	target := pcBase(a.project) + "/ops/rename"
-	status, _, data := a.doJSON(http.MethodPost, target, renameRequest{OldPath: trimPCPath(oldPath), NewPath: trimPCPath(newPath)}, nil)
+	status, _, data := a.doJSON(http.MethodPost, target, renameRequest{OldPath: trimPCPath(oldPath), NewPath: trimPCPath(newPath), NoReplace: noReplace}, nil)
 	if status == http.StatusOK || status == http.StatusCreated {
 		return nil
 	}
@@ -343,7 +370,12 @@ func (a *restConformAdapter) ReadRange(path string, offset, length int64) ([]byt
 	if length == 0 {
 		return []byte{}, nil
 	}
-	rp := trimPCPath(path)
+	// Reads follow a final link like read(2).
+	resolved, _, _, err := a.resolve(path)
+	if err != nil {
+		return nil, err
+	}
+	rp := trimPCPath(resolved)
 	target := pcBase(a.project) + "/content?path=" + url.QueryEscape(rp)
 	end := offset + length - 1
 	headers := map[string]string{"Range": fmt.Sprintf("bytes=%d-%d", offset, end)}
@@ -373,7 +405,15 @@ func (a *restConformAdapter) Append(path string, data []byte) error {
 }
 
 func (a *restConformAdapter) Sync(path string) error {
-	return errors.New("sync " + path + ": not supported: REST API has no flush endpoint")
+	// No standalone flush endpoint exists; a dry-run prune with ?sync=1
+	// drains the project journal without mutating anything, which is
+	// exactly the durability the scenario pins.
+	target := pcBase(a.project) + "/ops/prune?sync=1"
+	status, _, data := a.doJSON(http.MethodPost, target, pruneRequest{Scope: "all", DryRun: true}, nil)
+	if status != http.StatusOK {
+		return mapPCStatus(status, data, "sync "+path)
+	}
+	return nil
 }
 
 func (a *restConformAdapter) Revision(path string) (uint64, error) {
@@ -582,7 +622,14 @@ func (h *restConformHandle) Sync() error {
 	if err := h.checkClosed(); err != nil {
 		return err
 	}
-	return errors.New("handle sync: not supported: REST API has no flush endpoint")
+	// Same journal drain as Surface.Sync: handle writes commit
+	// immediately, so durability is the drain.
+	target := pcBase(h.adapter.project) + "/ops/prune?sync=1"
+	status, _, resp := h.adapter.doJSON(http.MethodPost, target, pruneRequest{Scope: "all", DryRun: true}, nil)
+	if status != http.StatusOK {
+		return mapPCStatus(status, resp, "handle sync")
+	}
+	return nil
 }
 
 func (h *restConformHandle) Close() error {
