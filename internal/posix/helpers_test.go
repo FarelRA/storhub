@@ -14,7 +14,12 @@ func TestApplyUploadAndUpdateIdentity(t *testing.T) {
 	// ApplyUploadIdentity stamps creation fields but deliberately leaves
 	// the inode at 0: minting happens against the authoritative metadata
 	// (InitializeNewFileIdentity), never against a staged snapshot.
-	if file.Inode != 0 || file.Mode == 0 || file.UID == 0 || file.GID == 0 || file.UploadedAt != now {
+	// Owner IDs stay 0 here too: 0 legitimately means root, so the
+	// caller provisions them explicitly (OwnerIDsForCreate) instead of
+	// this helper stamping the process user (regression: root-owned
+	// entries used to become process-owned, passing or failing tests
+	// depending on the runner's UID).
+	if file.Inode != 0 || file.Mode == 0 || file.UID != 0 || file.GID != 0 || file.UploadedAt != now {
 		t.Fatalf("unexpected staged file identity: %+v", file)
 	}
 	existing := &meta.FileMeta{Inode: 9, Mode: 0o777, UID: 7, GID: 8, AccessedAt: now, UploadedAt: now, ModifiedAt: now, ChangedAt: now, XAttrs: meta.XAttrMap{"user.demo": []byte("1")}}

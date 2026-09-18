@@ -454,7 +454,11 @@ func TestCloneRangeTimestamps(t *testing.T) {
 		t.Fatalf("seed stale dst: %v", err)
 	}
 
-	meta, err := hub.CloneRange(ctx, project, "src.bin", 0, "dst.bin", 0, 8)
+	// The seeded destination is root-owned (direct transaction, no
+	// identity); clone as admin so the test exercises timestamps, not
+	// DAC (covered by TestCloneRangePermissions).
+	adminCtx := shfs.WithIdentity(ctx, shfs.Identity{UID: 0, GID: 0, Admin: true})
+	meta, err := hub.CloneRange(adminCtx, project, "src.bin", 0, "dst.bin", 0, 8)
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -507,6 +511,21 @@ func TestCloneRangePermissions(t *testing.T) {
 		t.Fatalf("chmod locked: %v", err)
 	}
 
+	// Ownership hermeticity: the admin upload above must own the file as
+	// UID 0 regardless of which OS user runs the test. Without this pin,
+	// the test passes or fails depending on the runner's UID (it passed
+	// locally as UID 1000 and failed on CI as UID 1001).
+	ownerMeta, _, err := hub.loadRepoMetadataReadonly(context.Background(), project)
+	if err != nil {
+		t.Fatalf("load for ownership check: %v", err)
+	}
+	secretEntry := ownerMeta.FindFile("docs/secret.bin")
+	if secretEntry == nil {
+		t.Fatal("secret.bin missing after upload")
+	}
+	if secretEntry.UID != 0 || secretEntry.GID != 0 {
+		t.Fatalf("admin upload owner: want 0/0, got %d/%d", secretEntry.UID, secretEntry.GID)
+	}
 	// No read on the source: denied.
 	if _, err := hub.CloneRange(userCtx, project, "docs/secret.bin", 0, "docs/out.bin", 0, 4); !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("unreadable source: expected EACCES, got %v", err)

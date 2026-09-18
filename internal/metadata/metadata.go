@@ -1037,18 +1037,16 @@ func InitializeNewFileIdentity(meta *RepoMetadata, file *FileMeta, now int64) {
 // (a readonly snapshot, a working copy) silently skips the counter bump and
 // the next allocation re-issues the same inode.
 func initializeNewFileIdentityFields(file *FileMeta, now int64) {
-	uid, gid := defaultOwnerIDs()
 	if file.Mode == 0 {
 		file.Mode = defaultFileMode(nodeKindOf(file))
 	}
-	// Owner IDs are always materialized at creation (0 legitimately means
-	// root); they are never re-stamped afterwards.
-	if file.UID == 0 {
-		file.UID = uid
-	}
-	if file.GID == 0 {
-		file.GID = gid
-	}
+	// Owner IDs are NEVER materialized here: 0 legitimately means root,
+	// so a zero value cannot double as "unset". Every creation path
+	// provisions the owner explicitly before storing (OwnerIDsForCreate
+	// for fresh entries, PreserveFileIdentity for updates). Stamping the
+	// process user here used to silently reassign root-owned entries to
+	// whoever ran the process (regression: TestCloneRangePermissions
+	// passed or failed depending on the runner's UID).
 	// Fresh nodes get complete timestamps at creation. This runs ONLY on
 	// the new-node path (UpdateFileFamily writes the map directly), so an
 	// explicit epoch on an existing entry can never be rewritten here.
