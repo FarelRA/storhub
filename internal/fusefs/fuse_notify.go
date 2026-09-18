@@ -176,6 +176,14 @@ func (s *Filesystem) beginNotify(key notifyKey) bool {
 	}
 	s.notifyQueued[key] = struct{}{}
 	s.notifyMu.Unlock()
+	// Blocking enqueue is deadlock-free by construction, even when the
+	// caller holds the inode mu (commit emission runs after opMu release
+	// but may still hold mu): slot holders (notify goroutines) only take
+	// notifyMu and issue the kernel upcall, never the inode mu, so no
+	// wait cycle exists. Full slots under a healthy kernel mean a commit
+	// burst, absorbed as gentle backpressure with every invalidation
+	// preserved; only a wedged kernel (unusable mount regardless) stalls
+	// here, never normal operation.
 	s.notifySlots <- struct{}{}
 	return true
 }
