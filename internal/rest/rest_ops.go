@@ -38,6 +38,9 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
 }
 
@@ -59,6 +62,9 @@ func (h *restHandler) handlePurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logging.Info(h.logger, "purge complete", "project", project, "deleted_releases", result.DeletedReleases, "deleted_assets", result.DeletedAssets)
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.writeJSON(w, http.StatusOK, purgeResponse{
 		Project:         project,
 		Status:          "purged",
@@ -84,6 +90,9 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "reverted"})
@@ -131,6 +140,9 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, pruneResponse{

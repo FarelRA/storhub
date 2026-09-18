@@ -387,6 +387,10 @@ func (h *pcFakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount
 
 func (h *pcFakeHub) Shutdown(ctx context.Context) error { return nil }
 
+// DrainProjectContext is a no-op here: the conformance fake journals
+// nothing, and the CLI conformance surface has no fsync equivalent.
+func (h *pcFakeHub) DrainProjectContext(ctx context.Context, project string) error { return nil }
+
 // ---------------------------------------------------------------------------
 // Surface adapter driving the CLI.
 // ---------------------------------------------------------------------------

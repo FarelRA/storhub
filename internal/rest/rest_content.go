@@ -139,6 +139,9 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -286,6 +289,9 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -396,6 +402,9 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	}
 	// Same contract as every other mutation: answer with the fresh node so
 	// clients can chain If-Match tokens without a separate stat.
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, filePath, http.StatusOK)
 }
 
@@ -582,6 +591,9 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -595,6 +607,9 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

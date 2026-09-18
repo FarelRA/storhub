@@ -770,6 +770,15 @@ type fakeHub struct {
 	readDirErr        error
 	shutdowns         int
 	shutdownErr       error
+	drainCalls        []string
+	drainErr          error
+}
+
+// DrainProjectContext records the call so sync tests can assert draining
+// happened (or did not); a configured drainErr simulates a failed commit.
+func (h *fakeHub) DrainProjectContext(ctx context.Context, project string) error {
+	h.drainCalls = append(h.drainCalls, project)
+	return h.drainErr
 }
 
 // Shutdown records every drain so tests can prove App.Run closed what a

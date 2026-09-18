@@ -116,6 +116,10 @@ type Client interface {
 	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error)
 	DeleteProjectContext(ctx context.Context, project string) error
 	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
+	// DrainProjectContext blocks until everything published before the call
+	// lands in the remote commit (the storage fsync primitive). It backs
+	// the ?sync=1 opt-in on every mutating endpoint via maybeDrain.
+	DrainProjectContext(ctx context.Context, project string) error
 }
 
 type restHandler struct {
@@ -683,6 +687,33 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 		message = "internal server error"
 	}
 	h.writeError(w, status, code, message)
+}
+
+// maybeDrain honors the ?sync=1 opt-in (mirroring the POSIX write/fsync
+// split: async by default, durable on request). Call it after a mutation
+// completes and before responding. It returns false when the handler
+// already answered and the caller must return without writing more.
+//
+// A failed drain answers 500 carrying the storage error, which names the
+// project per the DrainProjectContext contract. The mutation itself is
+// already published and journaled at that point, so 500-after-publish
+// means retry-or-verify, never silent loss. writeMappedError is
+// deliberately bypassed here: it redacts 5xx wording, which would strip
+// the project name the caller needs for the retry.
+func (h *restHandler) maybeDrain(w http.ResponseWriter, r *http.Request, project string) bool {
+	want, err := parseBoolStrict(r.URL.Query().Get("sync"), "sync")
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	if !want {
+		return true
+	}
+	if err := h.clientFor(r).DrainProjectContext(r.Context(), project); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return false
+	}
+	return true
 }
 
 func mappedStatus(err error) int {

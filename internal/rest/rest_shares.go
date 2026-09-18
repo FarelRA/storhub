@@ -118,6 +118,12 @@ func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) e
 	return errReadOnly()
 }
 
+// DrainProjectContext is denied like every other mutation: share visitors
+// are read-only, and their lane never publishes journaled work to drain.
+func (readOnlyShare) DrainProjectContext(ctx context.Context, project string) error {
+	return errReadOnly()
+}
+
 // Compile-time proof that the auth wrappers implement the FULL Client
 // interface: a Client method added without a corresponding gate in either
 // wrapper fails the build here instead of silently falling through to the

@@ -542,6 +542,13 @@ func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project str
 	return c.base.DeleteProjectContext(ctx, project)
 }
 
+// DrainProjectContext forwards the sync drain to the base client. The
+// mutation endpoints already gated the write itself; the drain only waits
+// for that committed work to land, so no additional check applies.
+func (c *authorizedClient) DrainProjectContext(ctx context.Context, project string) error {
+	return c.base.DrainProjectContext(ctx, project)
+}
+
 const (
 	permRead  = 4
 	permWrite = 2

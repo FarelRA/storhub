@@ -57,6 +57,9 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, filePath, http.StatusCreated)
 }
 
@@ -69,6 +72,9 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).MkdirContext(r.Context(), project, dirPath); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.respondWithNode(w, r, project, dirPath, http.StatusCreated)
@@ -85,6 +91,9 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -97,6 +106,9 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -121,6 +133,9 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
 }
 
@@ -141,6 +156,9 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.respondWithNode(w, r, project, dst, http.StatusCreated)
@@ -165,6 +183,9 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusCreated)
 }
 
@@ -187,6 +208,9 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, req.LinkPath, http.StatusCreated)
 }
 
@@ -205,6 +229,9 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
@@ -221,6 +248,9 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
@@ -245,6 +275,9 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
 		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
 		return
 	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)

@@ -302,6 +302,8 @@ type fakeRESTClient struct {
 	rollbacks             []string
 	revertPaths           []string
 	readCalls             []readCall
+	drainCalls            []string
+	drainErr              error
 	seenIdentities        []shfs.Identity
 	failReplaceFromReader error
 	revision              string
@@ -355,6 +357,23 @@ func (c *fakeRESTClient) failNextReplace(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.failReplaceFromReader = err
+}
+
+// setDrainErr seeds a persistent drain failure (naming the project, like
+// the real DrainProjectContext) so tests can assert the 500 mapping.
+func (c *fakeRESTClient) setDrainErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.drainErr = err
+}
+
+// DrainProjectContext implements the Client contract: it records the call
+// so sync tests can assert draining happened (or did not).
+func (c *fakeRESTClient) DrainProjectContext(ctx context.Context, project string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.drainCalls = append(c.drainCalls, project)
+	return c.drainErr
 }
 
 type readCall struct {

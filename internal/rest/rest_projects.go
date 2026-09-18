@@ -31,5 +31,10 @@ func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
+	// Draining a deleted project is a cheap no-op on a clean (fresh) cache
+	// entry, kept here so every mutating route shares one uniform pattern.
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})
 }

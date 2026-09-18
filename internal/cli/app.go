@@ -129,6 +129,11 @@ type hubClient interface {
 	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 
+	// DrainProjectContext blocks until everything published before the call
+	// lands in the remote commit (the storage fsync primitive). It backs
+	// the --sync opt-in on every mutating command via drainIfSyncRequested.
+	DrainProjectContext(ctx context.Context, project string) error
+
 	// Shutdown drains the asynchronous metadata writer. Part of the
 	// contract on purpose: every implementation - including test fakes -
 	// must be drainable, and App.Run is the single caller.
@@ -348,6 +353,7 @@ func (a *App) newUploadOrReplaceCmd(name, short, long string) *cobra.Command {
 	}
 	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -429,7 +435,7 @@ Examples:
 }
 
 func (a *App) newMkdirCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mkdir [flags] <project> <path>",
 		Short: "Create a directory",
 		Long: `Mkdir creates a directory and any missing parents, like mkdir -p.
@@ -439,6 +445,8 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: a.runMkdir,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newRemoveCmd() *cobra.Command {
@@ -455,11 +463,12 @@ Examples:
 		RunE: a.runRemove,
 	}
 	cmd.Flags().BoolP("recursive", "r", false, "Remove directory instead of file")
+	addSyncFlag(cmd)
 	return cmd
 }
 
 func (a *App) newMoveCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mv [flags] <project> <old-path> <new-path>",
 		Short: "Move or rename a file/directory",
 		Long: `Mv renames or moves a path within the project, like mv(1).
@@ -469,10 +478,12 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(3)),
 		RunE: a.runMove,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newAppendCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "append [flags] <project> <path> <text>",
 		Short: "Append text to a file",
 		Long: `Append adds bytes (or stdin with "-") to the end of a file
@@ -484,10 +495,12 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(3)),
 		RunE: a.runAppend,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newWriteCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "write [flags] <project> <path> <offset> <text>",
 		Short: "Write data at a byte offset",
 		Long: `Write stores bytes (or stdin with "-") at an offset atomically.
@@ -498,10 +511,12 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(4)),
 		RunE: a.runWrite,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newPatchCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "patch [flags] <project> <path> <offset> <delete-size> <text>",
 		Short: "Delete and insert at an offset",
 		Long: `Patch deletes delete-size bytes at offset and inserts the new
@@ -512,6 +527,8 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(5)),
 		RunE: a.runPatch,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newRevisionsCmd() *cobra.Command {
@@ -531,7 +548,7 @@ Examples:
 }
 
 func (a *App) newRollbackCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "rollback [flags] <project> <commit-sha>",
 		Short: "Rollback metadata to a commit",
 		Long: `Rollback restores the project's metadata to a past commit SHA
@@ -542,10 +559,12 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: a.runRollback,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newPurgeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "purge <project>",
 		Short: "Delete untracked releases and assets",
 		Long: `Purge deletes GitHub releases and assets that are not tracked in the project metadata.
@@ -554,6 +573,8 @@ This cleans up orphaned releases and assets (e.g. from interrupted writes or man
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runPurge,
 	}
+	addSyncFlag(cmd)
+	return cmd
 }
 
 func (a *App) newPruneCmd() *cobra.Command {
@@ -577,6 +598,7 @@ Use --dry-run to see what would be reclaimed without deleting anything.
 	}
 	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -617,6 +639,9 @@ func (a *App) runPrune(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
+		return err
+	}
 	verb := "pruned"
 	if dryRun {
 		verb = "would prune"
@@ -645,6 +670,7 @@ The --yes flag is mandatory so a typo can never destroy a project.`,
 		RunE: a.runDeleteProject,
 	}
 	cmd.Flags().Bool("yes", false, "Confirm deletion of the whole project")
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -658,6 +684,9 @@ func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := hub.DeleteProject(args[0]); err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "deleted project %s\n", args[0])
@@ -693,6 +722,32 @@ live processes are never touched. No network access, no token required.`,
 			return nil
 		},
 	}
+}
+
+// addSyncFlag registers the --sync opt-in shared by every mutating
+// command: after success the command drains the project's journal before
+// exiting (fsync-class durability for scripts that delete the local source
+// on success). One definition so the flag wording cannot drift per command.
+func addSyncFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("sync", false, "Wait until the mutation is durably committed before exiting")
+}
+
+// drainIfSyncRequested honors --sync after a successful mutation: it drains
+// the project's journal and surfaces drain errors loudly (a non-zero exit
+// naming the project, via the returned error). Without --sync it is a
+// no-op, so default paths never pay for durability they did not request.
+func (a *App) drainIfSyncRequested(cmd *cobra.Command, ctx context.Context, project string) error {
+	want, _ := cmd.Flags().GetBool("sync")
+	if !want {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := a.hub.DrainProjectContext(ctx, project); err != nil {
+		return fmt.Errorf("sync %s: %w", project, err)
+	}
+	return nil
 }
 
 // addFUSEFlags registers the flags every FUSE-mounting command shares.
@@ -984,6 +1039,9 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	if replace {
 		action = "replaced"
 	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), project); err != nil {
+		return err
+	}
 	printFileSummary(a.stderr, action, meta)
 	return nil
 }
@@ -1103,6 +1161,9 @@ func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	if err := hub.Mkdir(args[0], args[1]); err != nil {
 		return err
 	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "created directory %s\n", args[1])
 	return nil
 }
@@ -1121,6 +1182,9 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "removed %s\n", args[1])
 	return nil
 }
@@ -1131,6 +1195,9 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := hub.Rename(args[0], args[1], args[2]); err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "moved %s -> %s\n", args[1], args[2])
@@ -1148,6 +1215,9 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	}
 	meta, err := hub.AppendFile(args[0], args[1], payload)
 	if err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "appended", meta)
@@ -1169,6 +1239,9 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	}
 	meta, err := hub.WriteFileAt(args[0], args[1], offset, payload)
 	if err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "written", meta)
@@ -1194,6 +1267,9 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	}
 	meta, err := hub.PatchFile(args[0], args[1], offset, deleteSize, edit)
 	if err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "patched", meta)
@@ -1237,6 +1313,9 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	if err := hub.RollbackMetadataContext(ctx, args[0], args[1]); err != nil {
 		return err
 	}
+	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
 	return nil
 }
@@ -1251,6 +1330,9 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	defer stop()
 	result, err := hub.PurgeUntrackedContext(ctx, args[0])
 	if err != nil {
+		return err
+	}
+	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "purged %s: %d releases, %d assets deleted\n",
