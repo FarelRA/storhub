@@ -755,8 +755,10 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 			return err
 		}
 		if size == file.Size {
-			// POSIX: even a no-op truncate updates mtime/ctime.
+			// POSIX: even a no-op truncate updates mtime/ctime and, for
+			// non-admin callers, clears setuid+setgid (decision 1A).
 			now := s.backend.Now()
+			sanitizedMode := SanitizeWrittenFileModeForContext(ctx, file.Mode)
 			if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 				if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
 					return err
@@ -769,6 +771,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 					return s.backend.FileNotFound(cleanPath)
 				}
 				clone := current.Clone()
+				clone.Mode = SanitizeWrittenFileModeForContext(ctx, clone.Mode)
 				clone.ModifiedAt = now
 				clone.ChangedAt = now
 				repo.ReplaceFile(cleanPath, clone)
@@ -777,6 +780,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 				return err
 			}
 			clone := file.Clone()
+			clone.Mode = sanitizedMode
 			clone.ModifiedAt = now
 			clone.ChangedAt = now
 			result = &clone

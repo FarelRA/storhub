@@ -469,6 +469,10 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 			}); err != nil {
 				return err
 			}
+			// Decision 1A: chown clears setuid+setgid for unprivileged
+			// callers only; Admin (CAP_FSETID equivalent) keeps them.
+			// POSIX clears on directories as well.
+			keepBits := shfs.IdentityFromContext(ctx).Admin
 			applyOwner := func(current *meta.FileMeta) {
 				if uid != keepOwner {
 					current.UID = uid
@@ -476,7 +480,9 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 				if gid != keepOwner {
 					current.GID = gid
 				}
-				current.Mode &^= 0o6000
+				if !keepBits {
+					current.Mode &^= 0o6000
+				}
 				current.ChangedAt = now
 			}
 			if file != nil {
@@ -487,6 +493,9 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 			}
 			if gid != keepOwner {
 				dir.GID = gid
+			}
+			if !keepBits {
+				dir.Mode &^= 0o6000
 			}
 			dir.ChangedAt = now
 			tx.persistDir(dir)
@@ -859,7 +868,9 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 					if patch.HasOwner {
 						current.UID = patch.UID
 						current.GID = patch.GID
-						current.Mode &^= 0o6000
+						if !shfs.IdentityFromContext(ctx).Admin {
+							current.Mode &^= 0o6000
+						}
 					}
 					if patch.HasMode {
 						current.Mode = sanitizedMode
@@ -878,7 +889,9 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			if patch.HasOwner {
 				dir.UID = patch.UID
 				dir.GID = patch.GID
-				dir.Mode &^= 0o6000
+				if !shfs.IdentityFromContext(ctx).Admin {
+					dir.Mode &^= 0o6000
+				}
 			}
 			if patch.HasMode {
 				dir.Mode = sanitizedMode

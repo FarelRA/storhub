@@ -240,7 +240,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 		totalInsert += edit.Len()
 	}
 	patched.Size = fileMeta.Size - totalDelete + totalInsert
-	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
+	patched.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, patched.Mode)
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
 	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
@@ -331,7 +331,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	}
 	patched.Chunks = chunkIDs
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
-	patched.Mode = shfs.SanitizeWrittenFileMode(patched.Mode)
+	patched.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, patched.Mode)
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
 	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
@@ -423,7 +423,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	}
 	rewritten.Chunks = chunkIDs
 	rewritten.Size = finalSize
-	rewritten.Mode = shfs.SanitizeWrittenFileMode(rewritten.Mode)
+	rewritten.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, rewritten.Mode)
 	rewritten.ModifiedAt = now
 	rewritten.ChangedAt = now
 	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)

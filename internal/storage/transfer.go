@@ -144,6 +144,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 
 	now := h.config.Now().Unix()
 	fileMeta := current.Clone()
+	fileMeta.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, fileMeta.Mode)
 
 	// Update metadata directly
 	pm := h.getOrCreateProjectMeta(project)
@@ -393,7 +394,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 	}
 	if existing != nil {
-		fileMeta.Mode = shfs.SanitizeWrittenFileMode(fileMeta.Mode)
+		fileMeta.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, fileMeta.Mode)
 	}
 	fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(repoMeta, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 

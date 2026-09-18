@@ -290,6 +290,16 @@ func SanitizeWrittenFileMode(mode uint32) uint32 {
 	return mode &^ 0o6000
 }
 
+// SanitizeWrittenFileModeForContext clears setuid+setgid on data writes
+// for unprivileged callers (decision 1A). Admin is the CAP_FSETID
+// equivalent and keeps the bits.
+func SanitizeWrittenFileModeForContext(ctx context.Context, mode uint32) uint32 {
+	if IdentityFromContext(ctx).Admin {
+		return mode
+	}
+	return mode &^ 0o6000
+}
+
 // CanChown enforces POSIX chown(2): only root may move a file between
 // owners; the file's owner may change the group to any group they belong
 // to (Linux allows the owner the chgrp right, and a no-op uid value).
