@@ -168,11 +168,19 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	// repository) and are not multi-user surfaces.
 	if shfs.IdentityPresent(ctx) {
 		// Open-ONLY read gate: any open that is not write-only must carry
-		// read permission on the file. Reads through the handle stay fast
+		// read permission on the file. O_PATH carries no access mode
+		// (Linux 0o10000000; no portable const, darwin lacks it) and is
+		// exempt: the kernel never forwards O_PATH opens anyway, so this
+		// is handler hygiene for a latent path, with no observable
+		// change today. Reads through the handle stay fast
 		// (no per-Read re-check): the open-time pin below captures the
 		// content layout, and the commit-time write DAC still guards the
 		// overlay path independently.
-		if flags&syscall.O_ACCMODE != syscall.O_WRONLY {
+		// oPathFlag is Linux O_PATH. There is no portable const (darwin
+		// lacks O_PATH entirely); the kernel never forwards such opens,
+		// so the literal only feeds the exemption below.
+		const oPathFlag = 0o10000000
+		if flags&syscall.O_ACCMODE != syscall.O_WRONLY && flags&oPathFlag == 0 {
 			if err := shfs.CheckReadAccess(ctx, repoMeta, targetPath); err != nil {
 				n.fs.debugf("open denied path=%s step=read-dac err=%v", targetPath, err)
 				return nil, 0, errnoFromError(err)
@@ -398,6 +406,14 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		}
 		return fuse.ReadResultData(dest[:n]), 0
 	}
+	// A read-only handle shares the inode's page cache with writers:
+	// when another handle holds this inode's live writeState, ranges it
+	// dirtied must come from the overlay temp and only clean spans from
+	// the pinned snapshot below. Uncontended reads (no live state, or a
+	// state with nothing uncommitted) fall through untouched.
+	if result, errno, served := h.readLiveOverlay(ctx, dest, off); served {
+		return result, errno
+	}
 	data, err := h.readFromPinned(ctx, off, int64(len(dest)))
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -412,6 +428,106 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		return nil, errnoFromError(err)
 	}
 	return fuse.ReadResultData(data), 0
+}
+
+// readLiveOverlay serves a handle without its own writeState from another
+// handle's live overlay for the same inode: dirty spans come from the
+// overlay temp, clean spans from the pinned path exactly as before.
+// Locking: takes only the short state mutex, never opMu. A commit holds
+// opMu across its whole network window, so readers serializing on it
+// would hang for minutes; writers and commit-plan changes both need the
+// state mutex, so the dirty-range plus logical-size snapshot and the temp
+// preads under it are atomic against concurrent writes and plan mutation.
+// Commits only read the temp during their network phase, so this is safe.
+// Returns served=false when no live state exists or it holds nothing
+// uncommitted, in which case the caller falls back to the pinned path
+// with zero behavior change. A poisoned state fails closed with EIO,
+// matching the owned-handle read; a closed or temp-less state falls back
+// to pinned.
+func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno, bool) {
+	if off < 0 {
+		return nil, 0, false
+	}
+	state := h.fs.writeStateForInode(h.inode)
+	if state == nil {
+		return nil, 0, false
+	}
+	state.mu.Lock()
+	if state.poisoned {
+		state.mu.Unlock()
+		return nil, syscall.EIO, true
+	}
+	if state.closed || state.temp == nil {
+		state.mu.Unlock()
+		return nil, 0, false
+	}
+	logical := state.logicalSize
+	if len(state.dirtyRanges) == 0 && logical == state.baseSize {
+		state.mu.Unlock()
+		return nil, 0, false
+	}
+	if off >= logical || len(dest) == 0 {
+		state.mu.Unlock()
+		return fuse.ReadResultData(nil), 0, true
+	}
+	limit := int64(len(dest))
+	if max := logical - off; limit > max {
+		limit = max
+	}
+	dirty := append([]ByteRange(nil), state.dirtyRanges...)
+	temp := state.temp
+	type span struct{ start, end int64 }
+	var clean []span
+	pos := off
+	for _, r := range dirty {
+		if r.End <= off || r.Start >= off+limit {
+			continue
+		}
+		s, e := r.Start, r.End
+		if s < off {
+			s = off
+		}
+		if e > off+limit {
+			e = off + limit
+		}
+		if s > pos {
+			clean = append(clean, span{pos, s})
+		}
+		// Local pread under the state mutex only: microsecond I/O,
+		// fully serial against writers and plan mutation.
+		n, err := temp.ReadAt(dest[pos-off:e-off], pos)
+		if err != nil && !errors.Is(err, io.EOF) {
+			state.mu.Unlock()
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			return nil, errnoFromError(err), true
+		}
+		for i := int64(n); i < e-pos; i++ {
+			dest[pos-off+i] = 0
+		}
+		pos = e
+	}
+	if pos < off+limit {
+		clean = append(clean, span{pos, off + limit})
+	}
+	state.mu.Unlock()
+	for _, g := range clean {
+		data, err := h.readFromPinned(ctx, g.start, g.end-g.start)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				for i := g.start; i < g.end; i++ {
+					dest[i-off] = 0
+				}
+				continue
+			}
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			return nil, errnoFromError(err), true
+		}
+		copy(dest[g.start-off:], data)
+		for i := g.start + int64(len(data)); i < g.end; i++ {
+			dest[i-off] = 0
+		}
+	}
+	return fuse.ReadResultData(dest[:limit]), 0, true
 }
 
 // readFromPinned resolves bytes against the content layout captured at

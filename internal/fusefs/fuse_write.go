@@ -1147,7 +1147,14 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if h.writeState.poisoned {
 		return 0, syscall.EIO
 	}
-	if h.flags&syscall.O_APPEND != 0 {
+	if h.flags&syscall.O_APPEND != 0 && off >= h.writeState.logicalSize {
+		// Append at the overlay EOF. When off points inside the file the
+		// kernel sent a merged writeback covering already-acknowledged
+		// bytes plus the new tail (writeback dirties whole pages, so one
+		// FUSE_WRITE can replay the prefix the server already acked):
+		// honoring its offset rewrites the prefix identically and lands
+		// the tail once, while forcing it to EOF duplicates the prefix
+		// (observed kernel 7 vs server 11, reads truncated to garbage).
 		off = h.writeState.logicalSize
 	}
 	if h.writeState.temp == nil {

@@ -2744,7 +2744,13 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 		t.Fatalf("open append handle: %v", errno)
 	}
 	h := hAny.(*fusefs.TestHandle)
-	if written, errno := h.Write(ctx, []byte("XYZ"), 0); errno != 0 || written != 3 {
+	// The kernel VFS positions every O_APPEND write at EOF before the
+	// FUSE_WRITE is issued (pwrite offsets are ignored for O_APPEND
+	// fds), so the handler receives the end offset, not 0. Forcing a
+	// sub-EOF offset to EOF here would corrupt merged writeback replays
+	// (kernel 7 vs server 11 divergence); sub-EOF offsets are honored
+	// so retransmits stay idempotent.
+	if written, errno := h.Write(ctx, []byte("XYZ"), 8); errno != 0 || written != 3 {
 		t.Fatalf("append write: written=%d errno=%v", written, errno)
 	}
 	if got := assetDownloadCalls.Load(); got != 0 {
