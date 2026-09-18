@@ -1475,43 +1475,16 @@ func (h *pcHandle) Close() error {
 }
 
 // pcScenarioBudget bounds one scenario. A wedged mount (for example the
-// concurrent-append commit deadlock documented in the test report) must
-// surface as a loud per-scenario FAIL, never as a hung suite.
+// concurrent-append commit deadlock documented in the program notes) must
+// surface as a loud per-scenario FAIL, never as a hung suite. Enforced by
+// posixconform.RunWithBudget; the timeout flag below drives lazy teardown.
 const pcScenarioBudget = 45 * time.Second
 
-// pcRunOne runs one scenario with panic recovery (like posixconform.Run)
-// plus a hang budget, and reports whether the budget fired. It mirrors
-// runOne semantics; the budget is the only addition, and it exists because
-// a stuck FUSE request has no error return.
-func pcRunOne(surface posixconform.Surface, sc posixconform.Scenario) (result posixconform.Result, timedOut bool) {
-	result.Name = sc.Name
-	type outcome struct {
-		err error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		defer func() {
-			if v := recover(); v != nil {
-				done <- outcome{err: fmt.Errorf("panic: %v", v)}
-			}
-		}()
-		done <- outcome{err: sc.Run(surface)}
-	}()
-	select {
-	case o := <-done:
-		if o.err != nil {
-			result.Pass = false
-			result.Error = o.err.Error()
-			return result, false
-		}
-		result.Pass = true
-		return result, false
-	case <-time.After(pcScenarioBudget):
-		result.Pass = false
-		result.Error = fmt.Sprintf("timed out after %s with requests unanswered; scenario abandoned", pcScenarioBudget)
-		return result, true
-	}
-}
+// pcTeardownBudget bounds unmount plus server close after one scenario. A
+// wedged mount can stall teardown behind the same stuck requests, so this
+// (not the scenario budget) is what keeps the suite total predictable:
+// worst case per scenario is budget plus lazy-detach plus this.
+const pcTeardownBudget = 60 * time.Second
 
 // pcLazyUnmount detaches a mountpoint even when files are still open.
 // Teardown is best effort everywhere: a wedged scenario may keep its
@@ -1572,15 +1545,32 @@ func pcRunScenario(t *testing.T, index, total int, sc posixconform.Scenario) pos
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	result, timedOut := pcRunOne(&pcSurface{mount: mountPoint}, sc)
-	if timedOut {
+	result := posixconform.RunWithBudget(&pcSurface{mount: mountPoint}, []posixconform.Scenario{sc}, pcScenarioBudget)[0]
+	if result.TimedOut {
 		pcLazyUnmount(mountPoint)
 	}
-	if err := fsys.Unmount(); err != nil && !timedOut {
-		t.Logf("scenario %s: unmount: %v", sc.Name, err)
-	}
-	if err := fsys.Close(); err != nil {
-		t.Logf("scenario %s: close: %v", sc.Name, err)
+	// Teardown itself runs bounded: on a wedged mount Unmount/Close can
+	// block behind the same stuck requests that tripped the budget
+	// (commit-path deadlock family, owned by Phase 2). The lazy detach
+	// above already aborted the connection, so abandoning teardown only
+	// leaks reaping to process exit, never hangs the suite.
+	teardownDone := make(chan struct{})
+	go func() {
+		defer close(teardownDone)
+		if err := fsys.Unmount(); err != nil && !result.TimedOut {
+			t.Logf("scenario %s: unmount: %v", sc.Name, err)
+		}
+		if err := fsys.Close(); err != nil {
+			t.Logf("scenario %s: close: %v", sc.Name, err)
+		}
+	}()
+	select {
+	case <-teardownDone:
+	case <-time.After(pcTeardownBudget):
+		if !result.TimedOut {
+			pcLazyUnmount(mountPoint)
+		}
+		t.Logf("scenario %s: teardown stuck, abandoned (reaped at process exit)", sc.Name)
 	}
 	return result
 }
@@ -1636,6 +1626,8 @@ func TestPosixConformFUSE(t *testing.T) {
 	pcPreflight(t)
 	total := len(posixconform.Table)
 	t.Logf("posix conformance over FUSE: %d scenarios, fresh mount each", total)
+	// PC_ONLY focuses one scenario by exact name (e.g. debugging a single
+	// RED case without paying for 30 fresh mounts). Empty runs the table.
 	only := os.Getenv("PC_ONLY")
 	results := make([]posixconform.Result, 0, total)
 	for i, sc := range posixconform.Table {
