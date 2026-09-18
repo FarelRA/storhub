@@ -368,7 +368,9 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
+	backend.mu.Lock()
 	backend.faults.embedCap = 2
+	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-placeholder-count"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))

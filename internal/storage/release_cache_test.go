@@ -144,7 +144,9 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	// danger band instead of trusting the truncated embedded list.
 	ctx := context.Background()
 	backend := newMockGitHub(t)
+	backend.mu.Lock()
 	backend.faults.embedCap = 980
+	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
 	meta, err := hub.UploadFile("project-true-count", "a.txt", input)
@@ -349,7 +351,9 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
+	backend.mu.Lock()
 	backend.faults.collideNext = map[string]bool{"project-collide/v1": true}
+	backend.mu.Unlock()
 	payload := bytes.Repeat([]byte("c"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "collide.txt", payload)
 	if _, err := hub.UploadFile("project-collide", "collide.txt", input); err != nil {
@@ -378,7 +382,9 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
+	backend.mu.Lock()
 	backend.faults.embedCap = 950
+	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("s"))
 	seedMeta, err := hub.UploadFile("project-spread", "seed.txt", seed)

@@ -931,6 +931,10 @@ func TestDeleteProject(t *testing.T) {
 func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
+	// Guarded by the backend lock: the shared mock server reads repos
+	// under mu on other tests' HTTP goroutines, so an unguarded fixture
+	// write races parallel CDN reads (race detector, CI race-arm64).
+	backend.mu.Lock()
 	backend.repos["existing-project"] = &mockRepo{
 		name:          "existing-project",
 		private:       true,
@@ -943,6 +947,7 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 		files:         make(map[string]*mockFile),
 		commitsByPath: make(map[string][]mockCommit),
 	}
+	backend.mu.Unlock()
 	createCalls := 0
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" {

@@ -179,6 +179,9 @@ func TestRollbackGitPathHappyPath(t *testing.T) {
 	}
 	url := seedBareMetadataRepo(t)
 	backend := newMockGitHub(t)
+	// Same guard as TestEnsureRepoUsesExistenceCheckBeforeCreate: fixture
+	// writes must hold the backend lock against shared-server readers.
+	backend.mu.Lock()
 	backend.repos["demo"] = &mockRepo{
 		name:          "demo",
 		nextReleaseID: 1,
@@ -190,6 +193,7 @@ func TestRollbackGitPathHappyPath(t *testing.T) {
 		files:         make(map[string]*mockFile),
 		commitsByPath: make(map[string][]mockCommit),
 	}
+	backend.mu.Unlock()
 	hub := backend.newClient(t, Config{GitCacheDir: t.TempDir()})
 	hub.getGitRepo("demo").remoteBase = url
 	ctx := context.Background()
