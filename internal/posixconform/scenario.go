@@ -378,15 +378,25 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			if err := s.Chown(p, 1234, 5678); err != nil {
+			// Chown to the current owner: the only chown a non-privileged
+			// caller is guaranteed on every enforcing surface (owner may
+			// always reassert its own uid/gid). Cross-owner chown is
+			// root-only and correctly EPERM elsewhere, so it cannot live
+			// in a portable scenario. Ownership-changing chown is pinned
+			// by storage-layer unit tests with mock identities instead.
+			self, err := s.Stat(p)
+			if err != nil {
+				return fmt.Errorf("stat: %v", err)
+			}
+			if err := s.Chown(p, self.UID, self.GID); err != nil {
 				return fmt.Errorf("chown: %v", err)
 			}
 			st, err := s.Stat(p)
 			if err != nil {
 				return fmt.Errorf("stat: %v", err)
 			}
-			if st.UID != 1234 || st.GID != 5678 {
-				return fmt.Errorf("ownership: want 1234/5678, got %d/%d", st.UID, st.GID)
+			if st.UID != self.UID || st.GID != self.GID {
+				return fmt.Errorf("ownership: want %d/%d, got %d/%d", self.UID, self.GID, st.UID, st.GID)
 			}
 			if st.Mode&0o7777 != 0o644 {
 				return fmt.Errorf("chown changed permission bits: want 644, got %o", st.Mode&0o7777)
@@ -497,7 +507,15 @@ var Table = []Scenario{
 			if err := s.Chmod(p, 0o6750); err != nil {
 				return fmt.Errorf("chmod: %v", err)
 			}
-			if err := s.Chown(p, 2000, 2000); err != nil {
+			// Same portable-chown rule as chown-roundtrip: reassert the
+			// current owner. A non-privileged chown that succeeds must
+			// clear setuid/setgid; cross-owner chown is EPERM by design
+			// on enforcing surfaces and lives in unit tests instead.
+			self, err := s.Stat(p)
+			if err != nil {
+				return fmt.Errorf("stat: %v", err)
+			}
+			if err := s.Chown(p, self.UID, self.GID); err != nil {
 				return fmt.Errorf("chown: %v", err)
 			}
 			st, err := s.Stat(p)
@@ -510,8 +528,8 @@ var Table = []Scenario{
 			if st.Mode&0o777 != 0o750 {
 				return fmt.Errorf("base bits changed: want 750, got %o", st.Mode&0o777)
 			}
-			if st.UID != 2000 || st.GID != 2000 {
-				return fmt.Errorf("ownership: want 2000/2000, got %d/%d", st.UID, st.GID)
+			if st.UID != self.UID || st.GID != self.GID {
+				return fmt.Errorf("ownership: want %d/%d, got %d/%d", self.UID, self.GID, st.UID, st.GID)
 			}
 			return nil
 		},
