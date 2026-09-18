@@ -68,6 +68,22 @@ type Options struct {
 	AllowOther        bool
 	Debug             bool
 	Logger            *slog.Logger
+	// Umask masks creation modes because the FUSE protocol does not
+	// transmit the caller umask. UmaskSet distinguishes an explicit
+	// zero mask (no masking) from an unset option; unset resolves to
+	// 0o022 in New and DefaultOptions. Only the low 9 bits apply.
+	Umask    uint32
+	UmaskSet bool
+}
+
+// EffectiveUmask reports the creation-mode mask for this configuration:
+// the explicit Umask when set (or non-zero), else the protocol default
+// 0o022. Pure resolution, no I/O: safe to call from tests and CLIs.
+func (o Options) EffectiveUmask() uint32 {
+	if o.UmaskSet || o.Umask != 0 {
+		return o.Umask & 0o777
+	}
+	return defaultCallerUmask
 }
 
 // isReadOnly reports whether the caller configured a read-only mount by
@@ -356,6 +372,12 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if opts.OverlayBufferSize <= 0 {
 		opts.OverlayBufferSize = defaults.OverlayBufferSize
 	}
+	// An unset umask resolves to the protocol default; an explicit one
+	// (including zero) is sanitized to permission bits and honored.
+	if !opts.UmaskSet && opts.Umask == 0 {
+		opts.Umask, opts.UmaskSet = defaultCallerUmask, true
+	}
+	opts.Umask &= 0o777
 	if len(opts.ExtraMountOpts) == 0 {
 		opts.ExtraMountOpts = append([]string(nil), defaults.ExtraMountOpts...)
 	}
@@ -1305,7 +1327,7 @@ const defaultCallerUmask = 0o022
 func (s *Filesystem) callerContext(ctx context.Context) context.Context {
 	ctx = shfs.WithSuppressedAtime(ctx)
 	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
-		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Umask: defaultCallerUmask, Admin: caller.Uid == 0})
+		return shfs.WithIdentity(ctx, shfs.Identity{UID: caller.Uid, GID: caller.Gid, PID: caller.Pid, Umask: s.opts.EffectiveUmask(), Admin: caller.Uid == 0})
 	}
 	return ctx
 }

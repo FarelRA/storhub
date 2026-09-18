@@ -872,6 +872,66 @@ func newTestApp(t *testing.T) (*App, func() string, func() string) {
 	return app, stdout, stderr
 }
 
+// TestMountUmaskFlagMasksCreatedModes pins the mount --umask wiring:
+// the flag exists with a 022 default, values parse as octal masks,
+// misuse is a usage error, and the wired FUSEOptions mask created modes
+// through the same ApplyCreateMode the server applies at create time.
+func TestMountUmaskFlagMasksCreatedModes(t *testing.T) {
+	app := New()
+	mount, _, err := app.rootCmd.Find([]string{"mount"})
+	if err != nil || mount == nil {
+		t.Fatalf("find mount command: %v", err)
+	}
+	def, err := mount.Flags().GetString("umask")
+	if err != nil {
+		t.Fatalf("mount --umask flag missing: %v", err)
+	}
+	if def != "022" {
+		t.Fatalf("mount --umask default: want %q, got %q", "022", def)
+	}
+	for _, tc := range []struct {
+		raw      string
+		wantMask uint32
+		wantMode uint32
+	}{
+		{raw: "022", wantMask: 0o022, wantMode: 0o644},
+		{raw: "027", wantMask: 0o027, wantMode: 0o640},
+		{raw: "077", wantMask: 0o077, wantMode: 0o600},
+		{raw: "0", wantMask: 0, wantMode: 0o666},
+	} {
+		if err := mount.Flags().Set("umask", tc.raw); err != nil {
+			t.Fatalf("set --umask %q: %v", tc.raw, err)
+		}
+		raw, _ := mount.Flags().GetString("umask")
+		mask, err := parseMountUmask(raw)
+		if err != nil {
+			t.Fatalf("parse --umask %q: %v", tc.raw, err)
+		}
+		if mask != tc.wantMask {
+			t.Fatalf("parse --umask %q: want %#o, got %#o", tc.raw, tc.wantMask, mask)
+		}
+		opts := storhub.DefaultFUSEOptions()
+		opts.Umask = mask
+		opts.UmaskSet = true
+		if got := opts.EffectiveUmask(); got != tc.wantMask {
+			t.Fatalf("--umask %q: effective: want %#o, got %#o", tc.raw, tc.wantMask, got)
+		}
+		ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 1000, GID: 1000, Umask: opts.EffectiveUmask()})
+		ctx = shfs.WithCreateMode(ctx, 0o666)
+		if got := shfs.ApplyCreateMode(ctx, 0o666); got != tc.wantMode {
+			t.Fatalf("--umask %q: created mode: want %#o, got %#o", tc.raw, tc.wantMode, got)
+		}
+	}
+	if got := storhub.DefaultFUSEOptions().EffectiveUmask(); got != 0o022 {
+		t.Fatalf("default effective umask: want %#o, got %#o", 0o022, got)
+	}
+	for _, bad := range []string{"", "abc", "888", "1000", "-1"} {
+		if _, err := parseMountUmask(bad); err == nil || !IsUsageError(err) {
+			t.Fatalf("parse --umask %q: want usage error, got %v", bad, err)
+		}
+	}
+}
+
 func tempCaptureFile(t *testing.T) (*os.File, func() string) {
 	t.Helper()
 	file, err := os.CreateTemp(t.TempDir(), "storhub-cli-*.txt")

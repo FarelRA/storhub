@@ -702,6 +702,7 @@ func addFUSEFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
 	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
 	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+	cmd.Flags().String("umask", "022", "Umask applied to created files and directories (octal 000-777); the FUSE protocol does not transmit the caller umask")
 }
 
 // addRESTFlags registers the flags every REST-serving command shares.
@@ -1257,11 +1258,27 @@ func (a *App) runPurge(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// parseMountUmask parses the mount --umask flag value as an octal
+// permission mask (000-777). Misuse is a usage error (exit 2), like the
+// other flag validation in this file.
+func parseMountUmask(raw string) (uint32, error) {
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 8, 32)
+	if err != nil || v > 0o777 {
+		return 0, &usageError{fmt.Errorf("invalid --umask %q: must be an octal mode 000-777", raw)}
+	}
+	return uint32(v), nil
+}
+
 func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	umaskRaw, _ := cmd.Flags().GetString("umask")
+	umask, err := parseMountUmask(umaskRaw)
+	if err != nil {
+		return err
+	}
 	// mount is a long-running interactive surface: it must get the
 	// pause-to-reset rate policy, not the one-shot fail-fast default.
 	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
@@ -1272,6 +1289,8 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	opts.AllowOther = allowOther
 	opts.Debug = debug
 	opts.CacheDir = cacheDir
+	opts.Umask = umask
+	opts.UmaskSet = true
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// mount setup must not fall through to the default disposition and kill
 	// the process with a half-attached mount left behind.
@@ -1509,6 +1528,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	allowOther, _ := cmd.Flags().GetBool("allow-other")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	umaskRaw, _ := cmd.Flags().GetString("umask")
 	listen, _ := cmd.Flags().GetString("listen")
 
 	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
@@ -1519,6 +1539,12 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	fuseOpts.AllowOther = allowOther
 	fuseOpts.Debug = debug
 	fuseOpts.CacheDir = cacheDir
+	umask, err := parseMountUmask(umaskRaw)
+	if err != nil {
+		return err
+	}
+	fuseOpts.Umask = umask
+	fuseOpts.UmaskSet = true
 
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// setup must not kill the process with a half-attached mount left behind.

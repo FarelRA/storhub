@@ -43,9 +43,12 @@ import (
 //
 // Compile-time conformance checks.
 var (
-	_ Hub                  = (*pcHub)(nil)
-	_ posixconform.Surface = (*pcSurface)(nil)
-	_ posixconform.Handle  = (*pcHandle)(nil)
+	_ Hub                     = (*pcHub)(nil)
+	_ posixconform.Surface    = (*pcSurface)(nil)
+	_ posixconform.PunchHoler = (*pcSurface)(nil)
+	_ posixconform.Handle     = (*pcHandle)(nil)
+	_ posixconform.SeekHandle = (*pcHandle)(nil)
+	_ posixconform.Handle     = (*pcPathHandle)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -128,16 +131,24 @@ func (h *pcHub) resolveLocked(p string) (*pcFile, error) {
 }
 
 // fileMetaLocked snapshots a file for hub replies. Callers hold h.mu.
+// Like production metadata, every non-empty regular file carries chunk
+// coverage for its bytes (one synthetic chunk keyed by inode); the seek
+// handler resolves data extents from those descriptors, so omitting them
+// would present every file as one big hole.
 func (h *pcHub) fileMetaLocked(f *pcFile) *meta.FileMeta {
 	size := int64(len(f.data))
 	if f.symlink != "" {
 		size = int64(len(f.symlink))
 	}
-	return &meta.FileMeta{
+	out := &meta.FileMeta{
 		Size: size, Symlink: f.symlink, Mode: f.mode, UID: f.uid, GID: f.gid,
 		Inode: f.inode, UploadedAt: f.ctime, ModifiedAt: f.mtime,
 		AccessedAt: f.atime, ChangedAt: f.ctime,
 	}
+	if f.symlink == "" && len(f.data) > 0 {
+		out.Chunks = []int64{int64(f.inode)}
+	}
+	return out
 }
 
 // entryLocked builds the stat view of a live path. Callers hold h.mu.
@@ -189,6 +200,15 @@ func (h *pcHub) buildRepoLocked(project string) *meta.RepoMetadata {
 	}
 	for p, f := range h.files {
 		repo.WriteFileDirect(p, *h.fileMetaLocked(f))
+		// Register the synthetic chunk recorded by fileMetaLocked so
+		// open-time pinning resolves the same coverage production
+		// serves (PutChunk errors only on negative fields, impossible
+		// for a synthetic [0, len) span, so the error is ignored).
+		if f.symlink == "" && len(f.data) > 0 {
+			_ = repo.PutChunk(int64(f.inode), meta.ChunkInfo{
+				Offset: 0, Size: int64(len(f.data)), Release: "pc", AssetID: 1,
+			})
+		}
 	}
 	repo.RebuildIndexes()
 	return repo
@@ -930,6 +950,18 @@ func (s *pcSurface) Open(p string, mode posixconform.OpenMode) (posixconform.Han
 	if err != nil {
 		return nil, err
 	}
+	// pcOPath is Linux O_PATH: a permission-free, I/O-free open. Kept as a
+	// numeric literal (rather than syscall.O_PATH) so this test file still
+	// compiles on non-Linux hosts; the scenario fails loudly off-Linux
+	// instead, like the renameat2 helper below.
+	const pcOPath = 0o10000000
+	if mode == posixconform.OpenPath {
+		fd, err := syscall.Open(full, pcOPath, 0)
+		if err != nil {
+			return nil, pcTranslate(err)
+		}
+		return &pcPathHandle{fd: fd}, nil
+	}
 	var flags int
 	switch mode {
 	case posixconform.OpenReadOnly:
@@ -1277,6 +1309,36 @@ func (s *pcSurface) CompareAndWrite(p string, offset int64, data []byte, token u
 	return pcTranslate(f.Close())
 }
 
+// PunchHole issues a real fallocate PUNCH_HOLE|KEEP_SIZE so the server's
+// Allocate handler decides honestly: EOPNOTSUPP surfaces as ErrUnsupported
+// (the scenario then requires unchanged content), anything else is a loud
+// failure. Linux-only by nature (fallocate(2)); x/sys is already a module
+// dependency (see the renameat2 helper below).
+func (s *pcSurface) PunchHole(p string, off, length int64) error {
+	full, err := s.join(p)
+	if err != nil {
+		return err
+	}
+	if off < 0 || length < 0 {
+		return posixconform.ErrInvalid
+	}
+	if length == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(full, os.O_RDWR, 0)
+	if err != nil {
+		return pcTranslate(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := pcFallocatePunchHole(int64(f.Fd()), off, length); err != nil {
+		if errors.Is(err, syscall.EOPNOTSUPP) {
+			return fmt.Errorf("punch hole %s: %w", p, posixconform.ErrUnsupported)
+		}
+		return pcTranslate(err)
+	}
+	return pcTranslate(f.Close())
+}
+
 // ---------------------------------------------------------------------------
 // Handle: one open file description with an independent cursor.
 // ---------------------------------------------------------------------------
@@ -1474,6 +1536,105 @@ func (h *pcHandle) Close() error {
 	return pcTranslate(h.f.Close())
 }
 
+// pcSeekWhence values are the Linux lseek whences for data/hole queries.
+// os.File.Seek passes whence straight to the kernel, which forwards
+// SEEK_DATA/SEEK_HOLE through FUSE_LSEEK to the server's Lseek handler;
+// numeric literals keep this file compiling on non-Linux hosts.
+const (
+	pcSeekData = 3
+	pcSeekHole = 4
+)
+
+// SeekData implements posixconform.SeekHandle over a real mount fd.
+func (h *pcHandle) SeekData(off int64) (int64, error) {
+	return h.pcSeek(off, pcSeekData)
+}
+
+// SeekHole implements posixconform.SeekHandle over a real mount fd.
+func (h *pcHandle) SeekHole(off int64) (int64, error) {
+	return h.pcSeek(off, pcSeekHole)
+}
+
+func (h *pcHandle) pcSeek(off int64, whence int) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, posixconform.ErrClosed
+	}
+	if off < 0 {
+		return 0, posixconform.ErrInvalid
+	}
+	n, err := h.f.Seek(off, whence)
+	if err != nil {
+		// The server reports ENXIO for data past EOF (and hole past
+		// EOF); surface it as the harness unsatisfiable-range sentinel
+		// so scenarios match with errors.Is.
+		if errors.Is(err, syscall.ENXIO) {
+			return 0, fmt.Errorf("seek: %w", posixconform.ErrUnsatisfiableRange)
+		}
+		return 0, pcTranslate(err)
+	}
+	return n, nil
+}
+
+// pcPathHandle is an O_PATH-style handle: permission-free to open, unable
+// to do I/O. Every data operation fails with ErrAccess locally, mirroring
+// the kernel's EBADF-on-I/O for O_PATH fds; use after close fails with
+// ErrClosed.
+type pcPathHandle struct {
+	mu     sync.Mutex
+	fd     int
+	closed bool
+}
+
+func (h *pcPathHandle) deny() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return posixconform.ErrClosed
+	}
+	return posixconform.ErrAccess
+}
+
+func (h *pcPathHandle) PRead(_ int64, _ int) ([]byte, error) {
+	return nil, h.deny()
+}
+
+func (h *pcPathHandle) PWrite(_ int64, _ []byte) (int, error) {
+	return 0, h.deny()
+}
+
+func (h *pcPathHandle) Read(_ int) ([]byte, error) {
+	return nil, h.deny()
+}
+
+func (h *pcPathHandle) Write(_ []byte) (int, error) {
+	return 0, h.deny()
+}
+
+func (h *pcPathHandle) Truncate(_ int64) error {
+	return h.deny()
+}
+
+func (h *pcPathHandle) Sync() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return posixconform.ErrClosed
+	}
+	return nil
+}
+
+func (h *pcPathHandle) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil
+	}
+	h.closed = true
+	return pcTranslate(syscall.Close(h.fd))
+}
+
 // pcScenarioBudget bounds one scenario. A wedged mount (for example the
 // concurrent-append commit deadlock documented in the program notes) must
 // surface as a loud per-scenario FAIL, never as a hung suite. Enforced by
@@ -1624,13 +1785,14 @@ func TestPosixConformFUSE(t *testing.T) {
 		t.Skipf("posix conformance over FUSE needs /dev/fuse: %v", err)
 	}
 	pcPreflight(t)
-	total := len(posixconform.Table)
+	table := posixconform.Filter(posixconform.Table, posixconform.SurfaceFUSE)
+	total := len(table)
 	t.Logf("posix conformance over FUSE: %d scenarios, fresh mount each", total)
 	// PC_ONLY focuses one scenario by exact name (e.g. debugging a single
 	// RED case without paying for 30 fresh mounts). Empty runs the table.
 	only := os.Getenv("PC_ONLY")
 	results := make([]posixconform.Result, 0, total)
-	for i, sc := range posixconform.Table {
+	for i, sc := range table {
 		if only != "" && sc.Name != only {
 			continue
 		}

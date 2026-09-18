@@ -605,7 +605,7 @@ func TestPosixConformREST(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	adapter := &restConformAdapter{handler: handler, project: pcProject, etagBy: map[uint64]string{}}
-	results := posixconform.Run(adapter, posixconform.Table)
+	results := posixconform.Run(adapter, posixconform.Filter(posixconform.Table, posixconform.SurfaceREST))
 	passed, failed := posixconform.Summary(results)
 	for _, r := range results {
 		if r.Pass {

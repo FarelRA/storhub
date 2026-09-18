@@ -932,7 +932,7 @@ func TestPosixConformCLI(t *testing.T) {
 	}
 
 	adapter := &cliPOSIXSurface{project: "pc"}
-	results := posixconform.Run(adapter, posixconform.Table)
+	results := posixconform.Run(adapter, posixconform.Filter(posixconform.Table, posixconform.SurfaceCLI))
 
 	t.Logf("POSIX conformance via CLI: %d scenarios", len(results))
 	for _, r := range results {
