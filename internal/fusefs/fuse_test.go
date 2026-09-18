@@ -1165,6 +1165,7 @@ type stubHub struct {
 	loadReadonly    func(context.Context, string) (*meta.RepoMetadata, string, error)
 	updateMeta      func(context.Context, string, func(*meta.RepoMetadata) error, string) (*meta.RepoMetadata, error)
 	renameFn        func(context.Context, string, string, string) error
+	cloneFn         func(context.Context, string, string, int64, string, int64, int64) (*meta.FileMeta, error)
 	replaceFile     func(context.Context, string, string, string) (*meta.FileMeta, error)
 	patchFile       func(context.Context, string, string, int64, int64, []byte) (*meta.FileMeta, error)
 	patchRanges     func([]shfs.RangeEdit) (*meta.FileMeta, error)
@@ -1771,6 +1772,13 @@ func (s *stubHub) RenameContext(ctx context.Context, project, oldPath, newPath s
 		return s.renameFn(ctx, project, oldPath, newPath)
 	}
 	return syscall.ENOSYS
+}
+
+func (s *stubHub) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
+	if s.cloneFn != nil {
+		return s.cloneFn(ctx, project, src, srcOff, dst, dstOff, length)
+	}
+	return nil, syscall.ENOSYS
 }
 
 // Shrinking then regrowing must serve zeros for the regrown region, never

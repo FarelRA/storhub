@@ -88,6 +88,7 @@ type Client interface {
 	RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error
 	RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error
 	CopyContext(ctx context.Context, project, srcPath, dstPath string) error
+	CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error)

@@ -329,6 +329,7 @@ Examples:
 	rootCmd.AddCommand(a.newMkdirCmd())
 	rootCmd.AddCommand(a.newRemoveCmd())
 	rootCmd.AddCommand(a.newMoveCmd())
+	rootCmd.AddCommand(a.newCpCmd())
 	rootCmd.AddCommand(a.newAppendCmd())
 	rootCmd.AddCommand(a.newWriteCmd())
 	rootCmd.AddCommand(a.newPatchCmd())

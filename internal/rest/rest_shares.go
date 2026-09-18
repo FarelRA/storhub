@@ -50,6 +50,10 @@ func (readOnlyShare) CopyContext(ctx context.Context, project, srcPath, dstPath 
 	return errReadOnly()
 }
 
+func (readOnlyShare) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	return nil, errReadOnly()
+}
+
 func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }

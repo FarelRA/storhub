@@ -530,6 +530,13 @@ func (h *pcHub) ReadlinkContext(_ context.Context, _ string, target string) (str
 	return "", shfs.NotFound(target)
 }
 
+// CloneRange is unimplemented on the conformance hub: the shared table has
+// no copy_file_range scenario, so ENOSYS keeps every existing outcome
+// unchanged while satisfying the Hub contract.
+func (h *pcHub) CloneRange(_ context.Context, _ string, _ string, _ int64, _ string, _ int64, _ int64, _ ...shfs.MutateOption) (*meta.FileMeta, error) {
+	return nil, syscall.ENOSYS
+}
+
 func (h *pcHub) LinkContext(_ context.Context, _ string, _, _ string) (*meta.FileMeta, error) {
 	// Hard links are not implemented by this test backend. The
 	// conformance table never exercises them.

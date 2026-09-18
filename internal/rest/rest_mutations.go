@@ -182,6 +182,15 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	srcOff, dstOff, length, isRange, err := copyRangeParams(req)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if isRange {
+		h.handleCloneRange(w, r, project, src, srcOff, dst, dstOff, length)
+		return
+	}
 	// Copy reads the source and creates the destination; the guard sits on
 	// the source (CopyContext takes no mutate options, so a revision token
 	// degrades to a start-of-request freshness check, documented below).
@@ -189,6 +198,51 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if !h.maybeDrain(w, r, project) {
+		return
+	}
+	h.respondWithNode(w, r, project, dst, http.StatusCreated)
+}
+
+// handleCloneRange serves the range variant of POST /ops/copy: one
+// server-side CloneRange, zero bytes uploaded. Outcome matrix:
+// full clone: absent length resolves to the source size from src_off
+// (src_off 0 covers the whole file) and creates dst when missing;
+// range: an explicit [src_off, src_off+length) overwrites the dst span
+// at dst_off with pwrite semantics (gaps zero-fill by size accounting);
+// self-clone: src and dst may name the same file, where the core's
+// memmove snapshot semantics clone the pre-op bytes (cloning a span onto
+// itself is an exact no-op duplicate, still applied atomically).
+// The guard funnels through preconditionForUpdate on the source like the
+// sibling mutating endpoints: a revision token becomes backend
+// compare-and-swap options enforced inside the core transaction (412 when
+// the project moved), any other token keeps start-of-request freshness.
+func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, project, src string, srcOff int64, dst string, dstOff int64, length *int64) {
+	revOpts, ok := h.preconditionForUpdate(w, r, project, src)
+	if !ok {
+		return
+	}
+	resolved := length
+	if resolved == nil {
+		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, src)
+		if err != nil {
+			h.writeMappedError(w, err)
+			return
+		}
+		if entry.IsDir {
+			h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: "clone source is a directory"})
+			return
+		}
+		full := entry.Size - srcOff
+		if full < 0 {
+			full = 0
+		}
+		resolved = &full
+	}
+	if _, err := h.clientFor(r).CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}

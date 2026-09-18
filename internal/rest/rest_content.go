@@ -55,6 +55,12 @@ type pathRequest struct {
 // old_path/new_path are a deprecated legacy alias kept for wire
 // compatibility: they warn-but-work this release and will be removed in a
 // future version. New clients must send src_path/dst_path.
+//
+// src/dst are short aliases for src_path/dst_path. src_off/dst_off/length
+// select the range variant: when any of them is present the request routes
+// to CloneRange (server-side range clone, zero bytes uploaded) instead of
+// the whole-file CopyContext. Absent offsets default to 0; an absent
+// length means the whole source file from src_off.
 type copyRequest struct {
 	SrcPath string `json:"src_path"`
 	DstPath string `json:"dst_path"`
@@ -62,16 +68,27 @@ type copyRequest struct {
 	OldPath string `json:"old_path"`
 	// Deprecated: use DstPath instead. Kept as a fallback alias.
 	NewPath string `json:"new_path"`
+	Src     string `json:"src,omitempty"`
+	Dst     string `json:"dst,omitempty"`
+	SrcOff  *int64 `json:"src_off,omitempty"`
+	DstOff  *int64 `json:"dst_off,omitempty"`
+	Length  *int64 `json:"length,omitempty"`
 }
 
 // copySrcDst resolves the effective (src,dst) pair, preferring the
-// canonical fields and falling back to the deprecated aliases.
+// canonical fields and falling back to the short and deprecated aliases.
 func copySrcDst(req copyRequest) (src, dst string, err error) {
 	src = strings.TrimSpace(req.SrcPath)
+	if src == "" {
+		src = strings.TrimSpace(req.Src)
+	}
 	if src == "" {
 		src = strings.TrimSpace(req.OldPath)
 	}
 	dst = strings.TrimSpace(req.DstPath)
+	if dst == "" {
+		dst = strings.TrimSpace(req.Dst)
+	}
 	if dst == "" {
 		dst = strings.TrimSpace(req.NewPath)
 	}
@@ -79,6 +96,33 @@ func copySrcDst(req copyRequest) (src, dst string, err error) {
 		return "", "", errBadRequest("src_path and dst_path are required")
 	}
 	return src, dst, nil
+}
+
+// copyRangeParams resolves the range-clone offsets: absent offsets default
+// to 0, and ok reports whether the request asks for the range variant at
+// all (any range field present). Negative values are 400 here so storage
+// never sees them.
+func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok bool, err error) {
+	ok = req.SrcOff != nil || req.DstOff != nil || req.Length != nil || strings.TrimSpace(req.Src) != "" || strings.TrimSpace(req.Dst) != ""
+	if req.SrcOff != nil {
+		if *req.SrcOff < 0 {
+			return 0, 0, nil, true, errBadRequest("src_off must be non-negative")
+		}
+		srcOff = *req.SrcOff
+	}
+	if req.DstOff != nil {
+		if *req.DstOff < 0 {
+			return 0, 0, nil, true, errBadRequest("dst_off must be non-negative")
+		}
+		dstOff = *req.DstOff
+	}
+	if req.Length != nil {
+		if *req.Length < 0 {
+			return 0, 0, nil, true, errBadRequest("length must be non-negative")
+		}
+		length = req.Length
+	}
+	return srcOff, dstOff, length, ok, nil
 }
 
 // handleNodeGet serves GET/HEAD /nodes: stat one node with ETag/304 support.

@@ -743,6 +743,82 @@ func (c *fakeRESTClient) CopyContext(ctx context.Context, project, srcPath, dstP
 	return nil
 }
 
+// CloneRangeContext implements the range-clone Client method with the
+// core's observable semantics: memmove snapshot (the source span is
+// captured before any destination byte lands), pwrite destination
+// behavior with zero-filled gaps, creation of a missing destination, and
+// the length-0 validated no-op (missing dst answers NotFound).
+func (c *fakeRESTClient) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
+	c.recordOpts(opts)
+	if err := c.consumeOptErr(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, err := c.getExistingProject(project)
+	if err != nil {
+		return nil, err
+	}
+	srcClean, err := cleanRESTPath(src)
+	if err != nil {
+		return nil, err
+	}
+	dstClean, err := cleanRESTPath(dst)
+	if err != nil {
+		return nil, err
+	}
+	srcNode, ok := p.files[srcClean]
+	if !ok {
+		return nil, shfs.NotFound(srcClean)
+	}
+	if srcOff < 0 || dstOff < 0 || length < 0 {
+		return nil, errors.New("clone offsets and length must be non-negative")
+	}
+	if srcOff > int64(len(srcNode.data.bytes)) || length > int64(len(srcNode.data.bytes))-srcOff {
+		return nil, errors.New("clone source range exceeds file size")
+	}
+	dstNode, dstExists := p.files[dstClean]
+	if length == 0 {
+		if !dstExists {
+			return nil, shfs.NotFound(dstClean)
+		}
+		return &FileMetadata{Size: dstNode.entry.Size, Inode: dstNode.entry.Inode}, nil
+	}
+	if !dstExists {
+		if _, ok := p.dirs[dstClean]; ok {
+			return nil, shfs.IsDirectory(dstClean)
+		}
+		if parent := parentPath(dstClean); parent != "" {
+			if _, ok := p.dirs[parent]; !ok {
+				return nil, fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+			}
+		}
+		now := c.tick()
+		dstNode = &fakeRESTNode{
+			entry: &shfs.EntryInfo{
+				Path: dstClean, Size: 0, Inode: c.nextInode, Mode: srcNode.entry.Mode,
+				UID: srcNode.entry.UID, GID: srcNode.entry.GID,
+				CreatedAt: now, ModifiedAt: now, ChangedAt: now,
+			},
+			data: &fakeRESTData{bytes: []byte{}, nlink: 1, kind: NodeKindFile},
+		}
+		c.nextInode++
+		p.files[dstClean] = dstNode
+	}
+	seg := append([]byte(nil), srcNode.data.bytes[srcOff:srcOff+length]...)
+	content := append([]byte(nil), dstNode.data.bytes...)
+	if need := dstOff + length; int64(len(content)) < need {
+		content = append(content, make([]byte, need-int64(len(content)))...)
+	}
+	copy(content[dstOff:], seg)
+	dstNode.data.bytes = content
+	dstNode.entry.Size = int64(len(content))
+	now := c.tick()
+	c.touchDataLocked(p, dstNode.data, now)
+	c.recordRevisionLocked(p, "clone-range "+srcClean+" to "+dstClean)
+	return &FileMetadata{Size: int64(len(content)), Inode: dstNode.entry.Inode}, nil
+}
+
 func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {

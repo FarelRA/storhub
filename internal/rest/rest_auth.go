@@ -334,6 +334,33 @@ func (c *authorizedClient) CopyContext(ctx context.Context, project, srcPath, ds
 	}
 	return c.base.CopyContext(ctx, project, srcPath, dstPath)
 }
+
+// CloneRange gates like CopyContext (read on the source, create on the
+// destination) and passes the revision CAS options through to the core,
+// which enforces them inside its transaction. DAC stays enforced twice:
+// here for the REST principal, inside for the storage identity.
+func (c *authorizedClient) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+	if err := c.requireTraverse(ctx, project, src); err != nil {
+		return nil, err
+	}
+	entry, err := c.base.StatPathContext(ctx, project, src)
+	if err != nil {
+		return nil, err
+	}
+	if entry.IsDir {
+		if !c.hasPerm(entry, permRead|permExec) {
+			return nil, errForbidden("permission denied")
+		}
+	} else {
+		if !c.hasPerm(entry, permRead) {
+			return nil, errForbidden("permission denied")
+		}
+	}
+	if err := c.requireCreate(ctx, project, dst); err != nil {
+		return nil, err
+	}
+	return c.base.CloneRange(ctx, project, src, srcOff, dst, dstOff, length, opts...)
+}
 func (c *authorizedClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := c.requireNodeWrite(ctx, project, filePath); err != nil {
 		return nil, err
