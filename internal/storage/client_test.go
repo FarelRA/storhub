@@ -17,9 +17,13 @@ import (
 )
 
 // oversizeTestEntries is sized to the 8MiB contents ceiling from the
-// measured ~126 bytes of JSON per entry, plus 10% headroom: 74000 entries
-// serialize to ~9.3MB, the minimum fixture that crosses the ceiling.
-const oversizeTestEntries = 74000
+// measured ~104 bytes of JSON per entry: 88000 entries serialize to
+// ~9.1MB, ~9% over the ceiling. (Entries carry no UID/GID on the wire:
+// root-owned omits them via omitempty, so this calibration assumes
+// minimal-size entries. If the entry schema grows, re-measure: the
+// rejection test below fails open when the fixture stops crossing the
+// ceiling.)
+const oversizeTestEntries = 88000
 
 func addBigDir(m *RepoMetadata, entries int) {
 	m.EnsureDirectory("big", 1700000000)
