@@ -3,9 +3,112 @@ package fusefs
 import (
 	"log/slog"
 	"runtime"
+	"sync"
+	"time"
 
 	"github.com/FarelRA/storhub/internal/logging"
 )
+
+// projectVersioner is the optional hub capability behind cross-surface
+// invalidation fan-out: a per-project version counter that advances on
+// every swap of shared truth. StorHub implements it
+// (internal/storage ProjectVersion); hubs that do not (test doubles)
+// report ok=false and the mount falls back to timeout expiry, changing
+// nothing.
+type projectVersioner interface {
+	ProjectVersion(project string) (uint64, bool)
+}
+
+// HubProjectVersion reads the hub's per-project version counter for this
+// mount's project. ok=false means the hub has no counter (or the project
+// is not resident there): the caller keeps timeout-expiry behavior.
+func (s *Filesystem) HubProjectVersion() (uint64, bool) {
+	if s == nil || s.hub == nil {
+		return 0, false
+	}
+	pv, ok := s.hub.(projectVersioner)
+	if !ok {
+		return 0, false
+	}
+	return pv.ProjectVersion(s.project)
+}
+
+// ProjectVersionWatcher subscribes one mount to its hub's version counter.
+// It owns only its last-seen baseline (no filesystem or hub state is
+// touched), so mounts without a poller pay nothing and dropping the
+// watcher leaks nothing. All methods are safe for concurrent use; the
+// poll callback runs on the poller's goroutine, where only async-safe
+// notify calls (notifyEntryForPath, notifyKernelContentChanged) belong.
+//
+// Fan-out wiring note: the watcher detects THAT the project moved; the
+// affected entry set comes from the caller, which notifies exactly those
+// entries (O(affected), no sweeps, no global invalidate). Comparing the
+// counter on the lookup/stat path itself and starting the background poll
+// at mount construction are follow-ups outside this file; tests drive the
+// loop explicitly and prove the kernel-visible result.
+type ProjectVersionWatcher struct {
+	fs   *Filesystem
+	mu   sync.Mutex
+	last uint64
+	have bool
+}
+
+// NewProjectVersionWatcher starts a version subscription for this mount.
+// The first Check establishes the baseline and never reports a change.
+func (s *Filesystem) NewProjectVersionWatcher() *ProjectVersionWatcher {
+	return &ProjectVersionWatcher{fs: s}
+}
+
+// Check compares the hub counter against the last-seen baseline, advances
+// the baseline, and reports whether the project moved. A hub without the
+// counter capability never reports a change.
+func (w *ProjectVersionWatcher) Check() (cur uint64, changed bool) {
+	if w == nil {
+		return 0, false
+	}
+	cur, ok := w.fs.HubProjectVersion()
+	if !ok {
+		return 0, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.have {
+		w.last, w.have = cur, true
+		return cur, false
+	}
+	if cur != w.last {
+		w.last = cur
+		return cur, true
+	}
+	return cur, false
+}
+
+// StartPoll runs the subscriber loop: every interval it checks the counter
+// and invokes onChange (if non-nil) exactly once per observed movement.
+// The returned stop ends delivery; it is idempotent. The zero interval
+// resolves to one second.
+func (w *ProjectVersionWatcher) StartPoll(interval time.Duration, onChange func(cur uint64)) (stop func()) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	stopCh := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				if cur, changed := w.Check(); changed && onChange != nil {
+					onChange(cur)
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(stopCh) }) }
+}
 
 var (
 	notifyEntryFunc  = func(node *storhubNode, name string) { _ = node.NotifyEntry(name) }

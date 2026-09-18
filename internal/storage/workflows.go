@@ -978,6 +978,31 @@ func cowTree(m *RepoMetadata) *RepoMetadata {
 	return cloneForWrite(m)
 }
 
+// ProjectVersion reports the per-project metadata version counter, the
+// cross-surface invalidation source: every swap of shared truth
+// (publishTreeLocked callers via markProjectDirtyLocked, the
+// storeRepoMetadata apply-back branches) advances it, while paths that
+// replace nothing leave it alone. A subscriber (FUSE) baselines the value
+// and treats any movement as "kernel-cached entries for this project may
+// be stale", then revalidates and invalidates exactly the affected
+// entries. ok=false means the project is not resident: no counter exists,
+// so the caller falls back to timeout expiry.
+//
+// Lock discipline: metaMu for the map lookup, then pm.mu for reading,
+// the same order as every other reader. The swap side always advances the
+// counter under pm.mu for writing, so this read never races a publish.
+func (h *StorHub) ProjectVersion(project string) (uint64, bool) {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if !ok {
+		return 0, false
+	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.version, true
+}
+
 // publishTreeLocked swaps a mutated COW copy in as the new shared truth.
 // It rebuilds the derived indexes so the published tree is clean and
 // exclusively owned: a lock-free reader's index read (NLink/DirNLink/

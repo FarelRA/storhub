@@ -259,6 +259,14 @@ type SessionStat struct {
 	Size    int64
 	Dirty   bool
 	Mode    OpenMode
+	// Stale reports whether a newer revision was committed after this
+	// handle pinned its snapshot (pin revision != current committed
+	// revision). Reads intentionally keep serving the pin (snapshot
+	// isolation); this flag only advertises that a reopen would see
+	// newer content. It is computed from the resident cache entry, so
+	// it never performs I/O: a missing or unhydrated entry reports
+	// false rather than reloading remote truth inside a stat call.
+	Stale bool
 }
 
 // openSession is one live handle.
@@ -907,7 +915,7 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 }
 
 // StatSession reports the handle's project, path, current size, dirty
-// state, and mode.
+// state, mode, and staleness against the current committed revision.
 func (h *StorHub) StatSession(ctx context.Context, handleID string) (SessionStat, error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
@@ -920,13 +928,23 @@ func (h *StorHub) StatSession(ctx context.Context, handleID string) (SessionStat
 		return SessionStat{}, err
 	}
 	s.lastUse = sh.now()
-	return SessionStat{
+	stat := SessionStat{
 		Project: s.project,
 		Path:    s.path,
 		Size:    s.curSize,
 		Dirty:   s.dirty,
 		Mode:    s.mode,
-	}, nil
+	}
+	// Staleness is a cached readonly comparison only: the resident entry's
+	// committed SHA against the open-time pin. It takes metaMu then pm.mu
+	// for reading, matching every other reader, and never triggers a
+	// remote load (a stat that performs network I/O could fail a pure
+	// local query on a backend outage). Lock order sh.mu -> metaMu/pm.mu
+	// matches the commit path, which already holds sh.mu across hub verbs.
+	if _, curSHA, ok := h.cachedRepoMetadataReadonly(s.project); ok {
+		stat.Stale = s.revision != curSHA
+	}
+	return stat, nil
 }
 
 // LinkSession names an unlinked scratch handle, DAC-checked at link time
