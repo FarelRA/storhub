@@ -227,6 +227,29 @@ func fsConnected(fs *Filesystem) bool {
 	return fsConnectedFunc(fs)
 }
 
+// nodeNotifyReady reports whether a kernel upcall may touch the node:
+// non-nil, and not mid-attach (see attaching). A node under attach is
+// getting fresh state from its lookup/create reply synchronously, so
+// skipping its invalidation loses nothing and avoids racing go-fuse's
+// inode initialization (data race plus nil-pointer panic). Check both
+// before enqueueing and at fire time: a node can enter attach between
+// the two.
+func (s *Filesystem) nodeNotifyReady(n *storhubNode) bool {
+	if n == nil {
+		return false
+	}
+	if s == nil {
+		// Detached seam (no filesystem): no attach lifecycle exists,
+		// so there is nothing to race. Preserve the historical
+		// behavior of driving such nodes (test seams rely on it).
+		return true
+	}
+	s.attachMu.Lock()
+	_, attaching := s.attaching[n]
+	s.attachMu.Unlock()
+	return !attaching
+}
+
 func safeNotifyContent(node *storhubNode) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -242,6 +265,9 @@ func safeNotifyContent(node *storhubNode) {
 	if node == nil || !fsConnected(node.fs) {
 		return
 	}
+	if !node.fs.nodeNotifyReady(node) {
+		return
+	}
 	notifyContentFunc(node)
 }
 
@@ -251,8 +277,13 @@ func safeNotifyContentAsync(node *storhubNode) {
 	}
 	contentFn := notifyContentFunc
 	fs := node.fs
+	if !fs.nodeNotifyReady(node) {
+		return
+	}
 	fs.notifyAsync(notifyKey{kind: notifyKindContent, node: node}, "NotifyContent", func() {
-		contentFn(node)
+		if fs.nodeNotifyReady(node) {
+			contentFn(node)
+		}
 	})
 }
 
@@ -340,8 +371,13 @@ func safeNotifyEntry(node *storhubNode, name string) {
 	}
 	entryFn := notifyEntryFunc
 	fs := node.fs
+	if !fs.nodeNotifyReady(node) {
+		return
+	}
 	fs.notifyAsync(notifyKey{kind: notifyKindEntry, node: node, name: name}, "NotifyEntry", func() {
-		entryFn(node, name)
+		if fs.nodeNotifyReady(node) {
+			entryFn(node, name)
+		}
 	})
 }
 
@@ -353,8 +389,14 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	deleteFn := notifyDeleteFunc
 	fs := parent.fs
 	fs.notifyAsync(notifyKey{kind: notifyKindDelete, node: parent, name: name}, "NotifyDelete", func() {
+		if !fs.nodeNotifyReady(parent) {
+			return
+		}
 		if child == nil {
 			entryFn(parent, name)
+			return
+		}
+		if !fs.nodeNotifyReady(child) {
 			return
 		}
 		deleteFn(parent, name, child)

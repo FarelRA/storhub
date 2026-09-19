@@ -136,6 +136,16 @@ type Filesystem struct {
 	// backpressure, and unbounded notify goroutines would queue faster
 	// than they drain.
 	notifySlots chan struct{}
+	// attaching tracks nodes whose go-fuse inode is being initialized
+	// (attachChild → NewInode) so kernel upcalls never touch a
+	// half-initialized inode: NotifyContent racing initInode is a data
+	// race inside go-fuse plus a nil-pointer panic. Skipping is sound,
+	// not lossy: attach (lookup/create reply) hands the kernel fresh
+	// state synchronously, so there is nothing to invalidate yet.
+	// Dedicated small mutex, never held with s.mu, so it cannot join
+	// the filesystem lock graph.
+	attachMu  sync.Mutex
+	attaching map[*storhubNode]struct{}
 	// pinnedMu guards pinned, the shared open-time content layouts (see
 	// pinnedKey in fuse_file.go). Sharing one immutable layout across
 	// handles of the same file version bounds the per-open metadata cost.
@@ -486,6 +496,7 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 		notifyQueued: make(map[notifyKey]struct{}),
 		notifySlots:  make(chan struct{}, maxConcurrentNotifies),
 		pinned:       make(map[pinnedKey]*pinnedContent),
+		attaching:    make(map[*storhubNode]struct{}),
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
@@ -1371,6 +1382,20 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 	if ino != nil && ino.Operations() != nil && ino.StableAttr().Ino != 0 {
 		return ino
 	}
+	// Mark for the duration of NewInode: kernel upcalls issued
+	// concurrently (content/entry notifications from commit and fan-out
+	// paths) must skip this node until go-fuse finishes initializing it.
+	// Deferred unmark runs even if NewInode panics (the outer recover
+	// degrades to "no cached child"); without it a panicking attach
+	// would suppress that node's invalidations forever.
+	n.fs.attachMu.Lock()
+	n.fs.attaching[child] = struct{}{}
+	n.fs.attachMu.Unlock()
+	defer func() {
+		n.fs.attachMu.Lock()
+		delete(n.fs.attaching, child)
+		n.fs.attachMu.Unlock()
+	}()
 	return n.NewInode(ctx, child, child.stableAttr())
 }
 
