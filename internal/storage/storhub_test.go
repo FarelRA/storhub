@@ -4266,7 +4266,9 @@ func (m *mockGitHub) handleDownloadAsset(w http.ResponseWriter, r *http.Request,
 	asset, ok := repo.assets[assetID]
 	if !ok {
 		m.mu.Unlock()
-		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": "asset not found"})
+		// Include the ID: under concurrent append storms a 404 without
+		// it is undebuggable (which upload's asset went missing?).
+		m.writeJSON(w, http.StatusNotFound, map[string]any{"message": fmt.Sprintf("asset not found: %d", assetID)})
 		return
 	}
 	name, size := asset.name, len(asset.data)
