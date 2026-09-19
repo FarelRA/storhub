@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
 // TestConcurrentAppendByteExactness pins the append concurrency contract:
@@ -94,5 +96,69 @@ func TestConcurrentAppendByteExactness(t *testing.T) {
 		if seen[w] != 1 {
 			t.Fatalf("winner %d appears %d times, want exactly once", w, seen[w])
 		}
+	}
+}
+
+func TestPatchedRangeCompensationSparesReusedChunks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "project-compensate-spares-reused"
+
+	seed := writeTempFile(t, t.TempDir(), "base.bin", []byte("0123456789ABCDEF"))
+	if _, err := hub.UploadFileContext(ctx, project, "f.bin", seed); err != nil {
+		t.Fatalf("upload base: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush base: %v", err)
+	}
+	repoMeta, _, err := hub.loadRepoMetadataFresh(ctx, project)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	file := repoMeta.FindFile("f.bin")
+	if file == nil {
+		t.Fatal("seed file missing")
+	}
+	var committedAsset int64
+	for _, cid := range file.Chunks {
+		if ci, ok := repoMeta.Chunks()[cid]; ok {
+			committedAsset = ci.AssetID
+		}
+	}
+	if committedAsset == 0 {
+		t.Fatal("seed file has no committed asset")
+	}
+	// Build a batch patch appending 4 bytes: the playlist must reference
+	// the committed chunk, but the compensatable set must hold ONLY the
+	// fresh upload. Compensating anything else orphans live data
+	// (regression: concurrent appends 404'd on read-back when a loser's
+	// failure deleted a winner's reused chunk).
+	edits := []shfs.RangeEdit{{Start: file.Size, Data: []byte("tail")}}
+	assembled, uploaded, _, err := hub.buildPatchedRangeChunks(ctx, project, repoMeta, *file, "f.bin", edits)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(assembled) == 0 {
+		t.Fatal("playlist must reference existing plus fresh chunks")
+	}
+	for _, c := range uploaded {
+		if c.AssetID == committedAsset {
+			t.Fatalf("compensatable set references committed asset %d", committedAsset)
+		}
+	}
+	if len(uploaded) == 0 {
+		t.Fatal("compensatable set must hold the fresh upload")
+	}
+	// The safety property itself: compensating the returned set leaves
+	// the committed asset downloadable.
+	hub.compensateDeleteAssets(ctx, project, uploaded)
+	data, err := hub.ReadFileAtContext(ctx, project, "f.bin", 0, file.Size)
+	if err != nil {
+		t.Fatalf("committed content unreadable after compensating fresh uploads: %v", err)
+	}
+	if string(data) != "0123456789ABCDEF" {
+		t.Fatalf("committed content corrupted: %q", data)
 	}
 }

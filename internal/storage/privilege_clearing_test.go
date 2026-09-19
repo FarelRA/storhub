@@ -10,7 +10,7 @@ import (
 )
 
 func privAdminCtx() context.Context {
-	return shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	return shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 }
 
 func privUserCtx() context.Context {

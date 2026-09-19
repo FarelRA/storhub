@@ -485,8 +485,12 @@ func TestCloneRangePermissions(t *testing.T) {
 	project := "project-clone-dac"
 	adminCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	userCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 1001, GID: 1002})
+	// Setup alone needs admin powers (project root is owned by the
+	// process user); everything below runs as plain UID 0 to prove
+	// ownership works without admin privilege.
+	setupCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 
-	if err := hub.MkdirContext(adminCtx, project, "docs"); err != nil {
+	if err := hub.MkdirContext(setupCtx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := hub.ChmodContext(adminCtx, project, "docs", 0o777); err != nil {

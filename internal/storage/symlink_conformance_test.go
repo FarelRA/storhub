@@ -16,7 +16,7 @@ func TestStorageConformanceSymlinkAndDotDotMatrix(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 	const project = "project-symlink-conformance"
 
 	for _, dir := range []string{"a", "a/b", "a/b/c"} {

@@ -121,7 +121,7 @@ func TestUploadHardeningRewriteCompensatesMidUploadFailure(t *testing.T) {
 		}
 		return false
 	})
-	if _, _, err := hub.buildRewrittenChunks(ctx, "project-hardening-rewrite", repoMeta, *fileMeta, "rewrite.txt", snapshot, 24, []byteRange{{start: 0, end: 16}}); err == nil {
+	if _, _, _, err := hub.buildRewrittenChunks(ctx, "project-hardening-rewrite", repoMeta, *fileMeta, "rewrite.txt", snapshot, 24, []byteRange{{start: 0, end: 16}}); err == nil {
 		t.Fatal("expected injected failure")
 	}
 	if got := hardeningAssetCount(t, backend, "project-hardening-rewrite"); got != 3 {
@@ -252,5 +252,65 @@ func TestUploadHardeningDuplicateRepoMatchesAlreadyExists(t *testing.T) {
 	apiErr := &ghapi.APIError{StatusCode: resp.StatusCode, Message: payload.Message, Body: string(raw)}
 	if !isAlreadyExists(apiErr) {
 		t.Fatalf("duplicate repo body must match already_exists matcher, got: %s", strings.TrimSpace(string(raw)))
+	}
+}
+
+func TestRewrittenCompensationSparesReusedChunks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "project-rewrite-spares"
+
+	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("0123456789abcdef01234567"))
+	if _, err := hub.UploadFile(project, "rewrite.txt", seed); err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	repoMeta, _, err := hub.loadRepoMetadata(ctx, project)
+	if err != nil {
+		t.Fatalf("load metadata: %v", err)
+	}
+	fileMeta := repoMeta.FindFile("rewrite.txt")
+	if fileMeta == nil {
+		t.Fatal("expected seeded file in metadata")
+	}
+	var committedAsset int64
+	for _, cid := range fileMeta.Chunks {
+		if ci, ok := repoMeta.Chunks()[cid]; ok {
+			committedAsset = ci.AssetID
+		}
+	}
+	if committedAsset == 0 {
+		t.Fatal("seed file has no committed asset")
+	}
+	// Rewrite the first 8 bytes: the playlist references the untouched
+	// tail, but only fresh uploads may ever be compensated (same
+	// regression as the patch batch path).
+	snapshot := writeTempFile(t, t.TempDir(), "snap.bin", []byte("XXXXXXXX0123456789abcdef"))
+	assembled, uploaded, _, err := hub.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, "rewrite.txt", snapshot, 24, []byteRange{{start: 0, end: 8}})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(assembled) == 0 {
+		t.Fatal("playlist must reference existing plus fresh chunks")
+	}
+	for _, c := range uploaded {
+		if c.AssetID == committedAsset {
+			t.Fatalf("compensatable set references committed asset %d", committedAsset)
+		}
+	}
+	if len(uploaded) == 0 {
+		t.Fatal("compensatable set must hold the fresh upload")
+	}
+	hub.compensateDeleteAssets(ctx, project, uploaded)
+	data, err := hub.ReadFileAtContext(ctx, project, "rewrite.txt", 0, 24)
+	if err != nil {
+		t.Fatalf("committed content unreadable after compensating fresh uploads: %v", err)
+	}
+	if string(data) != "0123456789abcdef01234567" {
+		t.Fatalf("committed content corrupted: %q", data)
 	}
 }

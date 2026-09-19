@@ -155,7 +155,7 @@ func inlineChunkCount(size, chunkSize int64) int {
 	return int((size + chunkSize - 1) / chunkSize)
 }
 
-func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) ([]ChunkInfo, string, error) {
+func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) (assembled, uploaded []ChunkInfo, tag string, err error) {
 	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 	dirtySegments := make([]byteRange, 0, len(dirtyRanges))
 	for _, dirty := range dirtyRanges {
@@ -170,14 +170,14 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 	}
 	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	snapshot, err := os.Open(snapshotPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("open snapshot: %w", err)
+		return nil, nil, "", fmt.Errorf("open snapshot: %w", err)
 	}
 	defer func() { _ = snapshot.Close() }()
-	assembled := make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
+	assembled = make([]ChunkInfo, 0, inlineChunkCount(finalSize, chunkSize)+len(file.Chunks))
 	var uploadedAll []ChunkInfo
 	// Track where the bytes actually land; a rotation mid-rewrite
 	// moves the sink and the reported tag must follow it.
@@ -194,7 +194,7 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 			})
 			if err != nil {
 				h.compensateDeleteAssets(ctx, project, append(uploadedAll, uploaded...))
-				return nil, "", err
+				return nil, nil, "", err
 			}
 			curTag, curURL = landedTag, landedURL
 			uploadedAll = append(uploadedAll, uploaded...)
@@ -204,11 +204,14 @@ func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repo
 		reused, err := h.referenceFileRangeChunks(ctx, project, repoMeta.Chunks(), file, segment.start, segment.end)
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, uploadedAll)
-			return nil, "", err
+			return nil, nil, "", err
 		}
 		assembled = append(assembled, reused...)
 	}
-	return finalizePlaylist(assembled), curTag, nil
+	// assembled mixes reused committed chunks with fresh uploads; only
+	// uploadedAll may ever be compensated (same regression as the patch
+	// batch path: deleting a reused chunk orphans live data).
+	return finalizePlaylist(assembled), uploadedAll, curTag, nil
 }
 
 // rangeOverlapsAny reports whether target overlaps any range.
@@ -285,9 +288,9 @@ func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, 
 // are folded through spliceEdit left to right with a running shift, so
 // the layout math stays identical to the single-edit path by
 // construction.
-func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, edits []shfs.RangeEdit) ([]ChunkInfo, string, error) {
+func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, edits []shfs.RangeEdit) (assembled, uploaded []ChunkInfo, tag string, err error) {
 	if len(edits) == 0 {
-		return nil, "", errors.New("patch batch is empty")
+		return nil, nil, "", errors.New("patch batch is empty")
 	}
 	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
 
@@ -297,7 +300,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	}
 	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 
 	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
@@ -307,7 +310,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 		}
 	}
 
-	assembled := resolved
+	assembled = resolved
 	shift := int64(0)
 	var uploadedAll []ChunkInfo
 	curTag, curURL := releaseTag, uploadURL
@@ -317,7 +320,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 		})
 		if err != nil {
 			h.compensateDeleteAssets(ctx, project, append(uploadedAll, inserted...))
-			return nil, "", err
+			return nil, nil, "", err
 		}
 		// A rotation inside this edit moves the sink; later edits
 		// must upload to where the bytes actually land.
@@ -326,5 +329,8 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 		assembled = spliceEdit(assembled, edit.Start+shift, edit.DeleteSize, edit.Len(), inserted)
 		shift += edit.Len() - edit.DeleteSize
 	}
-	return finalizePlaylist(assembled), curTag, nil
+	// assembled mixes reused committed chunks with fresh uploads; only
+	// uploadedAll may ever be compensated (deleting a reused chunk would
+	// orphan live data: regression TestConcurrentAppendByteExactness).
+	return finalizePlaylist(assembled), uploadedAll, curTag, nil
 }

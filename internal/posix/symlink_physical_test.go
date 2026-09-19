@@ -18,7 +18,7 @@ import (
 // facade routes through it, plus the escape rejection.
 func TestPosixConformanceSymlinkSmoke(t *testing.T) {
 	t.Parallel()
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 	svc, backend := posixConformanceService(t)
 	// chmod follows the final symlink to the target.
 	if err := svc.ChmodContext(ctx, "demo", "a/link/f.txt", 0o600); err != nil {

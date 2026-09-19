@@ -126,7 +126,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 	t.Parallel()
 	// The workflow runs as an explicitly identified root caller; absent
 	// identities fail closed to the process user and own nothing here.
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 	now := int64(300)
 	backend := newTestBackend(now)
 	backend.seedDir("docs")
@@ -372,7 +372,7 @@ func TestChownKeepOwnerSentinel(t *testing.T) {
 	backend := newTestBackend(500)
 	backend.seedDir("docs")
 	svc := NewService(backend)
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 
 	if err := svc.ChownContext(ctx, "demo", "docs", 1000, 2000); err != nil {
 		t.Fatalf("initial chown: %v", err)
@@ -409,7 +409,7 @@ func TestChtimesExplicitSemantics(t *testing.T) {
 	backend := newTestBackend(500)
 	backend.seedFile("ts.txt")
 	svc := NewService(backend)
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 	epoch := time.Unix(0, 0)
 	if err := svc.ChtimesExplicitContext(ctx, "demo", "ts.txt", &epoch, nil); err != nil {
 		t.Fatalf("explicit chtimes: %v", err)
@@ -504,7 +504,7 @@ func TestLinkSamePathDirectoryIsEPERM(t *testing.T) {
 	backend := newTestBackend(820)
 	backend.seedDir("docs")
 	svc := NewService(backend)
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 	if _, err := svc.LinkContext(ctx, "demo", "docs", "docs"); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("same-path directory link must be EPERM, got %v", err)
 	}

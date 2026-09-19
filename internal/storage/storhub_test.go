@@ -1944,7 +1944,7 @@ func TestPOSIXMetadataOpsHardlinksSymlinksAndXAttrs(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	// Ownership and chown operations require an explicitly identified
 	// privileged caller; absent identities fail closed to the process user.
-	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
+	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
 
 	if err := hub.MkdirContext(ctx, "project-posix", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)

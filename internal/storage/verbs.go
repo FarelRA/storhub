@@ -192,7 +192,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 		}
 	}
 
-	newChunks, releaseTag, err := h.buildPatchedRangeChunks(ctx, project, repoMeta, *fileMeta, cleanName, edits)
+	newChunks, uploaded, releaseTag, err := h.buildPatchedRangeChunks(ctx, project, repoMeta, *fileMeta, cleanName, edits)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	pm.mu.Lock()
 	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, err
 	}
 	// Mutations apply to a private COW copy; publish only on success.
@@ -214,13 +214,13 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	if releaseTag != "" {
 		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, uploaded)
 			return nil, err
 		}
 	}
 	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, err
 	}
 	chunkIDs := make([]int64, len(newChunks))
@@ -228,7 +228,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 		id := tree.AllocateChunkID()
 		if err := tree.PutChunk(id, newChunks[i]); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, uploaded)
 			return nil, err
 		}
 		chunkIDs[i] = id
@@ -247,14 +247,14 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	// Same concurrency guard as the single-edit path: the snapshot may be
 	// stale by the time uploads finish; one size check covers the batch.
 	if current.Size != fileMeta.Size || edits[len(edits)-1].End() > current.Size {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, fmt.Errorf("file %s changed concurrently (size %d, expected %d); patch batch rejected", cleanName, current.Size, fileMeta.Size)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
@@ -373,7 +373,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 }
 
 func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *RepoMetadata, fileMeta *FileMeta, finalSize int64, dirtyRanges []byteRange) (*FileMeta, error) {
-	newChunks, releaseTag, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, cleanName, snapshotPath, finalSize, dirtyRanges)
+	newChunks, uploaded, releaseTag, err := h.buildRewrittenChunks(ctx, project, repoMeta, *fileMeta, cleanName, snapshotPath, finalSize, dirtyRanges)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +385,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	pm.mu.Lock()
 	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, err
 	}
 
@@ -400,13 +400,13 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	if releaseTag != "" {
 		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, uploaded)
 			return nil, err
 		}
 	}
 	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, err
 	}
 	// Allocate identifiers against the authoritative in-memory metadata so
@@ -416,7 +416,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 		id := tree.AllocateChunkID()
 		if err := tree.PutChunk(id, newChunks[i]); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, uploaded)
 			return nil, err
 		}
 		chunkIDs[i] = id
@@ -430,7 +430,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, uploaded)
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
