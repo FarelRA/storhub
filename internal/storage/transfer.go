@@ -199,7 +199,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, latest, now)
 	implposix.ReplaceInodeFamily(tree, cleanName, latest, fileMeta, now)
 	siblings := tree.FindFilesByInode(fileMeta.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	opFile := fileMeta.Clone()
 	h.appendOpLocked(project, pm, Op{
@@ -476,7 +476,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	}
 	shfs.TouchParentDirectory(tree, cleanName, h.config.Now().Unix())
 	siblings := tree.FindFilesByInode(fileMeta.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	cause := "upload"
 	if replace {

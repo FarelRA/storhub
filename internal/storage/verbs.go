@@ -260,7 +260,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(tree, cleanName, current, patched, now)
 	siblings := tree.FindFilesByInode(patched.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	opFile := patched.Clone()
 	h.appendOpLocked(project, pm, Op{
@@ -352,7 +352,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
 	implposix.ReplaceInodeFamily(tree, cleanName, current, patched, now)
 	siblings := tree.FindFilesByInode(patched.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	opFile := patched.Clone()
 	h.appendOpLocked(project, pm, Op{
@@ -436,7 +436,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	implposix.ApplyUpdatedFileIdentity(cleanName, &rewritten, current, now)
 	implposix.ReplaceInodeFamily(tree, cleanName, current, rewritten, now)
 	siblings := tree.FindFilesByInode(rewritten.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	opFile := rewritten.Clone()
 	h.appendOpLocked(project, pm, Op{
@@ -1013,7 +1013,19 @@ func (h *StorHub) publishTxLocked(project string, pm *projectMetadata, candidate
 	for _, op := range synthesizeOpsFromIntents(pm.meta, candidate, rec, cause, now) {
 		h.appendOpLocked(project, pm, op)
 	}
-	publishTreeLocked(pm, candidate)
+	// Fan-out footprint comes straight from the transaction recorder:
+	// every file/dir the tracked mutators touched (puts and removes),
+	// harvested here where pm.mu is held, so no verb can forget it.
+	var txPaths []string
+	if rec != nil {
+		for path := range rec.FileIntents() {
+			txPaths = append(txPaths, path)
+		}
+		for path := range rec.DirIntents() {
+			txPaths = append(txPaths, path)
+		}
+	}
+	publishTreeLocked(pm, candidate, txPaths)
 }
 
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {

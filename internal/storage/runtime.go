@@ -77,7 +77,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			if shfs.ShouldUpdateAtime(h.config.AtimePolicy, pm.meta.Root.AccessedAt, pm.meta.Root.ModifiedAt, pm.meta.Root.ChangedAt, now) {
 				tree := cowTree(pm.meta)
 				tree.Root.AccessedAt = now
-				publishTreeLocked(pm, tree)
+				publishTreeLocked(pm, tree, []string{""})
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
 				root := pm.meta.Root.Clone()
 				h.appendOpLocked(project, pm, Op{
@@ -91,7 +91,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 			if dir != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, dir.AccessedAt, dir.ModifiedAt, dir.ChangedAt, now) {
 				tree := cowTree(pm.meta)
 				if tree.SetDirAtime(targetPath, now) {
-					publishTreeLocked(pm, tree)
+					publishTreeLocked(pm, tree, []string{targetPath})
 					trigger = h.markProjectDirtyLiveLocked(project, pm)
 					// markProjectDirtyLiveLocked drops pm.mu during
 					// eviction revival; a concurrent delete can remove
@@ -113,7 +113,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		if file != nil && shfs.ShouldUpdateAtime(h.config.AtimePolicy, file.AccessedAt, file.ModifiedAt, file.ChangedAt, now) {
 			tree := cowTree(pm.meta)
 			if tree.SetFileAtime(targetPath, now) {
-				publishTreeLocked(pm, tree)
+				publishTreeLocked(pm, tree, []string{targetPath})
 				trigger = h.markProjectDirtyLiveLocked(project, pm)
 				// Same revival-window re-check as the directory branch
 				// above: a nil here means the entry was deleted

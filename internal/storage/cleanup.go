@@ -91,7 +91,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	// Capture the surviving family members before publishing (FindFilesByInode
 	// rebuilds indexes, which must not happen on the shared tree).
 	siblings := tree.FindFilesByInode(existing.Inode)
-	publishTreeLocked(pm, tree)
+	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	h.appendOpLocked(project, pm, Op{
 		Type: OpDeleteFile, Paths: []string{cleanName}, Cause: "unlink",
@@ -139,7 +139,9 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	publishTreeLocked(pm, tree)
+	// Release catalog changes have no namespace footprint: nothing for
+	// cross-surface caches to invalidate.
+	publishTreeLocked(pm, tree, []string{})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	h.appendOpLocked(project, pm, Op{
 		Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: "release-delete",
