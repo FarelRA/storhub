@@ -23,6 +23,14 @@ type inodeWriteState struct {
 	tempPath     string
 	baseTemp     *os.File
 	baseTempPath string
+	// baseEntry caches the hub's entry at detach-snapshot time (see
+	// snapshotBaseLocked). An unlinked-but-open inode has no path to
+	// stat, so fh-carried ops on it (close-time mtime flush, fstat)
+	// build their replies from this snapshot plus the live overlay
+	// instead of failing ESTALE. First snapshot wins: the entry at
+	// detach time is the handle's truth for the rest of its life.
+	baseEntry    shfs.EntryInfo
+	hasBaseEntry bool
 	path         string
 	closed       bool
 	deleted      bool
@@ -240,7 +248,19 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 	}
 	w.baseTemp = baseTemp
 	w.baseTempPath = baseTempPath
+	if statErr == nil && entry != nil && !w.hasBaseEntry {
+		w.baseEntry = *entry
+		w.hasBaseEntry = true
+	}
 	return nil
+}
+
+// cachedBaseEntry returns the detach-time entry snapshot for fh-carried
+// ops on an unlinked inode. Callers must not hold w.mu.
+func (w *inodeWriteState) cachedBaseEntry() (shfs.EntryInfo, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.baseEntry, w.hasBaseEntry
 }
 
 func (w *inodeWriteState) clearBaseSnapshotLocked() {
@@ -1134,7 +1154,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		// without dirty tracking - the data was acknowledged but silently
 		// discarded at commit. Fail loudly instead of pretending the write
 		// landed.
-		h.fs.debugf("write rejected path=%s inode=%d reason=no-write-state", h.path, h.inode)
+		h.fs.debugf("write rejected path=%s inode=%d reason=no-write-state", h.handlePath(), h.inode)
 		return 0, syscall.EIO
 	}
 	h.writeState.opMu.Lock()
@@ -1341,7 +1361,7 @@ func (h *storhubHandle) drainProject(ctx context.Context) syscall.Errno {
 	// the dirty state for retry. Quarantining here would double-replay
 	// the same bytes via redrive plus the quarantined overlay.
 	if err := h.fs.hub.DrainProjectContext(ctx, h.fs.project); err != nil {
-		h.fs.errorf("drain failed path=%s inode=%d err=%v", h.path, h.inode, err)
+		h.fs.errorf("drain failed path=%s inode=%d err=%v", h.handlePath(), h.inode, err)
 		return syscall.EIO
 	}
 	return 0

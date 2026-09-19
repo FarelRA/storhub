@@ -704,10 +704,15 @@ var Table = []Scenario{
 		Run: func(s Surface) error {
 			a := "/pc-loop-a"
 			b := "/pc-loop-b"
-			if err := s.Symlink(b, a); err != nil {
+			// Relative targets: an absolute target escapes a real
+			// mount (the kernel resolves it against the host root,
+			// correctly yielding ENOENT), so loop detection on a
+			// mount is only testable with contained targets. The
+			// property under test — ELOOP on a cycle — is identical.
+			if err := s.Symlink("pc-loop-b", a); err != nil {
 				return fmt.Errorf("symlink a: %v", err)
 			}
-			if err := s.Symlink(a, b); err != nil {
+			if err := s.Symlink("pc-loop-a", b); err != nil {
 				return fmt.Errorf("symlink b: %v", err)
 			}
 			if _, err := s.Stat(a); !errors.Is(err, ErrLoop) {
@@ -723,14 +728,17 @@ var Table = []Scenario{
 		Name:     "symlink-readlink-roundtrip",
 		Surfaces: SurfaceAll,
 		Run: func(s Surface) error {
-			target := "/pc-symlink-target"
+			target := "pc-symlink-target"
 			link := "/pc-symlink-link"
-			if err := s.CreateFile(target, 0o644, false); err != nil {
+			if err := s.CreateFile("/"+target, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			if err := s.Append(target, []byte("payload")); err != nil {
+			if err := s.Append("/"+target, []byte("payload")); err != nil {
 				return fmt.Errorf("append: %v", err)
 			}
+			// Relative target: stays inside a real mount (absolute
+			// targets escape to the host root by design). Readlink
+			// still returns the stored string verbatim.
 			if err := s.Symlink(target, link); err != nil {
 				return fmt.Errorf("symlink: %v", err)
 			}
@@ -755,7 +763,7 @@ var Table = []Scenario{
 			if string(data) != "payload" {
 				return fmt.Errorf("link content: want %q, got %q", "payload", data)
 			}
-			if _, err := s.Readlink(target); !errors.Is(err, ErrInvalid) {
+			if _, err := s.Readlink("/" + target); !errors.Is(err, ErrInvalid) {
 				return fmt.Errorf("readlink on regular file: want ErrInvalid, got %v", err)
 			}
 			return nil

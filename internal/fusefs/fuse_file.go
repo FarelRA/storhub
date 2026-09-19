@@ -50,6 +50,18 @@ type storhubHandle struct {
 	writeState *inodeWriteState
 }
 
+// handlePath snapshots the handle's current path for logging. The path
+// is rebased under h.mu by renames and unlinks racing any in-flight op
+// (close-then-unlink hits Release against materializePath), so logging
+// h.path directly is a data race. h.mu is always a leaf lock, safe to
+// take on error and debug paths. h.inode never needs this: it is set
+// once before the handle is published and never mutated.
+func (h *storhubHandle) handlePath() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.path
+}
+
 // pinnedContent is an immutable, self-contained view of one file's data
 // layout. Chunk assets are content-addressed, so the descriptors stay
 // valid for the handle's lifetime regardless of later metadata changes.
@@ -354,12 +366,24 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 	h.path = targetPath
 	h.mu.Unlock()
 
-	// Network calls without lock
+	// Network calls without lock. The fd may close under us while they
+	// run: RELEASE is not synchronized with close, so a racing Release
+	// can close (and remove) our temp before we Seek it — historically
+	// surfacing as "file already closed" EIO on the concurrent unlink.
+	// Every exit below re-checks under h.mu and abandons the snapshot
+	// when the handle was released: no future read needs it, and the
+	// unlink must proceed.
 	entry, err := h.fs.hub.StatPathContext(ctx, h.fs.project, targetPath)
 	if err != nil {
 		// Propagate: silently treating stat failure as "empty file"
 		// would serve EOF for a readable handle whose remote stat
 		// merely hiccupped (same contract as the writeState twin).
+		// A handle released anywhere along the way (including the
+		// cleanup below) abandons instead: no future read needs the
+		// snapshot, and the unlink must proceed.
+		if h.abandonMaterialize(temp) {
+			return nil
+		}
 		if rmErr := temp.Close(); rmErr != nil {
 			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
 		}
@@ -367,13 +391,22 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
 		}
 		h.mu.Lock()
-		h.temp = nil
-		h.tempPath = ""
+		if h.temp == temp {
+			h.temp = nil
+			h.tempPath = ""
+		}
+		released := h.closed
 		h.mu.Unlock()
+		if released {
+			return nil
+		}
 		return err
 	}
 	if entry.Size > 0 {
 		if dlErr := h.fs.hub.DownloadFileContext(ctx, h.fs.project, targetPath, temp.Name()); dlErr != nil {
+			if h.abandonMaterialize(temp) {
+				return nil
+			}
 			if err := temp.Close(); err != nil {
 				logging.Error(h.fs.log(), "failed to close temp file after download error", "path", temp.Name(), "err", err)
 			}
@@ -381,12 +414,22 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 				logging.Error(h.fs.log(), "failed to remove temp file after download error", "path", temp.Name(), "err", err)
 			}
 			h.mu.Lock()
-			h.temp = nil
-			h.tempPath = ""
+			if h.temp == temp {
+				h.temp = nil
+				h.tempPath = ""
+			}
+			released := h.closed
 			h.mu.Unlock()
+			if released {
+				return nil
+			}
 			return dlErr
 		}
 		h.mu.Lock()
+		if h.abandonMaterializeLocked(temp) {
+			h.mu.Unlock()
+			return nil
+		}
 		if _, seekErr := h.temp.Seek(0, 0); seekErr != nil {
 			h.mu.Unlock()
 			return seekErr
@@ -394,6 +437,34 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 		h.mu.Unlock()
 	}
 	return nil
+}
+
+// abandonMaterialize drops a snapshot temp fetched for a handle that was
+// released concurrently, reporting whether the caller must abandon its
+// snapshot (true) or proceed (false). Callers must not hold h.mu.
+func (h *storhubHandle) abandonMaterialize(temp *os.File) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.abandonMaterializeLocked(temp)
+}
+
+// abandonMaterializeLocked is abandonMaterialize with h.mu held. When the
+// handle was released (or its temp replaced) out from under a snapshot
+// fetch, it detaches our temp so the caller can close and remove it, and
+// reports true. Close and remove run inline: h.mu is a leaf lock, the
+// same discipline as closeTemp.
+func (h *storhubHandle) abandonMaterializeLocked(temp *os.File) bool {
+	if !h.closed && h.temp == temp {
+		return false
+	}
+	name := temp.Name()
+	if h.temp == temp {
+		h.temp = nil
+		h.tempPath = ""
+	}
+	_ = temp.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -416,7 +487,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		// the returned slice, so the old per-read copy was pure GC churn.
 		n, err := writeState.readIntoLocked(ctx, dest, off)
 		if err != nil {
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -427,7 +498,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 	if temp != nil {
 		n, err := temp.ReadAt(dest, off)
 		if err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, io.EOF) {
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -450,7 +521,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		// A failed read is an operational event users experience as EIO
 		// with no other trace; without this line the backend cause was
 		// invisible unless the mount ran at debug level.
-		h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+		h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
 		return nil, errnoFromError(err)
 	}
 	return fuse.ReadResultData(data), 0
@@ -524,7 +595,7 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 		n, err := temp.ReadAt(dest[pos-off:e-off], pos)
 		if err != nil && !errors.Is(err, io.EOF) {
 			state.mu.Unlock()
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
 			return nil, errnoFromError(err), true
 		}
 		for i := int64(n); i < e-pos; i++ {
@@ -545,7 +616,7 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 				}
 				continue
 			}
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.path, h.inode, off, len(dest), err)
+			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
 			return nil, errnoFromError(err), true
 		}
 		copy(dest[g.start-off:], data)
@@ -632,7 +703,7 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		h.writeState.markDirtyLocked(h.writeState.logicalSize, end)
 		h.writeState.logicalSize = end
 	}
-	h.fs.debugf("fallocate path=%s inode=%d off=%d size=%d mode=%#x", h.path, h.inode, start, length, mode)
+	h.fs.debugf("fallocate path=%s inode=%d off=%d size=%d mode=%#x", h.handlePath(), h.inode, start, length, mode)
 	return 0
 }
 
@@ -655,12 +726,12 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
-	h.fs.debugf("fsync path=%s inode=%d", h.path, h.inode)
+	h.fs.debugf("fsync path=%s inode=%d", h.handlePath(), h.inode)
 	return h.commitAndDrain(ctx)
 }
 
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
-	h.fs.debugf("release path=%s inode=%d", h.path, h.inode)
+	h.fs.debugf("release path=%s inode=%d", h.handlePath(), h.inode)
 	errno := h.commit(ctx)
 	h.releaseTrackedLocks()
 	if errno != 0 {

@@ -41,6 +41,16 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	ctx = n.fs.callerContext(ctx)
 	targetPath, stale := n.safePath()
 	if stale != 0 {
+		// Pathless node (unlinked while open): fstat on a surviving
+		// fd must still work. Serve it from the detach-time snapshot
+		// plus the live overlay; only a getattr with no surviving
+		// view of the inode keeps ESTALE.
+		if !n.isDir {
+			if base, state, ok := n.detachedBase(f); ok {
+				n.detachedReply(base, state, out)
+				return 0
+			}
+		}
 		return stale
 	}
 	n.fs.debugf("getattr path=%s inode=%d", targetPath, n.inode)
@@ -368,7 +378,14 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	ctx = n.fs.callerContext(ctx)
 	targetPath, stale := n.safePath()
 	if stale != 0 {
-		return stale
+		// Pathless node (unlinked while open): an fh-carried setattr
+		// on this node's own detached inode stages into the overlay
+		// (or is accepted-and-discarded for read-only handles) instead
+		// of failing. The kernel pushes cached mtime here on close
+		// under writeback caching and fails close with EIO when the
+		// flush does not succeed. Pinned by the conformance
+		// unlink-while-open scenario.
+		return n.setattrDetached(ctx, f, in, out, stale)
 	}
 	state, errno := n.setattrOverlayState(ctx, f)
 	if errno != 0 {
@@ -390,7 +407,208 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	return n.finishSetattr(ctx, targetPath, state, usedLocalSize, localSize, out, in.Valid)
 }
 
-// setattrOverlayState resolves the write state this setattr may drive.
+// handleBase returns one handle's stat base for a pathless inode: its
+// write-state snapshot when present (plus the state to stage into),
+// else its open-time pin (with no state to stage into). A nil state
+// means accept-and-discard for setattr; the reply still serves.
+func (n *storhubNode) handleBase(handle *storhubHandle) (shfs.EntryInfo, *inodeWriteState, bool) {
+	if state := handle.writeState; state != nil && state.inode == n.inode {
+		if base, ok := state.cachedBaseEntry(); ok {
+			return base, state, true
+		}
+	}
+	if pin := handle.pinned; pin != nil {
+		return *shfs.EntryFromFile(&pin.file, "", 0), nil, true
+	}
+	return shfs.EntryInfo{}, nil, false
+}
+
+// detachedBase resolves the stat base for a pathless (unlinked) inode.
+// It prefers the calling handle's own view, then falls back to any
+// surviving handle of the inode: utimensat-family syscalls arrive
+// handleless (notify_change carries no file), and the issuing fd is
+// necessarily one of the survivors. A handle still mid-open (registered
+// but without pin or write state yet) simply misses and lets a complete
+// one hit: at least one complete handle exists whenever any fd
+// references the inode, because a usable fd implies its Open returned.
+func (n *storhubNode) detachedBase(f gofusefs.FileHandle) (shfs.EntryInfo, *inodeWriteState, bool) {
+	if handle, ok := f.(*storhubHandle); ok && handle.inode == n.inode {
+		if base, state, hit := n.handleBase(handle); hit {
+			return base, state, true
+		}
+	}
+	n.fs.mu.RLock()
+	survivors := make([]*storhubHandle, 0, len(n.fs.handles))
+	for _, handle := range n.fs.handles {
+		if handle.inode == n.inode {
+			survivors = append(survivors, handle)
+		}
+	}
+	n.fs.mu.RUnlock()
+	for _, handle := range survivors {
+		if base, state, hit := n.handleBase(handle); hit {
+			return base, state, true
+		}
+	}
+	return shfs.EntryInfo{}, nil, false
+}
+
+// detachedReply fills the attr reply for a pathless inode from its base
+// plus the live overlay. It carries no path and zero links, which is the
+// truth for an unlinked inode.
+func (n *storhubNode) detachedReply(base shfs.EntryInfo, state *inodeWriteState, out *fuse.AttrOut) {
+	entry := base
+	if state != nil {
+		state.mu.Lock()
+		state.overlayEntryLocked(&entry)
+		state.mu.Unlock()
+	} else if shared := n.fs.writeStateForInode(n.inode); shared != nil {
+		shared.mu.Lock()
+		shared.overlayEntryLocked(&entry)
+		shared.mu.Unlock()
+	}
+	entry.Path = ""
+	entry.NLink = 0
+	fillAttr(&out.Attr, &entry)
+	out.SetTimeout(n.fs.opts.AttrTimeout)
+}
+
+// setattrDetached applies a setattr to an unlinked-but-open inode. With a
+// write state the change stages into the overlay exactly like the linked
+// path (same verb DAC against the snapshot, same pending patch); the
+// commit discards it at Release, which is the POSIX fate of writes to
+// unlinked files. Without one (read-only survivor) mode/owner/times are
+// accepted and discarded — unobservable past close by definition — while
+// a size change is EINVAL (ftruncate needs a writable fd).
+//
+// Identity note: the opener-match check of the linked path is
+// deliberately absent. The kernel routes an fh only to the process that
+// opened it, and a handleless call can only originate from an open fd
+// (no path exists to name), so fd ownership is the auth; the verb DAC
+// below is still enforced, and any staged change dies at Release.
+// Anything else — directories, no surviving view — keeps ESTALE.
+func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut, stale syscall.Errno) syscall.Errno {
+	if n.isDir {
+		return stale
+	}
+	base, state, ok := n.detachedBase(f)
+	if !ok {
+		return stale
+	}
+	if size, ok := in.GetSize(); ok {
+		if state == nil {
+			return syscall.EINVAL
+		}
+		state.opMu.Lock()
+		state.mu.Lock()
+		if state.poisoned {
+			state.mu.Unlock()
+			state.opMu.Unlock()
+			return syscall.EIO
+		}
+		err := state.setSizeLocked(int64(size))
+		if err == nil {
+			// state.path is "" here; the detached branch of the
+			// stager is a safe no-op instead of a wrong-entry stat.
+			n.fs.stagePrivClearForDataWrite(ctx, state, state.path)
+		}
+		state.mu.Unlock()
+		state.opMu.Unlock()
+		if err != nil {
+			return errnoFromError(err)
+		}
+	}
+	if mode, ok := in.GetMode(); ok {
+		dacEntry := base
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanChmod(ctx, &dacEntry); err != nil {
+				return errnoFromError(err)
+			}
+		}
+		if state != nil {
+			state.opMu.Lock()
+			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
+			state.pending.HasMode = true
+			state.pending.Mode = mode & 0o7777
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		}
+	}
+	uid, uidOK := in.GetUID()
+	gid, gidOK := in.GetGID()
+	if uidOK || gidOK {
+		dacEntry := base
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanChown(ctx, &dacEntry, uid, gid); err != nil {
+				return errnoFromError(err)
+			}
+		}
+		if state != nil {
+			state.opMu.Lock()
+			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
+			overlayBase := base
+			state.overlayEntryLocked(&overlayBase)
+			if !uidOK {
+				uid = overlayBase.UID
+			}
+			if !gidOK {
+				gid = overlayBase.GID
+			}
+			state.pending.HasOwner = true
+			state.pending.UID = uid
+			state.pending.GID = gid
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		}
+	}
+	atime, atimeOK := in.GetATime()
+	mtime, mtimeOK := in.GetMTime()
+	if atimeOK || mtimeOK {
+		dacEntry := base
+		if shfs.IdentityPresent(ctx) {
+			if err := shfs.CanSetTimes(ctx, &dacEntry); err != nil {
+				return errnoFromError(err)
+			}
+		}
+		if state != nil {
+			state.opMu.Lock()
+			state.mu.Lock()
+			if state.poisoned {
+				state.mu.Unlock()
+				state.opMu.Unlock()
+				return syscall.EIO
+			}
+			overlayBase := base
+			state.overlayEntryLocked(&overlayBase)
+			if !atimeOK {
+				atime = time.Unix(overlayBase.AccessedAt, 0)
+			}
+			if !mtimeOK {
+				mtime = time.Unix(overlayBase.ModifiedAt, 0)
+			}
+			state.pending.HasTimes = true
+			state.pending.ATime = atime
+			state.pending.MTime = mtime
+			state.mu.Unlock()
+			state.opMu.Unlock()
+		}
+	}
+	n.detachedReply(base, state, out)
+	n.fs.notifyKernelContentChanged(n.inode)
+	n.fs.debugf("setattr detached inode=%d valid=%#x", n.inode, in.Valid)
+	return 0
+}
+
 // The overlay is honored only for a caller who may drive it. A
 // handle attached to the write state is the common case; a path-based
 // setattr (no fh) still reaches the overlay when the caller is the
@@ -400,6 +618,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 // enforce DAC against the *requesting* caller, so a stranger's
 // truncate/chmod is never deferred into the owner's next commit.
 // A nil state means "go to the hub verbs".
+// setattrOverlayState resolves the write state this setattr may drive.
 func (n *storhubNode) setattrOverlayState(ctx context.Context, f gofusefs.FileHandle) (*inodeWriteState, syscall.Errno) {
 	if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
 		if errno := handle.checkOverlayCaller(ctx); errno != 0 {

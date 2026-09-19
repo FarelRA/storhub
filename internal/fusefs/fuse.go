@@ -219,14 +219,25 @@ func (s *Filesystem) forgetNodeBookkeeping(n *storhubNode) {
 }
 
 // hasOpenHandleForLocked reports whether any unclosed handle exists for the
-// inode; callers must hold s.mu for reading.
+// inode; callers must hold s.mu for reading. Closure is read under each
+// handle's own lock: Releases run mutually concurrent (RELEASE is not
+// synchronized with close), so scanning h.closed bare races a racing
+// closeTemp on another handle of the same inode.
 func (s *Filesystem) hasOpenHandleForLocked(inode uint64) bool {
 	for _, handle := range s.handles {
-		if handle.inode == inode && !handle.closed {
+		if handle.inode == inode && !handle.isClosed() {
 			return true
 		}
 	}
 	return false
+}
+
+// isClosed reports handle closure under the handle lock. See
+// hasOpenHandleForLocked for the racing counterpart.
+func (h *storhubHandle) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
 }
 
 // Integration-test seam, deliberately exported: the storage↔FUSE

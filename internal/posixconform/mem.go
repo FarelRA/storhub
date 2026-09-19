@@ -75,7 +75,19 @@ func (m *MemSurface) resolveLocked(path string) (*memFile, error) {
 			return f, nil
 		}
 		if tgt, ok := m.links[cur]; ok {
-			cur = tgt
+			// open(2) semantics: a relative target resolves
+			// against the directory containing the link, so
+			// links behave identically inside real mounts
+			// (where absolute targets escape the mount) and
+			// in contained namespaces. Matches the REST, CLI
+			// and FUSE-pcHub adapters.
+			if strings.HasPrefix(tgt, "/") {
+				cur = tgt
+			} else if dir := parentOf(cur); dir == "/" {
+				cur = "/" + tgt
+			} else {
+				cur = dir + "/" + tgt
+			}
 			continue
 		}
 		if _, ok := m.dirs[cur]; ok {

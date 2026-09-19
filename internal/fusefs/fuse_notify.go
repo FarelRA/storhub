@@ -247,7 +247,21 @@ func (s *Filesystem) nodeNotifyReady(n *storhubNode) bool {
 	s.attachMu.Lock()
 	_, attaching := s.attaching[n]
 	s.attachMu.Unlock()
-	return !attaching
+	if attaching {
+		return false
+	}
+	// Incarnation check: OnForget evicts the node from s.nodes, but an
+	// already-queued async notify still holds the stale pointer and
+	// would panic inside go-fuse (nil bridge) on firing. Every notify
+	// source resolves through s.nodes, so a node absent (or superseded)
+	// here has no live kernel inode to invalidate; skipping is sound.
+	// A concurrent forget in the check-then-call micro-window stays
+	// covered by the notifyAsync recover backstop. Locks are taken
+	// sequentially (never nested) to keep the lock order acyclic.
+	s.mu.RLock()
+	cur := s.nodes[n.inode]
+	s.mu.RUnlock()
+	return cur == n
 }
 
 func safeNotifyContent(node *storhubNode) {
