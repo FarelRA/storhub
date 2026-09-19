@@ -62,12 +62,12 @@ func TestFanoutInvalidationBeatsTimeout(t *testing.T) {
 	if _, err := backend.TruncateFileContext(ctx, "demo", "f", 5); err != nil {
 		t.Fatalf("backend truncate: %v", err)
 	}
-	backend.fanoutFn = func(since uint64) ([]string, bool, uint64) {
+	backend.setFanoutFn(func(since uint64) ([]string, bool, uint64) {
 		if since > 0 {
 			return nil, false, since
 		}
 		return []string{"f"}, false, 1
-	}
+	})
 	if cur := fsys.pollInvalidationsOnce(0); cur != 1 {
 		t.Fatalf("poll cursor: want 1, got %d", cur)
 	}
@@ -112,9 +112,9 @@ func TestFanoutInvalidationBeatsTimeout(t *testing.T) {
 	if _, err := backend.TruncateFileContext(ctx, "demo", "f", 7); err != nil {
 		t.Fatalf("backend truncate 2: %v", err)
 	}
-	backend.fanoutFn = func(since uint64) ([]string, bool, uint64) {
+	backend.setFanoutFn(func(since uint64) ([]string, bool, uint64) {
 		return nil, true, since + 1
-	}
+	})
 	before = fsys.Invalidations()
 	fsys.pollInvalidationsOnce(1)
 	if fsys.Invalidations() <= before {

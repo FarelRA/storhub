@@ -96,11 +96,25 @@ type pcHub struct {
 
 // PublishedPathsSince serves the scripted fan-out journal, or reports
 // the capability absent when no script is installed.
+// The test goroutine installs the script while the mount poller reads
+// it, so both sides hold h.mu (test-only synchronization, mirroring the
+// shared-mock backend.mu precedent).
 func (h *pcHub) PublishedPathsSince(_ string, since uint64) ([]string, bool, uint64) {
-	if h.fanoutFn == nil {
+	h.mu.Lock()
+	fn := h.fanoutFn
+	h.mu.Unlock()
+	if fn == nil {
 		return nil, false, since
 	}
-	return h.fanoutFn(since)
+	return fn(since)
+}
+
+// setFanoutFn installs the scripted fan-out journal under h.mu; test
+// goroutines must use it instead of assigning fanoutFn directly.
+func (h *pcHub) setFanoutFn(fn func(since uint64) (paths []string, unknown bool, current uint64)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.fanoutFn = fn
 }
 
 func newPCHub() *pcHub {
