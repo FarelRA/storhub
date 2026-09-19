@@ -141,7 +141,7 @@ func (h *StorHub) CloneRange(ctx context.Context, project, src string, srcOff in
 		noop := dstFile.Clone()
 		return &noop, nil
 	}
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	snapSrc := cloneFileSnapshot{size: srcFile.Size, chunks: append([]int64(nil), srcFile.Chunks...)}
 	snapDst := cloneFileSnapshot{existed: dstFile != nil}
 	if dstFile != nil {
@@ -316,6 +316,19 @@ func (h *StorHub) applyCloneRange(ctx context.Context, tree *RepoMetadata, srcCl
 		implposix.ApplyUpdatedFileIdentity(dstClean, &updated, dstCur, now)
 		implposix.ReplaceInodeFamily(tree, dstClean, dstCur, updated, now)
 		return nil
+	}
+	// In-transaction parent recheck against the txn tree: the pre-check ran
+	// on a readonly snapshot, and a concurrent rmdir in between would let
+	// UpsertFile below silently recreate a process-owned parent chain
+	// (UpsertFile auto-creates missing parents via EnsureDirectory).
+	// Mirrors the transfer.go in-txn admission (RequireParentDirectory plus
+	// parent-write DAC). Any error aborts the transaction with nothing
+	// committed.
+	if err := shfs.RequireParentDirectory(tree, dstClean); err != nil {
+		return err
+	}
+	if err := shfs.CheckParentWrite(ctx, tree, dstClean); err != nil {
+		return err
 	}
 	created := FileMeta{
 		Chunks: finalIDs,

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	storage "github.com/FarelRA/storhub/internal/storage"
 )
 
@@ -194,28 +197,223 @@ func (h *fakeHub) CloseSession(ctx context.Context, handleID string) error {
 // compiling while conformance keeps failing loudly on use.
 func errPCSession() error { return errors.New("pcFakeHub: sessions not supported") }
 
+// pcSession is one emulated open handle: a pinned byte snapshot plus
+// staged writes, committed on sync/close. Commits resolve the publish
+// target by open-time inode identity, so a rename is followed and an
+// unlink discards, mirroring the real session manager.
+type pcSession struct {
+	path  string
+	mode  storage.OpenMode
+	data  []byte
+	dirty bool
+	ino   uint64
+}
+
+func pcSessionReadable(mode storage.OpenMode) bool {
+	return mode&storage.SessionReadOnly != 0 || mode&storage.SessionReadWrite != 0
+}
+
+func pcSessionWritable(mode storage.OpenMode) bool {
+	return mode&storage.SessionWriteOnly != 0 || mode&storage.SessionReadWrite != 0
+}
+
+// resolvePCCommitLocked maps a dirty handle to its publish path: the open
+// path while it still names the open-time inode, a surviving name after
+// a rename (sorted, deterministic), or "" when the inode lost its last
+// name after open. Created handles (ino 0) keep the open path. Caller
+// holds h.mu.
+func (h *pcFakeHub) resolvePCCommitLocked(s *pcSession) string {
+	if s.ino == 0 {
+		return s.path
+	}
+	if f, ok := h.files[s.path]; ok && f.ino == s.ino {
+		return s.path
+	}
+	var survivors []string
+	for path, f := range h.files {
+		if f.ino == s.ino {
+			survivors = append(survivors, path)
+		}
+	}
+	if len(survivors) == 0 {
+		return ""
+	}
+	sort.Strings(survivors)
+	return survivors[0]
+}
+
+// commitPCSessionLocked publishes staged bytes like the content verbs:
+// overwrite-or-create, privilege bits cleared, mtime moved. Caller holds
+// h.mu.
+func (h *pcFakeHub) commitPCSessionLocked(s *pcSession, target string) {
+	f, ok := h.files[target]
+	if !ok {
+		h.ensureParentsLocked(target)
+		f = &pcFile{mode: 0o644, uid: 1000, gid: 1000, mtime: h.clock, atime: h.clock}
+		h.files[target] = f
+	}
+	f.data = append([]byte(nil), s.data...)
+	f.mode &^= 0o6000
+	f.mtime = h.tick()
+	f.atime = f.mtime
+}
+
 func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
-	return "", errPCSession()
+	_ = ctx
+	_ = opts
+	_ = project
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.sessions == nil {
+		h.sessions = map[string]*pcSession{}
+	}
+	var data []byte
+	var ino uint64
+	if path != "" {
+		p := strings.TrimPrefix(path, "/")
+		path = p
+		if f, ok := h.files[p]; ok {
+			if f.ino == 0 {
+				h.nextIno++
+				f.ino = h.nextIno
+			}
+			ino = f.ino
+			data = append([]byte(nil), f.data...)
+		} else {
+			if h.dirs[p] {
+				return "", fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
+			}
+			if mode&storage.SessionCreate == 0 {
+				return "", fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
+			}
+			data = []byte{}
+		}
+	}
+	h.nextSession++
+	id := fmt.Sprintf("pcsess-%d", h.nextSession)
+	h.sessions[id] = &pcSession{path: path, mode: mode, data: data, ino: ino}
+	return id, nil
+}
+
+func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
+	s, ok := h.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, id)
+	}
+	return s, nil
 }
 
 func (h *pcFakeHub) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
-	return nil, errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return nil, err
+	}
+	if !pcSessionReadable(s.mode) {
+		return nil, fmt.Errorf("read session: %w", syscall.EBADF)
+	}
+	if length == 0 || offset >= int64(len(s.data)) {
+		return []byte{}, nil
+	}
+	end := offset + length
+	if end < offset || end > int64(len(s.data)) {
+		end = int64(len(s.data))
+	}
+	return append([]byte(nil), s.data[offset:end]...), nil
 }
 
 func (h *pcFakeHub) WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error) {
-	return 0, errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return 0, err
+	}
+	if !pcSessionWritable(s.mode) {
+		return 0, fmt.Errorf("write session: %w", syscall.EBADF)
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if s.mode&storage.SessionAppend != 0 {
+		offset = int64(len(s.data))
+	}
+	content := append([]byte(nil), s.data...)
+	if offset > int64(len(content)) {
+		content = append(content, make([]byte, offset-int64(len(content)))...)
+	}
+	end := offset + int64(len(data))
+	if end > int64(len(content)) {
+		grown := make([]byte, end)
+		copy(grown, content)
+		content = grown
+	}
+	copy(content[offset:end], data)
+	s.data = content
+	s.dirty = true
+	return len(data), nil
 }
 
 func (h *pcFakeHub) TruncateSession(ctx context.Context, handleID string, size int64) error {
-	return errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	if !pcSessionWritable(s.mode) {
+		return fmt.Errorf("truncate session: %w", syscall.EBADF)
+	}
+	if size < 0 {
+		return fmt.Errorf("%w: negative size", syscall.EINVAL)
+	}
+	if int64(len(s.data)) > size {
+		s.data = append([]byte(nil), s.data[:size]...)
+	} else {
+		s.data = append(append([]byte(nil), s.data...), make([]byte, size-int64(len(s.data)))...)
+	}
+	s.dirty = true
+	return nil
 }
 
 func (h *pcFakeHub) StatSession(ctx context.Context, handleID string) (storage.SessionStat, error) {
-	return storage.SessionStat{}, errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return storage.SessionStat{}, err
+	}
+	return storage.SessionStat{Project: "pc", Path: s.path, Size: int64(len(s.data)), Dirty: s.dirty, Mode: s.mode}, nil
 }
 
 func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
-	return errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	if s.path == "" {
+		return fmt.Errorf("commit session: %w", storage.ErrSessionUnlinked)
+	}
+	if !s.dirty {
+		return nil
+	}
+	// An inode unlinked after open has nowhere to publish: retain the
+	// staged bytes (fsync equivalent) without publishing.
+	if target := h.resolvePCCommitLocked(s); target == "" {
+		return nil
+	} else {
+		h.commitPCSessionLocked(s, target)
+	}
+	s.dirty = false
+	return nil
 }
 
 func (h *pcFakeHub) LinkSession(ctx context.Context, handleID, path string) error {
@@ -227,7 +425,29 @@ func (h *pcFakeHub) RelinkSession(ctx context.Context, handleID, path string) er
 }
 
 func (h *pcFakeHub) CloseSession(ctx context.Context, handleID string) error {
-	return errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	if s.path == "" {
+		delete(h.sessions, handleID)
+		return nil
+	}
+	if s.dirty {
+		// An inode unlinked after open discards with success (POSIX
+		// close); a rename is followed to the surviving name.
+		if target := h.resolvePCCommitLocked(s); target == "" {
+			delete(h.sessions, handleID)
+			return nil
+		} else {
+			h.commitPCSessionLocked(s, target)
+		}
+	}
+	delete(h.sessions, handleID)
+	return nil
 }
 
 // runSessionCLI executes one CLI invocation against the shared fake and

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -37,6 +38,37 @@ type fakeSession struct {
 	// their commit creates, so a taken target fails like UploadFileContext
 	// instead of silently overwriting.
 	linked bool
+	// inode is the open-time file identity (0 when the file was missing
+	// at open). Commits resolve the publish target by identity, so a
+	// rename is followed and an unlink discards, mirroring the real
+	// session manager's resolveCommitPathLocked.
+	inode uint64
+}
+
+// resolveFakeCommitLocked maps a dirty fake handle to its publish path:
+// the open path while it still names the open-time inode, a surviving
+// name after a rename (sorted, deterministic), or "" when the inode lost
+// its last name after open (close discards, sync retains). Created
+// handles (inode 0) keep the open path. Caller holds c.mu.
+func (c *fakeRESTClient) resolveFakeCommitLocked(s *fakeSession) string {
+	if s.inode == 0 {
+		return s.path
+	}
+	p := c.project(s.project)
+	if node, ok := p.files[s.path]; ok && node.entry.Inode == s.inode {
+		return s.path
+	}
+	var survivors []string
+	for path, node := range p.files {
+		if node.entry.Inode == s.inode {
+			survivors = append(survivors, path)
+		}
+	}
+	if len(survivors) == 0 {
+		return ""
+	}
+	sort.Strings(survivors)
+	return survivors[0]
 }
 
 func fakeSessionReadable(mode storage.OpenMode) bool {
@@ -112,7 +144,9 @@ func (c *fakeRESTClient) fakeSessionCaps() (perProject, perUser int) {
 }
 
 // commitFakeSessionLocked publishes staged bytes to the fake tree.
-// Caller holds c.mu.
+// Caller holds c.mu. Like every fake content verb, a publish clears
+// setuid/setgid (the fake has no admin concept by design; admin truth
+// lives in storage tests).
 func (c *fakeRESTClient) commitFakeSessionLocked(project, path string, data []byte) {
 	p := c.project(project)
 	node, ok := p.files[path]
@@ -126,6 +160,7 @@ func (c *fakeRESTClient) commitFakeSessionLocked(project, path string, data []by
 		p.files[path] = node
 	}
 	node.data.bytes = append([]byte(nil), data...)
+	node.entry.Mode &^= 0o6000
 	c.touchDataLocked(p, node.data, c.tick())
 }
 
@@ -180,7 +215,7 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 	}
 	c.nextSession++
 	id := fmt.Sprintf("fakesess-%d", c.nextSession)
-	c.sessions[id] = &fakeSession{
+	sess := &fakeSession{
 		project:  project,
 		path:     path,
 		mode:     mode,
@@ -189,6 +224,12 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 		hasOwner: shfs.IdentityPresent(ctx),
 		expires:  now.Add(c.fakeSessionTTL()),
 	}
+	if path != "" {
+		if node, ok := c.project(project).files[path]; ok {
+			sess.inode = node.entry.Inode
+		}
+	}
+	c.sessions[id] = sess
 	return id, nil
 }
 
@@ -310,7 +351,13 @@ func (c *fakeRESTClient) SyncSession(ctx context.Context, handleID string) error
 	if !s.dirty {
 		return nil
 	}
-	c.commitFakeSessionLocked(s.project, s.path, s.data)
+	// An inode unlinked after open has nowhere to publish: sync keeps
+	// the staged bytes readable (fsync equivalent) without publishing.
+	if target := c.resolveFakeCommitLocked(s); target == "" {
+		return nil
+	} else {
+		c.commitFakeSessionLocked(s.project, target, s.data)
+	}
 	s.dirty = false
 	return nil
 }
@@ -397,7 +444,14 @@ func (c *fakeRESTClient) CloseSession(ctx context.Context, handleID string) erro
 				return shfs.AlreadyExists(s.path)
 			}
 		}
-		c.commitFakeSessionLocked(s.project, s.path, s.data)
+		// An inode unlinked after open discards with success (POSIX
+		// close); a rename is followed to the surviving name.
+		if target := c.resolveFakeCommitLocked(s); target == "" {
+			delete(c.sessions, handleID)
+			return nil
+		} else {
+			c.commitFakeSessionLocked(s.project, target, s.data)
+		}
 	}
 	delete(c.sessions, handleID)
 	return nil

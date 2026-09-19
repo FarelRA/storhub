@@ -36,7 +36,7 @@ type Op struct {
 	Type      OpType   `json:"type"`
 	Paths     []string `json:"paths"` // scope: 1 path, 2 (from, to) for rename
 	Cause     string   `json:"cause"` // originating operation, e.g. "upload", "mkdir"
-	Timestamp int64    `json:"ts"`    // unix seconds of the latest coalesced mutation
+	Timestamp int64    `json:"ts"`    // unix nanoseconds of the latest coalesced mutation
 	Times     int      `json:"times,omitempty"`
 
 	// Full resulting state for the op scope. File/Dir is the complete

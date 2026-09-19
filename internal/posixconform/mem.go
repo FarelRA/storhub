@@ -148,10 +148,17 @@ func (m *MemSurface) CreateFile(path string, perm uint32, exclusive bool) error 
 	return nil
 }
 
-// Open implements Surface.Open. OpenPath is the perm-free open: like the
-// oracle having no permission checks at all, it succeeds on any existing
-// path (and reports ErrNotFound on a missing one without creating it),
-// while the handle itself carries no I/O rights.
+// Open implements Surface.Open. There is no O_CREAT flag on the Surface
+// interface: creation is expressed only through CreateFile, so opening a
+// missing path in ANY mode (including write modes) reports ErrNotFound,
+// matching open(2) without O_CREAT. The FUSE, REST and CLI adapters bake
+// O_CREATE into their write-mode opens (they cannot distinguish create
+// from open), which is their documented divergence from this oracle, not
+// a second contract: portable scenarios create first, then open.
+// OpenPath is the perm-free open: like the oracle having no permission
+// checks at all, it succeeds on any existing path (and reports ErrNotFound
+// on a missing one without creating it), while the handle itself carries
+// no I/O rights.
 func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -165,16 +172,11 @@ func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {
-		if err != ErrNotFound || mode == OpenReadOnly || mode == OpenPath {
-			return nil, err
-		}
-		if _, ok := m.dirs[parentOf(path)]; !ok {
-			return nil, ErrNotFound
-		}
-		f = &memFile{mode: 0o644, mtime: m.tick(), version: 1}
-		m.files[path] = f
-	} else if mode == OpenTruncate {
+		return nil, err
+	}
+	if mode == OpenTruncate {
 		f.data = nil
+		f.mode &^= SetUIDBit | SetGIDBit
 		m.bumpLocked(f)
 	}
 	var cursor int64
@@ -198,7 +200,9 @@ func (m *MemSurface) Stat(path string) (Stat, error) {
 	return Stat{Size: int64(len(f.data)), Mode: f.mode, UID: f.uid, GID: f.gid, MTime: f.mtime}, nil
 }
 
-// Truncate implements Surface.Truncate.
+// Truncate implements Surface.Truncate. Like every data mutation it clears
+// setuid/setgid (the non-privileged file_remove_privs rule) and advances
+// the revision.
 func (m *MemSurface) Truncate(path string, size int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -212,11 +216,14 @@ func (m *MemSurface) Truncate(path string, size int64) error {
 	nb := make([]byte, size)
 	copy(nb, f.data)
 	f.data = nb
+	f.mode &^= SetUIDBit | SetGIDBit
 	m.bumpLocked(f)
 	return nil
 }
 
-// Chmod implements Surface.Chmod.
+// Chmod implements Surface.Chmod. Replacing the mode is a metadata-only
+// change: it advances the revision (so a CAS token taken before the chmod
+// is stale) but leaves the data clock alone.
 func (m *MemSurface) Chmod(path string, mode uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -228,10 +235,15 @@ func (m *MemSurface) Chmod(path string, mode uint32) error {
 		return err
 	}
 	f.mode = mode & 0o7777
+	f.version++
 	return nil
 }
 
-// Chown implements Surface.Chown.
+// Chown implements Surface.Chown for a NON-privileged caller: it always
+// clears setuid/setgid, mirroring CAP_FSETID loss. The privileged path
+// (an admin chown keeps the bits) is ChownAdmin below; it lives outside
+// the Surface interface because the interface carries no caller identity,
+// and the shared scenarios pin the non-privileged rule only.
 func (m *MemSurface) Chown(path string, uid, gid uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -245,6 +257,26 @@ func (m *MemSurface) Chown(path string, uid, gid uint32) error {
 	f.uid = uid
 	f.gid = gid
 	f.mode &^= SetUIDBit | SetGIDBit
+	f.version++
+	return nil
+}
+
+// ChownAdmin replaces owner and group as a privileged caller: setuid/setgid
+// survive, exactly the CAP_FSETID exemption the storage layer pins in its
+// own unit tests. Not part of Surface; the oracle scenarios never call it.
+func (m *MemSurface) ChownAdmin(path string, uid, gid uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validPath(path) {
+		return ErrInvalid
+	}
+	f, err := m.resolveLocked(path)
+	if err != nil {
+		return err
+	}
+	f.uid = uid
+	f.gid = gid
+	f.version++
 	return nil
 }
 
@@ -621,7 +653,8 @@ func (h *memHandle) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// Truncate implements Handle.Truncate.
+// Truncate implements Handle.Truncate. Like the path form it clears
+// setuid/setgid and advances the revision.
 func (h *memHandle) Truncate(size int64) error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
@@ -637,6 +670,7 @@ func (h *memHandle) Truncate(size int64) error {
 	nb := make([]byte, size)
 	copy(nb, h.file.data)
 	h.file.data = nb
+	h.file.mode &^= SetUIDBit | SetGIDBit
 	h.mem.bumpLocked(h.file)
 	return nil
 }

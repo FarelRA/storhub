@@ -196,7 +196,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	if err != nil {
 		return nil, err
 	}
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	patched := fileMeta.Clone()
 
 	pm := h.getOrCreateProjectMeta(project)
@@ -281,11 +281,11 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 }
 
 func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *RepoMetadata, fileMeta *FileMeta, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
-	newChunks, releaseTag, err := h.buildPatchedChunks(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
+	newChunks, fresh, releaseTag, err := h.buildPatchedChunksFresh(ctx, project, repoMeta, *fileMeta, cleanName, offset, deleteSize, edit)
 	if err != nil {
 		return nil, err
 	}
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	patched := fileMeta.Clone()
 
 	// Update metadata directly
@@ -293,12 +293,12 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	pm.mu.Lock()
 	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, fresh)
 		return nil, err
 	}
 
 	// Register the release holding the new chunks so PurgeUntracked cannot
-	// delete live data. buildPatchedChunks EnsureReleases only on a local
+	// delete live data. buildPatchedChunksFresh EnsureReleases only on a local
 	// clone that is discarded here. Mutations apply to a private COW copy;
 	// publish only on success.
 	tree := cowTree(pm.meta)
@@ -308,13 +308,13 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	if releaseTag != "" {
 		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, fresh)
 			return nil, err
 		}
 	}
 	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, fresh)
 		return nil, err
 	}
 	// Allocate identifiers against the authoritative in-memory metadata so
@@ -324,7 +324,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 		id := tree.AllocateChunkID()
 		if err := tree.PutChunk(id, newChunks[i]); err != nil {
 			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, newChunks)
+			h.compensateDeleteAssets(ctx, project, fresh)
 			return nil, err
 		}
 		chunkIDs[i] = id
@@ -338,7 +338,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, fresh)
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
 	// The pre-network validation ran against a snapshot; the file may have
@@ -346,7 +346,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// committing, so a concurrent truncate/replace cannot be clobbered.
 	if current.Size != fileMeta.Size || offset+deleteSize > current.Size {
 		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, newChunks)
+		h.compensateDeleteAssets(ctx, project, fresh)
 		return nil, fmt.Errorf("file %s changed concurrently (size %d, expected %d); patch rejected", cleanName, current.Size, fileMeta.Size)
 	}
 	implposix.ApplyUpdatedFileIdentity(cleanName, &patched, current, now)
@@ -377,7 +377,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	if err != nil {
 		return nil, err
 	}
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	rewritten := fileMeta.Clone()
 
 	// Update metadata directly
@@ -721,16 +721,16 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 		return errors.New("revert requires a non-root path")
 	}
 	preview := current.Clone()
-	if err := metadata.RevertSubtree(preview, historical, cleanPath, h.config.Now().Unix()); err != nil {
+	if err := metadata.RevertSubtree(preview, historical, cleanPath, h.config.Now().UnixNano()); err != nil {
 		return err
 	}
-	preview.Normalize(project, h.config.Now().Unix())
+	preview.Normalize(project, h.config.Now().UnixNano())
 	if err := h.validateMetadataSnapshot(ctx, project, preview); err != nil {
 		return fmt.Errorf("revert %s: %w", cleanPath, err)
 	}
 	message := fmt.Sprintf("storhub: revert %s to %s", cleanPath, shortSHA(commitSHA))
 	if _, err := h.UpdateRepoMetadataContext(ctx, project, func(m *metadata.RepoMetadata) error {
-		return metadata.RevertSubtree(m, historical, cleanPath, h.config.Now().Unix())
+		return metadata.RevertSubtree(m, historical, cleanPath, h.config.Now().UnixNano())
 	}, message); err != nil {
 		return err
 	}
@@ -851,7 +851,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// shared stack and the journal, where a later rebase or crash replay
 	// resurrects work that was never acknowledged.
 	cause := causeFromMessage(message)
-	admitNow := h.config.Now().Unix()
+	admitNow := h.config.Now().UnixNano()
 	// Canonicalize the files the mutation touched (chunk-id order is part of
 	// the entry's serialized bytes and the read order), then stamp the
 	// per-transaction bookkeeping. O(changes): the candidate's entries are
@@ -1226,7 +1226,7 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 			return 0, err
 		}
 	}
-	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().Unix())
+	shfs.TouchFileAccessTime(ctx, h, project, cleanPath, h.config.Now().UnixNano())
 	return int(end - offset), nil
 }
 

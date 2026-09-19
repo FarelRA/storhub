@@ -351,7 +351,7 @@ func CanSetTimesValues(ctx context.Context, entry *EntryInfo, atime, mtime *time
 		if stamp == nil {
 			continue
 		}
-		if !isNowish(stamp.Unix(), now) {
+		if !isNowish(stamp.UnixNano(), now) {
 			return syscall.EPERM
 		}
 	}
@@ -360,13 +360,14 @@ func CanSetTimesValues(ctx context.Context, entry *EntryInfo, atime, mtime *time
 
 // isNowish reports whether a requested timestamp is within the tolerance
 // the kernel's UTIME_NOW resolution can produce (request handling latency
-// plus coarse clocks).
+// plus coarse clocks). Both sides are Unix nanoseconds, so the 2s window
+// is 2e9 ns.
 func isNowish(requested, now int64) bool {
 	diff := requested - now
 	if diff < 0 {
 		diff = -diff
 	}
-	return diff <= 2
+	return diff <= 2_000_000_000
 }
 
 func CanAccessEntry(id Identity, entry *EntryInfo, need int) error {

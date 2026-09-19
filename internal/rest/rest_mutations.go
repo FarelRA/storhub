@@ -247,9 +247,12 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Copy reads the source and creates the destination; the guard sits on
-	// the source (CopyContext takes no mutate options, so a revision token
-	// degrades to a start-of-request freshness check, documented below).
-	if _, ok := h.preconditionForUpdate(w, r, project, src); !ok {
+	// the source. CopyContext takes no mutate options, so a revision token
+	// cannot become apply-time compare-and-swap: it fails loud with 412
+	// (preconditionForUpdateNoCAS) instead of silently degrading to a
+	// start-of-request check. The range variant above keeps true CAS via
+	// CloneRange options.
+	if !h.preconditionForUpdateNoCAS(w, r, project, src, "copy") {
 		return
 	}
 	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
@@ -323,8 +326,10 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Link reads the existing path and creates the new one; the guard sits
-	// on the source (LinkContext takes no mutate options: freshness only).
-	if _, ok := h.preconditionForUpdate(w, r, project, req.ExistingPath); !ok {
+	// on the source. LinkContext takes no mutate options, so a revision
+	// token fails loud with 412 (preconditionForUpdateNoCAS) instead of
+	// silently degrading to a start-of-request check.
+	if !h.preconditionForUpdateNoCAS(w, r, project, req.ExistingPath, "link") {
 		return
 	}
 	if _, err := h.clientFor(r).LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
@@ -378,9 +383,11 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	// ChmodContext takes no mutate options: a revision token degrades to a
-	// start-of-request freshness check (documented on the helpers below).
-	if _, ok := h.preconditionForUpdate(w, r, project, req.Path); !ok {
+	// ChmodContext takes no mutate options: a revision token cannot become
+	// apply-time compare-and-swap, so it fails loud with 412
+	// (preconditionForUpdateNoCAS) instead of silently degrading to a
+	// start-of-request check. Classic ETag tokens keep freshness semantics.
+	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chmod") {
 		return
 	}
 	if err := h.clientFor(r).ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
@@ -404,8 +411,10 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	// ChownContext takes no mutate options: freshness only, as for chmod.
-	if _, ok := h.preconditionForUpdate(w, r, project, req.Path); !ok {
+	// ChownContext takes no mutate options: like chmod, a revision token
+	// fails loud with 412 (preconditionForUpdateNoCAS) instead of silently
+	// degrading to a start-of-request check.
+	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chown") {
 		return
 	}
 	if err := h.clientFor(r).ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
@@ -429,17 +438,23 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	// A zero time.Time would silently forward Unix() = -62135596800 to
+	// A zero time.Time would silently forward UnixNano() garbage to
 	// storage; require both stamps to be present.
 	if req.Atime.IsZero() || req.Mtime.IsZero() {
 		h.writeMappedError(w, errBadRequest("atime and mtime are required"))
 		return
 	}
-	// ChtimesContext takes no mutate options: freshness only, as for chmod.
-	if _, ok := h.preconditionForUpdate(w, r, project, req.Path); !ok {
+	// ChtimesContext takes no mutate options: like chmod, a revision token
+	// fails loud with 412 (preconditionForUpdateNoCAS) instead of silently
+	// degrading to a start-of-request check.
+	//
+	// Precision note: req.Atime/req.Mtime forward as UnixNano()
+	// nanoseconds; sub-second fractions survive end to end, matching the
+	// nanosecond storage format (structural: FUSE/REST/CLI share it).
+	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "utimes") {
 		return
 	}
-	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.Unix(), req.Mtime.Unix()); err != nil {
+	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -449,14 +464,36 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
 }
 
+// preconditionForUpdateNoCAS enforces the request's preconditions for an
+// operation whose storage verb takes no mutate options (copy whole-file,
+// link, chmod, chown, utimes, xattrs): a revision If-Match token cannot
+// become apply-time compare-and-swap there, so accepting it would silently
+// degrade to a start-of-request freshness check. Fail loud with 412 naming
+// the endpoint instead; callers needing CAS must use a CAS-capable verb.
+// Classic ETag tokens keep start-of-request freshness. ok=false means the
+// handler already answered and must return without writing more.
+func (h *restHandler) preconditionForUpdateNoCAS(w http.ResponseWriter, r *http.Request, project, targetPath, endpoint string) bool {
+	revOpts, err := h.mutationPrecondition(r, project, targetPath)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	if revOpts != nil {
+		h.writeMappedError(w, errPreconditionFailed(endpoint+" does not enforce revision compare-and-swap; retry without the revision If-Match token"))
+		return false
+	}
+	return true
+}
+
 // preconditionForUpdate enforces the request's If-Match for an operation
 // that mutates an existing target, through the shared mutationPrecondition
 // funnel (revision CAS where the header carries the current revision,
-// classic ETag freshness otherwise). It returns the backend CAS options
-// for client methods that accept them; methods that take no mutate options
-// (copy, link, chmod, chown, utimes, xattrs) get a start-of-request
-// freshness check only, without apply-time re-verification. ok=false means
-// the handler already answered and must return without writing more.
+// classic ETag freshness otherwise, If-None-Match * rejection on existing
+// targets in both flavors). It returns the backend CAS options for client
+// methods that accept them. Verbs that take no mutate options must use
+// preconditionForUpdateNoCAS instead so a revision token fails loud rather
+// than silently degrading. ok=false means the handler already answered and
+// must return without writing more.
 func (h *restHandler) preconditionForUpdate(w http.ResponseWriter, r *http.Request, project, targetPath string) ([]shfs.MutateOption, bool) {
 	revOpts, err := h.mutationPrecondition(r, project, targetPath)
 	if err != nil {

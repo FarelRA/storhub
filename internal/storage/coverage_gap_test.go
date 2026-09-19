@@ -457,7 +457,7 @@ func TestAtimePolicies(t *testing.T) {
 		return entry.AccessedAt
 	}
 
-	const later = int64(1700003600)
+	const later = int64(1700003600000000000)
 	hub.QueueAtimeUpdateContext(ctx, project, "atime.txt", false, later)
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush queued atime: %v", err)
@@ -468,12 +468,12 @@ func TestAtimePolicies(t *testing.T) {
 
 	// Backdate, then read: the read itself must move atime forward to the
 	// hub's fixed test clock (1700000000).
-	hub.QueueAtimeUpdateContext(ctx, project, "atime.txt", false, later-7200)
+	hub.QueueAtimeUpdateContext(ctx, project, "atime.txt", false, later-7200*1e9)
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush backdate: %v", err)
 	}
-	if got := observeAtime(); got != later-7200 {
-		t.Fatalf("strictatime must record backdate %d, got %d", later-7200, got)
+	if got := observeAtime(); got != later-7200*1e9 {
+		t.Fatalf("strictatime must record backdate %d, got %d", later-7200*1e9, got)
 	}
 	if _, err := hub.ReadFileAtContext(ctx, project, "atime.txt", 0, 7); err != nil {
 		t.Fatalf("read: %v", err)
@@ -481,7 +481,7 @@ func TestAtimePolicies(t *testing.T) {
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush read atime: %v", err)
 	}
-	if got := observeAtime(); got != 1700000000 {
+	if got := observeAtime(); got != 1700000000000000000 {
 		t.Fatalf("read under strictatime must refresh atime to now, got %d", got)
 	}
 

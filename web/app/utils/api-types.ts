@@ -18,6 +18,7 @@ export class ApiError extends Error {
  * returned by GET /children. Extra attrs may be present via omitempty
  * (uid, gid, created_at, modified_at, accessed_at, changed_at);
  * EntryInfo remains authoritative for stat-grade detail.
+ * All timestamp fields below are Unix nanoseconds (int64).
  */
 export interface DirEntry {
   name: string
@@ -82,7 +83,7 @@ export interface Share {
 export interface Revision {
   commit_sha: string
   message?: string
-  /** Unix seconds (`metadata.MetadataRevision.CommittedAt` is int64). */
+  /** Unix nanoseconds (`metadata.MetadataRevision.CommittedAt` is int64 ns). */
   committed_at?: number
 }
 

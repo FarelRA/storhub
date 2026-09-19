@@ -78,7 +78,7 @@ func TestRESTContentWorkflow(t *testing.T) {
 
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chmod", chmodRequest{Path: "docs/readme.txt", Mode: 0o600}, http.StatusOK)
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown", chownRequest{Path: "docs/readme.txt", UID: 7, GID: 9}, http.StatusOK)
-	stamp := time.Unix(100, 0).UTC()
+	stamp := time.Unix(0, 1700000000123456789).UTC()
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/utimes", utimesRequest{Path: "docs/readme.txt", Atime: stamp, Mtime: stamp}, http.StatusOK)
 }
 

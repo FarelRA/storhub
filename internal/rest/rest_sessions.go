@@ -241,6 +241,17 @@ func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, h
 		h.writeSessionError(w, err)
 		return
 	}
+	// An empty read never carries a range: offset-at-EOF or an empty file
+	// would otherwise emit 206 with an invalid "bytes N-(N-1)/M"
+	// Content-Range. Answer plain 200 with no Content-Range instead (416
+	// stays reserved for the byte-range endpoint, which fails loud there).
+	if len(data) == 0 {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	end := offset + int64(len(data))
 	partial := offset != 0 || end < stat.Size
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -280,6 +291,12 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 		h.writeSessionError(w, err)
 		return
 	}
+	// Staged writes are not yet published, but ?sync=1 still drains the
+	// project (no-op when nothing is published) so callers get one
+	// durability spelling across all session verbs, mirroring closeSession.
+	if !h.drainSessionProject(w, r, handle) {
+		return
+	}
 	h.writeJSON(w, http.StatusOK, sessionWriteResponse{Handle: handle, Written: wrote})
 }
 
@@ -298,13 +315,22 @@ func (h *restHandler) handleSessionTruncate(w http.ResponseWriter, r *http.Reque
 		h.writeSessionError(w, err)
 		return
 	}
+	if !h.drainSessionProject(w, r, handle) {
+		return
+	}
 	h.respondWithSessionStat(w, r, handle)
 }
 
 func (h *restHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 	handle := chi.URLParam(r, "handle")
+	// SyncSession commits staged state without closing (commit-then-drain
+	// on ?sync=1: the project drain below lands the commit remotely, the
+	// same durability closeSession offers).
 	if err := h.clientFor(r).SyncSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
+		return
+	}
+	if !h.drainSessionProject(w, r, handle) {
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -323,6 +349,9 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := h.clientFor(r).LinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
+		return
+	}
+	if !h.drainSessionProject(w, r, handle) {
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -344,6 +373,9 @@ func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request
 	}
 	if err := h.clientFor(r).RelinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
+		return
+	}
+	if !h.drainSessionProject(w, r, handle) {
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -388,6 +420,20 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 		return false
 	}
 	return true
+}
+
+// drainSessionProject stats the handle for its project, then honors
+// ?sync=1 by draining the project, reusing the maybeDrain pattern from
+// closeSession. Staged-only verbs (write, truncate, link, relink) share it
+// so every mutating session verb answers one durability spelling. False
+// means the handler already answered.
+func (h *restHandler) drainSessionProject(w http.ResponseWriter, r *http.Request, handle string) bool {
+	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	if err != nil {
+		h.writeSessionError(w, err)
+		return false
+	}
+	return h.maybeDrain(w, r, stat.Project)
 }
 
 func (h *restHandler) respondWithSessionStat(w http.ResponseWriter, r *http.Request, handle string) {

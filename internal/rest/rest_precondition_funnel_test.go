@@ -45,7 +45,7 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 		{name: "chown", method: http.MethodPost, target: "/api/v1/projects/demo/ops/chown", body: chownRequest{Path: "docs/f.txt", UID: 1000, GID: 1000}},
 		{
 			name: "utimes", method: http.MethodPost, target: "/api/v1/projects/demo/ops/utimes",
-			body: utimesRequest{Path: "docs/f.txt", Atime: time.Unix(1700000000, 0).UTC(), Mtime: time.Unix(1700000000, 0).UTC()},
+			body: utimesRequest{Path: "docs/f.txt", Atime: time.Unix(0, 1700000000123456789).UTC(), Mtime: time.Unix(0, 1700000000123456789).UTC()},
 		},
 		{name: "purge", method: http.MethodPost, target: "/api/v1/projects/demo/ops/purge"},
 		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune", body: pruneRequest{Scope: "all"}},

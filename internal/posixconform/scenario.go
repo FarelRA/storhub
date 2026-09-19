@@ -29,6 +29,31 @@ type Scenario struct {
 	Run      func(Surface) error
 }
 
+// Table notes (contract divergences documented, not faked).
+//
+//   - Open carries no O_CREAT flag on purpose. Portable scenarios create
+//     with CreateFile first, then open: a write-mode open of a missing
+//     path expects ErrNotFound (POSIX ENOENT without O_CREAT), which the
+//     MemSurface oracle enforces. The FUSE, REST and CLI adapters bake
+//     O_CREATE into their write-mode opens, so they would create there;
+//     adding an O_CREAT expression to Surface would ripple into all three
+//     adapters without changing any product behavior, so the invention is
+//     recorded here instead of in the interface.
+//   - Chown pins the non-privileged rule only: any successful chown in
+//     the table must clear setuid/setgid (cross-owner chown is EPERM on
+//     enforcing surfaces and cannot be portable, so scenarios reassert
+//     the current owner). The admin-keeps-bits exemption lives outside
+//     the interface (MemSurface.ChownAdmin) with its real proof in the
+//     storage-layer unit tests, which own caller identity.
+//   - umask (deviation #7) has no harness scenario by structural reason:
+//     the fixed 022 default plus the --umask mount/serve override is
+//     pinned at the product layer by TestMountUmaskFlagMasksCreatedModes
+//     (internal/cli/app_test.go) and TestCallerContextCarriesDefaultUmask
+//     (internal/fusefs/fuse_dac_test.go). Surface has no mount-option
+//     expression and gains none for this: creating through a mount
+//     already applies the configured mask, which the conformance open
+//     path cannot distinguish from a literal mode.
+//
 // Table is the full conformance suite.
 var Table = []Scenario{
 	{

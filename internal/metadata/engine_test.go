@@ -65,7 +65,7 @@ func compareDerived(t *testing.T, step string, a, b *RepoMetadata) {
 // silently fell back to a rebuild.
 func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
 	t.Parallel()
-	now := int64(1000)
+	now := int64(1000000000000)
 	inc := NewRepoMetadata("equiv")
 	oracle := NewRepoMetadata("equiv")
 	inc.RebuildIndexes()
@@ -147,7 +147,7 @@ func TestIncrementalIndexesMatchFullRebuild(t *testing.T) {
 
 func TestCloneSharesIndexAndIsolatesMutations(t *testing.T) {
 	t.Parallel()
-	now := int64(10)
+	now := int64(10000000000)
 	m := NewRepoMetadata("share")
 	m.EnsureDirectory("d", now)
 	m.UpsertFile("d/a", FileMeta{Size: 1, Mode: 0o644, UploadedAt: now, ModifiedAt: now, Chunks: []int64{5}}, now)
@@ -323,7 +323,7 @@ func TestBuildTreeStreamCacheReuseAndKnown(t *testing.T) {
 
 func TestSerializedSizeMatchesToJSON(t *testing.T) {
 	t.Parallel()
-	now := int64(500)
+	now := int64(500000000000)
 	m := NewRepoMetadata("size")
 	check := func(step string) {
 		t.Helper()
@@ -431,9 +431,9 @@ func TestSerializedSizeMatchesToJSON(t *testing.T) {
 func TestValidateScratchMapStillDetectsDuplicates(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("dup")
-	m.EnsureDirectory("d", 1)
-	m.UpsertFile("d/a", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1, ModifiedAt: 1, Chunks: []int64{1}}, 1)
-	m.UpsertFile("d/b", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1, ModifiedAt: 1, Chunks: []int64{1}}, 1)
+	m.EnsureDirectory("d", 1000000000)
+	m.UpsertFile("d/a", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1000000000, ModifiedAt: 1000000000, Chunks: []int64{1}}, 1000000000)
+	m.UpsertFile("d/b", FileMeta{Size: 2, Mode: 0o644, UploadedAt: 1000000000, ModifiedAt: 1000000000, Chunks: []int64{1}}, 1000000000)
 	if err := m.PutChunk(1, ChunkInfo{Size: 2, Offset: 0, AssetID: 1}); err != nil {
 		t.Fatalf("seed chunk: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestValidateScratchMapStillDetectsDuplicates(t *testing.T) {
 // copylocks error; Clone is the only sanctioned sharing path.
 func TestCloneMutationDoesNotCorruptSourceIndex(t *testing.T) {
 	t.Parallel()
-	now := int64(10)
+	now := int64(10000000000)
 	m := NewRepoMetadata("valuecopy")
 	m.EnsureDirectory("d", now)
 	m.UpsertFile("d/a", FileMeta{Size: 1, Mode: 0o644, UploadedAt: now, ModifiedAt: now}, now)

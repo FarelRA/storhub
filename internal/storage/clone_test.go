@@ -444,7 +444,7 @@ func TestCloneRangeTimestamps(t *testing.T) {
 	project := "project-clone-time"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEF"))
-	const fixedNow = int64(1700000000)
+	const fixedNow = int64(1700000000000000000)
 	// Pre-create the destination with stale timestamps through a direct
 	// transaction so stamping is observable under the fixed test clock.
 	if _, err := hub.UpdateRepoMetadataContext(ctx, project, func(m *RepoMetadata) error {

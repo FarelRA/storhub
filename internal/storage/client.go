@@ -485,7 +485,7 @@ func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesyst
 }
 
 func (h *StorHub) Now() int64 {
-	return h.config.Now().Unix()
+	return h.config.Now().UnixNano()
 }
 
 func (h *StorHub) ChunkSize() int64 {

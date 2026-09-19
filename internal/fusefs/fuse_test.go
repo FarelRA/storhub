@@ -1381,7 +1381,7 @@ func (s *stubHub) DrainProjectContext(ctx context.Context, project string) error
 }
 func (s *stubHub) Now() int64 {
 	if s.now == 0 {
-		return time.Now().Unix()
+		return time.Now().UnixNano()
 	}
 	return s.now
 }

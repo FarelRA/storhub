@@ -212,7 +212,7 @@ func TestInputValidationReturnsBadRequest(t *testing.T) {
 		{"symlink empty target", http.MethodPost, "/api/v1/projects/demo/ops/symlink", symlinkRequest{Target: "", LinkPath: "docs/s.txt"}},
 		{"chmod empty path", http.MethodPost, "/api/v1/projects/demo/ops/chmod", chmodRequest{Path: "", Mode: 0o644}},
 		{"chown empty path", http.MethodPost, "/api/v1/projects/demo/ops/chown", chownRequest{Path: "", UID: 1, GID: 1}},
-		{"utimes empty path", http.MethodPost, "/api/v1/projects/demo/ops/utimes", utimesRequest{Path: "", Atime: time.Unix(1, 0), Mtime: time.Unix(1, 0)}},
+		{"utimes empty path", http.MethodPost, "/api/v1/projects/demo/ops/utimes", utimesRequest{Path: "", Atime: time.Unix(0, 1), Mtime: time.Unix(0, 1)}},
 		{"utimes zero times", http.MethodPost, "/api/v1/projects/demo/ops/utimes", utimesRequest{Path: "docs/f.txt"}},
 		{"rollback empty sha", http.MethodPost, "/api/v1/projects/demo/ops/rollback", rollbackRequest{}},
 		{"rollback branch sha", http.MethodPost, "/api/v1/projects/demo/ops/rollback", rollbackRequest{CommitSHA: "refs/heads/main"}},

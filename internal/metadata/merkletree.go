@@ -14,14 +14,14 @@ import (
 	"sync/atomic"
 )
 
-// The v5 index splits the single metadata blob into a Merkle hierarchy of
+// The v6 index splits the single metadata blob into a Merkle hierarchy of
 // content-addressed objects plus a small manifest (the only CAS point). The
 // in-memory RepoMetadata model stays FLAT; this file is purely a
 // (de)serialization layer between the flat maps and the object set.
 //
 // Layout of one project's index:
 //
-//	.storhub/index.json                 the manifest (Manifest, version 5)
+//	.storhub/index.json                 the manifest (Manifest, version 6)
 //	.storhub/objects/<2-hex>/<62-hex>   content-addressed objects (sha256)
 //
 // Object kinds: TreeNode (one directory), ChunkBucket (a range of chunk
@@ -35,9 +35,9 @@ import (
 // buckets stay immutable and dedup across commits.
 const ChunkBucketSize = 65536
 
-// Manifest is the v5 index manifest: the single contended CAS point of a
+// Manifest is the v6 index manifest: the single contended CAS point of a
 // split-layout project. Its Version field carries the ONE metadata document
-// version (maxMetadataVersion = 5); there is no separate index-format number.
+// version (maxMetadataVersion = 6); there is no separate index-format number.
 // Everything the manifest does not name lives in objects. Stats are an
 // ADVISORY hint (recomputed authoritatively on load); the counters live here
 // because the manifest is small, always loaded, and already the CAS point.
@@ -51,7 +51,8 @@ type Manifest struct {
 	NextInode    uint64        `json:"ni,omitempty"`
 	NextChunkID  int64         `json:"nc,omitempty"`
 	Stats        ManifestStats `json:"st"`
-	LastMod      int64         `json:"lm,omitempty"`
+	// LastMod is a Unix NANOSECONDS timestamp (time.Time.UnixNano).
+	LastMod int64 `json:"lm,omitempty"`
 }
 
 // ManifestStats is the advisory file/byte hint carried in the manifest.
@@ -467,18 +468,26 @@ func ObjectPath(sha string) string {
 	return "objects/" + sha[:2] + "/" + sha[2:]
 }
 
-// IsManifest reports whether a serialized blob is a v5 split-index manifest
-// (as opposed to a v1-v4 single metadata document). Detection is by shape: a
-// manifest carries the current document version and a non-empty tree root.
+// IsManifest reports whether a serialized blob is a split-index manifest
+// (as opposed to a v1-v5 single metadata document). Detection is by shape: a
+// manifest carries a non-empty tree root. Version 6 is current; version 5
+// with a tree root is a seconds-era manifest that ParseManifest/LoadTree
+// still accepts (and migrates to nanoseconds on load). A version-5 document
+// WITHOUT a tree root is a current blob, not a manifest.
 func IsManifest(data []byte) bool {
 	probe, err := probeVersion(data)
 	if err != nil {
 		return false
 	}
-	return probe.V != nil && *probe.V == maxMetadataVersion && probe.TreeRoot != ""
+	if probe.V == nil || probe.TreeRoot == "" {
+		return false
+	}
+	return *probe.V == maxMetadataVersion || *probe.V == maxBlobVersion
 }
 
-// ParseManifest decodes a v5 manifest. Every object reference must be a
+// ParseManifest decodes a manifest. Version 6 is current; version 5 is the
+// seconds-era manifest, still accepted so LoadTree can migrate its
+// timestamps to nanoseconds on load. Every object reference must be a
 // sha256 content address (64-char lowercase hex): the storage layer builds
 // repo paths from these strings via ObjectPath, so arbitrary text must never
 // survive the parse boundary.
@@ -487,7 +496,7 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
-	if m.Version != maxMetadataVersion {
+	if m.Version != maxMetadataVersion && m.Version != maxBlobVersion {
 		return nil, fmt.Errorf("manifest version %d is not %d", m.Version, maxMetadataVersion)
 	}
 	if m.TreeRoot == "" {
@@ -522,7 +531,7 @@ func isContentSHA(s string) bool {
 	return true
 }
 
-// MarshalManifest serializes a v5 manifest deterministically.
+// MarshalManifest serializes a manifest deterministically.
 func MarshalManifest(m *Manifest) ([]byte, error) {
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -594,6 +603,10 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		for tag, ref := range rel.Releases {
 			meta.releases[tag] = ref
 		}
+	}
+	if manifest.Version < maxMetadataVersion {
+		// Seconds-era manifest: its objects carry seconds timestamps.
+		migrateTreeTimesToNano(meta)
 	}
 	meta.RecomputeStats()
 	// Reconcile the allocation counters against the content actually loaded:
@@ -735,6 +748,10 @@ func LoadTreeParallel(manifest *Manifest, getObject func(sha string) ([]byte, er
 	l.wg.Wait()
 	if l.err != nil {
 		return nil, l.err
+	}
+	if manifest.Version < maxMetadataVersion {
+		// Seconds-era manifest: its objects carry seconds timestamps.
+		migrateTreeTimesToNano(l.meta)
 	}
 	l.meta.RecomputeStats()
 	// Same tail as LoadTree: counters reconcile against loaded content.

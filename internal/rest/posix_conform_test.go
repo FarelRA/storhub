@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,99 @@ type restConformHandle struct {
 	mu      sync.Mutex
 	cursor  int64
 	closed  bool
+	// session is the server-side open-file description (/handles).
+	// Stateless verbs carry IO while the path is linked (immediate
+	// publish, which is what cross-handle visibility and uncommitted
+	// stat size observe); the session carries the pin plus close
+	// commit/discard/follow, and serves reads/writes staged after an
+	// unlink or rename. This mirrors the surface as designed: stateless
+	// endpoints plus stateful handles are one REST surface, and open
+	// file descriptions live in the stateful half.
+	session string
+}
+
+// pcSessionMode maps open modes to session fopen strings. Only "r" and
+// "r+" are used: the adapter enforces fd read/write legality locally
+// (canPCRead/canPCWrite, allowed by the harness contract), create and
+// truncate happen through stateless verbs before the session opens, and
+// append cursors stay adapter-side, so the session never needs
+// create/truncate/append bits.
+func pcSessionMode(m posixconform.OpenMode) string {
+	if m == posixconform.OpenReadOnly {
+		return "r"
+	}
+	return "r+"
+}
+
+func (a *restConformAdapter) openSession(path, mode string) (string, error) {
+	target := "/api/v1/handles"
+	status, _, data := a.doJSON(http.MethodPost, target, sessionOpenRequest{Project: a.project, Path: path, Mode: mode}, nil)
+	if status != http.StatusCreated {
+		return "", mapPCStatus(status, data, "open session "+path)
+	}
+	var resp sessionOpenResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("open session %s: decode handle: %v", path, err)
+	}
+	if resp.Handle == "" {
+		return "", fmt.Errorf("open session %s: empty handle", path)
+	}
+	return resp.Handle, nil
+}
+
+func (h *restConformHandle) sessionSync() error {
+	target := "/api/v1/handles/" + h.session + "/sync"
+	status, _, data := h.adapter.doJSON(http.MethodPost, target, struct{}{}, nil)
+	if status != http.StatusOK && status != http.StatusNoContent {
+		return mapPCStatus(status, data, "session sync")
+	}
+	return nil
+}
+
+func (h *restConformHandle) sessionRead(offset int64, length int) ([]byte, error) {
+	target := "/api/v1/handles/" + h.session + "?offset=" + fmt.Sprintf("%d", offset) + "&length=" + fmt.Sprintf("%d", length)
+	status, _, data := h.adapter.do(http.MethodGet, target, nil, nil)
+	switch status {
+	case http.StatusOK, http.StatusPartialContent:
+		return data, nil
+	default:
+		return nil, mapPCStatus(status, data, "session pread")
+	}
+}
+
+func (h *restConformHandle) sessionWrite(offset int64, data []byte) (int, error) {
+	target := "/api/v1/handles/" + h.session + "/write"
+	status, _, resp := h.adapter.doJSON(http.MethodPost, target, sessionWriteRequest{Offset: offset, Data: base64.StdEncoding.EncodeToString(data)}, nil)
+	if status != http.StatusOK {
+		return 0, mapPCStatus(status, resp, "session pwrite")
+	}
+	var out sessionWriteResponse
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return 0, fmt.Errorf("session pwrite: decode written: %v", err)
+	}
+	return out.Written, nil
+}
+
+func (h *restConformHandle) sessionStat() (sessionStatResponse, error) {
+	target := "/api/v1/handles/" + h.session
+	status, _, data := h.adapter.do(http.MethodGet, target, nil, nil)
+	if status != http.StatusOK {
+		return sessionStatResponse{}, mapPCStatus(status, data, "session stat")
+	}
+	var out sessionStatResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		return sessionStatResponse{}, fmt.Errorf("session stat: decode: %v", err)
+	}
+	return out, nil
+}
+
+func (h *restConformHandle) sessionTruncate(size int64) error {
+	target := "/api/v1/handles/" + h.session + "/truncate"
+	status, _, data := h.adapter.doJSON(http.MethodPost, target, sessionTruncateRequest{Size: size}, nil)
+	if status != http.StatusOK && status != http.StatusNoContent {
+		return mapPCStatus(status, data, "session truncate")
+	}
+	return nil
 }
 
 func trimPCPath(p string) string {
@@ -199,6 +293,10 @@ func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool
 		return nil
 	}
 	if status == http.StatusConflict {
+		// Idempotence emulation lives HERE in the harness, not in the
+		// product: POST /ops/create-file is create-only by design (409
+		// when the path exists), so a non-exclusive create re-stats and
+		// treats "already there" as success. The server never fakes it.
 		if !exclusive {
 			if _, _, err := a.statEntry(path); err == nil {
 				return nil
@@ -242,7 +340,15 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 			return nil, mapPCStatus(status, data, "open truncate "+path)
 		}
 	}
-	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode}, nil
+	// Every handle also opens a server-side session: the open-file
+	// description behind close commit/discard/follow and detached IO.
+	// Failing here fails the open loudly instead of silently dropping
+	// POSIX close semantics.
+	id, err := a.openSession(trimPCPath(resolved), pcSessionMode(mode))
+	if err != nil {
+		return nil, err
+	}
+	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode, session: id}, nil
 }
 
 func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
@@ -255,7 +361,7 @@ func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
 		Mode:  entry.Mode,
 		UID:   entry.UID,
 		GID:   entry.GID,
-		MTime: entry.ModifiedAt * 1e9,
+		MTime: entry.ModifiedAt,
 	}, nil
 }
 
@@ -483,6 +589,9 @@ func (h *restConformHandle) getRange(offset int64, length int) ([]byte, error) {
 	case http.StatusOK, http.StatusPartialContent:
 		return data, nil
 	case http.StatusRequestedRangeNotSatisfiable:
+		// 416 means the offset sits at or past EOF: the product fails
+		// loud with Content-Range */size (never silent truncation), and
+		// the harness maps that to an empty read, matching pread-at-EOF.
 		return []byte{}, nil
 	default:
 		return nil, mapPCStatus(status, data, "pread")
@@ -505,7 +614,16 @@ func (h *restConformHandle) PRead(offset int64, length int) ([]byte, error) {
 	if length == 0 {
 		return []byte{}, nil
 	}
-	return h.getRange(offset, length)
+	got, err := h.getRange(offset, length)
+	if err == nil {
+		return got, nil
+	}
+	if !errors.Is(err, posixconform.ErrNotFound) {
+		return nil, err
+	}
+	// The path is gone (unlinked or renamed away) but the open
+	// description survives: serve the session pin plus staged writes.
+	return h.sessionRead(offset, length)
 }
 
 func (h *restConformHandle) PWrite(offset int64, data []byte) (int, error) {
@@ -524,12 +642,17 @@ func (h *restConformHandle) PWrite(offset int64, data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
-	target := pcBase(h.adapter.project) + "/content?path=" + url.QueryEscape(h.rest) + "&op=write&offset=" + fmt.Sprintf("%d", offset)
-	status, _, resp := h.adapter.do(http.MethodPatch, target, bytes.NewReader(data), nil)
-	if status != http.StatusOK {
-		return 0, mapPCStatus(status, resp, "pwrite")
+	// Staged through the session, then committed: the bytes publish
+	// immediately (cross-handle visibility, stat size) and the pin
+	// refreshes, so a later unlink still serves them from the session.
+	wrote, err := h.sessionWrite(offset, data)
+	if err != nil {
+		return 0, err
 	}
-	return len(data), nil
+	if err := h.sessionSync(); err != nil {
+		return 0, err
+	}
+	return wrote, nil
 }
 
 func (h *restConformHandle) Read(length int) ([]byte, error) {
@@ -577,24 +700,27 @@ func (h *restConformHandle) Write(data []byte) (int, error) {
 	if mode == posixconform.OpenAppend {
 		entry, _, err := h.adapter.statEntry("/" + h.rest)
 		if err != nil {
-			return 0, err
+			if !errors.Is(err, posixconform.ErrNotFound) {
+				return 0, err
+			}
+			// Unlinked mid-append: the session size is the end.
+			st, serr := h.sessionStat()
+			if serr != nil {
+				return 0, serr
+			}
+			off = st.Size
+		} else {
+			off = entry.Size
 		}
-		off = entry.Size
 	}
-	target := pcBase(h.adapter.project) + "/content?path=" + url.QueryEscape(h.rest) + "&op=write&offset=" + fmt.Sprintf("%d", off)
-	status, _, resp := h.adapter.do(http.MethodPatch, target, bytes.NewReader(data), nil)
-	if status != http.StatusOK {
-		return 0, mapPCStatus(status, resp, "write")
+	wrote, err := h.PWrite(off, data)
+	if err != nil {
+		return 0, err
 	}
 	h.mu.Lock()
-	if mode == posixconform.OpenAppend {
-		h.cursor = off + int64(len(data))
-	} else {
-		h.cursor = off + int64(len(data))
-	}
-	_ = cursor
+	h.cursor = off + int64(wrote)
 	h.mu.Unlock()
-	return len(data), nil
+	return wrote, nil
 }
 
 func (h *restConformHandle) Truncate(size int64) error {
@@ -610,35 +736,47 @@ func (h *restConformHandle) Truncate(size int64) error {
 	if size < 0 {
 		return fmt.Errorf("truncate: %w: negative size", posixconform.ErrInvalid)
 	}
-	target := pcBase(h.adapter.project) + "/content?path=" + url.QueryEscape(h.rest) + "&op=truncate&size=" + fmt.Sprintf("%d", size)
-	status, _, resp := h.adapter.do(http.MethodPatch, target, nil, nil)
-	if status != http.StatusOK {
-		return mapPCStatus(status, resp, "ftruncate")
+	// Staged through the session, then committed like writes: the pin
+	// refreshes and a later unlink still serves the truncated view.
+	if err := h.sessionTruncate(size); err != nil {
+		return err
 	}
-	return nil
+	return h.sessionSync()
 }
 
 func (h *restConformHandle) Sync() error {
 	if err := h.checkClosed(); err != nil {
 		return err
 	}
-	// Same journal drain as Surface.Sync: handle writes commit
-	// immediately, so durability is the drain.
-	target := pcBase(h.adapter.project) + "/ops/prune?sync=1"
-	status, _, resp := h.adapter.doJSON(http.MethodPost, target, pruneRequest{Scope: "all", DryRun: true}, nil)
-	if status != http.StatusOK {
-		return mapPCStatus(status, resp, "handle sync")
+	// Session sync commits, repins, and honors ?sync=1 with a project
+	// drain: the fsync equivalent with the same durability as
+	// Surface.Sync.
+	target := "/api/v1/handles/" + h.session + "/sync?sync=1"
+	status, _, data := h.adapter.doJSON(http.MethodPost, target, struct{}{}, nil)
+	if status != http.StatusOK && status != http.StatusNoContent {
+		return mapPCStatus(status, data, "handle sync")
 	}
 	return nil
 }
 
 func (h *restConformHandle) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return fmt.Errorf("close: %w", posixconform.ErrClosed)
 	}
+	h.mu.Unlock()
+	// Session close commits staged state (discarding when the path went
+	// away, following a rename) and drains with ?sync=1, so close means
+	// durable exactly like Surface.Sync.
+	target := "/api/v1/handles/" + h.session + "/close?sync=1"
+	status, _, data := h.adapter.doJSON(http.MethodPost, target, struct{}{}, nil)
+	if status != http.StatusOK {
+		return mapPCStatus(status, data, "close")
+	}
+	h.mu.Lock()
 	h.closed = true
+	h.mu.Unlock()
 	return nil
 }
 

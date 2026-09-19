@@ -2101,5 +2101,5 @@ func formatTime(t int64) string {
 	if t == 0 {
 		return "-"
 	}
-	return time.Unix(t, 0).Format(time.RFC3339)
+	return time.Unix(0, t).Format(time.RFC3339)
 }

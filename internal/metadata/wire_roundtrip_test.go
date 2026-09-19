@@ -8,12 +8,12 @@ import (
 func TestWireFormatRoundTripByteIdentical(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("wire")
-	m.EnsureDirectory("a", 1700000000)
-	m.UpsertFile("a/f.txt", FileMeta{Size: 12, Inode: 7, Mode: 0o644, UID: 1, GID: 1, Chunks: []int64{3}}, 1700000001)
+	m.EnsureDirectory("a", 1700000000000000000)
+	m.UpsertFile("a/f.txt", FileMeta{Size: 12, Inode: 7, Mode: 0o644, UID: 1, GID: 1, Chunks: []int64{3}}, 1700000001000000000)
 	if err := m.PutChunk(3, ChunkInfo{Size: 12, Offset: 0, Release: "r1"}); err != nil {
 		t.Fatalf("seed chunk: %v", err)
 	}
-	if _, err := m.EnsureRelease("r1", 1700000002); err != nil {
+	if _, err := m.EnsureRelease("r1", 1700000002000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	b1, err := m.ToJSON()

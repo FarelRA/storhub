@@ -271,8 +271,8 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	if err := h.ensureOwner(ctx); err != nil {
 		return "", "", err
 	}
-	metadata.Normalize(project, h.config.Now().Unix())
-	metadata.LastMod = h.config.Now().Unix()
+	metadata.Normalize(project, h.config.Now().UnixNano())
+	metadata.LastMod = h.config.Now().UnixNano()
 	metadata.RecomputeStats()
 	if err := metadata.Validate(); err != nil {
 		return "", "", fmt.Errorf("validate metadata: %w", err)
@@ -329,7 +329,7 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 	}
 	revisions := make([]MetadataRevision, 0, len(commits))
 	for _, commit := range commits {
-		revisions = append(revisions, MetadataRevision{CommitSHA: commit.SHA, Message: commit.Message, CommittedAt: commit.CommittedAt.Unix()})
+		revisions = append(revisions, MetadataRevision{CommitSHA: commit.SHA, Message: commit.Message, CommittedAt: commit.CommittedAt.UnixNano()})
 	}
 	return revisions, nil
 }
@@ -372,7 +372,7 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 		if err != nil {
 			return nil, fmt.Errorf("parse metadata revision: %w", err)
 		}
-		m.Normalize(project, h.config.Now().Unix())
+		m.Normalize(project, h.config.Now().UnixNano())
 		if err := m.Validate(); err != nil {
 			return nil, fmt.Errorf("validate metadata revision: %w", err)
 		}
@@ -604,7 +604,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	if requiredSlots <= 0 {
 		if len(releases) > 0 {
 			r := releases[0]
-			if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().Unix()); err != nil {
+			if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().UnixNano()); err != nil {
 				return "", "", err
 			}
 			return r.TagName, r.UploadURL, nil
@@ -616,7 +616,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 				return "", "", err
 			}
 			if count+requiredSlots <= releaseAssetCap {
-				if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().Unix()); err != nil {
+				if _, err := metadata.EnsureRelease(r.TagName, h.config.Now().UnixNano()); err != nil {
 					return "", "", err
 				}
 				return r.TagName, r.UploadURL, nil
@@ -631,7 +631,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := metadata.EnsureRelease(tag, h.config.Now().Unix()); err != nil {
+	if _, err := metadata.EnsureRelease(tag, h.config.Now().UnixNano()); err != nil {
 		return "", "", err
 	}
 	return tag, release.UploadURL, nil
@@ -1184,7 +1184,7 @@ func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op 
 		h.journalRewrite(project, nil)
 		return nil
 	}
-	meta.Normalize(project, h.config.Now().Unix())
+	meta.Normalize(project, h.config.Now().UnixNano())
 	meta.RecomputeStats()
 	logging.Info(h.projectLogger(project), "op journal replayed onto remote state", "ops", len(ops))
 	return ops

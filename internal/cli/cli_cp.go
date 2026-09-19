@@ -123,6 +123,12 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	opts := revisionOpts(cmd)
+	if mode == "never" && opts != nil {
+		// The streaming path cannot honor compare-and-swap (plain
+		// WriteFileAt with no revision plumbing): accepting the flag
+		// would silently drop the guard, so fail loud as a usage error.
+		return &usageError{fmt.Errorf("--reflink=never cannot be combined with --expected-revision: streaming copy cannot enforce compare-and-swap; use --reflink=auto or --reflink=always")}
+	}
 	switch mode {
 	case "always":
 		meta, err := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode)

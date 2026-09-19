@@ -64,7 +64,7 @@ func TestHelpersAndPOSIXUtilities(t *testing.T) {
 
 func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 	t.Parallel()
-	now := int64(100)
+	now := int64(100000000000)
 	repo := NewRepoMetadata("demo")
 
 	repo.EnsureDirectory("docs", now)
@@ -140,7 +140,7 @@ func TestRepoMetadataNormalizeCloneAndIndexes(t *testing.T) {
 
 func TestRepoMetadataMutationFlows(t *testing.T) {
 	t.Parallel()
-	now := int64(200)
+	now := int64(200000000000)
 	repo := NewRepoMetadata("mutations")
 	repo.EnsureDirectory("docs/specs", now)
 	if !repo.HasDirectory("docs") || !repo.HasDirectory("docs/specs") {
@@ -196,32 +196,38 @@ func TestRepoMetadataMutationFlows(t *testing.T) {
 	repo.RebuildIndexes()
 }
 
-// A v5 document without a non-empty tree root is a truncated/corrupt
+// A v6 document without a non-empty tree root is a truncated/corrupt
 // manifest, never a blob. The blob side must reject it loudly instead of
-// decoding an empty v5 tree that a later commit would publish over the real
+// decoding an empty v6 tree that a later commit would publish over the real
 // index (silent total data loss).
-func TestV5DocumentWithoutTreeRootIsRejected(t *testing.T) {
+func TestV6DocumentWithoutTreeRootIsRejected(t *testing.T) {
 	t.Parallel()
-	probe := []byte(`{"v":5,"p":"proj","d":{},"f":{},"c":{},"r":{}}`)
+	probe := []byte(`{"v":6,"p":"proj","d":{},"f":{},"c":{},"r":{}}`)
 	if IsManifest(probe) {
 		t.Fatal("probe: shape detector must not call a tr-less document a manifest")
 	}
 	var direct RepoMetadata
 	if err := json.Unmarshal(probe, &direct); err == nil {
-		t.Fatal("UnmarshalJSON accepted a v5 blob: v5 documents are manifests, blobs are v<=4")
+		t.Fatal("UnmarshalJSON accepted a v6 blob: v6 documents are manifests, blobs are v<=5")
 	} else if !strings.Contains(err.Error(), "manifest") {
 		t.Fatalf("rejection must name the manifest contract: %v", err)
 	}
 	if _, _, err := Migrate(probe); err == nil {
-		t.Fatal("Migrate passed a tr-less v5 document through as a blob")
+		t.Fatal("Migrate passed a tr-less v6 document through as a blob")
 	}
 	var viaFromJSON RepoMetadata
 	if err := viaFromJSON.FromJSON(probe); err == nil {
-		t.Fatal("FromJSON accepted a tr-less v5 document")
+		t.Fatal("FromJSON accepted a tr-less v6 document")
+	}
+	// A current blob (v5, no tree root) still decodes as a blob.
+	blobProbe := []byte(`{"v":5,"p":"proj","tf":0,"ts":0,"lm":1700000000000000000,"rt":{"cr":1700000000000000000,"ma":1700000000000000000,"i":1},"ni":2,"nc":1}`)
+	var asCurrent RepoMetadata
+	if err := json.Unmarshal(blobProbe, &asCurrent); err != nil {
+		t.Fatalf("current v5 blob must decode as a blob: %v", err)
 	}
 	// A real manifest (tr present) keeps its dedicated rejection.
 	m := NewRepoMetadata("demo")
-	m.Normalize("demo", 1)
+	m.Normalize("demo", 1000000000)
 	res, err := BuildTree(m)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -237,17 +243,17 @@ func TestV5DocumentWithoutTreeRootIsRejected(t *testing.T) {
 }
 
 // The blob side of the version axis: ToJSON serializes the single-blob
-// layout, which tops out at maxBlobVersion; a version-5 tree migrates to the
-// split layout on write, so a v5 blob document can never legitimately exist.
+// layout, which tops out at maxBlobVersion; a version-6 tree migrates to the
+// split layout on write, so a v6 blob document can never legitimately exist.
 func TestToJSONEmitsBlobVersion(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123)
+	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123000000000)
 	blob, err := m.ToJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(blob), `"v":4`) {
+	if !strings.Contains(string(blob), `"v":5`) {
 		t.Fatalf("blob document must carry the blob version: %s", blob)
 	}
 	var back RepoMetadata
@@ -268,8 +274,8 @@ func TestValidateRejectsNonCanonicalKeys(t *testing.T) {
 	t.Parallel()
 	for _, key := range []string{"a/", "a//b", "a/./b", "./a"} {
 		m := NewRepoMetadata("demo")
-		m.EnsureDirectory("a", 1)
-		m.EnsureDirectory("a/b", 1)
+		m.EnsureDirectory("a", 1000000000)
+		m.EnsureDirectory("a/b", 1000000000)
 		m.files[key] = FileMeta{Inode: 50, Size: 0}
 		m.TotalFiles = 1
 		if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "canonical") {
@@ -278,10 +284,10 @@ func TestValidateRejectsNonCanonicalKeys(t *testing.T) {
 	}
 	// Canonical keys (including whitespace-significant names) still pass.
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("a", 1)
-	m.UpsertFile("a/b.txt", FileMeta{Size: 0, Inode: 50}, 1)
-	m.UpsertFile(" spaced ", FileMeta{Size: 0, Inode: 51}, 1)
-	m.Normalize("demo", 1)
+	m.EnsureDirectory("a", 1000000000)
+	m.UpsertFile("a/b.txt", FileMeta{Size: 0, Inode: 50}, 1000000000)
+	m.UpsertFile(" spaced ", FileMeta{Size: 0, Inode: 51}, 1000000000)
+	m.Normalize("demo", 1000000000)
 	if err := m.Validate(); err != nil {
 		t.Fatalf("canonical keys rejected: %v", err)
 	}
@@ -348,8 +354,8 @@ func TestValidateRejectsOverflowingAndOverlappingChunks(t *testing.T) {
 func TestValidateRejectsFileDirPathCollision(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("d", 1)
-	m.dirs["x"] = DirMeta{Inode: 10, CreatedAt: 1, ModifiedAt: 1}
+	m.EnsureDirectory("d", 1000000000)
+	m.dirs["x"] = DirMeta{Inode: 10, CreatedAt: 1000000000, ModifiedAt: 1000000000}
 	m.files["x"] = FileMeta{Inode: 11, Size: 0}
 	m.TotalFiles = 1
 	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "both") {
@@ -363,7 +369,7 @@ func TestValidateRejectsFileDirPathCollision(t *testing.T) {
 func TestSymlinkModeDefaults(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.UpsertFile("lnk", FileMeta{Symlink: "target"}, 100)
+	m.UpsertFile("lnk", FileMeta{Symlink: "target"}, 100000000000)
 	got := m.FindFile("lnk")
 	if got == nil || got.Mode != defaultFileMode(NodeKindSymlink) {
 		t.Fatalf("symlink creation default = %o, want %o", got.Mode, defaultFileMode(NodeKindSymlink))
@@ -383,21 +389,21 @@ func TestSymlinkModeDefaults(t *testing.T) {
 	// Regular files keep the regular default on creation, and an explicit
 	// 000 survives the verbatim store path end to end.
 	r := &FileMeta{Size: 1, Chunks: []int64{}}
-	InitializeNewFileIdentityFields(r, 200)
+	InitializeNewFileIdentityFields(r, 200000000000)
 	if r.Mode != defaultFileMode(NodeKindFile) {
 		t.Fatalf("regular default = %o, want %o", r.Mode, defaultFileMode(NodeKindFile))
 	}
-	m.UpsertFile("plain.txt", FileMeta{Size: 1}, 200)
+	m.UpsertFile("plain.txt", FileMeta{Size: 1}, 200000000000)
 	if stored := m.FindFile("plain.txt"); stored == nil || stored.Mode != defaultFileMode(NodeKindFile) {
 		t.Fatalf("regular creation default broken: %+v", stored)
 	}
-	denied := FileMeta{Size: 1, Mode: 0o000, Inode: 4242, UploadedAt: 200, ModifiedAt: 200, AccessedAt: 200, ChangedAt: 200, Chunks: []int64{}}
+	denied := FileMeta{Size: 1, Mode: 0o000, Inode: 4242, UploadedAt: 200000000000, ModifiedAt: 200000000000, AccessedAt: 200000000000, ChangedAt: 200000000000, Chunks: []int64{}}
 	m.WriteFileDirect("denied.txt", denied)
 	if stored := m.FindFile("denied.txt"); stored == nil || stored.Mode != 0 {
 		t.Fatalf("explicit 000 widened on store: %+v", stored)
 	}
 	// Creation through UpsertFile still defaults an absent mode.
-	m.UpsertFile("fresh.txt", FileMeta{Size: 1}, 200)
+	m.UpsertFile("fresh.txt", FileMeta{Size: 1}, 200000000000)
 	if stored := m.FindFile("fresh.txt"); stored == nil || stored.Mode != defaultFileMode(NodeKindFile) {
 		t.Fatalf("creation default broken: %+v", stored)
 	}
@@ -407,8 +413,8 @@ func TestSymlinkModeDefaults(t *testing.T) {
 func TestReadLookupsNormalizeKeys(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("a/b", 1)
-	m.UpsertFile("a/b/f.txt", FileMeta{Size: 0, Inode: 9}, 1)
+	m.EnsureDirectory("a/b", 1000000000)
+	m.UpsertFile("a/b/f.txt", FileMeta{Size: 0, Inode: 9}, 1000000000)
 	m.RebuildIndexes()
 	if !m.HasDirectory("/a") {
 		t.Fatal(`HasDirectory("/a") missed`)
@@ -437,7 +443,7 @@ func TestFileMetaNormalizeKeepsChunkOrder(t *testing.T) {
 
 func TestValidationFailuresAndIdentityHelpers(t *testing.T) {
 	t.Parallel()
-	now := int64(300)
+	now := int64(300000000000)
 	repo := NewRepoMetadata("validate")
 	initializeNewFileIdentity(repo, &FileMeta{}, now)
 	existing := &FileMeta{Inode: 42, Mode: 0o777, UID: 7, GID: 9, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now, XAttrs: XAttrMap{"user.demo": []byte("1")}}
@@ -522,7 +528,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 		t.Fatalf("FromJSON (migrateV1): %v", err)
 	}
 
-	meta.Normalize("demo", 100)
+	meta.Normalize("demo", 100000000000)
 	if err := meta.Validate(); err != nil {
 		t.Fatalf("Validate after migration+normalize: %v", err)
 	}
@@ -579,7 +585,7 @@ func TestMigrateV1ChunkNameCollision(t *testing.T) {
 	if err := decoded.FromJSON(encoded); err != nil {
 		t.Fatalf("FromJSON round-trip: %v", err)
 	}
-	decoded.Normalize("demo", 100)
+	decoded.Normalize("demo", 100000000000)
 	if err := decoded.Validate(); err != nil {
 		t.Fatalf("Validate after round-trip: %v", err)
 	}
@@ -589,14 +595,14 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	link := FileMeta{Symlink: "target", Size: 6, Inode: 7, Mode: 0o120777, UID: 1, GID: 1}
-	m.UpsertFile("link", link, 100)
-	if _, err := m.EnsureRelease("v1", 100); err != nil {
+	m.UpsertFile("link", link, 100000000000)
+	if _, err := m.EnsureRelease("v1", 100000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
 
 	file := FileMeta{Size: 4, Chunks: []int64{1}, Mode: 0o100644}
-	m.UpsertFile("link", file, 200)
+	m.UpsertFile("link", file, 200000000000)
 
 	got := m.FindFile("link")
 	if got == nil {
@@ -611,7 +617,7 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 	if got.Inode == 7 || got.Inode == 0 {
 		t.Fatalf("expected fresh inode for replaced node, got %d", got.Inode)
 	}
-	m.Normalize("demo", 300)
+	m.Normalize("demo", 300000000000)
 	if err := m.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -620,11 +626,11 @@ func TestUpsertRegularFileOverSymlinkReplacesNode(t *testing.T) {
 func TestUpsertSymlinkRefreshKeepsIdentity(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	link := FileMeta{Symlink: "old-target", Inode: 9, Mode: 0o120777, UID: 5, GID: 5, UploadedAt: 100, ModifiedAt: 100, AccessedAt: 100, ChangedAt: 100}
-	m.UpsertFile("lnk", link, 100)
+	link := FileMeta{Symlink: "old-target", Inode: 9, Mode: 0o120777, UID: 5, GID: 5, UploadedAt: 100000000000, ModifiedAt: 100000000000, AccessedAt: 100000000000, ChangedAt: 100000000000}
+	m.UpsertFile("lnk", link, 100000000000)
 
 	refresh := FileMeta{Symlink: "new-target"}
-	m.UpsertFile("lnk", refresh, 200)
+	m.UpsertFile("lnk", refresh, 200000000000)
 
 	got := m.FindFile("lnk")
 	if got == nil || got.Symlink != "new-target" {
@@ -669,12 +675,12 @@ func TestV2PayloadMigratesStringXAttrsToBytes(t *testing.T) {
 func TestCountersPersistAcrossReload(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	if _, err := m.EnsureRelease("v1", 1); err != nil {
+	if _, err := m.EnsureRelease("v1", 1000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	m.chunks[1] = ChunkInfo{Size: 1, Release: "v1"}
-	m.UpsertFile("a.txt", FileMeta{Size: 1, Chunks: []int64{1}}, 1)
-	m.Normalize("demo", 1)
+	m.UpsertFile("a.txt", FileMeta{Size: 1, Chunks: []int64{1}}, 1000000000)
+	m.Normalize("demo", 1000000000)
 	nextChunk := m.NextChunkID
 	nextInode := m.NextInode
 
@@ -689,7 +695,7 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 	if err := reloaded.FromJSON(encoded); err != nil {
 		t.Fatalf("fromjson: %v", err)
 	}
-	reloaded.Normalize("demo", 2)
+	reloaded.Normalize("demo", 2000000000)
 	if reloaded.NextChunkID < nextChunk {
 		t.Fatalf("chunk counter rolled back: %d < %d", reloaded.NextChunkID, nextChunk)
 	}
@@ -704,13 +710,13 @@ func TestCountersPersistAcrossReload(t *testing.T) {
 func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	if _, err := m.EnsureRelease("v1", 1); err != nil {
+	if _, err := m.EnsureRelease("v1", 1000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	m.chunks[2] = ChunkInfo{Size: 2, Offset: 4, Release: "v1"}
 	m.chunks[1] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
-	m.UpsertFile("f.bin", FileMeta{Size: 6, Chunks: []int64{2, 1}, Inode: 9}, 1)
-	m.Normalize("demo", 1)
+	m.UpsertFile("f.bin", FileMeta{Size: 6, Chunks: []int64{2, 1}, Inode: 9}, 1000000000)
+	m.Normalize("demo", 1000000000)
 	if err := m.Validate(); err != nil {
 		t.Fatalf("validate after normalize: %v", err)
 	}
@@ -721,12 +727,12 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 
 	// Out-of-order stored chunks must fail validation loudly.
 	bad := NewRepoMetadata("demo")
-	if _, err := bad.EnsureRelease("v1", 1); err != nil {
+	if _, err := bad.EnsureRelease("v1", 1000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	bad.chunks[1] = ChunkInfo{Size: 4, Offset: 4, Release: "v1"}
 	bad.chunks[2] = ChunkInfo{Size: 4, Offset: 0, Release: "v1"}
-	bad.UpsertFile("g.bin", FileMeta{Size: 8, Chunks: []int64{1, 2}, Inode: 9}, 1)
+	bad.UpsertFile("g.bin", FileMeta{Size: 8, Chunks: []int64{1, 2}, Inode: 9}, 1000000000)
 	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "offset order") {
 		t.Fatalf("expected offset-order violation, got %v", err)
 	}
@@ -735,8 +741,8 @@ func TestNormalizeSortsFileChunksByOffsetAndValidateEnforcesOrder(t *testing.T) 
 func TestDirNLinkCountsEachSubdirectoryOnce(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("docs/a", 1)
-	m.EnsureDirectory("docs/b", 1)
+	m.EnsureDirectory("docs/a", 1000000000)
+	m.EnsureDirectory("docs/b", 1000000000)
 	m.RebuildIndexes()
 	if got := m.DirNLink("docs"); got != 4 {
 		t.Fatalf("indexed DirNLink = %d, want 4", got)
@@ -753,12 +759,12 @@ func TestDirNLinkCountsEachSubdirectoryOnce(t *testing.T) {
 func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("rooted", 1)
+	m.EnsureDirectory("rooted", 1000000000)
 	dir := m.dirs["rooted"]
 	dir.UID = 0
 	dir.GID = 0
 	m.dirs["rooted"] = dir
-	m.Normalize("demo", 1)
+	m.Normalize("demo", 1000000000)
 	if m.dirs["rooted"].UID != 0 || m.dirs["rooted"].GID != 0 {
 		t.Fatalf("zero owner was clobbered by normalize: %+v", m.dirs["rooted"])
 	}
@@ -767,7 +773,7 @@ func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 func TestPruneUnreferencedChunks(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100)
+	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100000000000)
 	m.chunks[10] = ChunkInfo{Offset: 0, Size: 4}
 	m.chunks[11] = ChunkInfo{Offset: 4, Size: 4}
 	// Stale entries from an overwrite and a deleted file.
@@ -851,7 +857,7 @@ func TestParseNumericReleaseTagRejectsSigns(t *testing.T) {
 	}
 }
 
-// TestNormalizePreservesAuthoritativeZeros pins the v4 contract: Normalize
+// TestNormalizePreservesAuthoritativeZeros pins the v5 contract: Normalize
 // never repairs timestamps - persisted values are complete and exact, and
 // zero is a real epoch value, not a gap. Legacy completion belongs to the
 // stacked migrator (migrate.go), not to the parser or normalizer.
@@ -870,9 +876,9 @@ func TestNormalizePreservesAuthoritativeZeros(t *testing.T) {
 
 	// Creation-time stamping stays: UpsertFile materializes identity.
 	m := NewRepoMetadata("demo")
-	m.UpsertFile("n.txt", FileMeta{Size: 1}, 1700000000)
+	m.UpsertFile("n.txt", FileMeta{Size: 1}, 1700000000000000000)
 	stored := m.FindFile("n.txt")
-	if stored.UploadedAt != 1700000000 || stored.ChangedAt != 1700000000 {
+	if stored.UploadedAt != 1700000000000000000 || stored.ChangedAt != 1700000000000000000 {
 		t.Fatalf("creation stamping broken: %+v", stored)
 	}
 }
@@ -913,8 +919,8 @@ func TestPathNormalizerConformance(t *testing.T) {
 func TestSchemaV4KeysRoundTrip(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.EnsureDirectory("d", 1)
-	m.UpsertFile("d/f.txt", FileMeta{Size: 1, Chunks: []int64{7}, UploadedAt: 5, ModifiedAt: 6, AccessedAt: 7, ChangedAt: 8, Inode: 9}, 1)
+	m.EnsureDirectory("d", 1000000000)
+	m.UpsertFile("d/f.txt", FileMeta{Size: 1, Chunks: []int64{7}, UploadedAt: 5000000000, ModifiedAt: 6000000000, AccessedAt: 7000000000, ChangedAt: 8000000000, Inode: 9}, 1000000000)
 	blob, err := m.ToJSON()
 	if err != nil {
 		t.Fatal(err)
@@ -922,12 +928,12 @@ func TestSchemaV4KeysRoundTrip(t *testing.T) {
 	s := string(blob)
 	for _, legacy := range []string{`"ca"`, `"cha"`} {
 		if strings.Contains(s, legacy) {
-			t.Fatalf("legacy key %s must not be written by v4", legacy)
+			t.Fatalf("legacy key %s must not be written by v5", legacy)
 		}
 	}
 	for _, want := range []string{`"cr":`, `"ch":`} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("v4 key %s missing from output", want)
+			t.Fatalf("v5 key %s missing from output", want)
 		}
 	}
 	var back RepoMetadata
@@ -938,7 +944,7 @@ func TestSchemaV4KeysRoundTrip(t *testing.T) {
 	if f == nil {
 		t.Fatal("file missing after round trip")
 	}
-	if f.ChangedAt != 8 || f.ModifiedAt != 6 || f.AccessedAt != 7 {
+	if f.ChangedAt != 8000000000 || f.ModifiedAt != 6000000000 || f.AccessedAt != 7000000000 {
 		t.Fatalf("file timestamps lost in round trip: %+v", f)
 	}
 	if d, ok := back.dirs["d"]; !ok || d.CreatedAt <= 0 || d.ChangedAt <= 0 {
@@ -963,22 +969,22 @@ func TestV3PayloadMigratesTimestamps(t *testing.T) {
 	if m.Version != maxBlobVersion {
 		t.Fatalf("version not advanced: %d", m.Version)
 	}
-	if m.Root.CreatedAt != 100 || m.Root.ChangedAt != 103 {
+	if m.Root.CreatedAt != 100000000000 || m.Root.ChangedAt != 103000000000 {
 		t.Fatalf("root legacy keys unmapped: %+v", m.Root)
 	}
 	d := m.dirs["olddir"]
-	if d.CreatedAt != 200 || d.ChangedAt != 202 {
+	if d.CreatedAt != 200000000000 || d.ChangedAt != 202000000000 {
 		t.Fatalf("dir legacy keys unmapped: %+v", d)
 	}
 	f, ok := m.files["old.txt"]
-	if !ok || f.ChangedAt != 303 || f.ModifiedAt != 301 {
+	if !ok || f.ChangedAt != 303000000000 || f.ModifiedAt != 301000000000 {
 		t.Fatalf("file legacy ca (ChangedAt) unmapped: %+v", f)
 	}
 	r := m.releases["v1"]
-	if r.CreatedAt != 400 {
+	if r.CreatedAt != 400000000000 {
 		t.Fatalf("release legacy key unmapped: %+v", r)
 	}
-	// Re-serialization must emit v4 spellings only.
+	// Re-serialization must emit v5 spellings only.
 	blob, err := m.ToJSON()
 	if err != nil {
 		t.Fatal(err)

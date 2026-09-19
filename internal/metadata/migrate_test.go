@@ -68,11 +68,11 @@ func TestMigrateRejectsNewerAndInvalid(t *testing.T) {
 }
 
 // Identity: a current document passes through byte-for-byte. ToJSON emits
-// the blob layout (maxBlobVersion): v5 is manifest-only.
+// the blob layout (maxBlobVersion): v6 is manifest-only.
 func TestMigrateIdentityOnCurrent(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123)
+	m.UpsertFile("f.txt", FileMeta{Size: 1}, 123000000000)
 	blob, err := m.ToJSON()
 	if err != nil {
 		t.Fatal(err)
@@ -167,22 +167,22 @@ func TestStepV3ToV4(t *testing.T) {
 	if strings.Contains(s, `"tsx"`) {
 		t.Fatal("tsx must be consumed by v4")
 	}
-	var m RepoMetadata
-	if err := json.Unmarshal(v4, &m); err != nil {
+	var doc repoMetadataJSON
+	if err := json.Unmarshal(v4, &doc); err != nil {
 		t.Fatal(err)
 	}
-	legacy := m.files["legacy.bin"]
+	legacy := doc.Files["legacy.bin"]
 	// Deterministic completion: uploaded falls back to LastMod, the rest
-	// chain from it.
+	// chain from it. (Seconds era: the v4->v5 step scales these to ns.)
 	if legacy.UploadedAt != 900 || legacy.ModifiedAt != 900 || legacy.AccessedAt != 900 || legacy.ChangedAt != 900 {
 		t.Fatalf("completion wrong: %+v", legacy)
 	}
-	marked := m.files["marked.bin"]
+	marked := doc.Files["marked.bin"]
 	if marked.UploadedAt != 0 {
 		t.Fatalf("explicit zeros must survive verbatim: %+v", marked)
 	}
-	if m.releases["v1"].CreatedAt != 5 {
-		t.Fatalf("release key rename lost data: %+v", m.Releases())
+	if doc.Releases["v1"].CreatedAt != 5 {
+		t.Fatalf("release key rename lost data: %+v", doc.Releases)
 	}
 }
 
@@ -224,8 +224,10 @@ func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate v3->v4: %v", err)
 	}
+	// The repaired intermediate loads through the normal path (which
+	// migrates v4->v5); chunk/size assertions are unit-independent.
 	var m RepoMetadata
-	if err := json.Unmarshal(v4, &m); err != nil {
+	if err := m.FromJSON(v4); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Validate(); err != nil {
@@ -299,7 +301,89 @@ func TestParserIsCurrentOnly(t *testing.T) {
 	if err := viaFromJSON.FromJSON([]byte(rawV3)); err != nil {
 		t.Fatalf("FromJSON must migrate: %v", err)
 	}
-	if viaFromJSON.files["a"].ChangedAt != 2 {
+	if viaFromJSON.files["a"].ChangedAt != 2000000000 {
 		t.Fatalf("migrated ChangedAt wrong: %+v", viaFromJSON.files["a"])
+	}
+}
+
+// The v4->v5 step changes the timestamp UNIT from Unix seconds to Unix
+// nanoseconds, nothing else: every sub-threshold persisted time (LastMod,
+// root, dirs, files, releases) scales by 1e9, while authoritative zeros,
+// already-nanosecond values, and the allocation counters pass through
+// untouched.
+func TestStepV4ToV5ConvertsSecondsToNanos(t *testing.T) {
+	t.Parallel()
+	v4 := `{"v":4,"p":"demo","tf":3,"ts":3,"lm":1700000000,` +
+		`"rt":{"cr":1700000000,"ma":1700000001,"aa":1700000002,"ch":1700000003,"i":1},` +
+		`"d":{"docs":{"cr":1700000000,"ma":1700000001,"i":2}},` +
+		`"f":{"a.txt":{"s":3,"cs":[1],"ua":1700000000,"ma":1700000001,"aa":1700000002,"ch":1700000003,"i":5},` +
+		`"zero.txt":{"s":0,"ua":0,"ma":0,"aa":0,"ch":0,"i":6},` +
+		`"modern.txt":{"s":0,"ua":1700000000000000000,"ma":1700000000000000000,"i":7}},` +
+		`"c":{"1":{"s":3,"o":0,"r":"v1","a":9}},` +
+		`"r":{"v1":{"ac":1,"cr":1700000000}},"ni":8,"nc":2}`
+	v5, err := migrators[4]([]byte(v4))
+	if err != nil {
+		t.Fatalf("migrate v4->v5: %v", err)
+	}
+	var m RepoMetadata
+	if err := json.Unmarshal(v5, &m); err != nil {
+		t.Fatalf("decode migrated v5: %v", err)
+	}
+	if m.Version != maxBlobVersion {
+		t.Fatalf("migrated version = %d, want %d", m.Version, maxBlobVersion)
+	}
+	if m.LastMod != 1700000000000000000 {
+		t.Fatalf("LastMod not converted: %d", m.LastMod)
+	}
+	if m.Root.CreatedAt != 1700000000000000000 || m.Root.ModifiedAt != 1700000001000000000 ||
+		m.Root.AccessedAt != 1700000002000000000 || m.Root.ChangedAt != 1700000003000000000 {
+		t.Fatalf("root times not converted: %+v", m.Root)
+	}
+	d := m.dirs["docs"]
+	if d.CreatedAt != 1700000000000000000 || d.ModifiedAt != 1700000001000000000 {
+		t.Fatalf("dir times not converted: %+v", d)
+	}
+	f := m.files["a.txt"]
+	if f.UploadedAt != 1700000000000000000 || f.ModifiedAt != 1700000001000000000 ||
+		f.AccessedAt != 1700000002000000000 || f.ChangedAt != 1700000003000000000 {
+		t.Fatalf("file times not converted: %+v", f)
+	}
+	if z := m.files["zero.txt"]; z.UploadedAt != 0 || z.ModifiedAt != 0 || z.AccessedAt != 0 || z.ChangedAt != 0 {
+		t.Fatalf("authoritative zeros must survive verbatim: %+v", z)
+	}
+	if n := m.files["modern.txt"]; n.UploadedAt != 1700000000000000000 || n.ModifiedAt != 1700000000000000000 {
+		t.Fatalf("already-nanosecond values must pass through: %+v", n)
+	}
+	if r := m.releases["v1"]; r.CreatedAt != 1700000000000000000 {
+		t.Fatalf("release time not converted: %+v", r)
+	}
+	if m.NextInode != 8 || m.NextChunkID != 2 {
+		t.Fatalf("allocation counters are not times and must not scale: ni=%d nc=%d", m.NextInode, m.NextChunkID)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("migrated v5 document must pass Validate: %v", err)
+	}
+
+	// Full chain: a v4 blob loads through FromJSON as nanoseconds.
+	var viaFromJSON RepoMetadata
+	if err := viaFromJSON.FromJSON([]byte(v4)); err != nil {
+		t.Fatalf("FromJSON must migrate v4: %v", err)
+	}
+	if viaFromJSON.Version != maxBlobVersion {
+		t.Fatalf("loaded version = %d, want %d", viaFromJSON.Version, maxBlobVersion)
+	}
+	if got := viaFromJSON.files["a.txt"].UploadedAt; got != 1700000000000000000 {
+		t.Fatalf("full-chain file time = %d, want ns", got)
+	}
+
+	// Sabotage check: the same payload decoded WITHOUT the migrator still
+	// carries seconds, so this test fails if the migration is ever skipped.
+	var raw repoMetadataJSON
+	if err := json.Unmarshal([]byte(v4), &raw); err != nil {
+		t.Fatalf("decode raw v4: %v", err)
+	}
+	if raw.Files["a.txt"].UploadedAt != 1700000000 || raw.LastMod != 1700000000 ||
+		raw.Releases["v1"].CreatedAt != 1700000000 {
+		t.Fatal("sabotage baseline broken: raw v4 payload must carry seconds")
 	}
 }

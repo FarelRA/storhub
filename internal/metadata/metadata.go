@@ -38,17 +38,18 @@ type FileMeta struct {
 	// regular file and symlink - it is NEVER nil after normalization, and
 	// empty files carry zero chunks since the sentinel-part removal.
 	// Compare with len(), never DeepEqual against nil or []int64{}.
-	Chunks     []int64 `json:"cs,omitempty"`
-	Size       int64   `json:"s"`
-	Symlink    string  `json:"sl,omitempty"`
-	UploadedAt int64   `json:"ua"`
-	ModifiedAt int64   `json:"ma,omitempty"`
-	AccessedAt int64   `json:"aa,omitempty"`
-	ChangedAt  int64   `json:"ch,omitempty"`
-	Mode       uint32  `json:"md,omitempty"`
-	UID        uint32  `json:"u,omitempty"`
-	GID        uint32  `json:"g,omitempty"`
-	Inode      uint64  `json:"i,omitempty"`
+	Chunks  []int64 `json:"cs,omitempty"`
+	Size    int64   `json:"s"`
+	Symlink string  `json:"sl,omitempty"`
+	// Timestamps are Unix NANOSECONDS (time.Time.UnixNano), never seconds.
+	UploadedAt int64  `json:"ua"`
+	ModifiedAt int64  `json:"ma,omitempty"`
+	AccessedAt int64  `json:"aa,omitempty"`
+	ChangedAt  int64  `json:"ch,omitempty"`
+	Mode       uint32 `json:"md,omitempty"`
+	UID        uint32 `json:"u,omitempty"`
+	GID        uint32 `json:"g,omitempty"`
+	Inode      uint64 `json:"i,omitempty"`
 	// XAttrs is nil-means-empty: normalizeXAttrs collapses empty maps to
 	// nil so serialized metadata omits the field.
 	XAttrs XAttrMap `json:"x,omitempty"`
@@ -64,6 +65,7 @@ func (f FileMeta) Clone() FileMeta {
 }
 
 type DirMeta struct {
+	// Timestamps are Unix NANOSECONDS (time.Time.UnixNano), never seconds.
 	CreatedAt  int64    `json:"cr"`
 	ModifiedAt int64    `json:"ma"`
 	AccessedAt int64    `json:"aa,omitempty"`
@@ -82,8 +84,9 @@ func (d DirMeta) Clone() DirMeta {
 }
 
 type ReleaseRef struct {
-	AssetCount int   `json:"ac"`
-	CreatedAt  int64 `json:"cr"`
+	AssetCount int `json:"ac"`
+	// CreatedAt is a Unix NANOSECONDS timestamp (time.Time.UnixNano).
+	CreatedAt int64 `json:"cr"`
 }
 
 type RepoMetadata struct {
@@ -91,8 +94,9 @@ type RepoMetadata struct {
 	Project    string `json:"p"`
 	TotalFiles int    `json:"tf"`
 	TotalSize  int64  `json:"ts"`
-	LastMod    int64  `json:"lm"`
-	Root       DirMeta
+	// LastMod is a Unix NANOSECONDS timestamp (time.Time.UnixNano).
+	LastMod int64 `json:"lm"`
+	Root    DirMeta
 	// dirs/files/chunks/releases are the stored maps. They are unexported so
 	// every mutation flows through the tracked mutators, which maintain the
 	// derived index and the serialized-size cache; the blob wire format is
@@ -142,13 +146,14 @@ func (*noCopy) Lock()   {}
 func (*noCopy) Unlock() {}
 
 type MetadataRevision struct {
-	CommitSHA   string `json:"commit_sha"`
-	Message     string `json:"message"`
-	CommittedAt int64  `json:"committed_at"`
+	CommitSHA string `json:"commit_sha"`
+	Message   string `json:"message"`
+	// CommittedAt is a Unix NANOSECONDS timestamp (time.Time.UnixNano).
+	CommittedAt int64 `json:"committed_at"`
 }
 
 func NewRepoMetadata(project string) *RepoMetadata {
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	uid, gid := defaultOwnerIDs()
 	return &RepoMetadata{
 		Version:     maxMetadataVersion,
@@ -276,22 +281,22 @@ func cloneMap[K comparable, V any](src map[K]V) map[K]V {
 
 // maxMetadataVersion is the newest DOCUMENT version this build reads and
 // writes. Versions 1..maxBlobVersion are single-blob layouts (the whole index
-// in one metadata.json, entry shapes evolving); version 5 is the split layout
+// in one metadata.json, entry shapes evolving); version 6 is the split layout
 // (a manifest plus content-addressed Merkle objects). The split is therefore
 // just the next step on the ONE version axis, not a parallel numbering.
 //
 // A RepoMetadata.Version records the document version its tree corresponds to:
-// 5 when loaded from a manifest or newly created (the split layout), or <=4
-// when loaded from a legacy single-blob document (it migrates to 5 on its next
-// write). The entry SHAPE is identical at 4 and 5; only the on-disk layout
-// differs, so no pure migrator crosses the 4->5 boundary (that step is the
+// 6 when loaded from a manifest or newly created (the split layout), or <=5
+// when loaded from a legacy single-blob document (it migrates to 6 on its next
+// write). The entry SHAPE is identical at 5 and 6; only the on-disk layout
+// differs, so no pure migrator crosses the 5->6 boundary (that step is the
 // write-time split, in the storage layer).
-const maxMetadataVersion = 5
+const maxMetadataVersion = 6
 
 // maxBlobVersion is the newest single-blob schema: what Migrate upgrades legacy
 // blobs to, and the version a tree loaded from a metadata.json carries until it
-// is written as a split (version 5) document.
-const maxBlobVersion = 4
+// is written as a split (version 6) document.
+const maxBlobVersion = 5
 
 // IsSplit reports whether this tree corresponds to the split (version-5)
 // layout: a manifest plus content-addressed objects. A tree loaded from a
@@ -460,7 +465,7 @@ func (d *DirMeta) Normalize() {
 	// (EnsureDirectory stamps them; the v3 to v4 migrator materializes
 	// them for legacy entries), never here. See the explicit-zero
 	// contract on FileMeta.Normalize.
-	// Timestamps are NOT repaired here: the v4 contract is complete,
+	// Timestamps are NOT repaired here: the v5 contract is complete,
 	// authoritative values (the stacked migrator completes legacy docs;
 	// creation paths stamp real times). Zeros are real epoch values.
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
@@ -1107,7 +1112,7 @@ func (m *RepoMetadata) normalizeRootFast() {
 	if m.Root.Inode == 0 {
 		m.Root.Inode = 1
 	}
-	// Root timestamps are authoritative under v4 (see DirMeta.Normalize).
+	// Root timestamps are authoritative under v5 (see DirMeta.Normalize).
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)
 }
 

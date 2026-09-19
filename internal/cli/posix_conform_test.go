@@ -85,6 +85,10 @@ type pcFile struct {
 	gid   uint32
 	mtime int64
 	atime int64
+	// ino is the open-time identity for session commit resolution,
+	// assigned lazily at first session open (rename preserves it by
+	// moving the struct; unlink drops it with the map entry).
+	ino uint64
 }
 
 // pcFakeHub implements hubClient with textbook in-memory semantics and
@@ -99,6 +103,12 @@ type pcFakeHub struct {
 	links map[string]string
 	dirs  map[string]bool
 	clock int64
+	// Session emulation: open handles with pinned snapshots, staged
+	// writes, identity-resolved commit (rename followed, unlink
+	// discarded), mirroring the real session manager.
+	sessions    map[string]*pcSession
+	nextSession int
+	nextIno     uint64
 }
 
 func newPCFakeHub() *pcFakeHub {
@@ -809,6 +819,16 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 		}
 		h.cursor = st.Size
 	}
+	// Every handle also opens a server-side session: the open-file
+	// description behind close commit/discard/follow and detached IO.
+	// Failing here fails the open loudly instead of silently dropping
+	// POSIX close semantics.
+	rel, _ := cliPath(resolved)
+	id, err := s.sessionOpen(rel, cliSessionMode(mode))
+	if err != nil {
+		return nil, err
+	}
+	h.session = id
 	_ = entry
 	return h, nil
 }
@@ -1093,6 +1113,84 @@ type cliHandle struct {
 	mode    posixconform.OpenMode
 	cursor  int64
 	closed  bool
+	// session is the server-side open-file description (session open).
+	// One-shot verbs carry IO while the path is linked (immediate
+	// publish, which is what cross-handle visibility and uncommitted
+	// stat size observe); the session carries the pin plus close
+	// commit/discard/follow, and serves IO staged after an unlink or
+	// rename. Stateless commands plus stateful sessions are one CLI
+	// surface, and open file descriptions live in the stateful half.
+	session string
+}
+
+// cliSessionMode maps open modes to session fopen strings. Only "r" and
+// "r+" are used: the adapter enforces fd legality locally, create and
+// truncate happen through one-shot verbs first, and append cursors stay
+// adapter-side.
+func cliSessionMode(m posixconform.OpenMode) string {
+	if m == posixconform.OpenReadOnly {
+		return "r"
+	}
+	return "r+"
+}
+
+func (s *cliPOSIXSurface) sessionOpen(rel, mode string) (string, error) {
+	out, err := s.runCLI([]string{"session", "open", "--token", "x", s.project, rel, "--mode", mode})
+	if err != nil {
+		return "", pcTranslateErr(err)
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", fmt.Errorf("session open %s: empty handle", rel)
+	}
+	return id, nil
+}
+
+func (h *cliHandle) sessionRead(offset int64, length int) ([]byte, error) {
+	out, err := h.surface.runCLI([]string{"session", "read", "--token", "x", "--handle", h.session,
+		"--offset", strconv.FormatInt(offset, 10), "--length", strconv.Itoa(length)})
+	if err != nil {
+		return nil, pcTranslateErr(err)
+	}
+	return out, nil
+}
+
+func (h *cliHandle) sessionWrite(offset int64, data []byte) (int, error) {
+	// Text travels via argv, which is exact for the ASCII payloads the
+	// table uses; binary callers use session write with "-" (stdin).
+	if _, err := h.surface.runCLI([]string{"session", "write", "--token", "x", "--handle", h.session,
+		strconv.FormatInt(offset, 10), string(data)}); err != nil {
+		return 0, pcTranslateErr(err)
+	}
+	return len(data), nil
+}
+
+func (h *cliHandle) sessionSync() error {
+	if _, err := h.surface.runCLI([]string{"session", "sync", "--token", "x", "--handle", h.session}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
+}
+
+func (h *cliHandle) sessionTruncate(size int64) error {
+	if _, err := h.surface.runCLI([]string{"session", "truncate", "--token", "x", "--handle", h.session, strconv.FormatInt(size, 10)}); err != nil {
+		return pcTranslateErr(err)
+	}
+	return nil
+}
+
+func (h *cliHandle) sessionSize() (int64, error) {
+	out, err := h.surface.runCLI([]string{"session", "stat", "--token", "x", "--handle", h.session, "--json"})
+	if err != nil {
+		return 0, pcTranslateErr(err)
+	}
+	var doc struct {
+		Size int64 `json:"size"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return 0, fmt.Errorf("session stat: decode size: %v", err)
+	}
+	return doc.Size, nil
 }
 
 func (h *cliHandle) readable() bool {
@@ -1131,7 +1229,17 @@ func (h *cliHandle) PRead(offset int64, length int) ([]byte, error) {
 	}
 	data, err := h.catLocked()
 	if err != nil {
-		return nil, err
+		// The path is gone (unlinked or renamed away) but the open
+		// description survives: serve the session pin plus staged
+		// writes. Only NotFound falls back; anything else propagates.
+		if !errors.Is(pcTranslateErr(err), posixconform.ErrNotFound) {
+			return nil, err
+		}
+		sess, serr := h.sessionRead(offset, length)
+		if serr != nil {
+			return nil, serr
+		}
+		return sess, nil
 	}
 	if offset >= int64(len(data)) || length == 0 {
 		return []byte{}, nil
@@ -1155,14 +1263,17 @@ func (h *cliHandle) PWrite(offset int64, data []byte) (int, error) {
 	if offset < 0 {
 		return 0, posixconform.ErrInvalid
 	}
-	rel, err := cliPath(h.path)
+	// Staged through the session, then committed: the bytes publish
+	// immediately (cross-handle visibility, stat size) and the pin
+	// refreshes, so a later unlink still serves them from the session.
+	wrote, err := h.sessionWrite(offset, data)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := h.surface.runCLI([]string{"write", "--token", "x", h.surface.project, rel, strconv.FormatInt(offset, 10), string(data)}); err != nil {
-		return 0, pcTranslateErr(err)
+	if err := h.sessionSync(); err != nil {
+		return 0, err
 	}
-	return len(data), nil
+	return wrote, nil
 }
 
 func (h *cliHandle) Read(length int) ([]byte, error) {
@@ -1179,7 +1290,15 @@ func (h *cliHandle) Read(length int) ([]byte, error) {
 	}
 	data, err := h.catLocked()
 	if err != nil {
-		return nil, err
+		if !errors.Is(pcTranslateErr(err), posixconform.ErrNotFound) {
+			return nil, err
+		}
+		sess, serr := h.sessionRead(h.cursor, length)
+		if serr != nil {
+			return nil, serr
+		}
+		h.cursor += int64(len(sess))
+		return sess, nil
 	}
 	if h.cursor >= int64(len(data)) || length == 0 {
 		return []byte{}, nil
@@ -1202,28 +1321,33 @@ func (h *cliHandle) Write(data []byte) (int, error) {
 	if !h.writable() {
 		return 0, posixconform.ErrAccess
 	}
-	rel, err := cliPath(h.path)
+	off := h.cursor
+	if h.mode == posixconform.OpenAppend {
+		// O_APPEND forces the cursor to the end on every cursor write.
+		// Unlinked mid-append, the session size is the end.
+		st, err := h.surface.statViaCLI(h.path)
+		if err != nil {
+			if !errors.Is(err, posixconform.ErrNotFound) {
+				return 0, err
+			}
+			sz, serr := h.sessionSize()
+			if serr != nil {
+				return 0, serr
+			}
+			off = sz
+		} else {
+			off = st.Size
+		}
+	}
+	wrote, err := h.sessionWrite(off, data)
 	if err != nil {
 		return 0, err
 	}
-	if h.mode == posixconform.OpenAppend {
-		// O_APPEND forces the cursor to the end on every cursor write.
-		st, err := h.surface.statViaCLI(h.path)
-		if err != nil {
-			return 0, err
-		}
-		h.cursor = st.Size
-		if _, err := h.surface.runCLI([]string{"append", "--token", "x", h.surface.project, rel, string(data)}); err != nil {
-			return 0, pcTranslateErr(err)
-		}
-		h.cursor += int64(len(data))
-		return len(data), nil
+	if err := h.sessionSync(); err != nil {
+		return 0, err
 	}
-	if _, err := h.surface.runCLI([]string{"write", "--token", "x", h.surface.project, rel, strconv.FormatInt(h.cursor, 10), string(data)}); err != nil {
-		return 0, pcTranslateErr(err)
-	}
-	h.cursor += int64(len(data))
-	return len(data), nil
+	h.cursor = off + int64(wrote)
+	return wrote, nil
 }
 
 func (h *cliHandle) Truncate(size int64) error {
@@ -1238,14 +1362,12 @@ func (h *cliHandle) Truncate(size int64) error {
 	if size < 0 {
 		return posixconform.ErrInvalid
 	}
-	rel, err := cliPath(h.path)
-	if err != nil {
+	// Staged through the session, then committed like writes: the pin
+	// refreshes and a later unlink still serves the truncated view.
+	if err := h.sessionTruncate(size); err != nil {
 		return err
 	}
-	if _, err := h.surface.runCLI([]string{"truncate", "--token", "x", h.surface.project, rel, strconv.FormatInt(size, 10)}); err != nil {
-		return pcTranslateErr(err)
-	}
-	return nil
+	return h.sessionSync()
 }
 
 func (h *cliHandle) Sync() error {
@@ -1254,8 +1376,12 @@ func (h *cliHandle) Sync() error {
 	if h.closed {
 		return posixconform.ErrClosed
 	}
-	// Drain the project like Surface.Sync: the handle's writes commit
-	// immediately, so durability is the journal drain.
+	// Session sync commits, repins, and the close flag drains the
+	// project; plain session sync is the fsync equivalent here because
+	// every staged write already committed through write+sync.
+	if err := h.sessionSync(); err != nil {
+		return err
+	}
 	if _, err := h.surface.runCLI([]string{"sync", "--token", "x", h.surface.project}); err != nil {
 		return pcTranslateErr(err)
 	}
@@ -1264,8 +1390,20 @@ func (h *cliHandle) Sync() error {
 
 func (h *cliHandle) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	if h.closed {
+		h.mu.Unlock()
+		return posixconform.ErrClosed
+	}
+	h.mu.Unlock()
+	// Session close commits staged state (discarding when the path went
+	// away, following a rename) with --sync draining, so close means
+	// durable exactly like Sync.
+	if _, err := h.surface.runCLI([]string{"session", "close", "--token", "x", "--handle", h.session, "--sync"}); err != nil {
+		return pcTranslateErr(err)
+	}
+	h.mu.Lock()
 	h.closed = true
+	h.mu.Unlock()
 	return nil
 }
 

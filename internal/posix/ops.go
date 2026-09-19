@@ -515,11 +515,11 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 		// zero-means-now contract), not arbitrary timestamps.
 		var atimePtr, mtimePtr *time.Time
 		if atime != 0 {
-			t := time.Unix(atime, 0)
+			t := time.Unix(0, atime)
 			atimePtr = &t
 		}
 		if mtime != 0 {
-			t := time.Unix(mtime, 0)
+			t := time.Unix(0, mtime)
 			mtimePtr = &t
 		}
 		now := s.backend.Now()
@@ -579,19 +579,19 @@ func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPat
 			if file != nil {
 				return UpdateFileFamily(tx.repo, file.Inode, func(current *meta.FileMeta) {
 					if atime != nil {
-						current.AccessedAt = atime.Unix()
+						current.AccessedAt = atime.UnixNano()
 					}
 					if mtime != nil {
-						current.ModifiedAt = mtime.Unix()
+						current.ModifiedAt = mtime.UnixNano()
 					}
 					current.ChangedAt = now
 				})
 			}
 			if atime != nil {
-				dir.AccessedAt = atime.Unix()
+				dir.AccessedAt = atime.UnixNano()
 			}
 			if mtime != nil {
-				dir.ModifiedAt = mtime.Unix()
+				dir.ModifiedAt = mtime.UnixNano()
 			}
 			dir.ChangedAt = now
 			tx.persistDir(dir)
@@ -877,10 +877,10 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 					}
 					if patch.HasTimes {
 						if !patch.ATime.IsZero() {
-							current.AccessedAt = patch.ATime.Unix()
+							current.AccessedAt = patch.ATime.UnixNano()
 						}
 						if !patch.MTime.IsZero() {
-							current.ModifiedAt = patch.MTime.Unix()
+							current.ModifiedAt = patch.MTime.UnixNano()
 						}
 					}
 					current.ChangedAt = now
@@ -898,10 +898,10 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			}
 			if patch.HasTimes {
 				if !patch.ATime.IsZero() {
-					dir.AccessedAt = patch.ATime.Unix()
+					dir.AccessedAt = patch.ATime.UnixNano()
 				}
 				if !patch.MTime.IsZero() {
-					dir.ModifiedAt = patch.MTime.Unix()
+					dir.ModifiedAt = patch.MTime.UnixNano()
 				}
 			}
 			dir.ChangedAt = now

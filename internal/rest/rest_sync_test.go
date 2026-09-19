@@ -210,7 +210,7 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 		{
 			name: "utimes", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
-			target: "/api/v1/projects/demo/ops/utimes", json: utimesRequest{Path: "a.txt", Atime: time.Unix(10, 0).UTC(), Mtime: time.Unix(20, 0).UTC()},
+			target: "/api/v1/projects/demo/ops/utimes", json: utimesRequest{Path: "a.txt", Atime: time.Unix(0, 10000000001).UTC(), Mtime: time.Unix(0, 20000000002).UTC()},
 			wantStatus: http.StatusOK,
 		},
 		{

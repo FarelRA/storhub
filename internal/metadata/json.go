@@ -55,7 +55,7 @@ func (m *RepoMetadata) MarshalJSON() ([]byte, error) {
 }
 
 func (m *RepoMetadata) ToJSON() ([]byte, error) {
-	// A blob document is always maxBlobVersion: version 5 is the split
+	// A blob document is always maxBlobVersion: version 6 is the split
 	// (manifest + objects) layout, which ToJSON cannot express. The in-memory
 	// Version records the tree's target layout; the write path re-stamps it
 	// via MarkSplit when publishing the split. Marshaled through the shadow
@@ -74,9 +74,9 @@ func (m *RepoMetadata) ToJSON() ([]byte, error) {
 // FromJSON parses a metadata document into current form. Version detection
 // and any upgrades belong entirely to Migrate (stacked, eager); this parser
 // understands ONLY the current blob schema - legacy spellings never reach it.
-// A version-5 split-index manifest is NOT a blob and must go through
+// A version-6 split-index manifest is NOT a blob and must go through
 // ParseManifest. The resulting tree carries the document version it was read
-// as (maxBlobVersion: blobs stop at 4; 5 is manifest-only).
+// as (maxBlobVersion: blobs stop at 5; 6 is manifest-only).
 func (m *RepoMetadata) FromJSON(data []byte) error {
 	upgraded, version, err := Migrate(data)
 	if err != nil {
@@ -94,7 +94,7 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 // decode. Older payloads must go through FromJSON/Migrate, and a split-index
 // manifest must go through ParseManifest/LoadTree - a direct unmarshal fails
 // loudly instead of silently yielding an empty tree from ignored unknown
-// fields. Version 5 is manifest-only: a v5 document without a non-empty tree
+// fields. Version 6 is manifest-only: a v6 document without a non-empty tree
 // root is a truncated manifest, not a blob, and decoding it as one would
 // hand the next commit an empty tree over the real index.
 func (m *RepoMetadata) UnmarshalJSON(data []byte) error {

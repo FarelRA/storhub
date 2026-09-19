@@ -135,7 +135,11 @@ func (e ErrPrecondition) Error() string {
 type Surface interface {
 	// CreateFile creates a file like O_CREAT; exclusive adds O_EXCL so a duplicate fails with ErrExists.
 	CreateFile(path string, perm uint32, exclusive bool) error
-	// Open returns a handle with an independent cursor; read-only open of a missing path fails with ErrNotFound.
+	// Open returns a handle with an independent cursor. The interface has
+	// no O_CREAT flag: opening a missing path in any mode fails with
+	// ErrNotFound (POSIX ENOENT without O_CREAT); creation is CreateFile.
+	// The FUSE/REST/CLI adapters bake O_CREATE into write-mode opens and
+	// therefore diverge from the oracle on missing paths by design.
 	Open(path string, mode OpenMode) (Handle, error)
 	// Stat reports size, mode, ownership, and mtime of the resolved path like stat().
 	Stat(path string) (Stat, error)

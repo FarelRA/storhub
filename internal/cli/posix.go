@@ -236,6 +236,11 @@ func (a *App) newChmodCmd() *cobra.Command {
 		Long: `Chmod replaces a path's permission bits (octal 000-7777),
 like chmod(1).
 
+There is deliberately no --expected-revision flag here: the storage
+Chmod verb takes no revision options, so a revision token could only be
+a start-of-request check, never apply-time compare-and-swap. Failing
+loud by documentation instead of offering a guard that does not guard.
+
 Examples:
   storhub chmod docs-project docs/f.txt 640`,
 		Args: usageArgs(cobra.ExactArgs(3)),
@@ -254,6 +259,8 @@ func (a *App) runChmod(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Plain hub.Chmod: no Context revision variant exists on the storage
+	// verb, so there is no --expected-revision to thread (see newChmodCmd).
 	if err := hub.Chmod(args[0], args[1], mode); err != nil {
 		return err
 	}
@@ -286,6 +293,11 @@ func (a *App) newChownCmd() *cobra.Command {
 		Long: `Chown replaces a path's owner and group like chown(1); -1
 keeps the corresponding id (prefix with -- so -1 is not read as a flag).
 
+There is deliberately no --expected-revision flag here: the storage
+Chown verb takes no revision options, so a revision token could only be
+a start-of-request check, never apply-time compare-and-swap. Failing
+loud by documentation instead of offering a guard that does not guard.
+
 Examples:
   storhub chown docs-project docs/f.txt 1000 1000
   storhub chown docs-project docs/f.txt -- -1 100`,
@@ -309,6 +321,8 @@ func (a *App) runChown(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Plain hub.Chown: no Context revision variant exists on the storage
+	// verb, so there is no --expected-revision to thread (see newChownCmd).
 	if err := hub.Chown(args[0], args[1], uid, gid); err != nil {
 		return err
 	}
@@ -326,6 +340,12 @@ func (a *App) newTouchCmd() *cobra.Command {
 		Long: `Touch sets a path's access and modification times to now
 (or to --atime-ns/--mtime-ns nanoseconds since the epoch), creating an
 empty file when missing unless --no-create is given, like touch(1).
+
+There is deliberately no --expected-revision flag here: touch is a
+create-plus-chtimes composition and neither storage verb takes revision
+options, so a revision token could only be a start-of-request check,
+never apply-time compare-and-swap. Failing loud by documentation
+instead of offering a guard that does not guard.
 
 Examples:
   storhub touch docs-project docs/f.txt
@@ -376,25 +396,37 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(a.stderr, "created %s\n", args[1])
 		return nil
 	}
-	if _, err := hub.StatPath(args[0], args[1]); err != nil {
-		// A missing path is created (unless --no-create); any other stat
-		// failure aborts before mutating.
-		if !isNotFoundErr(err) {
+	if noCreate {
+		// No creation allowed: a read-only existence check decides. A
+		// missing path is the touch(1) --no-create silent no-op; a live
+		// path is stamped, tolerating NotFound when it vanishes under
+		// us. The stat is read-only (no mutation TOCTOU); either race
+		// outcome stamps or skips correctly.
+		if _, err := hub.StatPath(args[0], args[1]); err != nil {
+			if isNotFoundErr(err) {
+				return nil
+			}
 			return err
 		}
-		if noCreate {
-			return nil
+		if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
+			if isNotFoundErr(err) {
+				return nil
+			}
+			return err
 		}
+	} else {
+		// Create-first, never check-then-act: attempt the create
+		// directly and tolerate AlreadyExists (a concurrent touch won
+		// the race) or IsDirectory (touching a live directory updates
+		// its stamps), so the timestamp update below always lands.
 		if _, err := hub.CreateFile(args[0], args[1]); err != nil {
-			// Lost a create race with a concurrent touch: the file exists
-			// now, so fall through to the timestamp update.
-			if !isAlreadyExistsErr(err) {
+			if !isAlreadyExistsErr(err) && !isIsDirErr(err) {
 				return err
 			}
 		}
-	}
-	if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
-		return err
+		if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
+			return err
+		}
 	}
 	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
 		return err
@@ -403,8 +435,8 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// isNotFoundErr/isAlreadyExistsErr classify hub errors. errors.Is keeps
-// wrapped failures matching.
+// isNotFoundErr/isAlreadyExistsErr/isIsDirErr classify hub errors.
+// errors.Is keeps wrapped failures matching.
 func isNotFoundErr(err error) bool {
 	return err != nil && errors.Is(err, shfs.ErrNotFound)
 }
@@ -413,12 +445,21 @@ func isAlreadyExistsErr(err error) bool {
 	return err != nil && errors.Is(err, shfs.ErrAlreadyExists)
 }
 
+func isIsDirErr(err error) bool {
+	return err != nil && errors.Is(err, shfs.ErrIsDirectory)
+}
+
 func (a *App) newSymlinkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "symlink [flags] <project> <target> <link-path>",
 		Short: "Create a symbolic link",
 		Long: `Symlink creates link-path pointing at target (dangling
 targets allowed), like ln -s.
+
+There is deliberately no --expected-revision flag here: the storage
+Symlink verb takes no revision options, so a revision token could only
+be a start-of-request check, never apply-time compare-and-swap. Failing
+loud by documentation instead of offering a guard that does not guard.
 
 Examples:
   storhub symlink docs-project docs/f.txt docs/alias.txt`,
@@ -434,6 +475,8 @@ func (a *App) runSymlink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Plain hub.Symlink: no Context revision variant exists on the
+	// storage verb, so there is no --expected-revision to thread.
 	meta, err := hub.Symlink(args[0], args[1], args[2])
 	if err != nil {
 		return err
@@ -478,6 +521,11 @@ func (a *App) newLinkCmd() *cobra.Command {
 		Long: `Link creates new-path as a hard link to existing-path
 (regular files only), like ln(1) without -s.
 
+There is deliberately no --expected-revision flag here: the storage
+Link verb takes no revision options, so a revision token could only be
+a start-of-request check, never apply-time compare-and-swap. Failing
+loud by documentation instead of offering a guard that does not guard.
+
 Examples:
   storhub link docs-project docs/f.txt docs/hard.txt`,
 		Args: usageArgs(cobra.ExactArgs(3)),
@@ -492,6 +540,8 @@ func (a *App) runLink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Plain hub.Link: no Context revision variant exists on the storage
+	// verb, so there is no --expected-revision to thread.
 	meta, err := hub.Link(args[0], args[1], args[2])
 	if err != nil {
 		return err

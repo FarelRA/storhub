@@ -530,7 +530,7 @@ func TestChtimesWriteOnlyCannotForgeTimestamps(t *testing.T) {
 	if err := svc.ChtimesExplicitContext(writer, "demo", "docs/w.txt", nil, nil); err != nil {
 		t.Fatalf("write-only pure-omit chtimes: %v", err)
 	}
-	now := time.Unix(backend.now, 0)
+	now := time.Unix(0, backend.now)
 	if err := svc.ChtimesExplicitContext(writer, "demo", "docs/w.txt", &now, &now); err != nil {
 		t.Fatalf("write-only now-ish chtimes: %v", err)
 	}

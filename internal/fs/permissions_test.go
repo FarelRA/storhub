@@ -37,9 +37,9 @@ func TestCheckStickyDelete(t *testing.T) {
 
 func TestShouldUpdateAtimePolicy(t *testing.T) {
 	t.Parallel()
-	now := int64(1000)
-	old := now - 172800
-	recent := now - 3600
+	now := int64(1_000_000_000_000)
+	old := now - 172800*1e9
+	recent := now - 3600*1e9
 	if ShouldUpdateAtime(storcfg.AtimeNo, old, old, old, now) {
 		t.Fatal("expected noatime to skip updates")
 	}

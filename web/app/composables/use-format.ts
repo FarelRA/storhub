@@ -35,7 +35,8 @@ export function formatMode(mode: number | undefined): string {
 function parseDate(input: string | number | undefined | null): Date | null {
   if (input === undefined || input === null || input === '') return null
   if (typeof input === 'number') {
-    const ms = input > 1e12 ? input : input * 1000
+    // Wire timestamps are Unix nanoseconds (int64); convert to ms for Date.
+    const ms = input / 1e6
     const date = new Date(ms)
     return Number.isNaN(date.getTime()) ? null : date
   }
@@ -69,12 +70,13 @@ export function relativeTime(input: string | number | undefined | null, now = Da
       return rtf.format(Math.round(diffMs / size), unit)
     }
   }
-  return formatDateTime(date.getTime())
+  return formatDateTime(date.toISOString())
 }
 
 export function toDatetimeLocal(input: number | undefined): string {
   if (!input) return ''
-  const date = new Date(input * 1000)
+  // Wire timestamps are Unix nanoseconds; convert to ms for Date.
+  const date = new Date(input / 1e6)
   if (Number.isNaN(date.getTime())) return ''
   const pad = (n: number) => String(n).padStart(2, '0')
   return (

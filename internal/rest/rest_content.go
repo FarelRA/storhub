@@ -56,7 +56,8 @@ type pathRequest struct {
 // compatibility: they warn-but-work this release and will be removed in a
 // future version. New clients must send src_path/dst_path.
 //
-// src/dst are short aliases for src_path/dst_path. src_off/dst_off/length
+// src/dst are short aliases for src_path/dst_path (name aliases only: they
+// never select the range variant). src_off/dst_off/length
 // select the range variant: when any of them is present the request routes
 // to CloneRange (server-side range clone, zero bytes uploaded) instead of
 // the whole-file CopyContext. Absent offsets default to 0; an absent
@@ -100,10 +101,12 @@ func copySrcDst(req copyRequest) (src, dst string, err error) {
 
 // copyRangeParams resolves the range-clone offsets: absent offsets default
 // to 0, and ok reports whether the request asks for the range variant at
-// all (any range field present). Negative values are 400 here so storage
-// never sees them.
+// all (any of src_off/dst_off/length present). Only those three fields
+// select the range path: the src/dst short aliases are name aliases, not
+// range selectors, so alias-only requests stay on whole-file CopyContext.
+// Negative values are 400 here so storage never sees them.
 func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok bool, err error) {
-	ok = req.SrcOff != nil || req.DstOff != nil || req.Length != nil || strings.TrimSpace(req.Src) != "" || strings.TrimSpace(req.Dst) != ""
+	ok = req.SrcOff != nil || req.DstOff != nil || req.Length != nil
 	if req.SrcOff != nil {
 		if *req.SrcOff < 0 {
 			return 0, 0, nil, true, errBadRequest("src_off must be non-negative")
@@ -192,6 +195,12 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	dirPath := r.URL.Query().Get("path")
+	// Unbounded by design: no limit/offset parameters. Directory reads
+	// resolve against the published tree in one storage call and the
+	// response is one JSON document; adding pagination would need a
+	// storage cursor to stay consistent across commits, which does not
+	// exist. Clients needing bounded transfers page at a coarser grain
+	// (per-path stat loops) instead.
 	entries, err := h.clientFor(r).ReadDirContext(r.Context(), project, dirPath)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -250,6 +259,10 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	}
 	start, end, partial, rerr := parseByteRange(r.Header.Get("Range"), entry.Size)
 	if rerr != nil {
+		// Unmatched or unsatisfiable ranges fail loud with 416 plus a
+		// Content-Range */size hint (never silent truncation to 200):
+		// the caller asked for bytes that do not exist. The conformance
+		// getRange helper treats 416 as an empty read at that offset.
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
 		h.writeMappedError(w, &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rerr.Error()})
 		return
@@ -533,6 +546,11 @@ func (h *restHandler) enforceFreshPrecondition(r *http.Request, project, targetP
 // earlier clients) yield no options here; those flows keep their existing
 // freshness semantics via enforceFreshPrecondition, which still answers 412
 // on staleness. Absent If-Match yields no options.
+//
+// Status contract: CAS divergence always surfaces as
+// fs.ErrPreconditionFailed, mapped to 412. 409 stays reserved for resource
+// conflicts (AlreadyExists, NoReplace, unlinked-handle states), so CAS
+// clients only need the 412 arm; no CAS path emits 409.
 func (h *restHandler) revisionPrecondition(r *http.Request, project string) (opts []shfs.MutateOption, matched bool, err error) {
 	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
 	if ifMatch == "" {
@@ -567,10 +585,21 @@ func unquoteEntityTag(v string) string {
 // classic attribute-ETag freshness against freshly-statted state. Every
 // mutating endpoint funnels through here so neither flavor can be
 // short-circuited by a stale fast path.
+//
+// If-None-Match * is enforced here too (RFC 9110 precedence over
+// If-Match): on an existing guard target the request fails 412, so the
+// create-only guard can never be skipped by pairing * with a matching
+// If-Match token. A missing target proceeds so the handler answers its
+// own 404/create outcome.
 func (h *restHandler) mutationPrecondition(r *http.Request, project, filePath string) (opts []shfs.MutateOption, err error) {
 	revOpts, revMatched, rerr := h.revisionPrecondition(r, project)
 	if rerr != nil {
 		return nil, rerr
+	}
+	if matchEntityTag(r.Header.Get("If-None-Match"), "*") {
+		if serr := h.rejectIfNoneMatchStar(r, project, filePath); serr != nil {
+			return nil, serr
+		}
 	}
 	if revMatched {
 		return revOpts, nil
@@ -579,6 +608,18 @@ func (h *restHandler) mutationPrecondition(r *http.Request, project, filePath st
 		return nil, err
 	}
 	return nil, nil
+}
+
+// rejectIfNoneMatchStar enforces If-None-Match * against the guard target:
+// existing answers 412 (create-only semantics), missing proceeds, and any
+// other stat failure propagates so an unprovable state never applies.
+func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath string) error {
+	if _, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath); err == nil {
+		return errPreconditionFailed("resource already exists")
+	} else if mappedStatus(err) != http.StatusNotFound {
+		return err
+	}
+	return nil
 }
 
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
@@ -628,8 +669,10 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// SetXAttrContext takes no mutate options: freshness only.
-	if _, ok := h.preconditionForUpdate(w, r, project, targetPath); !ok {
+	// SetXAttrContext takes no mutate options: a revision token fails loud
+	// with 412 (preconditionForUpdateNoCAS) instead of silently degrading
+	// to a start-of-request check.
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-put") {
 		return
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
@@ -659,8 +702,9 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	// RemoveXAttrContext takes no mutate options: freshness only.
-	if _, ok := h.preconditionForUpdate(w, r, project, targetPath); !ok {
+	// RemoveXAttrContext takes no mutate options: like xattr-put, a
+	// revision token fails loud with 412 (preconditionForUpdateNoCAS).
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-delete") {
 		return
 	}
 	if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
@@ -826,7 +870,7 @@ func restEntryETag(entry *shfs.EntryInfo) string {
 	hash := sha256.New()
 	_, _ = io.WriteString(hash, entry.Path)
 	_, _ = io.WriteString(hash, "|")
-	_, _ = io.WriteString(hash, fmt.Sprintf("%d|%d|%d|%d|%d|%t|%t|%s|%s", entry.Inode, entry.Size, entry.Mode, entry.UID, entry.GID, entry.IsDir, entry.IsSymlink, time.Unix(entry.ModifiedAt, 0).UTC().Format(time.RFC3339Nano), time.Unix(entry.ChangedAt, 0).UTC().Format(time.RFC3339Nano)))
+	_, _ = io.WriteString(hash, fmt.Sprintf("%d|%d|%d|%d|%d|%t|%t|%s|%s", entry.Inode, entry.Size, entry.Mode, entry.UID, entry.GID, entry.IsDir, entry.IsSymlink, time.Unix(0, entry.ModifiedAt).UTC().Format(time.RFC3339Nano), time.Unix(0, entry.ChangedAt).UTC().Format(time.RFC3339Nano)))
 	if entry.SymlinkTarget != "" {
 		_, _ = io.WriteString(hash, "|")
 		_, _ = io.WriteString(hash, entry.SymlinkTarget)

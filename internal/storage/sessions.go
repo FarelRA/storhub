@@ -56,6 +56,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -95,6 +96,13 @@ var (
 	ErrSessionUnlinked = errors.New("storhub: session has no path: link it before sync or close")
 	// ErrSessionLinked reports linking a handle that already has a path.
 	ErrSessionLinked = errors.New("storhub: session already has a path")
+	// ErrSessionPathGone reports a commit or sync for a handle whose
+	// pinned inode lost its last name after open (unlinked or renamed
+	// away with no surviving link). Close maps it to discard-success
+	// (POSIX: closing an unlinked fd drops the data); sync maps it to
+	// retain-and-succeed (POSIX: fsync on an unlinked fd succeeds, and
+	// the staged bytes stay readable until close).
+	ErrSessionPathGone = errors.New("storhub: session path unlinked after open")
 )
 
 // StaleSessionError is the typed stale-handle error answered for expired or
@@ -1161,12 +1169,52 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) erro
 // sessions. Same-handle exclusion comes from s.mu, cross-session commit
 // exclusion from commitMu (order s.mu then commitMu; hub verbs underneath
 // take pm.mu, never session locks, so no cycle).
+// resolveCommitPathLocked maps a dirty handle to the path its staged state
+// must publish to. The open path wins while it still names the pinned
+// inode; after a rename the first surviving name (sorted, deterministic)
+// wins, so close follows the rename instead of resurrecting the old name;
+// when the inode lost its last name after open it returns "" and the
+// caller maps that to discard (close) or retain (sync). Created handles
+// keep the open path: a concurrent creator wins or loses through the
+// normal create verb, exactly as before. Callers must hold s.mu; the live
+// tree read is the same snapshot the verbs will contend with.
+func (h *StorHub) resolveCommitPathLocked(ctx context.Context, s *openSession) (string, error) {
+	if s.created {
+		return s.path, nil
+	}
+	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	if err != nil {
+		return "", err
+	}
+	paths := live.FindFilesByInode(s.pinned.Inode)
+	for _, p := range paths {
+		if p == s.path {
+			return s.path, nil
+		}
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	sort.Strings(paths)
+	return paths[0], nil
+}
+
 func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, s *openSession) error {
 	if !s.dirty {
 		return nil
 	}
 	if s.path == "" {
 		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionUnlinked)
+	}
+	// Map the handle to the path its staged state must publish to: the
+	// open path while it still names the pinned inode, a surviving name
+	// after a rename, or gone when the inode was unlinked after open.
+	commitPath, err := h.resolveCommitPathLocked(ctx, s)
+	if err != nil {
+		return err
+	}
+	if commitPath == "" {
+		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionPathGone)
 	}
 	// Commit as the opener (see the opener field): ownership and
 	// privilege decisions follow whoever staged the bytes. The closer's
@@ -1186,7 +1234,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 	sh.commitMu.Lock()
 	defer sh.commitMu.Unlock()
 
-	if err := h.recheckSessionDAC(commitCtx, s); err != nil {
+	if err := h.recheckSessionDAC(commitCtx, s, commitPath); err != nil {
 		return err
 	}
 
@@ -1194,13 +1242,13 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 		var err error
 		switch {
 		case s.created:
-			_, err = h.UploadFileContext(commitCtx, s.project, s.path, s.tmpName)
+			_, err = h.UploadFileContext(commitCtx, s.project, commitPath, s.tmpName)
 		case s.fullImage:
 			var staged *os.File
 			staged, err = os.Open(s.tmpName)
 			if err == nil {
 				defer func() { _ = staged.Close() }()
-				_, err = h.ReplaceFileFromReaderContext(commitCtx, s.project, s.path, staged, shfs.WithSize(s.curSize))
+				_, err = h.ReplaceFileFromReaderContext(commitCtx, s.project, commitPath, staged, shfs.WithSize(s.curSize))
 			}
 			if err != nil {
 				err = fmt.Errorf("commit session %s: %w", shortSHA(s.id), err)
@@ -1209,7 +1257,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 			var tail []byte
 			tail, err = s.readStagedRange(s.baseSize, s.curSize)
 			if err == nil {
-				_, err = h.AppendFileContext(commitCtx, s.project, s.path, tail)
+				_, err = h.AppendFileContext(commitCtx, s.project, commitPath, tail)
 			}
 		default:
 			var edits []shfs.RangeEdit
@@ -1218,7 +1266,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 				if len(edits) == 0 {
 					return fmt.Errorf("commit session %s: staged state with no dirty ranges", shortSHA(s.id))
 				}
-				_, err = h.PatchFileRangesContext(commitCtx, s.project, s.path, edits)
+				_, err = h.PatchFileRangesContext(commitCtx, s.project, commitPath, edits)
 			}
 		}
 		if err != nil {
@@ -1234,13 +1282,16 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 
 // recheckSessionDAC re-validates write permission against live state before
 // committing: the open-time check cannot see permission changes that landed
-// while the handle was open. Failures fail loud and retain staged state.
-func (h *StorHub) recheckSessionDAC(ctx context.Context, s *openSession) error {
+// while the handle was open. commitPath is the resolved publish target
+// (open path, or a surviving name after a rename), so the check follows
+// renames instead of authorizing against a stale name. Failures fail loud
+// and retain staged state.
+func (h *StorHub) recheckSessionDAC(ctx context.Context, s *openSession, commitPath string) error {
 	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
 	if err != nil {
 		return err
 	}
-	cleanName, traversed, err := h.resolveAuthedPath(ctx, live, s.path, true)
+	cleanName, traversed, err := h.resolveAuthedPath(ctx, live, commitPath, true)
 	if err != nil {
 		return err
 	}
@@ -1340,6 +1391,14 @@ func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
 		return nil
 	}
 	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
+		if errors.Is(err, ErrSessionPathGone) {
+			// Pinned inode unlinked after open: the fsync
+			// equivalent succeeds with nothing to publish, and
+			// the staged bytes stay readable until close. There
+			// is no live entry to repin to, so keep the pin.
+			s.lastUse = sh.now()
+			return nil
+		}
 		return err
 	}
 	if err := h.repinSessionLocked(ctx, s); err != nil {
@@ -1376,9 +1435,9 @@ func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
 		s.mu.Unlock()
 		return newStaleSessionError(handleID, "unknown handle")
 	}
-	if s.path == "" || !s.dirty {
-		// Destroy needs the table lock in sh-then-s order: release s.mu
-		// first, then re-acquire both and re-validate.
+	// Destroy needs the table lock in sh-then-s order: release s.mu
+	// first, then re-acquire both and re-validate.
+	destroy := func() error {
 		s.mu.Unlock()
 		sh.mu.Lock()
 		victim, verr := sh.getLiveLocked(handleID, sh.now())
@@ -1392,19 +1451,17 @@ func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
 		sh.mu.Unlock()
 		return nil
 	}
+	if s.path == "" || !s.dirty {
+		return destroy()
+	}
 	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
+		if errors.Is(err, ErrSessionPathGone) {
+			// Pinned inode unlinked after open: POSIX close
+			// discards the staged state with success.
+			return destroy()
+		}
 		s.mu.Unlock()
 		return err
 	}
-	s.mu.Unlock()
-	sh.mu.Lock()
-	victim, verr := sh.getLiveLocked(handleID, sh.now())
-	if verr != nil {
-		sh.mu.Unlock()
-		return verr
-	}
-	sh.destroyLocked(victim, false)
-	victim.mu.Unlock()
-	sh.mu.Unlock()
-	return nil
+	return destroy()
 }

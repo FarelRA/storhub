@@ -14,7 +14,7 @@ import (
 // must preserve.
 func sampleTree(t *testing.T) *RepoMetadata {
 	t.Helper()
-	now := int64(1000)
+	now := int64(1000000000000)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("docs", now)
 	m.EnsureDirectory("docs/2024", now)
@@ -99,7 +99,7 @@ func TestMerkleRoundTripIdentity(t *testing.T) {
 
 func TestMerkleDedupIdenticalSubtrees(t *testing.T) {
 	t.Parallel()
-	now := int64(500)
+	now := int64(500000000000)
 	m := NewRepoMetadata("demo")
 	// Two structurally identical directories (same file names, same sizes,
 	// same modes, same times) but distinct inodes. The node CONTENT differs
@@ -203,7 +203,7 @@ func collectNodeShas(t *testing.T, m *RepoMetadata, res *TreeResult, out map[str
 
 func TestMerkleChunkBucketsByIndex(t *testing.T) {
 	t.Parallel()
-	now := int64(700)
+	now := int64(700000000000)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("d", now)
 	if _, err := m.EnsureRelease("v1", now); err != nil {
@@ -264,7 +264,7 @@ func TestBuildTreeRejectsOrphanEntries(t *testing.T) {
 		t.Fatal("file under a missing parent directory built silently")
 	}
 	orphanDir := NewRepoMetadata("demo")
-	orphanDir.dirs["ghost/deep"] = DirMeta{Inode: 6, CreatedAt: 1, ModifiedAt: 1}
+	orphanDir.dirs["ghost/deep"] = DirMeta{Inode: 6, CreatedAt: 1000000000, ModifiedAt: 1000000000}
 	if _, err := BuildTree(orphanDir); err == nil {
 		t.Fatal("directory under a missing parent built silently")
 	}
@@ -425,7 +425,7 @@ func TestObjectAddressing(t *testing.T) {
 func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
-	m.Normalize("demo", 42)
+	m.Normalize("demo", 42000000000)
 	res, err := BuildTree(m)
 	if err != nil {
 		t.Fatalf("build empty: %v", err)
@@ -441,7 +441,7 @@ func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load empty: %v", err)
 	}
-	loaded.Normalize("demo", 42)
+	loaded.Normalize("demo", 42000000000)
 	if len(loaded.files) != 0 || len(loaded.dirs) != 0 || loaded.Root.Inode != m.Root.Inode {
 		t.Fatalf("empty round-trip lost root or gained entries: %+v", loaded)
 	}
@@ -452,7 +452,7 @@ func TestMerkleEmptyTreeRoundTrips(t *testing.T) {
 // loader used to mistake that sharing for a cycle (unloadable project).
 func TestLoadTreeLoadsDedupedSubtrees(t *testing.T) {
 	t.Parallel()
-	now := int64(500)
+	now := int64(500000000000)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("a", now)
 	m.EnsureDirectory("b", now)
@@ -561,7 +561,7 @@ func TestLoadTreeParallelMatchesSequential(t *testing.T) {
 // sequential loader.
 func TestLoadTreeParallelLoadsDedupedSubtrees(t *testing.T) {
 	t.Parallel()
-	now := int64(500)
+	now := int64(500000000000)
 	m := NewRepoMetadata("demo")
 	m.EnsureDirectory("a", now)
 	m.EnsureDirectory("b", now)

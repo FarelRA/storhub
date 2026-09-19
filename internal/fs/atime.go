@@ -51,9 +51,10 @@ func ShouldUpdateAtime(policy storcfg.AtimePolicy, accessedAt, modifiedAt, chang
 	return (now - accessedAt) >= relatimeInterval
 }
 
-// relatimeInterval is the Linux default relatime window (24h in seconds):
-// atime updates at most once per interval unless mtime/ctime moved first.
-const relatimeInterval = 86400
+// relatimeInterval is the Linux default relatime window (24h) in Unix
+// nanoseconds: atime updates at most once per interval unless
+// mtime/ctime moved first.
+const relatimeInterval = 86_400_000_000_000
 
 // TouchAccessTime queues one atime update for the node at targetPath,
 // honouring the backend policy and the suppression context. It is the

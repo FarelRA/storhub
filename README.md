@@ -385,6 +385,13 @@ REST APIs:
 - `rest.New`
 - `rest.HashPassword`
 
+Wire timestamps are Unix nanoseconds (int64, `time.UnixNano` scale):
+`modified_at`, `created_at`, `accessed_at`, and `changed_at` on node/entry
+payloads plus `committed_at` on metadata revisions all carry nanoseconds
+since the epoch (the `POST .../ops/utimes` body is the exception: it takes
+RFC 3339 `atime`/`mtime` strings). Durations stay in their own units
+(`expires_in` is seconds, share TTLs accept seconds only).
+
 REST endpoint groups:
 
 - `GET|DELETE /api/v1/projects/{project}`: project stats; DELETE removes the project (admin only)
@@ -395,6 +402,7 @@ REST endpoint groups:
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...`: extended attribute inspection and mutation
 - `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge, prune
 - `?sync=1` on any mutating endpoint drains the project's journal before responding (fsync-class: pre-call data is remote-durable on success). Drain failure answers `500` naming the project; the mutation is already published and journaled, so retry-or-verify, never silent loss
+- journal group-commit window: acknowledged mutations are journal-persistent for same-machine recovery before acknowledgment, but the journal fsync itself is coalesced on a short window (100ms), so a hard crash inside the window can drop acknowledged-but-uncommitted ops. Anything that survived the window redrives from the journal; only `?sync=1` (or CLI `--sync`, or session sync/close with sync) makes a call remote-durable before it returns
 - `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}`: share management for the project (creator or admin)
 - `POST /api/v1/projects/{project}/shares` answers `201` with a `Location` header pointing at the created share's management resource, and `DELETE` of a share answers `204`, matching the API's other create/delete conventions; share lifetimes are clamped to the configured maximum (7 days by default). Share URLs carry the signed JWT itself: the console link is `/?share=<token>` and the file download link is `/api/v1/shares/<id>/download?token=<token>`. Redemption (`GET /api/v1/shares/<token>`, `GET|HEAD /api/v1/shares/<id>/download`, `POST /api/v1/shares/<id>/derive`) verifies the token statelessly and answers from its claims, with no registry lookup, so links survive server restarts; the short ID addresses only the management plane under `/projects/{project}/shares`. The creation response alone returns the signed token; listings never include it or mintable URLs. `DELETE` marks the share revoked in the serving handler's registry, killing the link immediately there (revocation is per-handler by design; permanent revocation is key rotation)
 - `GET /api/v1/projects/{project}/revisions`: metadata revision history
@@ -407,7 +415,7 @@ Authenticated REST:
 - authorization uses StorHub owner/group/mode metadata, so REST operations follow UNIX-style checks instead of a separate ACL model
 - directory traversal requires execute/search permission on each ancestor directory
 - create, unlink, rename, and rmdir operations are authorized from parent directory write+execute permission
-- `chown`, rollback, revert-path, purge, prune, and project deletion are restricted to admin identities
+- rollback, revert-path, purge, prune, and project deletion are restricted to admin identities; `chown` of ownership is admin-only, but a file owner may change the group to any group they belong to (owner chgrp, no admin needed)
 
 Minimal authenticated REST setup:
 
@@ -473,6 +481,43 @@ curl -X PATCH 'http://localhost:8080/api/v1/projects/demo/content?path=docs/log.
   --data-binary 'new entry' -H "If-Match: $REV"
 # 412 means HEAD moved under you: refetch REV and retry.
 ```
+
+### Stateful sessions (handles)
+
+Stateless REST resolves every request against the latest commit, so a
+multi-call sequence (read, edit, edit, commit) can straddle a concurrent
+writer. Sessions pin an open-time snapshot plus the handle's own staged
+writes, mirroring FUSE open-file descriptions: reads serve the pin plus
+own writes, staged writes stay invisible to everyone else, and sync or
+close commits them atomically through the standard verb ladder.
+
+REST (`/api/v1/projects/{project}/handles`, same auth as the project
+routes; the share lane denies every session verb):
+
+- `POST /handles` with `{project, path?, mode, ttl?}` opens a handle
+  (`201 {handle}`); an empty path opens unlinked scratch that must be
+  named with link before sync or close
+- `GET /handles/{h}` stats the handle; `GET` with `?offset=&length=`
+  reads a byte range (positional reads only, no server cursor)
+- `POST /handles/{h}/write`, `/truncate`, `/sync` (commit without
+  closing), `/link` (name scratch), `/close` (commit and destroy;
+  `DELETE /handles/{h}` is an alias); close and sync honor `?sync=1`
+- errors: stale (expired or unknown handle) `410`, owner mismatch `403`,
+  project or user over caps `429`, unlinked scratch or already linked
+  `409`, mode violations `400`
+
+CLI (`storhub session`, every verb threads `--handle`):
+
+- `session open <project> [path] [--mode r] [--ttl 5m]`,
+  `session read/write/append/truncate/stat/sync/link/close`
+- `session close --handle H --sync` drains the project before returning,
+  like `?sync=1`
+
+Handles expire after 10 minutes idle by default; a larger per-open TTL is
+clamped to the 1-hour cap, not rejected. Per-project (64) and per-user
+(128) handle caps answer `429` when busy. A server restart drops all
+sessions: committed state is unaffected, staged-but-uncommitted writes
+are lost unless they were synced.
 
 ## Examples
 

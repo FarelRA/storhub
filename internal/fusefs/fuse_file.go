@@ -62,6 +62,16 @@ func (h *storhubHandle) handlePath() string {
 	return h.path
 }
 
+// snapshotWriteState returns the handle's write state under h.mu. Release
+// nils the pointer under the same lock, so every other reader must load it
+// this way: a plain read races the Release write. h.mu is a leaf lock; the
+// caller must release it before taking opMu or the state mutex.
+func (h *storhubHandle) snapshotWriteState() *inodeWriteState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.writeState
+}
+
 // pinnedContent is an immutable, self-contained view of one file's data
 // layout. Chunk assets are content-addressed, so the descriptors stay
 // valid for the handle's lifetime regardless of later metadata changes.
@@ -317,7 +327,12 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			s.mu.Unlock()
 			return nil, err
 		}
+		// The handle is already published in s.handles above, so
+		// scanners (detachedBase, rebind) may load the pointer
+		// concurrently: store it under h.mu.
+		h.mu.Lock()
 		h.writeState = writeState
+		h.mu.Unlock()
 		if flags&syscall.O_TRUNC != 0 && bootstrap == nil {
 			// Serialize with in-flight commits and writes on opMu: the
 			// truncate must land wholly before or after them, never in
@@ -468,7 +483,7 @@ func (h *storhubHandle) abandonMaterializeLocked(temp *os.File) bool {
 }
 
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	if writeState := h.writeState; writeState != nil {
+	if writeState := h.snapshotWriteState(); writeState != nil {
 		// Serialize with commits on opMu (always opMu before mu): commit
 		// drops mu across its network window while mutating the plan,
 		// and a read straddling that window would serve half-old,
@@ -665,7 +680,10 @@ const (
 // nothing to allocate against and returns EBADF, matching POSIX.
 func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
 	_ = ctx
-	if h.writeState == nil {
+	// Load-then-use: the pointer is nilled under h.mu by Release, so
+	// snapshot it first and use only the local below.
+	writeState := h.snapshotWriteState()
+	if writeState == nil {
 		return syscall.EBADF
 	}
 	if off > math.MaxInt64 || size > math.MaxInt64 {
@@ -685,23 +703,23 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		}
 		return syscall.EOPNOTSUPP
 	}
-	h.writeState.opMu.Lock()
-	defer h.writeState.opMu.Unlock()
-	h.writeState.mu.Lock()
-	defer h.writeState.mu.Unlock()
-	if h.writeState.poisoned {
+	writeState.opMu.Lock()
+	defer writeState.opMu.Unlock()
+	writeState.mu.Lock()
+	defer writeState.mu.Unlock()
+	if writeState.poisoned {
 		return syscall.EIO
 	}
-	if err := h.writeState.ensureTempLocked(); err != nil {
+	if err := writeState.ensureTempLocked(); err != nil {
 		return errnoFromError(err)
 	}
-	if err := reserveSpace(h.writeState.temp, mode, start, length); err != nil {
+	if err := reserveSpace(writeState.temp, mode, start, length); err != nil {
 		return errnoFromError(err)
 	}
 	end := start + length
-	if mode&fallocFlKeepSize == 0 && end > h.writeState.logicalSize {
-		h.writeState.markDirtyLocked(h.writeState.logicalSize, end)
-		h.writeState.logicalSize = end
+	if mode&fallocFlKeepSize == 0 && end > writeState.logicalSize {
+		writeState.markDirtyLocked(writeState.logicalSize, end)
+		writeState.logicalSize = end
 	}
 	h.fs.debugf("fallocate path=%s inode=%d off=%d size=%d mode=%#x", h.handlePath(), h.inode, start, length, mode)
 	return 0
@@ -741,8 +759,11 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		// for earlier fsync-less writes). Preserve the overlay for manual
 		// recovery instead of deleting it.
 		h.quarantineTemps()
-		if h.writeState != nil && h.fs.soleWriteStateRef(h.writeState) {
-			h.writeState.quarantineTemps()
+		// Load-then-use: commit above already snapshotted the same
+		// pointer, and a concurrent op may hold it too; the state
+		// outlives the handle via refs and the registry.
+		if writeState := h.snapshotWriteState(); writeState != nil && h.fs.soleWriteStateRef(writeState) {
+			writeState.quarantineTemps()
 		}
 	} else if drainErrno := h.drainProject(ctx); drainErrno != 0 {
 		// The commit published but the drain did not confirm remote
@@ -770,9 +791,15 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		// close is the guarantee that matters in practice.
 		h.fs.dropAllLocksForInode(h.inode)
 	}
-	if h.writeState != nil {
-		h.fs.releaseWriteState(h.writeState)
-		h.writeState = nil
+	// Nil the pointer under h.mu so in-flight Read/Write/Allocate/Lseek
+	// snapshots either observe the state (safe: it outlives the handle)
+	// or a clean nil, never a torn read.
+	h.mu.Lock()
+	writeState := h.writeState
+	h.writeState = nil
+	h.mu.Unlock()
+	if writeState != nil {
+		h.fs.releaseWriteState(writeState)
 	}
 	_ = ctx
 	return errno

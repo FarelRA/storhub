@@ -21,7 +21,7 @@ import (
 // rotation prepare closures. Partial-upload compensation stays with the
 // callers (they own sink.results).
 func (h *StorHub) preparePatchWorkspace(ctx context.Context, project string, repoMeta *RepoMetadata, filePath string, requiredSlots int) (releaseTag, uploadURL string, probe *RepoMetadata, err error) {
-	probe, err = newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	probe, err = newReleaseProbe(repoMeta, project, h.config.Now().UnixNano())
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -49,14 +49,26 @@ func finalizePlaylist(assembled []ChunkInfo) []ChunkInfo {
 }
 
 func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) ([]ChunkInfo, string, error) {
+	assembled, _, tag, err := h.buildPatchedChunksFresh(ctx, project, repoMeta, fileMeta, filePath, patchOffset, deleteSize, edit)
+	return assembled, tag, err
+}
+
+// buildPatchedChunksFresh is the single-edit builder with a fresh-only
+// side channel: assembled mixes reused committed chunks with fresh uploads
+// (spliceEdit cuts reused chunks into prefix/suffix views of their original
+// assets), so callers must compensate ONLY the returned fresh list on
+// failure. Compensating the mixed playlist deletes winners' live chunks
+// (same regression as the batch builders: TestConcurrentAppendByteExactness
+// 404'd on read-back when a loser's failure deleted a reused chunk).
+func (h *StorHub) buildPatchedChunksFresh(ctx context.Context, project string, repoMeta *RepoMetadata, fileMeta FileMeta, filePath string, patchOffset, deleteSize int64, edit []byte) (assembled, fresh []ChunkInfo, tag string, err error) {
 	finalSize := fileMeta.Size - deleteSize + int64(len(edit))
 	requiredSlots := inlineChunkCount(int64(len(edit)), h.config.ChunkSize)
 	if finalSize == 0 && requiredSlots == 0 {
-		return []ChunkInfo{}, "", nil
+		return []ChunkInfo{}, nil, "", nil
 	}
 	releaseTag, uploadURL, probe, err := h.preparePatchWorkspace(ctx, project, repoMeta, filePath, requiredSlots)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 
 	patchedChunks, actualTag, _, err := h.uploadInlineChunks(ctx, project, releaseTag, uploadURL, patchOffset, edit, func(remaining int) (string, string, error) {
@@ -64,7 +76,7 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 	})
 	if err != nil {
 		h.compensateDeleteAssets(ctx, project, patchedChunks)
-		return nil, "", err
+		return nil, nil, "", err
 	}
 
 	resolved := make([]ChunkInfo, 0, len(fileMeta.Chunks))
@@ -74,11 +86,11 @@ func (h *StorHub) buildPatchedChunks(ctx context.Context, project string, repoMe
 		}
 	}
 
-	assembled := finalizePlaylist(spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks))
+	assembled = finalizePlaylist(spliceEdit(resolved, patchOffset, deleteSize, int64(len(edit)), patchedChunks))
 	// Report the release that actually holds the new chunks. A
 	// release-full rotation inside the sink moves later chunks; the
 	// initial tag may no longer hold them.
-	return assembled, actualTag, nil
+	return assembled, patchedChunks, actualTag, nil
 }
 
 // spliceEdit rewrites a playlist for one edit: chunks entirely before the

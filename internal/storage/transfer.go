@@ -43,7 +43,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	// Release probe, not a full tree clone (audit 33): picking only reads
 	// the release set + counts, so a throwaway carrying just the catalog
 	// avoids an O(tree) memcpy per upload/patch.
-	probe, err := newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	probe, err := newReleaseProbe(repoMeta, project, h.config.Now().UnixNano())
 	if err != nil {
 		return "", "", err
 	}
@@ -142,7 +142,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// file content (before truncation), producing chunks past the new EOF.
 	chunks = trimChunks(chunks, size)
 
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	fileMeta := current.Clone()
 	fileMeta.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, fileMeta.Mode)
 
@@ -356,7 +356,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	}
 	defer func() { _ = planner.Close() }()
 
-	workingMeta, err := newReleaseProbe(repoMeta, project, h.config.Now().Unix())
+	workingMeta, err := newReleaseProbe(repoMeta, project, h.config.Now().UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 		Size:   fileInfo.Size(),
 		Chunks: nil,
 	}
-	implposix.ApplyUploadIdentity(cleanName, existing, &fileMeta, h.config.Now().Unix())
+	implposix.ApplyUploadIdentity(cleanName, existing, &fileMeta, h.config.Now().UnixNano())
 	if existing == nil {
 		defaultUID, defaultGID := h.DefaultOwnerIDs()
 		fileMeta.UID, fileMeta.GID = shfs.OwnerIDsForCreate(ctx, defaultUID, defaultGID)
@@ -439,7 +439,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	// All mutations apply to a private COW copy; the shared tree is swapped
 	// in only once every fallible step has succeeded.
 	tree := cowTree(pm.meta)
-	if _, err := tree.EnsureRelease(releaseTag, h.config.Now().Unix()); err != nil {
+	if _, err := tree.EnsureRelease(releaseTag, h.config.Now().UnixNano()); err != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
@@ -447,7 +447,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	// Rotation may have spread this file's chunks across releases;
 	// ensuring only the initial tag would strand rotated chunks outside
 	// the catalog where PurgeUntracked deletes live data.
-	if err := ensureChunkReleases(tree, results, h.config.Now().Unix()); err != nil {
+	if err := ensureChunkReleases(tree, results, h.config.Now().UnixNano()); err != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, results)
 		return nil, err
@@ -467,14 +467,14 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	fileMeta.Chunks = chunkIDs
 	current := tree.FindFile(cleanName)
 	if current != nil {
-		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().Unix())
-		implposix.ReplaceInodeFamily(tree, cleanName, current, fileMeta, h.config.Now().Unix())
+		implposix.ApplyUpdatedFileIdentity(cleanName, &fileMeta, current, h.config.Now().UnixNano())
+		implposix.ReplaceInodeFamily(tree, cleanName, current, fileMeta, h.config.Now().UnixNano())
 	} else {
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = shfs.ApplyParentInheritance(tree, cleanName, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
-		metadata.InitializeNewFileIdentity(tree, &fileMeta, h.config.Now().Unix())
-		tree.UpsertFile(cleanName, fileMeta, h.config.Now().Unix())
+		metadata.InitializeNewFileIdentity(tree, &fileMeta, h.config.Now().UnixNano())
+		tree.UpsertFile(cleanName, fileMeta, h.config.Now().UnixNano())
 	}
-	shfs.TouchParentDirectory(tree, cleanName, h.config.Now().Unix())
+	shfs.TouchParentDirectory(tree, cleanName, h.config.Now().UnixNano())
 	siblings := tree.FindFilesByInode(fileMeta.Inode)
 	publishTreeLocked(pm, tree, []string{cleanName})
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
@@ -482,7 +482,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	if replace {
 		cause = "replace"
 	}
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	opFile := fileMeta.Clone()
 	h.appendOpLocked(project, pm, Op{
 		Type: OpPutFile, Paths: []string{cleanName}, Cause: cause,

@@ -9,15 +9,15 @@ func TestIntentRecorderFirstTouchWins(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("p")
 	old := FileMeta{Size: 1, Inode: 2, Chunks: []int64{7}, Mode: 0o644}
-	m.UpsertFile("a.txt", old, 100) // pre-transaction state
+	m.UpsertFile("a.txt", old, 100000000000) // pre-transaction state
 	rec := NewIntentRecorder()
 	m.AttachIntentRecorder(rec)
 
 	// First touch inside the transaction pins the pre-transaction state.
-	m.UpsertFile("a.txt", FileMeta{Size: 9, Inode: 3, Chunks: []int64{}, Mode: 0o600}, 200)
+	m.UpsertFile("a.txt", FileMeta{Size: 9, Inode: 3, Chunks: []int64{}, Mode: 0o600}, 200000000000)
 	// Later touches of the same path must not overwrite the pinned original.
 	m.RemoveFile("a.txt")
-	m.UpsertFile("a.txt", FileMeta{Size: 12, Inode: 4, Chunks: []int64{}, Mode: 0o600}, 300)
+	m.UpsertFile("a.txt", FileMeta{Size: 12, Inode: 4, Chunks: []int64{}, Mode: 0o600}, 300000000000)
 
 	intent, ok := rec.FileIntents()["a.txt"]
 	if !ok {
@@ -30,7 +30,7 @@ func TestIntentRecorderFirstTouchWins(t *testing.T) {
 	// must not reach into it.
 	live := m.FindFile("a.txt")
 	live.Size = 42
-	m.UpsertFile("a.txt", *live, 400)
+	m.UpsertFile("a.txt", *live, 400000000000)
 	if rec.FileIntents()["a.txt"].Old.Size != 1 {
 		t.Fatal("recorded original was aliased by a later write")
 	}
@@ -41,15 +41,15 @@ func TestIntentRecorderNilIsNoOp(t *testing.T) {
 	m := NewRepoMetadata("p")
 	// No recorder attached: every mutator must run without recording and
 	// without panicking.
-	m.UpsertFile("a.txt", FileMeta{Size: 1, Inode: 2, Chunks: []int64{}, Mode: 0o644}, 100)
+	m.UpsertFile("a.txt", FileMeta{Size: 1, Inode: 2, Chunks: []int64{}, Mode: 0o644}, 100000000000)
 	m.RemoveFile("a.txt")
-	m.EnsureDirectory("d", 100)
+	m.EnsureDirectory("d", 100000000000)
 	m.RemoveDirectory("d")
 	if err := m.PutChunk(1, ChunkInfo{}); err != nil {
 		t.Fatalf("seed chunk: %v", err)
 	}
 	m.DeleteChunk(1)
-	if _, err := m.EnsureRelease("v1", 100); err != nil {
+	if _, err := m.EnsureRelease("v1", 100000000000); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	// A zero CreatedAt is rejected loudly (validation), never stored and
@@ -68,15 +68,15 @@ func TestIntentRecorderCloneDropsIt(t *testing.T) {
 	m.AttachIntentRecorder(rec)
 	clone := m.Clone()
 	// Mutating the clone must not record into the original's recorder.
-	clone.EnsureDirectory("from-clone", 100)
-	clone.UpsertFile("from-clone/f.txt", FileMeta{Size: 1, Inode: 5, Chunks: []int64{}, Mode: 0o644}, 100)
+	clone.EnsureDirectory("from-clone", 100000000000)
+	clone.UpsertFile("from-clone/f.txt", FileMeta{Size: 1, Inode: 5, Chunks: []int64{}, Mode: 0o644}, 100000000000)
 	if len(rec.DirIntents()) != 0 || len(rec.FileIntents()) != 0 {
 		t.Fatalf("clone mutations leaked into the source recorder: %+v %+v", rec.DirIntents(), rec.FileIntents())
 	}
 	// And the clone takes its own recorder without affecting the source.
 	rec2 := NewIntentRecorder()
 	clone.AttachIntentRecorder(rec2)
-	m.EnsureDirectory("from-source", 100)
+	m.EnsureDirectory("from-source", 100000000000)
 	if len(rec2.DirIntents()) != 0 {
 		t.Fatal("source mutations leaked into the clone recorder")
 	}
@@ -88,7 +88,7 @@ func TestIntentRecorderNotSerialized(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("p")
 	m.AttachIntentRecorder(NewIntentRecorder())
-	m.EnsureDirectory("d", 100)
+	m.EnsureDirectory("d", 100000000000)
 	data, err := m.ToJSON()
 	if err != nil {
 		t.Fatalf("ToJSON: %v", err)
@@ -124,11 +124,11 @@ func TestIntentRecorderChunkAndReleaseKinds(t *testing.T) {
 	if err := m.PutChunk(7, ChunkInfo{Size: 1}); err != nil { // new
 		t.Fatalf("seed chunk: %v", err)
 	}
-	m.DeleteChunk(7)                                      // created then removed: net absent, did not exist before
-	if _, err := m.EnsureRelease("v1", 100); err != nil { // new
+	m.DeleteChunk(7)                                               // created then removed: net absent, did not exist before
+	if _, err := m.EnsureRelease("v1", 100000000000); err != nil { // new
 		t.Fatalf("seed release: %v", err)
 	}
-	if err := m.PutRelease("v1", ReleaseRef{CreatedAt: 200}); err != nil {
+	if err := m.PutRelease("v1", ReleaseRef{CreatedAt: 200000000000}); err != nil {
 		t.Fatalf("seed release: %v", err)
 	}
 	m.RemoveRelease("v1") // removed again: net absent, existed before
@@ -158,7 +158,7 @@ func TestIntentRecorderSortFileChunksIntent(t *testing.T) {
 	if err := m.PutChunk(2, ChunkInfo{Size: 4, Offset: 0, Release: "v1", AssetID: 12}); err != nil {
 		t.Fatal(err)
 	}
-	m.UpsertFile("a.txt", FileMeta{Size: 8, Mode: 0o644, Chunks: []int64{1, 2}}, 100)
+	m.UpsertFile("a.txt", FileMeta{Size: 8, Mode: 0o644, Chunks: []int64{1, 2}}, 100000000000)
 	rec := NewIntentRecorder()
 	m.AttachIntentRecorder(rec)
 	m.SortFileChunks("a.txt")
@@ -177,7 +177,7 @@ func TestIntentRecorderSortFileChunksIntent(t *testing.T) {
 func TestIntentRecorderRemoveReleaseKeepsOld(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("p")
-	if _, err := m.EnsureRelease("v1", 100); err != nil {
+	if _, err := m.EnsureRelease("v1", 100000000000); err != nil {
 		t.Fatal(err)
 	}
 	rec := NewIntentRecorder()
@@ -187,7 +187,7 @@ func TestIntentRecorderRemoveReleaseKeepsOld(t *testing.T) {
 	if !ok {
 		t.Fatal("RemoveRelease must record a release intent")
 	}
-	if !intent.Existed || intent.Old.CreatedAt != 100 {
+	if !intent.Existed || intent.Old.CreatedAt != 100000000000 {
 		t.Fatalf("remove intent must pin the removed ref, got %+v", intent)
 	}
 }
@@ -195,14 +195,14 @@ func TestIntentRecorderRemoveReleaseKeepsOld(t *testing.T) {
 func TestIntentRecorderAtimeIntents(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("p")
-	m.EnsureDirectory("d", 100)
-	m.UpsertFile("d/a.txt", FileMeta{Size: 1, Mode: 0o644, Chunks: []int64{}}, 100)
+	m.EnsureDirectory("d", 100000000000)
+	m.UpsertFile("d/a.txt", FileMeta{Size: 1, Mode: 0o644, Chunks: []int64{}}, 100000000000)
 	rec := NewIntentRecorder()
 	m.AttachIntentRecorder(rec)
-	if !m.SetFileAtime("d/a.txt", 200) {
+	if !m.SetFileAtime("d/a.txt", 200000000000) {
 		t.Fatal("set file atime")
 	}
-	if !m.SetDirAtime("d", 200) {
+	if !m.SetDirAtime("d", 200000000000) {
 		t.Fatal("set dir atime")
 	}
 	fintent, ok := rec.FileIntents()["d/a.txt"]
@@ -218,10 +218,10 @@ func TestIntentRecorderAtimeIntents(t *testing.T) {
 func TestIntentRecorderRevertSubtreeIntents(t *testing.T) {
 	t.Parallel()
 	hist := buildTree(t, func(m *RepoMetadata) {
-		m.EnsureDirectory("docs", 100)
+		m.EnsureDirectory("docs", 100000000000)
 		putTestChunk(t, m, 1, ChunkInfo{Size: 5, Offset: 0, Release: "v1", AssetID: 11})
-		m.UpsertFile("docs/a.txt", FileMeta{Size: 5, Mode: 0o644, UploadedAt: 100, ModifiedAt: 100, Chunks: []int64{1}}, 100)
-		if _, err := m.EnsureRelease("v1", 100); err != nil {
+		m.UpsertFile("docs/a.txt", FileMeta{Size: 5, Mode: 0o644, UploadedAt: 100000000000, ModifiedAt: 100000000000, Chunks: []int64{1}}, 100000000000)
+		if _, err := m.EnsureRelease("v1", 100000000000); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -234,7 +234,7 @@ func TestIntentRecorderRevertSubtreeIntents(t *testing.T) {
 	cur.RemoveRelease("v1")
 	rec := NewIntentRecorder()
 	cur.AttachIntentRecorder(rec)
-	if err := RevertSubtree(cur, hist, "docs/a.txt", 300); err != nil {
+	if err := RevertSubtree(cur, hist, "docs/a.txt", 300000000000); err != nil {
 		t.Fatalf("revert: %v", err)
 	}
 	if _, ok := rec.ChunkIntents()[1]; !ok {

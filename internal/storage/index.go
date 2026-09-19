@@ -126,7 +126,7 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 		if err := m.FromJSON(data); err != nil {
 			return nil, 0, fmt.Errorf("parse metadata: %w", err)
 		}
-		m.Normalize(project, h.config.Now().Unix())
+		m.Normalize(project, h.config.Now().UnixNano())
 		if err := m.Validate(); err != nil {
 			return nil, 0, fmt.Errorf("validate metadata: %w", err)
 		}
@@ -149,7 +149,7 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 		return nil, 0, fmt.Errorf("load split index: %w", err)
 	}
 	loaded.Project = project
-	loaded.Normalize(project, h.config.Now().Unix())
+	loaded.Normalize(project, h.config.Now().UnixNano())
 	if err := loaded.Validate(); err != nil {
 		return nil, 0, fmt.Errorf("validate split index: %w", err)
 	}

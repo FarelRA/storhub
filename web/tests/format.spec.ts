@@ -43,9 +43,9 @@ describe('formatMode', () => {
 })
 
 describe('toDatetimeLocal', () => {
-  it('formats unix seconds for datetime-local inputs and rejects junk', () => {
+  it('formats unix nanoseconds for datetime-local inputs and rejects junk', () => {
     expect(toDatetimeLocal(0)).toBe('')
-    const value = toDatetimeLocal(1750000000)
+    const value = toDatetimeLocal(1750000000000000000)
     expect(value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
   })
 })

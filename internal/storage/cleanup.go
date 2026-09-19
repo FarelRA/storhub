@@ -75,7 +75,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	// error can never leave the file deleted while the caller believes the
 	// delete failed. All mutations apply to a private COW copy; the shared
 	// tree is swapped in only once they have all succeeded.
-	now := h.config.Now().Unix()
+	now := h.config.Now().UnixNano()
 	tree := cowTree(pm.meta)
 	shfs.TouchParentDirectory(tree, cleanName, now)
 	if len(tree.FindFilesByInode(existing.Inode)) > 0 {
@@ -145,7 +145,7 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	trigger := h.markProjectDirtyLiveLocked(project, pm)
 	h.appendOpLocked(project, pm, Op{
 		Type: OpRelease, Paths: []string{tag}, Tag: tag, Cause: "release-delete",
-		Timestamp: h.config.Now().Unix(),
+		Timestamp: h.config.Now().UnixNano(),
 	})
 	pm.mu.Unlock()
 
@@ -175,10 +175,10 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 	// (no encode); only when the sizes match do we pay for the marshal
 	// pair to rule out a same-size-but-different tree.
 	before := repoMeta.Clone()
-	before.Normalize(project, h.config.Now().Unix())
+	before.Normalize(project, h.config.Now().UnixNano())
 	working := repoMeta.Clone()
 	working.RecomputeStats()
-	working.Normalize(project, h.config.Now().Unix())
+	working.Normalize(project, h.config.Now().UnixNano())
 	beforeSize, beforeErr := before.SerializedSize()
 	afterSize, afterErr := working.SerializedSize()
 	if beforeErr == nil && afterErr == nil && beforeSize != afterSize {

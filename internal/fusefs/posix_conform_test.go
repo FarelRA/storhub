@@ -34,8 +34,8 @@ import (
 //   - Chown clears setuid/setgid and enforces shfs.CanChown, so a
 //     non-privileged caller cannot move a file to a foreign uid, exactly
 //     like the posix service.
-//   - Timestamps are second precision (ModifiedAt and friends are Unix
-//     seconds end to end), exactly like production metadata.
+//   - Timestamps are nanosecond precision (ModifiedAt and friends are
+//     Unix nanoseconds end to end), exactly like production metadata.
 //   - The FUSE path exposes no per-file version or etag (the Hub interface
 //     has no version query and FileMeta carries no CAS token), so Revision
 //     is a best-effort content hash and CompareAndWrite is a non-atomic
@@ -104,7 +104,7 @@ func (h *pcHub) PublishedPathsSince(_ string, since uint64) ([]string, bool, uin
 }
 
 func newPCHub() *pcHub {
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
 	return &pcHub{
@@ -188,7 +188,7 @@ func (h *pcHub) entryLocked(p string) (*shfs.EntryInfo, error) {
 
 // touchLocked stamps mtime/ctime after a content change. Callers hold h.mu.
 func (h *pcHub) touchLocked(f *pcFile) {
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	f.mtime = now
 	f.ctime = now
 }
@@ -298,7 +298,7 @@ func (h *pcHub) CreateFileContext(ctx context.Context, _ string, target string) 
 	if _, ok := h.dirs[pcParent(target)]; !ok {
 		return nil, shfs.NotFound(target)
 	}
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, uint32(os.Getuid()), uint32(os.Getgid()))
 	f := &pcFile{
 		mode: shfs.ApplyCreateMode(ctx, 0o666), uid: uid, gid: gid,
@@ -325,7 +325,7 @@ func (h *pcHub) MkdirContext(ctx context.Context, _ string, target string) error
 	if _, ok := h.dirs[pcParent(target)]; !ok {
 		return shfs.NotFound(target)
 	}
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, uint32(os.Getuid()), uint32(os.Getgid()))
 	h.dirs[target] = &pcDir{
 		mode: shfs.ApplyCreateMode(ctx, 0o777), uid: uid, gid: gid,
@@ -414,7 +414,7 @@ func (h *pcHub) ChmodContext(ctx context.Context, _ string, target string, mode 
 		return err
 	}
 	f.mode = shfs.SanitizeChmodMode(ctx, entry, mode)
-	f.ctime = time.Now().Unix()
+	f.ctime = time.Now().UnixNano()
 	return nil
 }
 
@@ -438,7 +438,7 @@ func (h *pcHub) ChownContext(ctx context.Context, _ string, target string, uid, 
 	}
 	// POSIX chown clears setuid/setgid, mirroring the posix service.
 	f.mode &^= 0o6000
-	f.ctime = time.Now().Unix()
+	f.ctime = time.Now().UnixNano()
 	return nil
 }
 
@@ -449,14 +449,14 @@ func (h *pcHub) ChtimesContext(ctx context.Context, _ string, target string, ati
 	if err != nil {
 		return err
 	}
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	var atimePtr, mtimePtr *time.Time
 	if atime != 0 {
-		t := time.Unix(atime, 0)
+		t := time.Unix(0, atime)
 		atimePtr = &t
 	}
 	if mtime != 0 {
-		t := time.Unix(mtime, 0)
+		t := time.Unix(0, mtime)
 		mtimePtr = &t
 	}
 	entry := shfs.EntryFromFile(h.fileMetaLocked(f), target, 1)
@@ -482,18 +482,18 @@ func (h *pcHub) ChtimesExplicitContext(ctx context.Context, _ string, target str
 	if err != nil {
 		return err
 	}
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	entry := shfs.EntryFromFile(h.fileMetaLocked(f), target, 1)
 	if err := shfs.CanSetTimesValues(ctx, entry, atime, mtime, now); err != nil {
 		return err
 	}
-	// Second precision only: metadata stamps are Unix seconds end to
-	// end, mirroring production. Sub-second input is truncated here.
+	// Nanosecond precision: metadata stamps are Unix nanoseconds end to
+	// end, mirroring production. Sub-second input is preserved.
 	if atime != nil {
-		f.atime = atime.Unix()
+		f.atime = atime.UnixNano()
 	}
 	if mtime != nil {
-		f.mtime = mtime.Unix()
+		f.mtime = mtime.UnixNano()
 	}
 	f.ctime = now
 	return nil
@@ -517,7 +517,7 @@ func (h *pcHub) SymlinkContext(ctx context.Context, _ string, target, linkPath s
 	if _, ok := h.dirs[pcParent(linkPath)]; !ok {
 		return nil, shfs.NotFound(linkPath)
 	}
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 	uid, gid := shfs.OwnerIDsForCreate(ctx, uint32(os.Getuid()), uint32(os.Getgid()))
 	f := &pcFile{
 		mode: 0o777, uid: uid, gid: gid,
@@ -598,10 +598,10 @@ func (h *pcHub) ApplyMetadataPatchContext(ctx context.Context, project, target s
 		f.mode &^= 0o6000
 	}
 	if patch.HasTimes {
-		f.atime = patch.ATime.Unix()
-		f.mtime = patch.MTime.Unix()
+		f.atime = patch.ATime.UnixNano()
+		f.mtime = patch.MTime.UnixNano()
 	}
-	f.ctime = time.Now().Unix()
+	f.ctime = time.Now().UnixNano()
 	return nil
 }
 
@@ -885,7 +885,7 @@ func (h *pcHub) removeFileLocked(p string) error {
 func (h *pcHub) DrainProjectContext(context.Context, string) error { return nil }
 
 func (h *pcHub) Now() int64 {
-	return time.Now().Unix()
+	return time.Now().UnixNano()
 }
 
 func (h *pcHub) ChunkSize() int64 {

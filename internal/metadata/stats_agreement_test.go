@@ -13,7 +13,7 @@ import (
 // accounting fails here instead of passing silently through Validate.
 func TestMutatorStatsAgreementWithRecomputeStats(t *testing.T) {
 	t.Parallel()
-	const now = int64(1700000000)
+	const now = int64(1700000000000000000)
 	base := func() *RepoMetadata {
 		m := NewRepoMetadata("p")
 		m.EnsureDirectory("docs", now)

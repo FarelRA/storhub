@@ -425,7 +425,9 @@ func newFakeRESTClient() *fakeRESTClient {
 		nextInode: 2,
 		projects:  make(map[string]*fakeRESTProject),
 		deleted:   make(map[string]bool),
-		now:       10,
+		// Fake clock in Unix nanoseconds: every entry stamp minted from
+		// tick() is ns, matching the storage contract.
+		now: 1700000000000000000,
 	}
 }
 
@@ -1174,6 +1176,8 @@ func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath
 		return err
 	}
 	now := c.tick()
+	// Caller stamps arrive as Unix nanoseconds and persist verbatim: no
+	// truncation, matching the ns storage contract.
 	node.entry.AccessedAt = atime
 	node.entry.ModifiedAt = mtime
 	node.entry.ChangedAt = now
@@ -1438,6 +1442,8 @@ func (c *fakeRESTClient) allocInode() uint64 {
 	return ino
 }
 
+// tick advances the fake clock by one nanosecond and reports it, so every
+// minted entry stamp is a distinct Unix-nanosecond value.
 func (c *fakeRESTClient) tick() int64 {
 	c.now++
 	return c.now

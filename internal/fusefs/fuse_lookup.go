@@ -58,11 +58,31 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	if err != nil {
 		return errnoFromError(err)
 	}
-	n.fs.applyPendingSize(entry)
+	// Overlay staged mode/owner/times/size exactly as finishSetattr
+	// does, so fstat on an open fd observes pre-commit fchmod/fchown
+	// instead of the last committed stat.
+	n.fs.applyOverlayForGetattr(f, n.inode, entry)
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
-	_ = f
 	return 0
+}
+
+// applyOverlayForGetattr overlays the live write state onto a linked-file
+// stat result. The calling handle's own state wins: it may still be
+// referenced after unregistering from the inode map (e.g. a quarantined
+// state), where the shared lookup below would miss it. Otherwise the
+// shared state for the inode covers another handle's staged patch, and a
+// handleless getattr falls back to applyPendingSize.
+func (s *Filesystem) applyOverlayForGetattr(f gofusefs.FileHandle, inode uint64, entry *shfs.EntryInfo) {
+	if handle, ok := f.(*storhubHandle); ok {
+		if ws := handle.snapshotWriteState(); ws != nil && ws.inode == inode {
+			ws.mu.Lock()
+			ws.overlayEntryLocked(entry)
+			ws.mu.Unlock()
+			return
+		}
+	}
+	s.applyPendingSize(entry)
 }
 
 func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
@@ -214,7 +234,8 @@ func (h *storhubHandle) Lseek(ctx context.Context, off uint64, whence uint32) (u
 // the read path; with neither, the pinned layout alone describes the
 // file. Callers must not hold h.mu or any state mutex.
 func (h *storhubHandle) lseekView() (int64, []ByteRange) {
-	if ws := h.writeState; ws != nil {
+	// Load-then-use under h.mu: Release nils the pointer concurrently.
+	if ws := h.snapshotWriteState(); ws != nil {
 		ws.mu.Lock()
 		defer ws.mu.Unlock()
 		size := ws.logicalSize
@@ -412,7 +433,9 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 // else its open-time pin (with no state to stage into). A nil state
 // means accept-and-discard for setattr; the reply still serves.
 func (n *storhubNode) handleBase(handle *storhubHandle) (shfs.EntryInfo, *inodeWriteState, bool) {
-	if state := handle.writeState; state != nil && state.inode == n.inode {
+	// Load-then-use under h.mu: Release nils the pointer concurrently,
+	// and the state outlives the handle via refs and the registry.
+	if state := handle.snapshotWriteState(); state != nil && state.inode == n.inode {
 		if base, ok := state.cachedBaseEntry(); ok {
 			return base, state, true
 		}
@@ -567,6 +590,11 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.pending.HasOwner = true
 			state.pending.UID = uid
 			state.pending.GID = gid
+			// Same chown privilege clearing as the linked path: a
+			// non-admin chown stages the cleared mode at once so the
+			// detached fstat reply below observes it. overlayBase
+			// already carries the effective overlay mode.
+			stagePrivClearLocked(ctx, state, overlayBase.Mode)
 			state.mu.Unlock()
 			state.opMu.Unlock()
 		}
@@ -591,10 +619,10 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			overlayBase := base
 			state.overlayEntryLocked(&overlayBase)
 			if !atimeOK {
-				atime = time.Unix(overlayBase.AccessedAt, 0)
+				atime = time.Unix(0, overlayBase.AccessedAt)
 			}
 			if !mtimeOK {
-				mtime = time.Unix(overlayBase.ModifiedAt, 0)
+				mtime = time.Unix(0, overlayBase.ModifiedAt)
 			}
 			state.pending.HasTimes = true
 			state.pending.ATime = atime
@@ -620,11 +648,14 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 // A nil state means "go to the hub verbs".
 // setattrOverlayState resolves the write state this setattr may drive.
 func (n *storhubNode) setattrOverlayState(ctx context.Context, f gofusefs.FileHandle) (*inodeWriteState, syscall.Errno) {
-	if handle, ok := f.(*storhubHandle); ok && handle.writeState != nil {
-		if errno := handle.checkOverlayCaller(ctx); errno != 0 {
-			return nil, errno
+	// Load-then-use under h.mu: Release nils the pointer concurrently.
+	if handle, ok := f.(*storhubHandle); ok {
+		if ws := handle.snapshotWriteState(); ws != nil {
+			if errno := handle.checkOverlayCaller(ctx); errno != 0 {
+				return nil, errno
+			}
+			return ws, 0
 		}
-		return handle.writeState, 0
 	}
 	if st := n.fs.writeStateForInode(n.inode); st != nil && n.fs.callerMayDriveOverlay(ctx, st) {
 		return st, 0
@@ -748,6 +779,12 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 		state.pending.HasOwner = true
 		state.pending.UID = uid
 		state.pending.GID = gid
+		// Chown clears setuid/setgid for non-admin callers (POSIX
+		// file_remove_privs): stage the cleared mode immediately so
+		// pre-commit fstat observes it instead of the stale bits,
+		// mirroring the data-write path. entry already carries the
+		// effective overlay mode via the overlay above.
+		stagePrivClearLocked(ctx, state, entry.Mode)
 		state.mu.Unlock()
 		state.opMu.Unlock()
 		return 0
@@ -780,10 +817,10 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		return errnoFromError(err)
 	}
 	if !atimeOK {
-		atime = time.Unix(entry.AccessedAt, 0)
+		atime = time.Unix(0, entry.AccessedAt)
 	}
 	if !mtimeOK {
-		mtime = time.Unix(entry.ModifiedAt, 0)
+		mtime = time.Unix(0, entry.ModifiedAt)
 	}
 	if state != nil && !n.isDir {
 		if shfs.IdentityPresent(ctx) {
@@ -800,10 +837,10 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		}
 		state.overlayEntryLocked(entry)
 		if !atimeOK {
-			atime = time.Unix(entry.AccessedAt, 0)
+			atime = time.Unix(0, entry.AccessedAt)
 		}
 		if !mtimeOK {
-			mtime = time.Unix(entry.ModifiedAt, 0)
+			mtime = time.Unix(0, entry.ModifiedAt)
 		}
 		state.pending.HasTimes = true
 		state.pending.ATime = atime
@@ -954,9 +991,9 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	attr.Owner = fuse.Owner{Uid: entry.UID, Gid: entry.GID}
 	attr.Nlink = entry.NLink
 	attr.Blksize = 4096
-	atime := time.Unix(entry.AccessedAt, 0)
-	mtime := time.Unix(entry.ModifiedAt, 0)
-	ctime := time.Unix(entry.ChangedAt, 0)
+	atime := time.Unix(0, entry.AccessedAt)
+	mtime := time.Unix(0, entry.ModifiedAt)
+	ctime := time.Unix(0, entry.ChangedAt)
 	attr.SetTimes(&atime, &mtime, &ctime)
 	mode := entry.Mode & 0o7777
 	if entry.IsDir {

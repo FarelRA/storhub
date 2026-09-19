@@ -475,7 +475,7 @@ func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *comm
 		baseTree:    pm.baseTree,
 		objectCount: pm.objectCount,
 		headSplit:   working.IsSplit(),
-		now:         h.config.Now().Unix(),
+		now:         h.config.Now().UnixNano(),
 	}
 	pm.opStack.noteSnapshot(snap.opSeq)
 	pm.mu.Unlock()
@@ -666,6 +666,13 @@ func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *
 		// (cross-surface invalidation) observe the swap. Guards are
 		// equality-based, so extra bumps only cause extra invalidations,
 		// never missed ones.
+		//
+		// No path-ring entry here: this swap carries no new namespace
+		// content beyond the mutation's own publish (already ringed with
+		// exact paths via publishTreeLocked). A nil entry would force
+		// unknown scope on a window the test suite pins exact
+		// (TestPublishedPathsSinceExactScopes); re-recording the op paths
+		// would represent one mutation twice.
 		pm.version++
 	} else if didRebase {
 		// A mutation landed mid-commit AND the commit rebased: the
@@ -684,10 +691,11 @@ func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *
 				pm.opStack.clear()
 				pm.meta = working
 				// Same bump: falling back to the committed tree swaps in
-				// upstream content the live tree lacks.
+				// upstream content the live tree lacks. Unknown scope.
 				pm.version++
+				notePublishedPathsLocked(pm, nil)
 			} else {
-				rebased.Normalize(project, h.config.Now().Unix())
+				rebased.Normalize(project, h.config.Now().UnixNano())
 				rebased.RecomputeStats()
 				pm.meta = rebased
 				// Rebased tree carries upstream changes the live tree
@@ -701,8 +709,9 @@ func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *
 		} else {
 			pm.meta = working
 			// Same bump: the adopted tree differs from the previously
-			// published one (upstream content landed).
+			// published one (upstream content landed). Unknown scope.
 			pm.version++
+			notePublishedPathsLocked(pm, nil)
 		}
 		pm.lastCommit = h.config.Now()
 	} else {

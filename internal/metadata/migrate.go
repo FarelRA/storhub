@@ -9,13 +9,13 @@ import (
 )
 
 // CurrentVersion is the newest document version this build reads and writes
-// (5, the split layout). The pure blob migrators below only ever produce
-// maxBlobVersion (4); the 4->5 step is a write-time layout split, not a bytes
+// (6, the split layout). The pure blob migrators below only ever produce
+// maxBlobVersion (5); the 5->6 step is a write-time layout split, not a bytes
 // transform.
 const CurrentVersion = maxMetadataVersion
 
 // versionProbe is the single version/shape envelope for every JSON document
-// the package reads: v1 ("version"), v2-v4 ("v"), and v5 split manifests
+// the package reads: v1 ("version"), v2-v5 ("v"), and v6 split manifests
 // ("v" plus a non-empty "tr"). One struct replaces the three triplicated
 // anonymous probes in detectVersion, UnmarshalJSON, and IsManifest.
 type versionProbe struct {
@@ -55,23 +55,24 @@ func detectVersion(data []byte) (int, error) {
 // migrators stacks one step per version boundary: migrators[n] upgrades a
 // version-n document to version n+1. Every step is pure bytes->bytes:
 // no clock, no I/O, deterministic output for a given input. There is no
-// 4->5 step: that boundary is the write-time layout split (it emits objects),
+// 5->6 step: that boundary is the write-time layout split (it emits objects),
 // not a blob transform.
 var migrators = [...]func([]byte) ([]byte, error){
 	1: migrateV1ToV2,
 	2: migrateV2ToV3,
 	3: migrateV3ToV4,
+	4: migrateV4ToV5,
 }
 
 // Migrate upgrades a serialized metadata BLOB to the current blob schema by
 // applying every required step in order; a document already current (version
 // maxBlobVersion) passes through unchanged. A split-index manifest is
 // rejected: it loads through ParseManifest/LoadTree, never as a blob - and so
-// is any version-5 document lacking a tree root, which is a truncated
-// manifest, not a blob (v5 documents are manifests; blobs are v<=4). Loading
+// is any version-6 document lacking a tree root, which is a truncated
+// manifest, not a blob (v6 documents are manifests; blobs are v<=5). Loading
 // is eager: every blob parse funnels through here, so no code path outside
 // this file can observe an older schema shape. The upgraded document persists
-// when the next mutation commits it (as a version-5 split).
+// when the next mutation commits it (as a version-6 split).
 func Migrate(data []byte) ([]byte, int, error) {
 	if IsManifest(data) {
 		return nil, maxMetadataVersion, fmt.Errorf("metadata version %d is the split-index manifest; load it via ParseManifest, not Migrate", maxMetadataVersion)
@@ -90,7 +91,7 @@ func Migrate(data []byte) ([]byte, int, error) {
 		return nil, from, fmt.Errorf("metadata version %d with no tree root is a corrupt split-index manifest, not a blob; blobs are v%d or older", maxMetadataVersion, maxBlobVersion)
 	}
 	if from == maxBlobVersion {
-		// Version 4 is the newest single-blob schema; the 4->5 step is the
+		// Version 5 is the newest single-blob schema; the 5->6 step is the
 		// write-time layout split, not a blob transform.
 		return data, from, nil
 	}
@@ -622,7 +623,10 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 	}
 	m.NextInode = in.NextInode
 	m.NextChunkID = in.NextChunkID
-	m.Version = maxBlobVersion
+	// Era-pinned: this step emits v4 (seconds era). The v4->v5 migrator owns
+	// the seconds-to-nanoseconds conversion; stamping maxBlobVersion here
+	// would skip it.
+	m.Version = 4
 	// Reconcile every derived counter from the walked content: stripping
 	// dangling chunk refs above shrinks file sizes (TotalSize adjusted
 	// inline) but leaves the per-release AssetCounts stale, and a v3
@@ -630,8 +634,7 @@ func migrateV3ToV4(data []byte) ([]byte, error) {
 	// TotalFiles/TotalSize from the surviving entries, fixes each ref's
 	// AssetCount from the chunk walk, and rebuilds pendingAssets; the
 	// counter reconciliation then raises any regressed allocation floors
-	// past the live ids. Version is already maxBlobVersion so it is
-	// preserved.
+	// past the live ids. Version is already 4 so RecomputeStats preserves it.
 	m.RecomputeStats()
 	m.reconcileCounters()
 	return json.Marshal(m)
@@ -740,4 +743,90 @@ func fileV3ToV4(f docFileV3, lastMod int64) FileMeta {
 		out.Chunks = []int64{}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// v4 -> v5: every persisted timestamp changes unit from Unix SECONDS to Unix
+// NANOSECONDS. v5 is otherwise byte-shape-identical to v4 (same keys).
+// ---------------------------------------------------------------------------
+
+// nanosPerSecond scales a seconds-era timestamp to nanoseconds.
+const nanosPerSecond = 1_000_000_000
+
+// secondsThreshold distinguishes the two eras on load: current epoch time is
+// ~1.79e9 seconds vs ~1.79e18 nanoseconds, so any persisted time value below
+// 1e12 is unambiguously seconds and is multiplied by 1e9.
+const secondsThreshold = 1_000_000_000_000
+
+// secsToNanos converts one seconds-era persisted timestamp to Unix
+// nanoseconds. Values at or above secondsThreshold are already nanoseconds
+// and pass through; zero (the authoritative epoch under the v4 contract)
+// stays zero. MIGRATION-ONLY: live code assumes nanoseconds everywhere and
+// never calls this.
+func secsToNanos(v int64) int64 {
+	if v > 0 && v < secondsThreshold {
+		return v * nanosPerSecond
+	}
+	return v
+}
+
+func convertDirTimesToNano(d DirMeta) DirMeta {
+	d.CreatedAt = secsToNanos(d.CreatedAt)
+	d.ModifiedAt = secsToNanos(d.ModifiedAt)
+	d.AccessedAt = secsToNanos(d.AccessedAt)
+	d.ChangedAt = secsToNanos(d.ChangedAt)
+	return d
+}
+
+func convertFileTimesToNano(f FileMeta) FileMeta {
+	f.UploadedAt = secsToNanos(f.UploadedAt)
+	f.ModifiedAt = secsToNanos(f.ModifiedAt)
+	f.AccessedAt = secsToNanos(f.AccessedAt)
+	f.ChangedAt = secsToNanos(f.ChangedAt)
+	return f
+}
+
+// migrateTreeTimesToNano converts every sub-threshold timestamp of an
+// in-memory tree to nanoseconds: root and stored dirs, stored files, release
+// refs, and LastMod. Counters (NextInode/NextChunkID) are NOT times and are
+// left untouched. Used by the v4->v5 blob migrator and by the split load
+// path for pre-nanosecond manifests.
+func migrateTreeTimesToNano(m *RepoMetadata) {
+	m.LastMod = secsToNanos(m.LastMod)
+	m.Root = convertDirTimesToNano(m.Root)
+	for path, d := range m.dirs {
+		m.dirs[path] = convertDirTimesToNano(d)
+	}
+	for path, f := range m.files {
+		m.files[path] = convertFileTimesToNano(f)
+	}
+	for tag, r := range m.releases {
+		r.CreatedAt = secsToNanos(r.CreatedAt)
+		m.releases[tag] = r
+	}
+}
+
+func migrateV4ToV5(data []byte) ([]byte, error) {
+	var doc repoMetadataJSON
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("decode v4: %w", err)
+	}
+	if doc.Version != maxBlobVersion-1 {
+		return nil, fmt.Errorf("migrate v4->v5: expected document version 4, got %d", doc.Version)
+	}
+	doc.Version = maxBlobVersion
+	doc.LastMod = secsToNanos(doc.LastMod)
+	doc.Root = convertDirTimesToNano(doc.Root)
+	for path, d := range doc.Dirs {
+		doc.Dirs[path] = convertDirTimesToNano(d)
+	}
+	for path, f := range doc.Files {
+		doc.Files[path] = convertFileTimesToNano(f)
+	}
+	for tag, r := range doc.Releases {
+		r.CreatedAt = secsToNanos(r.CreatedAt)
+		doc.Releases[tag] = r
+	}
+	// NextInode/NextChunkID are allocation counters, not times: never scaled.
+	return json.Marshal(doc)
 }
