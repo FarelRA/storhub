@@ -495,23 +495,21 @@ func chunkToDoc(c ChunkInfo) docChunk {
 }
 
 // ---------------------------------------------------------------------------
-// v2 -> v3: owners materialized, string xattrs became base64 bytes, inode/
-// chunk counters became persisted state.
+// v2 -> v3: string xattrs became base64 bytes, inode/chunk counters became
+// persisted state.
+//
+// Owner IDs copy verbatim: 0 means root, never unset. An earlier revision
+// materialized zero IDs into the daemon process user, silently reassigning
+// root-owned entries to whoever ran the migration (the same
+// zero-confusion class as the file-stamping regression documented on
+// initializeNewFileIdentityFields). Like the v1 and v3 to v4 steps, this
+// migrator must not invent owners.
 // ---------------------------------------------------------------------------
 
 func migrateV2ToV3(data []byte) ([]byte, error) {
 	var in docTopV2
 	if err := json.Unmarshal(data, &in); err != nil {
 		return nil, fmt.Errorf("decode v2: %w", err)
-	}
-	uid, gid := defaultOwnerIDs()
-	materialize := func(ownerUID, ownerGID *uint32) {
-		if *ownerUID == 0 && uid != 0 {
-			*ownerUID = uid
-		}
-		if *ownerGID == 0 && gid != 0 {
-			*ownerGID = gid
-		}
 	}
 
 	out := docTopV3{
@@ -523,11 +521,9 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 		Chunks:   in.Chunks,
 		Releases: in.Releases,
 	}
-	materialize(&out.Root.UID, &out.Root.GID)
 	maxInode := out.Root.Inode
 	for path, d := range in.Dirs {
 		dv3 := dirV2ToV3(d)
-		materialize(&dv3.UID, &dv3.GID)
 		if dv3.Inode > maxInode {
 			maxInode = dv3.Inode
 		}
@@ -535,7 +531,6 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	}
 	for path, f := range in.Files {
 		fv3 := fileV2ToV3(f)
-		materialize(&fv3.UID, &fv3.GID)
 		if fv3.Inode > maxInode {
 			maxInode = fv3.Inode
 		}

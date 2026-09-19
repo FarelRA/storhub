@@ -27,7 +27,7 @@ func conformanceService(t *testing.T) (*Service, *testBackend) {
 }
 
 func rootTestCtx() context.Context {
-	return WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	return WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 }
 
 func TestConformanceReadThroughSymlinkedDir(t *testing.T) {

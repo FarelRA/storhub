@@ -183,7 +183,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	t.Parallel()
 	// The workflow runs as an explicitly identified root caller; absent
 	// identities fail closed to the process user and own nothing here.
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	now := int64(100)
 	backend := newTestBackend(now)
 	svc := NewService(backend)
@@ -276,7 +276,7 @@ func TestServiceErrors(t *testing.T) {
 	}
 	// Read/append have open() semantics and follow the final
 	// symlink to its target instead of failing on the link itself.
-	rootCtx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	rootCtx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	if data, err := svc.ReadFileAtContext(context.Background(), "demo", "docs/symlink", 0, 3); err != nil || string(data) != "abc" {
 		t.Fatalf("expected read through symlink to succeed, got %q err=%v", data, err)
 	}
@@ -529,7 +529,7 @@ func TestReadFileAtOverflowLengthClamped(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(700)
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	backend.seedFile("big.bin", []byte("0123456789"))
 	data, err := svc.ReadFileAtContext(ctx, "demo", "big.bin", 0, math.MaxInt64)
 	if err != nil {
@@ -551,7 +551,7 @@ func TestWhitespaceOnlyNameIsNotRoot(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(710)
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	if _, err := svc.StatPathContext(ctx, "demo", " "); err == nil {
 		t.Fatal("stat of a whitespace-only name must not return root")
 	}
@@ -577,7 +577,7 @@ func TestTruncateExtensionStreamsZeros(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(720)
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	backend.seedFile("grow.bin", []byte("ab"))
 	// Two MiB: more than one 1 MiB chunk, so the streaming loop iterates.
 	if _, err := svc.TruncateFileContext(ctx, "demo", "grow.bin", 2<<20); err != nil {
@@ -611,7 +611,7 @@ func TestRenameNoReplaceInTransaction(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(730)
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	if _, err := svc.CreateFileContext(ctx, "demo", "src.txt"); err != nil {
 		t.Fatalf("create src: %v", err)
 	}
@@ -669,6 +669,111 @@ func TestCopyRequiresSourceReadAccess(t *testing.T) {
 	}
 }
 
+// CopyContext must mint caller ownership and clear setuid/setgid for
+// unprivileged callers (decision 1A), matching CloneRange new
+// destinations and data writes: a copy must never mint a root-owned
+// setuid node for a non-root caller.
+func TestCopySanitizesOwnerAndPrivilegeBits(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend(800)
+	backend.seedDir("pub")
+	src := backend.seedFile("pub/tool", []byte("x"))
+	src.Mode = 0o4755
+	src.UID = 0
+	src.GID = 0
+	// WriteFileDirect, not UpsertFile: UpsertFile on an existing path
+	// treats a zero UID as unset and restores the old owner, so only a
+	// verbatim store can seed a true root-owned source.
+	backend.repo.WriteFileDirect("pub/tool", *src)
+	backend.seedDir("mine")
+	mine := backend.repo.GetDirectory("mine")
+	mineCopy := *mine
+	mineCopy.Mode = 0o777
+	backend.repo.Dirs()["mine"] = mineCopy
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	caller := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1002, Groups: []uint32{1002}})
+	if err := svc.CopyContext(caller, "demo", "pub/tool", "mine/tool"); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	got := backend.repo.FindFile("mine/tool")
+	if got == nil {
+		t.Fatal("copy destination missing")
+	}
+	if got.UID != 1001 || got.GID != 1002 {
+		t.Fatalf("copy owner = %d:%d, want caller 1001:1002", got.UID, got.GID)
+	}
+	if got.Mode&0o6000 != 0 {
+		t.Fatalf("copy mode = %o, privilege bits must clear for non-admin", got.Mode)
+	}
+	if got.Mode&0o777 != 0o755 {
+		t.Fatalf("copy mode = %o, want permission bits 755", got.Mode)
+	}
+	// Admin keeps the source owner and bits (CAP_FSETID equivalent).
+	admin := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
+	if err := svc.CopyContext(admin, "demo", "pub/tool", "mine/admintool"); err != nil {
+		t.Fatalf("admin copy: %v", err)
+	}
+	agot := backend.repo.FindFile("mine/admintool")
+	if agot == nil {
+		t.Fatal("admin copy destination missing")
+	}
+	if agot.UID != 0 || agot.GID != 0 || agot.Mode != 0o4755 {
+		t.Fatalf("admin copy = %d:%d %o, want 0:0 4755", agot.UID, agot.GID, agot.Mode)
+	}
+}
+
+// Directory copies must sanitize every entry in the subtree, not just
+// the root: each new node is caller-owned with privilege bits cleared
+// for unprivileged callers.
+func TestCopyDirSanitizesOwnerAndPrivilegeBits(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend(810)
+	backend.seedDir("pub")
+	pub := backend.repo.GetDirectory("pub")
+	pubCopy := *pub
+	pubCopy.Mode = 0o2755
+	pubCopy.UID = 0
+	pubCopy.GID = 0
+	backend.repo.Dirs()["pub"] = pubCopy
+	src := backend.seedFile("pub/tool", []byte("x"))
+	src.Mode = 0o4755
+	src.UID = 0
+	src.GID = 0
+	backend.repo.WriteFileDirect("pub/tool", *src)
+	backend.seedDir("mine")
+	mine := backend.repo.GetDirectory("mine")
+	mineCopy := *mine
+	mineCopy.Mode = 0o777
+	backend.repo.Dirs()["mine"] = mineCopy
+	backend.repo.RebuildIndexes()
+	svc := NewService(backend)
+	caller := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1002, Groups: []uint32{1002}})
+	if err := svc.CopyContext(caller, "demo", "pub", "mine/pubcopy"); err != nil {
+		t.Fatalf("dir copy: %v", err)
+	}
+	dir := backend.repo.GetDirectory("mine/pubcopy")
+	if dir == nil {
+		t.Fatal("copied dir missing")
+	}
+	if dir.UID != 1001 || dir.GID != 1002 {
+		t.Fatalf("copied dir owner = %d:%d, want caller 1001:1002", dir.UID, dir.GID)
+	}
+	if dir.Mode&0o6000 != 0 {
+		t.Fatalf("copied dir mode = %o, privilege bits must clear for non-admin", dir.Mode)
+	}
+	got := backend.repo.FindFile("mine/pubcopy/tool")
+	if got == nil {
+		t.Fatal("copied file missing")
+	}
+	if got.UID != 1001 || got.GID != 1002 {
+		t.Fatalf("copied file owner = %d:%d, want caller 1001:1002", got.UID, got.GID)
+	}
+	if got.Mode&0o6000 != 0 {
+		t.Fatalf("copied file mode = %o, privilege bits must clear for non-admin", got.Mode)
+	}
+}
+
 // The file owner keeps the POSIX chgrp right (into a group they
 // belong to) but may not hand the file away.
 func TestCanChownOwnerRights(t *testing.T) {
@@ -688,7 +793,7 @@ func TestCanChownOwnerRights(t *testing.T) {
 	if err := CanChown(stranger, entry, entry.UID, 100); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("non-owner chown must be EPERM, got %v", err)
 	}
-	root := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	root := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	if err := CanChown(root, entry, 1234, 5678); err != nil {
 		t.Fatalf("admin chown: %v", err)
 	}
@@ -699,7 +804,7 @@ func TestTruncateSameSizeTouchesTimestamps(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(750)
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	backend.seedFile("ts.bin", []byte("abc"))
 	before := backend.repo.FindFile("ts.bin")
 	beforeMtime, beforeCtime := before.ModifiedAt, before.ChangedAt

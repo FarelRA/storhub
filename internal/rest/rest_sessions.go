@@ -58,6 +58,7 @@ func (h *restHandler) registerSessionRoutes(r chi.Router) {
 	r.Post("/{handle}/truncate", h.handleSessionTruncate)
 	r.Post("/{handle}/sync", h.handleSessionSync)
 	r.Post("/{handle}/link", h.handleSessionLink)
+	r.Post("/{handle}/relink", h.handleSessionRelink)
 	r.Post("/{handle}/close", h.handleSessionClosePost)
 	r.Delete("/{handle}", h.handleSessionCloseDelete)
 }
@@ -327,6 +328,27 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 	h.respondWithSessionStat(w, r, handle)
 }
 
+// handleSessionRelink rescues a handle whose linked target was taken by a
+// concurrent writer: it retargets the staged bytes instead of stranding
+// the handle until TTL expiry. Same validation and error mapping as link.
+func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	var req sessionLinkRequest
+	if err := h.decodeJSON(r, &req, false); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := requireNonEmptyPath("path", req.Path); err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := h.clientFor(r).RelinkSession(r.Context(), handle, req.Path); err != nil {
+		h.writeSessionError(w, err)
+		return
+	}
+	h.respondWithSessionStat(w, r, handle)
+}
+
 // handleSessionClosePost answers POST .../close with a JSON ack; the DELETE
 // alias answers 204 with no body, like every other successful delete.
 func (h *restHandler) handleSessionClosePost(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +432,10 @@ func (c *authorizedClient) LinkSession(ctx context.Context, handleID, path strin
 	return c.base.LinkSession(ctx, handleID, path)
 }
 
+func (c *authorizedClient) RelinkSession(ctx context.Context, handleID, path string) error {
+	return c.base.RelinkSession(ctx, handleID, path)
+}
+
 func (c *authorizedClient) CloseSession(ctx context.Context, handleID string) error {
 	return c.base.CloseSession(ctx, handleID)
 }
@@ -443,6 +469,10 @@ func (readOnlyShare) SyncSession(ctx context.Context, handleID string) error {
 }
 
 func (readOnlyShare) LinkSession(ctx context.Context, handleID, path string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) RelinkSession(ctx context.Context, handleID, path string) error {
 	return errReadOnly()
 }
 

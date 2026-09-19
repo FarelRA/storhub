@@ -33,6 +33,10 @@ type fakeSession struct {
 	ownerUID uint32
 	hasOwner bool
 	expires  time.Time
+	// linked marks handles named by LinkSession (vs opened with a path):
+	// their commit creates, so a taken target fails like UploadFileContext
+	// instead of silently overwriting.
+	linked bool
 }
 
 func fakeSessionReadable(mode storage.OpenMode) bool {
@@ -324,6 +328,28 @@ func (c *fakeRESTClient) LinkSession(ctx context.Context, handleID, path string)
 	if s.path != "" {
 		return fmt.Errorf("link session %s to %s: %w", shortFakeHandle(handleID), path, storage.ErrSessionLinked)
 	}
+	return c.nameFakeSessionLocked(s, path)
+}
+
+// RelinkSession retargets a linked handle (rescue path); unlike Link it
+// accepts an already-named handle. Mirrors the manager contract.
+func (c *fakeRESTClient) RelinkSession(ctx context.Context, handleID, path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, err := c.liveFakeSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	if err := c.authorizeFakeSessionLocked(ctx, handleID, s); err != nil {
+		return err
+	}
+	return c.nameFakeSessionLocked(s, path)
+}
+
+// nameFakeSessionLocked validates and names a scratch handle (shared by
+// link and relink): parent must exist with nothing at the target. Naming
+// stages creation, so linked=true marks create-semantics for the commit.
+func (c *fakeRESTClient) nameFakeSessionLocked(s *fakeSession, path string) error {
 	clean, err := cleanRESTPath(path)
 	if err != nil {
 		return err
@@ -341,6 +367,7 @@ func (c *fakeRESTClient) LinkSession(ctx context.Context, handleID, path string)
 		}
 	}
 	s.path = clean
+	s.linked = true
 	s.dirty = true
 	return nil
 }
@@ -360,6 +387,16 @@ func (c *fakeRESTClient) CloseSession(ctx context.Context, handleID string) erro
 		return nil
 	}
 	if s.dirty {
+		// Linked scratch commits with create semantics (like
+		// UploadFileContext): a target taken since link fails instead
+		// of overwriting. Opened-with-path handles overwrite (replace
+		// semantics) as before.
+		if s.linked {
+			p := c.project(s.project)
+			if _, ok := p.files[s.path]; ok {
+				return shfs.AlreadyExists(s.path)
+			}
+		}
 		c.commitFakeSessionLocked(s.project, s.path, s.data)
 	}
 	delete(c.sessions, handleID)
@@ -640,4 +677,40 @@ func mustJSONRequestAuthed(t *testing.T, handler http.Handler, method, target st
 		merged[key] = value
 	}
 	return mustRequest(t, handler, method, target, strings.NewReader(string(body)), merged, wantStatus)
+}
+
+func TestRESTSessionRelinkRescuesTakenTarget(t *testing.T) {
+	t.Parallel()
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	scratch := openSessionHTTP(t, handler, "demo", "", "w")
+	writeSessionHTTP(t, handler, scratch, 0, "rescued bytes")
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles/"+scratch+"/link", map[string]string{"path": "taken.txt"}, http.StatusOK)
+	// A concurrent writer takes the linked target through the plain
+	// content endpoint.
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=taken.txt", strings.NewReader("rival"), nil, http.StatusCreated)
+	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/handles/"+scratch+"/close", nil, nil, http.StatusConflict)
+	assertErrorCode(t, resp, "conflict")
+	// Relink rescues the staged bytes at a free name; the rival keeps
+	// its own content.
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles/"+scratch+"/relink", map[string]string{"path": "rescued.txt"}, http.StatusOK)
+	if stat := statSessionHTTP(t, handler, scratch); stat.Path != "rescued.txt" {
+		t.Fatalf("relink must rename the handle target: %+v", stat)
+	}
+	mustRequest(t, handler, http.MethodPost, "/api/v1/handles/"+scratch+"/close", nil, nil, http.StatusOK)
+	if got := contentHTTP(t, handler, "demo", "rescued.txt"); got != "rescued bytes" {
+		t.Fatalf("relocated content = %q, want %q", got, "rescued bytes")
+	}
+	if got := contentHTTP(t, handler, "demo", "taken.txt"); got != "rival" {
+		t.Fatalf("rival content disturbed: %q", got)
+	}
+	// Relink to a taken name fails loudly instead of stealing it.
+	other := openSessionHTTP(t, handler, "demo", "", "w")
+	writeSessionHTTP(t, handler, other, 0, "x")
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles/"+other+"/link", map[string]string{"path": "other.txt"}, http.StatusOK)
+	resp = mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles/"+other+"/relink", map[string]string{"path": "taken.txt"}, http.StatusConflict)
+	assertErrorCode(t, resp, "conflict")
 }

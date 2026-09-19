@@ -126,6 +126,35 @@ func TestShareDeriveRunsAsNobody(t *testing.T) {
 	assertRedemptionIdentities(t, client)
 }
 
+// Derive also accepts the redemption spelling: the signed parent JWT in
+// the path segment with no query or header credential.
+func TestShareDeriveAcceptsJWTInPath(t *testing.T) {
+	t.Parallel()
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true, ShareSigningKey: []byte(testShareKey)})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("data"), nil, http.StatusCreated)
+	parent := mustDecodeShare(t, mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares", shareRequest{Path: "docs"}, http.StatusCreated))
+
+	derive := mustRequest(t, handler, http.MethodPost,
+		"/api/v1/shares/"+url.PathEscape(parent.Token)+"/derive",
+		bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "docs/f.txt"})),
+		map[string]string{"Content-Type": "application/json"}, http.StatusCreated)
+	child := mustDecodeShare(t, derive)
+	if child.Path != "docs/f.txt" {
+		t.Fatalf("unexpected derived share: %+v", child)
+	}
+
+	// A mismatched ID in the path with a valid token credential stays denied.
+	mustRequest(t, handler, http.MethodPost,
+		"/api/v1/shares/deadbeef/derive?token="+url.QueryEscape(parent.Token),
+		bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "docs/f.txt"})),
+		map[string]string{"Content-Type": "application/json"}, http.StatusForbidden)
+}
+
 func assertRedemptionIdentities(t *testing.T, client *fakeRESTClient) {
 	t.Helper()
 	ids := client.takeSeenIdentities()
@@ -754,4 +783,43 @@ func mustJSONRequestWithBearer(t *testing.T, handler http.Handler, target string
 		t.Fatalf("%s: got %d want %d body=%s", target, rec.Code, wantStatus, rec.Body.String())
 	}
 	return rec.Result()
+}
+
+// ---- Owner chgrp over REST follows CanChown; uid/gid omission keeps ----
+
+func TestRESTOwnerChgrpAndKeepConvention(t *testing.T) {
+	t.Parallel()
+	client := newFakeRESTClient()
+	seedProjectForAuth(t, client)
+	handler := newAuthedTestHandler(t, client)
+
+	rootAuth := map[string]string{"Authorization": loginBearer(t, handler, "root", "root-pass"), "Content-Type": "application/json"}
+	aliceAuth := map[string]string{"Authorization": loginBearer(t, handler, "alice", "alice-pass"), "Content-Type": "application/json"}
+
+	// Hand shared/readme.txt to alice so she is the file owner.
+	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBuffer(mustJSONMarshal(t, chownRequest{Path: "shared/readme.txt", UID: 1001, GID: 2001})), rootAuth, http.StatusOK)
+
+	// Omitted uid means keep: owner chgrp to her own group succeeds.
+	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBufferString(`{"path":"shared/readme.txt","gid":2001}`), aliceAuth, http.StatusOK)
+	var doc nodeResponse
+	decodeJSONBody(t, resp, &doc)
+	if doc.Entry.UID != 1001 || doc.Entry.GID != 2001 {
+		t.Fatalf("owner keep-chgrp changed ownership: %+v", doc.Entry)
+	}
+
+	// Explicit -1 on both ids is the keep spelling shared with the CLI.
+	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBufferString(`{"path":"shared/readme.txt","uid":-1,"gid":-1}`), aliceAuth, http.StatusOK)
+
+	// The owner still cannot hand the file away or move it out of her groups.
+	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBuffer(mustJSONMarshal(t, chownRequest{Path: "shared/readme.txt", UID: 1002, GID: 2001})), aliceAuth, http.StatusForbidden)
+	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBufferString(`{"path":"shared/readme.txt","gid":4000}`), aliceAuth, http.StatusForbidden)
+
+	// Out-of-range ids fail closed with 400, not 500.
+	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",
+		bytes.NewBufferString(`{"path":"shared/readme.txt","uid":4294967296}`), rootAuth, http.StatusBadRequest)
 }

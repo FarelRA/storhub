@@ -3,10 +3,12 @@ package rest
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
@@ -96,6 +98,26 @@ func TestMappedCodeNamesBadGateway(t *testing.T) {
 	t.Parallel()
 	if code := mappedCode(http.StatusBadGateway); code != "bad_gateway" {
 		t.Fatalf("502 must map to bad_gateway, got %q", code)
+	}
+}
+
+// Storage-layer errno must surface with the FUSE/report meaning: DAC
+// refusals are 403 denials (never a 500 that invites retries of a
+// deterministic denial), and EINVAL is a 400 client error, including
+// through wrapping.
+func TestMappedStatusErrnoMapping(t *testing.T) {
+	t.Parallel()
+	if status := mappedStatus(syscall.EACCES); status != http.StatusForbidden {
+		t.Fatalf("EACCES must map to 403, got %d", status)
+	}
+	if status := mappedStatus(syscall.EPERM); status != http.StatusForbidden {
+		t.Fatalf("EPERM must map to 403, got %d", status)
+	}
+	if status := mappedStatus(fmt.Errorf("commit: %w", syscall.EACCES)); status != http.StatusForbidden {
+		t.Fatalf("wrapped EACCES must map to 403, got %d", status)
+	}
+	if status := mappedStatus(syscall.EINVAL); status != http.StatusBadRequest {
+		t.Fatalf("EINVAL must map to 400, got %d", status)
 	}
 }
 

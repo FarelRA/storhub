@@ -72,7 +72,14 @@ func TestIdentityFromContextFailsClosed(t *testing.T) {
 	if root.Admin {
 		t.Fatalf("explicit non-root identity must stay unprivileged: %+v", root)
 	}
-	if !IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 0})).Admin {
-		t.Fatal("uid 0 must normalize to Admin")
+
+	// Admin is an explicit assertion only: a UID-0 identity without
+	// Admin:true stays unprivileged (DAC still keys off the UID), and an
+	// explicit Admin:true survives the assertion round trip.
+	if IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 0})).Admin {
+		t.Fatal("uid 0 without an explicit Admin flag must not promote to Admin")
+	}
+	if !IdentityFromContext(WithIdentity(context.Background(), Identity{UID: 0, Admin: true})).Admin {
+		t.Fatal("explicit uid-0 Admin must survive the assertion round trip")
 	}
 }

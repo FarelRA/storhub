@@ -203,6 +203,12 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 
 // serveContent serves GET/HEAD /content: raw file bytes. A serve* stream
 // (not a handle* JSON route) because the body is user-stored bytes.
+//
+// Atime note: reads through this endpoint update atime relatime-gated
+// in storage, while FUSE suppresses atime on every op (hot-path write
+// avoidance) and snapshot/session reads never touch it. That matrix is
+// deliberate per surface; unifying it further needs the FUSE and storage
+// layers, not this handler.
 func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")

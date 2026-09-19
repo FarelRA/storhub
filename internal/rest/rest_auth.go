@@ -472,7 +472,23 @@ func (c *authorizedClient) ChmodContext(ctx context.Context, project, targetPath
 	return c.base.ChmodContext(ctx, project, targetPath, mode)
 }
 func (c *authorizedClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
-	if !c.principal.Admin {
+	// Same rule as FUSE and CLI (shfs.CanChown): admins may move
+	// anything, and the file owner may change group within their own
+	// membership (UID kept or equal). Anything else fails closed here,
+	// never wider than CanChown; the backend re-enforces the same rule
+	// under the request identity.
+	entry, err := c.base.StatPathContext(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	idCtx := shfs.WithIdentity(ctx, shfs.Identity{
+		UID:    c.principal.UID,
+		GID:    c.principal.PrimaryGID,
+		Groups: append([]uint32(nil), c.principal.Groups...),
+		Admin:  c.principal.Admin,
+		Umask:  defaultRESTUmask,
+	})
+	if err := shfs.CanChown(idCtx, entry, uid, gid); err != nil {
 		return errForbidden("permission denied")
 	}
 	return c.base.ChownContext(ctx, project, targetPath, uid, gid)

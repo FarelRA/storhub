@@ -138,8 +138,10 @@ func TestStepV2ToV3(t *testing.T) {
 		t.Fatalf("expected v3, got %d", doc.V)
 	}
 	f := doc.Files["a.txt"]
-	if f.UID == 0 {
-		t.Fatal("owners must materialize at v3")
+	// Zero means root and copies verbatim: the migrator must not invent
+	// owners for entries that predate (or simply carry) explicit IDs.
+	if f.UID != 0 || f.GID != 0 {
+		t.Fatalf("owners must survive verbatim at v3, got %d:%d", f.UID, f.GID)
 	}
 	if doc.NextInode != 8 || doc.NextChunkID != 10 {
 		t.Fatalf("counters must seed max+1: ni=%d nc=%d", doc.NextInode, doc.NextChunkID)
@@ -247,14 +249,13 @@ func TestStepV3ToV4RepairsDanglingChunkRefs(t *testing.T) {
 	}
 }
 
-// Owner materialization in the v2->v3 migration must cover GID, not just UID.
-func TestStepV2ToV3MaterializesGID(t *testing.T) {
+// Owner IDs in the v2->v3 migration copy verbatim: 0 means root, never
+// unset. A v2 document carrying root-owned entries must migrate with
+// UID/GID 0 intact no matter which user runs the daemon, and nonzero
+// IDs must survive untouched.
+func TestStepV2ToV3PreservesOwners(t *testing.T) {
 	t.Parallel()
-	_, gid := defaultOwnerIDs()
-	if gid == 0 {
-		t.Skip("running as root group: materialization is a no-op by design")
-	}
-	v2 := `{"v":2,"p":"demo","f":{"a.txt":{"s":1,"i":7,"ua":50}},"d":{"x":{"ca":1,"ma":1}}}`
+	v2 := `{"v":2,"p":"demo","rt":{"ca":1,"ma":1},"f":{"root.bin":{"s":1,"i":7,"ua":50},"owned.txt":{"s":1,"i":8,"ua":50,"u":1001,"g":1002}},"d":{"x":{"ca":1,"ma":1}}}`
 	v3, err := migrators[2]([]byte(v2))
 	if err != nil {
 		t.Fatal(err)
@@ -263,14 +264,17 @@ func TestStepV2ToV3MaterializesGID(t *testing.T) {
 	if err := json.Unmarshal(v3, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Files["a.txt"].GID != gid {
-		t.Fatalf("file GID not materialized: %d, want %d", doc.Files["a.txt"].GID, gid)
+	if root := doc.Files["root.bin"]; root.UID != 0 || root.GID != 0 {
+		t.Fatalf("root-owned file rewritten to %d:%d, want 0:0", root.UID, root.GID)
 	}
-	if doc.Dirs["x"].GID != gid {
-		t.Fatalf("dir GID not materialized: %d, want %d", doc.Dirs["x"].GID, gid)
+	if owned := doc.Files["owned.txt"]; owned.UID != 1001 || owned.GID != 1002 {
+		t.Fatalf("owned file rewritten to %d:%d, want 1001:1002", owned.UID, owned.GID)
 	}
-	if doc.Root.GID != gid {
-		t.Fatalf("root GID not materialized: %d, want %d", doc.Root.GID, gid)
+	if doc.Root.UID != 0 || doc.Root.GID != 0 {
+		t.Fatalf("root dir rewritten to %d:%d, want 0:0", doc.Root.UID, doc.Root.GID)
+	}
+	if dir := doc.Dirs["x"]; dir.UID != 0 || dir.GID != 0 {
+		t.Fatalf("dir rewritten to %d:%d, want 0:0", dir.UID, dir.GID)
 	}
 }
 

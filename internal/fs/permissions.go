@@ -54,13 +54,14 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 	if id.GID != 0 {
 		id.Groups = uniqueGIDs(append(id.Groups, id.GID))
 	}
-	// Admin is granted only to an *explicitly declared* uid-0 identity.
-	// The process-user fallback in IdentityFromContext must never mint it:
-	// a root-run daemon would otherwise hand superuser rights to every
-	// surface that forgets WithIdentity (fail-open).
-	if id.UID == 0 {
-		id.Admin = true
-	}
+	// Admin is an explicit assertion only: a UID-0 identity without
+	// Admin:true stays unprivileged (DAC still keys off the UID, so
+	// root-owned files keep their owner semantics). The earlier silent
+	// promotion made the Admin flag on uid-0 accounts meaningless, so a
+	// configured admin:false still yielded full admin. Callers that mean
+	// privileged (FUSE uid-0 mounts, REST admin records) set Admin:true
+	// at the assertion point; the process-user fallback in
+	// IdentityFromContext never mints it.
 	return context.WithValue(ctx, identityContextKey, id)
 }
 

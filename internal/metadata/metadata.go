@@ -455,21 +455,38 @@ func (m *RepoMetadata) PruneUnreferencedChunks() int {
 }
 
 func (d *DirMeta) Normalize() {
-	if d.Mode == 0 {
-		d.Mode = defaultDirMode()
-	}
+	// Mode 0 is an explicit deny-all (000), not an unset field: it
+	// survives verbatim. Creation defaults live on the creation paths
+	// (EnsureDirectory stamps them; the v3 to v4 migrator materializes
+	// them for legacy entries), never here. See the explicit-zero
+	// contract on FileMeta.Normalize.
 	// Timestamps are NOT repaired here: the v4 contract is complete,
 	// authoritative values (the stacked migrator completes legacy docs;
 	// creation paths stamp real times). Zeros are real epoch values.
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
+// Explicit-zero contract: a stored Mode 0 means chmod 000, and Normalize
+// preserves it. The unset sentinel for creates is handled one layer up:
+// UpsertFile routes fresh nodes through initializeNewFileIdentityFields
+// (which defaults a zero mode), EnsureDirectory stamps directory modes
+// explicitly, and the stacked migrator materializes legacy zeros. Update
+// and verbatim paths (WriteFileDirect, WriteDirDirect, ReplaceFile, and
+// the family rewrites built on them) must never invent a mode, so an
+// explicit 000 survives store, reload (omitempty round-trips 0 as
+// absent and back to 0), and every later Normalize. Conversely,
+// preserveFileIdentity still treats a zero mode on an INCOMING update
+// as carry-over (keep the existing mode): modes change through the
+// chmod path, not through update assembly.
+//
+// One known edge stays outside this file: re-insertion flows that
+// Remove then Upsert (inode-family rebuilds) re-apply creation defaults
+// to the re-inserted entry. A 000 file with hardlinks therefore widens
+// on the next family rewrite; routing those re-inserts through
+// WriteFileDirect (as UpdateFileFamily already does) closes it.
 func (f *FileMeta) Normalize() {
-	if f.Mode == 0 {
-		f.Mode = defaultFileMode(nodeKindOf(f))
-	}
-	// See DirMeta.Normalize: zeros are authoritative epoch values, never
-	// gaps to repair here.
+	// See DirMeta.Normalize: zeros are authoritative values, never gaps
+	// to repair here.
 	if f.Chunks == nil {
 		f.Chunks = make([]int64, 0)
 	}
@@ -1078,17 +1095,17 @@ func (m *RepoMetadata) normalizeRoot() {
 	m.reconcileCounters()
 }
 
-// normalizeRootFast applies the O(1) root touch-ups (inode/mode defaults,
-// xattr normalization) without the O(files+dirs+chunks) counter
+// normalizeRootFast applies the O(1) root touch-ups (inode default, xattr
+// normalization) without the O(files+dirs+chunks) counter
 // reconciliation. normalizeRoot (load/normalize paths) adds the
 // reconciliation; SealTransaction uses only this fast path so sealing stays
-// O(1) per transaction.
+// O(1) per transaction. The root mode is never defaulted here: like every
+// other entry, an explicit 000 survives (see the explicit-zero contract
+// on FileMeta.Normalize); fresh trees stamp the default in
+// NewRepoMetadata and the migrator materializes legacy zeros.
 func (m *RepoMetadata) normalizeRootFast() {
 	if m.Root.Inode == 0 {
 		m.Root.Inode = 1
-	}
-	if m.Root.Mode == 0 {
-		m.Root.Mode = defaultDirMode()
 	}
 	// Root timestamps are authoritative under v4 (see DirMeta.Normalize).
 	m.Root.XAttrs = normalizeXAttrs(m.Root.XAttrs)

@@ -1,6 +1,8 @@
 package rest
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -43,6 +45,59 @@ type chownRequest struct {
 	Path string `json:"path"`
 	UID  uint32 `json:"uid"`
 	GID  uint32 `json:"gid"`
+}
+
+// chownKeepID is the chown(2) leave-unchanged sentinel (all-ones, the
+// wire encoding of (uid_t)-1), shared with shfs.CanChown and the CLI
+// -1 convention. REST clients omit the field (or send -1) to keep the
+// corresponding id, matching the CLI and FUSE partial-chown spellings.
+const chownKeepID = ^uint32(0)
+
+// UnmarshalJSON decodes a chown body with an explicit keep convention:
+// an omitted uid/gid (or the signed -1 the CLI accepts) means keep,
+// anything else must be a uint32 id. Out-of-range values fail closed.
+// Unknown fields are rejected, preserving the strict decoding the
+// default path applies under DisallowUnknownFields.
+func (r *chownRequest) UnmarshalJSON(data []byte) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	for key := range keys {
+		switch key {
+		case "path", "uid", "gid":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	var raw struct {
+		Path string `json:"path"`
+		UID  *int64 `json:"uid"`
+		GID  *int64 `json:"gid"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	uid, err := chownIDOrKeep(raw.UID, "uid")
+	if err != nil {
+		return err
+	}
+	gid, err := chownIDOrKeep(raw.GID, "gid")
+	if err != nil {
+		return err
+	}
+	r.Path, r.UID, r.GID = raw.Path, uid, gid
+	return nil
+}
+
+func chownIDOrKeep(value *int64, field string) (uint32, error) {
+	if value == nil || *value == -1 {
+		return chownKeepID, nil
+	}
+	if *value < 0 || *value > int64(chownKeepID) {
+		return 0, fmt.Errorf("invalid %s %d: must be a non-negative id, -1, or omitted to keep", field, *value)
+	}
+	return uint32(*value), nil
 }
 
 type utimesRequest struct {

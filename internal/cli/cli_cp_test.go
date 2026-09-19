@@ -15,20 +15,43 @@ import (
 type cpFakeHub struct {
 	hubClient
 	files                  map[string][]byte
+	modes                  map[string]uint32
 	cloneErr               error
 	cloneCalls             int
 	readCalls              int
 	writeCalls             int
 	createCalls            int
+	chmodCalls             int
 	lastSrcOff, lastDstOff int64
 	lastLength             int64
 }
 
+func (h *cpFakeHub) modeOf(targetPath string) uint32 {
+	if h.modes != nil {
+		if mode, ok := h.modes[targetPath]; ok {
+			return mode
+		}
+	}
+	return 0o644
+}
+
 func (h *cpFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, error) {
 	if data, ok := h.files[targetPath]; ok {
-		return &storhub.EntryInfo{Path: targetPath, Size: int64(len(data)), Mode: 0o644, Inode: 1, NLink: 1}, nil
+		return &storhub.EntryInfo{Path: targetPath, Size: int64(len(data)), Mode: h.modeOf(targetPath), Inode: 1, NLink: 1}, nil
 	}
 	return nil, shfs.NotFound(targetPath)
+}
+
+func (h *cpFakeHub) Chmod(project, targetPath string, mode uint32) error {
+	h.chmodCalls++
+	if _, ok := h.files[targetPath]; !ok {
+		return shfs.NotFound(targetPath)
+	}
+	if h.modes == nil {
+		h.modes = map[string]uint32{}
+	}
+	h.modes[targetPath] = mode
+	return nil
 }
 
 func (h *cpFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
@@ -196,5 +219,30 @@ func TestCpUsageErrors(t *testing.T) {
 		if err == nil || !IsUsageError(err) {
 			t.Fatalf("cp %q must be a usage error (exit 2), got %v", strings.Join(args, " "), err)
 		}
+	}
+}
+
+// A streaming copy onto a fresh path takes the source permission bits
+// minus setuid/setgid, matching the CopyContext/CloneRange rule so the
+// --reflink choice never changes the result mode.
+func TestCpStreamingCopyUnifiesDestinationMode(t *testing.T) {
+	fake := &cpFakeHub{
+		files: map[string][]byte{"locked.txt": []byte("secret"), "setuid.txt": []byte("tool")},
+		modes: map[string]uint32{"locked.txt": 0o600, "setuid.txt": 0o4755},
+	}
+	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=never", "demo", "locked.txt", "locked-copy.txt"}); err != nil {
+		t.Fatalf("cp never: %v", err)
+	}
+	if got := fake.modeOf("locked-copy.txt"); got != 0o600 {
+		t.Fatalf("streaming copy mode = %o, want source 600", got)
+	}
+	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=never", "demo", "setuid.txt", "tool-copy.txt"}); err != nil {
+		t.Fatalf("cp never: %v", err)
+	}
+	if got := fake.modeOf("tool-copy.txt"); got != 0o755 {
+		t.Fatalf("streaming copy mode = %o, want 755 (setuid cleared)", got)
+	}
+	if fake.chmodCalls != 2 {
+		t.Fatalf("streaming copy must chmod each fresh destination, got %d chmod calls", fake.chmodCalls)
 	}
 }

@@ -166,6 +166,19 @@ func (h *fakeHub) LinkSession(ctx context.Context, handleID, path string) error 
 	return nil
 }
 
+func (h *fakeHub) RelinkSession(ctx context.Context, handleID, path string) error {
+	store := h.sessionStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	sess, err := store.live(handleID)
+	if err != nil {
+		return err
+	}
+	sess.path = path
+	sess.dirty = true
+	return nil
+}
+
 func (h *fakeHub) CloseSession(ctx context.Context, handleID string) error {
 	store := h.sessionStore()
 	store.mu.Lock()
@@ -206,6 +219,10 @@ func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
 }
 
 func (h *pcFakeHub) LinkSession(ctx context.Context, handleID, path string) error {
+	return errPCSession()
+}
+
+func (h *pcFakeHub) RelinkSession(ctx context.Context, handleID, path string) error {
 	return errPCSession()
 }
 
@@ -316,5 +333,30 @@ func TestCLISessionOpenRejectsBadMode(t *testing.T) {
 	err = app2.Run([]string{"session", "open", "--token", "x", "demo", "--ttl", "nope"})
 	if err == nil || !IsUsageError(err) {
 		t.Fatalf("bad ttl must be a usage error, got %v", err)
+	}
+}
+
+func TestCLISessionRelinkRetargetsHandle(t *testing.T) {
+	oldFactory := newHubFromFlagsFn
+	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
+	fake := &fakeHub{t: t}
+	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		return fake, nil
+	}
+	opened := runSessionCLI(t, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
+	handle := strings.TrimSpace(opened)
+	if handle == "" {
+		t.Fatalf("open printed no handle: %q", opened)
+	}
+	runSessionCLI(t, []string{"session", "write", "--token", "x", "--handle", handle, "0", "hello"})
+	runSessionCLI(t, []string{"session", "link", "--token", "x", "--handle", handle, "docs/a.txt"})
+	runSessionCLI(t, []string{"session", "relink", "--token", "x", "--handle", handle, "docs/b.txt"})
+	statJSON := runSessionCLI(t, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
+	if !strings.Contains(statJSON, `"path":"docs/b.txt"`) {
+		t.Fatalf("relink must retarget the handle: %s", statJSON)
+	}
+	app, _, _ := newTestApp(t)
+	if err := app.Run([]string{"session", "relink", "--token", "x", "only-path"}); err == nil {
+		t.Fatal("relink without --handle must fail")
 	}
 }

@@ -621,10 +621,16 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			dstFile := repo.FindFile(dstClean)
 			dstDir := repo.GetDirectory(dstClean)
 			now := s.backend.Now()
+			// Caller ownership for the new nodes: provisioned once here so
+			// both copy helpers stamp the same identity (OwnerIDsForCreate
+			// falls back to the process owner only when no identity is
+			// attached, mirroring CreateFileContext).
+			defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
+			createUID, createGID := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 			if srcFile != nil {
-				return copyFileInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now)
+				return copyFileInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now, createUID, createGID)
 			}
-			return copyDirInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now)
+			return copyDirInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now, createUID, createGID)
 		}, fmt.Sprintf("storhub: copy %s to %s", srcClean, dstClean))
 		return err
 	})
@@ -633,7 +639,17 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 // copyFileInTxn duplicates one file key inside the update transaction with
 // a fresh inode. Copying onto a directory is EISDIR; onto a file replaces
 // it subject to the sticky check.
-func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64) error {
+//
+// Ownership and privilege model: a copy is a creation, not an identity
+// transfer. The destination carries the caller's owner IDs (plus
+// setgid-parent inheritance) and the source permission bits minus
+// setuid/setgid for unprivileged callers (decision 1A), exactly like a
+// CloneRange new destination and data writes. Admin (the CAP_FSETID
+// equivalent) keeps the source owner and bits. The store bypasses
+// UpsertFile for WriteFileDirect (the destination parent is verified
+// above): UpsertFile would route the fresh node through creation
+// defaults, which would widen an explicit 000 mode back to 0644.
+func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64, createUID, createGID uint32) error {
 	if dstDir != nil {
 		return syscall.EISDIR
 	}
@@ -649,8 +665,11 @@ func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCl
 	}
 	cloned := srcFile.Clone()
 	cloned.Inode = repo.AllocateInode()
+	cloned.UID, cloned.GID = createUID, createGID
+	cloned.Mode = SanitizeWrittenFileModeForContext(ctx, cloned.Mode)
+	cloned.Mode, cloned.UID, cloned.GID = ApplyParentInheritance(repo, dstClean, false, cloned.Mode, cloned.UID, cloned.GID)
 	cloned.ChangedAt = now
-	repo.UpsertFile(dstClean, cloned, now)
+	repo.WriteFileDirect(dstClean, cloned)
 	TouchParentDirectory(repo, dstClean, now)
 	return nil
 }
@@ -660,7 +679,12 @@ func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCl
 // O(subtree): entries are collected from DirectoryChildren, collision
 // checked against the live tree, and written as they are visited (RemapPath
 // is injective, so visited targets can never collide with each other).
-func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64) error {
+//
+// Every new node follows the copyFileInTxn ownership and privilege model
+// (caller owner, setuid/setgid cleared for unprivileged callers, setgid
+// re-inherited from the new parent): without it a copied tree would mint
+// foreign-owned setuid nodes for any caller with read access.
+func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64, createUID, createGID uint32) error {
 	if dstFile != nil {
 		return syscall.ENOTDIR
 	}
@@ -683,6 +707,9 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 	}
 	newDir := srcDir.Clone()
 	newDir.Inode = repo.AllocateInode()
+	newDir.UID, newDir.GID = createUID, createGID
+	newDir.Mode = SanitizeWrittenFileModeForContext(ctx, newDir.Mode)
+	newDir.Mode, newDir.UID, newDir.GID = ApplyParentInheritance(repo, dstClean, true, newDir.Mode, newDir.UID, newDir.GID)
 	newDir.ModifiedAt = now
 	newDir.ChangedAt = now
 	newDir.AccessedAt = now
@@ -703,6 +730,9 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 		}
 		cloned := sub.Clone()
 		cloned.Inode = repo.AllocateInode()
+		cloned.UID, cloned.GID = createUID, createGID
+		cloned.Mode = SanitizeWrittenFileModeForContext(ctx, cloned.Mode)
+		cloned.Mode, cloned.UID, cloned.GID = ApplyParentInheritance(repo, newPath, true, cloned.Mode, cloned.UID, cloned.GID)
 		cloned.ModifiedAt = now
 		cloned.ChangedAt = now
 		cloned.AccessedAt = now
@@ -719,8 +749,14 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 		}
 		cloned := sub.Clone()
 		cloned.Inode = repo.AllocateInode()
+		cloned.UID, cloned.GID = createUID, createGID
+		cloned.Mode = SanitizeWrittenFileModeForContext(ctx, cloned.Mode)
+		cloned.Mode, cloned.UID, cloned.GID = ApplyParentInheritance(repo, newPath, false, cloned.Mode, cloned.UID, cloned.GID)
 		cloned.ChangedAt = now
-		repo.UpsertFile(newPath, cloned, now)
+		// WriteFileDirect, not UpsertFile: the fresh identity is fully
+		// provisioned above, and UpsertFile creation defaults would
+		// widen an explicit 000 mode (see copyFileInTxn).
+		repo.WriteFileDirect(newPath, cloned)
 	}
 	TouchParentDirectory(repo, dstClean, now)
 	return nil

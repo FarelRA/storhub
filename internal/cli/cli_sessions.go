@@ -58,6 +58,7 @@ Examples:
 	cmd.AddCommand(a.newSessionStatCmd())
 	cmd.AddCommand(a.newSessionSyncCmd())
 	cmd.AddCommand(a.newSessionLinkCmd())
+	cmd.AddCommand(a.newSessionRelinkCmd())
 	cmd.AddCommand(a.newSessionCloseCmd())
 	return cmd
 }
@@ -378,6 +379,35 @@ func (a *App) runSessionLink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "linked %s to %s\n", handle, args[0])
+	return nil
+}
+
+func (a *App) newSessionRelinkCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "relink [flags] <path>",
+		Short: "Retarget a handle whose linked path was taken",
+		Long: `Relink retargets a handle to a new path: the rescue for a
+close that failed because a concurrent writer took the linked target.
+The staged bytes commit at the new path on close.`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runSessionRelink,
+	}
+	return cmd
+}
+
+func (a *App) runSessionRelink(cmd *cobra.Command, args []string) error {
+	handle, err := sessionHandle(cmd)
+	if err != nil {
+		return err
+	}
+	hub, err := a.mustCmdHub(cmd, 0, false)
+	if err != nil {
+		return err
+	}
+	if err := hub.RelinkSession(cmd.Context(), handle, args[0]); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.stderr, "relinked %s to %s\n", handle, args[0])
 	return nil
 }
 

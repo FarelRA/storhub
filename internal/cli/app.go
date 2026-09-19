@@ -156,6 +156,7 @@ type hubClient interface {
 	StatSession(ctx context.Context, handleID string) (storage.SessionStat, error)
 	SyncSession(ctx context.Context, handleID string) error
 	LinkSession(ctx context.Context, handleID, path string) error
+	RelinkSession(ctx context.Context, handleID, path string) error
 	CloseSession(ctx context.Context, handleID string) error
 
 	// Shutdown drains the asynchronous metadata writer. Part of the
@@ -598,6 +599,10 @@ func (a *App) newRollbackCmd() *cobra.Command {
 		Long: `Rollback restores the project's metadata to a past commit SHA
 (7-64 lowercase hex). A malformed SHA is a usage error (exit 2).
 
+The serve-mode admin boundary covers the REST surface only: this
+command runs with local-process trust and performs no admin check
+(the REST rollback endpoint is admin-gated).
+
 Examples:
   storhub rollback docs-project abc1234`,
 		Args: usageArgs(cobra.ExactArgs(2)),
@@ -613,7 +618,11 @@ func (a *App) newPurgeCmd() *cobra.Command {
 		Short: "Delete untracked releases and assets",
 		Long: `Purge deletes GitHub releases and assets that are not tracked in the project metadata.
 
-This cleans up orphaned releases and assets (e.g. from interrupted writes or manual interference).`,
+This cleans up orphaned releases and assets (e.g. from interrupted writes or manual interference).
+
+The serve-mode admin boundary covers the REST surface only: this
+command runs with local-process trust and performs no admin check
+(the REST purge endpoint is admin-gated).`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runPurge,
 	}
@@ -636,7 +645,11 @@ func (a *App) newPruneCmd() *cobra.Command {
   all       history (where possible) + objects + assets
 
 Use --dry-run to see what would be reclaimed without deleting anything.
---keep bounds history compaction (manifests newer than keep are retained).`,
+--keep bounds history compaction (manifests newer than keep are retained).
+
+The serve-mode admin boundary covers the REST surface only: this
+command runs with local-process trust and performs no admin check
+(the REST prune endpoint is admin-gated).`,
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
 		RunE: a.runPrune,
 	}
@@ -708,6 +721,10 @@ func (a *App) newDeleteProjectCmd() *cobra.Command {
 		Short: "Delete an entire project repository",
 		Long: `Delete-project removes the project's GitHub repository outright: every file,
 directory, release, asset, and metadata revision is gone. This cannot be undone.
+
+The serve-mode admin boundary covers the REST surface only: this
+command runs with local-process trust and performs no admin check
+(the REST project-delete endpoint is admin-gated).
 
 The --yes flag is mandatory so a typo can never destroy a project.`,
 		Args: usageArgs(cobra.ExactArgs(1)),

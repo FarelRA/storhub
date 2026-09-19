@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -174,8 +175,74 @@ func (c *restrictedClient) checkAccess(project, targetPath string) error {
 	return errForbidden("access denied: path not shared")
 }
 
+// maxShareResolveHops bounds symlink chasing in the share lane, mirroring
+// the kernel MAXSYMLINKS budget: a longer chain fails closed instead of
+// serving.
+const maxShareResolveHops = 40
+
+// isShareScopeDenial reports whether err is a share-lane scope denial
+// (escape or loop) as opposed to a backend failure (missing node,
+// DAC refusal as nobody), so callers can fail closed on escapes while
+// preserving benign shapes like dangling-link stat.
+func isShareScopeDenial(err error) bool {
+	var rerr *restStatusError
+	if !errors.As(err, &rerr) {
+		return false
+	}
+	return rerr.status == http.StatusForbidden
+}
+
+// resolveShareTarget follows symlinks hop by hop from a scope-checked
+// request path and enforces the share prefix on every hop and the final
+// target. A link inside the shared subtree pointing outside (absolute
+// or relative, single or chained) resolves to a denied error instead of
+// serving outside bytes or metadata. Dangling or DAC-refused targets
+// surface their backend error unchanged: the link path itself passed the
+// scope check, so the denial (if any) comes from the serve-time DAC.
+//
+// The check races a concurrent retarget between resolution and serve
+// (check-then-use): the serve still runs as the nobody visitor, so an
+// outside target additionally needs nobody DAC to leak bytes. Share
+// creators (who place or retarget links) stay trusted for link-shape
+// changes, exactly as for share creation itself.
+func (c *restrictedClient) resolveShareTarget(ctx context.Context, project, targetPath string) (string, error) {
+	if err := c.checkAccess(project, targetPath); err != nil {
+		return "", err
+	}
+	current, err := canonicalSharePath(targetPath)
+	if err != nil {
+		return "", errForbidden("access denied: path not shared")
+	}
+	for range maxShareResolveHops {
+		entry, err := c.underlying.StatPathContext(ctx, project, current)
+		if err != nil {
+			return "", err
+		}
+		if !entry.IsSymlink {
+			return current, nil
+		}
+		target, err := c.underlying.ReadlinkContext(ctx, project, current)
+		if err != nil {
+			return "", err
+		}
+		next := target
+		if !path.IsAbs(target) {
+			next = path.Join(path.Dir(current), target)
+		}
+		canonical, err := canonicalSharePath(next)
+		if err != nil {
+			return "", errForbidden("access denied: path not shared")
+		}
+		if !hasPathPrefix(canonical, c.allowedPath) {
+			return "", errForbidden("access denied: path not shared")
+		}
+		current = canonical
+	}
+	return "", errForbidden("access denied: too many levels of symbolic links")
+}
+
 func (c *restrictedClient) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
-	if err := c.checkAccess(project, filePath); err != nil {
+	if _, err := c.resolveShareTarget(ctx, project, filePath); err != nil {
 		return nil, err
 	}
 	return c.underlying.ReadFileAtContext(ctx, project, filePath, offset, length)
@@ -185,11 +252,28 @@ func (c *restrictedClient) StatPathContext(ctx context.Context, project, targetP
 	if err := c.checkAccess(project, targetPath); err != nil {
 		return nil, err
 	}
-	return c.underlying.StatPathContext(ctx, project, targetPath)
+	entry, err := c.underlying.StatPathContext(ctx, project, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	if !entry.IsSymlink {
+		return entry, nil
+	}
+	if _, rerr := c.resolveShareTarget(ctx, project, targetPath); rerr != nil {
+		if isShareScopeDenial(rerr) {
+			// Escaping or looping link: no outside metadata, not even
+			// the link row.
+			return nil, rerr
+		}
+		// Dangling or unreadable target: the link itself sits inside
+		// the share, so its own row stays visible.
+		return entry, nil
+	}
+	return entry, nil
 }
 
 func (c *restrictedClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
-	if err := c.checkAccess(project, dirPath); err != nil {
+	if _, err := c.resolveShareTarget(ctx, project, dirPath); err != nil {
 		return nil, err
 	}
 	return c.underlying.ReadDirContext(ctx, project, dirPath)
@@ -215,18 +299,32 @@ func (c *restrictedClient) ReadlinkContext(ctx context.Context, project, linkPat
 	if err := c.checkAccess(project, linkPath); err != nil {
 		return "", err
 	}
-	return c.underlying.ReadlinkContext(ctx, project, linkPath)
+	target, err := c.underlying.ReadlinkContext(ctx, project, linkPath)
+	if err != nil {
+		return "", err
+	}
+	// The raw target string names a path: when resolution escapes the
+	// share the string itself leaks outside structure, so it stays
+	// denied. A backend failure from the resolver means every hop it
+	// reached stayed in scope (dangling or DAC-refused tail), and the
+	// first-hop string names an in-scope path.
+	if _, rerr := c.resolveShareTarget(ctx, project, linkPath); rerr != nil {
+		if isShareScopeDenial(rerr) {
+			return "", rerr
+		}
+	}
+	return target, nil
 }
 
 func (c *restrictedClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
-	if err := c.checkAccess(project, targetPath); err != nil {
+	if _, err := c.resolveShareTarget(ctx, project, targetPath); err != nil {
 		return nil, err
 	}
 	return c.underlying.GetXAttrContext(ctx, project, targetPath, attr)
 }
 
 func (c *restrictedClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
-	if err := c.checkAccess(project, targetPath); err != nil {
+	if _, err := c.resolveShareTarget(ctx, project, targetPath); err != nil {
 		return nil, err
 	}
 	return c.underlying.ListXAttrContext(ctx, project, targetPath)
@@ -466,6 +564,14 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 
 // handleShareDerive serves POST /shares/{token}/derive: mint a sub-capability.
 // A handle* JSON route (not a byte stream).
+//
+// Parent credential, two spellings (both explicit): the {token} path
+// segment carries the parent share ID with the signed JWT in ?token= or
+// Authorization: Bearer (the management-plane spelling the info route
+// documents), or the path segment carries the signed JWT itself (the
+// redemption spelling the info/download routes use). The two never mix
+// silently: an ID in the path must match the presented token's ID, and a
+// JWT in the path must verify on its own.
 func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) {
 	parentToken := r.URL.Query().Get("token")
 	if parentToken == "" {
@@ -473,13 +579,24 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 	}
 	claims, err := h.parseShareToken(parentToken)
 	if err != nil || h.isRevoked(claims.ID) {
+		// Fall back to the redemption spelling: the path segment itself
+		// is the signed parent JWT (no query or header credential).
+		if parentToken == "" {
+			if pathClaims, perr := h.parseShareToken(chi.URLParam(r, "token")); perr == nil && !h.isRevoked(pathClaims.ID) {
+				claims, err = pathClaims, nil
+			}
+		}
+	}
+	if err != nil || h.isRevoked(claims.ID) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
 	// Only the share's own token can derive children: the {token} path
-	// segment must match the presented token's ID when present.
+	// segment must match the presented token's ID when it names an ID.
+	// (When the path segment was the JWT itself it is already the
+	// verified parent, so the ID comparison below is skipped.)
 	token := chi.URLParam(r, "token")
-	if token != "" && token != claims.ID {
+	if parentToken != "" && token != "" && token != claims.ID {
 		h.writeMappedError(w, errForbidden("share id mismatch"))
 		return
 	}

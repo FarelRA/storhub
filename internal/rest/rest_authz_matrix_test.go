@@ -49,6 +49,13 @@ func newMatrixTree(t *testing.T) *authorizedClientFactory {
 		return err
 	})
 	setModeOwner("demo", "team/plan.txt", 0o640, 1001, 2001)
+	// A second team file owned by alice isolates the owner-chgrp cases
+	// from the admin-chown mutation above (which reassigns plan.txt).
+	mk(func() error {
+		_, err := client.CreateFileContext(context.Background(), "demo", "team/chgrp.txt")
+		return err
+	})
+	setModeOwner("demo", "team/chgrp.txt", 0o640, 1001, 2001)
 
 	return &authorizedClientFactory{client: client}
 }
@@ -63,6 +70,7 @@ func TestAuthorizationMatrix(t *testing.T) {
 	t.Parallel()
 	f := newMatrixTree(t)
 	owner := restPrincipal{Kind: "user", Username: "alice", UID: 1001, PrimaryGID: 2001}
+	ownerInGroup := restPrincipal{Kind: "user", Username: "alice", UID: 1001, PrimaryGID: 2001, Groups: []uint32{2001, 3000}}
 	groupMember := restPrincipal{Kind: "user", Username: "bob", UID: 1002, PrimaryGID: 3000, Groups: []uint32{2001}}
 	outsider := restPrincipal{Kind: "user", Username: "carol", UID: 1003, PrimaryGID: 3000}
 	admin := restPrincipal{Kind: "user", Username: "root", UID: 0, PrimaryGID: 0, Admin: true}
@@ -84,6 +92,14 @@ func TestAuthorizationMatrix(t *testing.T) {
 	chownPlanToSelf := func(uid uint32) func(*authorizedClient) error {
 		return func(c *authorizedClient) error {
 			return c.ChownContext(context.Background(), "demo", "team/plan.txt", uid, 2001)
+		}
+	}
+	// Owner chgrp moves group only (UID kept), into a member group or a
+	// no-op on the current group; anything else stays denied. These run
+	// against team/chgrp.txt, which no other case mutates.
+	chownPlan := func(uid, gid uint32) func(*authorizedClient) error {
+		return func(c *authorizedClient) error {
+			return c.ChownContext(context.Background(), "demo", "team/chgrp.txt", uid, gid)
 		}
 	}
 	listRevisions := func(c *authorizedClient) error {
@@ -129,11 +145,15 @@ func TestAuthorizationMatrix(t *testing.T) {
 		{name: "group member creates via parent wx bits", principal: groupMember, op: createInTeam, allowed: true},
 		{name: "other cannot create in team dir", principal: outsider, op: createInTeam, allowed: false},
 
-		// chown policy: a privileged operation, restricted to admins at the
-		// REST layer regardless of file ownership (unlike chmod).
-		{name: "owner cannot chown via REST", principal: owner, op: chownPlanToSelf(1009), allowed: false},
+		// chown policy: the CanChown rule shared with FUSE/CLI. Admins may
+		// move anything; the file owner may change group within their own
+		// membership (UID kept); every other combination fails closed.
+		{name: "owner cannot give the file away via REST", principal: owner, op: chownPlanToSelf(1009), allowed: false},
 		{name: "non-owner group member cannot chown", principal: groupMember, op: chownPlanToSelf(1009), allowed: false},
 		{name: "admin chowns arbitrary file", principal: admin, op: chownPlanToSelf(1009), allowed: true},
+		{name: "owner chgrps within membership", principal: ownerInGroup, op: chownPlan(1001, 3000), allowed: true},
+		{name: "owner keeps both ids", principal: owner, op: chownPlan(^uint32(0), ^uint32(0)), allowed: true},
+		{name: "owner chgrp into foreign group denied", principal: owner, op: chownPlan(1001, 4000), allowed: false},
 
 		// Metadata and destructive operations are gated above DAC.
 		// Revision listing is gated by metadata READ access (root here is

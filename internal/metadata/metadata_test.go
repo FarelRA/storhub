@@ -358,6 +358,8 @@ func TestValidateRejectsFileDirPathCollision(t *testing.T) {
 }
 
 // Symlinks must default to the symlink mode, not the regular-file mode.
+// Defaults apply on the creation path (UpsertFile); Normalize itself
+// preserves stored modes verbatim, including an explicit 000.
 func TestSymlinkModeDefaults(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
@@ -366,16 +368,38 @@ func TestSymlinkModeDefaults(t *testing.T) {
 	if got == nil || got.Mode != defaultFileMode(NodeKindSymlink) {
 		t.Fatalf("symlink creation default = %o, want %o", got.Mode, defaultFileMode(NodeKindSymlink))
 	}
+	// Explicit modes (including deny-all) survive normalization: 0 is a
+	// value, not a gap.
 	f := &FileMeta{Symlink: "t"}
 	f.Normalize()
-	if f.Mode != defaultFileMode(NodeKindSymlink) {
-		t.Fatalf("symlink normalize default = %o, want %o", f.Mode, defaultFileMode(NodeKindSymlink))
+	if f.Mode != 0 {
+		t.Fatalf("explicit 000 must survive normalize, got %o", f.Mode)
 	}
-	// Regular files keep the regular default.
+	f.Mode = defaultFileMode(NodeKindSymlink)
+	f.Normalize()
+	if f.Mode != defaultFileMode(NodeKindSymlink) {
+		t.Fatalf("symlink mode changed by normalize: %o", f.Mode)
+	}
+	// Regular files keep the regular default on creation, and an explicit
+	// 000 survives the verbatim store path end to end.
 	r := &FileMeta{Size: 1, Chunks: []int64{}}
-	r.Normalize()
+	InitializeNewFileIdentityFields(r, 200)
 	if r.Mode != defaultFileMode(NodeKindFile) {
 		t.Fatalf("regular default = %o, want %o", r.Mode, defaultFileMode(NodeKindFile))
+	}
+	m.UpsertFile("plain.txt", FileMeta{Size: 1}, 200)
+	if stored := m.FindFile("plain.txt"); stored == nil || stored.Mode != defaultFileMode(NodeKindFile) {
+		t.Fatalf("regular creation default broken: %+v", stored)
+	}
+	denied := FileMeta{Size: 1, Mode: 0o000, Inode: 4242, UploadedAt: 200, ModifiedAt: 200, AccessedAt: 200, ChangedAt: 200, Chunks: []int64{}}
+	m.WriteFileDirect("denied.txt", denied)
+	if stored := m.FindFile("denied.txt"); stored == nil || stored.Mode != 0 {
+		t.Fatalf("explicit 000 widened on store: %+v", stored)
+	}
+	// Creation through UpsertFile still defaults an absent mode.
+	m.UpsertFile("fresh.txt", FileMeta{Size: 1}, 200)
+	if stored := m.FindFile("fresh.txt"); stored == nil || stored.Mode != defaultFileMode(NodeKindFile) {
+		t.Fatalf("creation default broken: %+v", stored)
 	}
 }
 

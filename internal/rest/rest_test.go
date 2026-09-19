@@ -1151,8 +1151,16 @@ func (c *fakeRESTClient) ChownContext(ctx context.Context, project, targetPath s
 		return err
 	}
 	now := c.tick()
-	node.entry.UID = uid
-	node.entry.GID = gid
+	// The all-ones value is the chown(2) leave-unchanged sentinel the
+	// real backend honors; the fake mirrors it so keep-spelling tests do
+	// not corrupt the seeded tree.
+	const keepOwner = ^uint32(0)
+	if uid != keepOwner {
+		node.entry.UID = uid
+	}
+	if gid != keepOwner {
+		node.entry.GID = gid
+	}
 	node.entry.Mode &^= 0o6000
 	node.entry.ChangedAt = now
 	return nil

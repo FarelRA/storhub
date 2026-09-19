@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -132,6 +133,7 @@ type Client interface {
 	StatSession(ctx context.Context, handleID string) (storage.SessionStat, error)
 	SyncSession(ctx context.Context, handleID string) error
 	LinkSession(ctx context.Context, handleID, path string) error
+	RelinkSession(ctx context.Context, handleID, path string) error
 	CloseSession(ctx context.Context, handleID string) error
 }
 
@@ -476,6 +478,14 @@ func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 	})
 }
 
+// defaultRESTUmask is the server default umask carried by REST
+// identities. Creations through REST use fixed modes (0644 files, 0755
+// dirs, 0777 links) that already reflect a 022 mask, matching the FUSE
+// default; attaching it here (instead of leaving Umask 0) means any
+// future explicit-mode REST input flows through ApplyCreateMode masked
+// rather than bypassing the mask entirely.
+const defaultRESTUmask = 0o022
+
 // requestBearerToken extracts the Authorization: Bearer *** token from a
 // request, tolerating inline whitespace. Empty unless the scheme is Bearer.
 // Callers keep their own header-vs-query precedence on top of it.
@@ -556,6 +566,7 @@ func (h *restHandler) authPrincipal(r *http.Request, auth *restAuthenticator, to
 		GID:    fresh.PrimaryGID,
 		Groups: fresh.Groups,
 		Admin:  fresh.Admin,
+		Umask:  defaultRESTUmask,
 	})
 	return context.WithValue(identity, clientCtxKey, &authorizedClient{base: h.client, principal: fresh}), true
 }
@@ -761,6 +772,19 @@ func mappedStatus(err error) int {
 	}
 	if errors.Is(err, shfs.ErrNotFound) {
 		return http.StatusNotFound
+	}
+	// DAC refusals raised below the REST pre-checks (in-transaction
+	// re-authorize, session commit recheck, clone inner checks, or a
+	// lexical traverse check that passed while physical resolution
+	// failed) arrive as raw errno: like the wrapper path they are
+	// denials (403), and like FUSE they stay EACCES/EPERM, never a 500
+	// that invites retries of a deterministic denial. Malformed
+	// arguments that reach storage as EINVAL are client errors (400).
+	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		return http.StatusForbidden
+	}
+	if errors.Is(err, syscall.EINVAL) {
+		return http.StatusBadRequest
 	}
 	switch {
 	case errors.Is(err, shfs.ErrAlreadyExists),

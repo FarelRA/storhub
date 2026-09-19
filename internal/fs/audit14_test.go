@@ -31,7 +31,7 @@ func TestStatFSContextCachesAndInvalidates(t *testing.T) {
 	backend.seedDir("docs")
 	backend.seedFile("docs/a.txt", []byte("hello"))
 	svc := NewService(backend)
-	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0})
+	ctx := WithIdentity(context.Background(), Identity{UID: 0, GID: 0, Admin: true})
 	first, err := svc.StatFSContext(ctx, "demo")
 	if err != nil || first.Files != 1 {
 		t.Fatalf("initial statfs: %+v err=%v", first, err)

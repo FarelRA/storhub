@@ -184,7 +184,13 @@ func cloneWithFlags(ctx context.Context, hub hubClient, project, src string, src
 // streamingCopy is the download-plus-upload fallback: the source span is
 // read window by window and written over the destination span (pwrite
 // semantics; WriteFileAt zero-fills a dst gap). The destination is created
-// when missing so a full-file stream lands on a fresh path.
+// when missing so a full-file stream lands on a fresh path. A newly
+// created destination takes the source permission bits minus
+// setuid/setgid (the CLI runs as the trusted local process, never
+// admin), matching the CopyContext/CloneRange mode rule so the --reflink
+// choice never changes the result mode. An existing destination keeps
+// its mode (range-write semantics, like CloneRange onto an existing
+// file).
 func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcOff int64, dst string, dstOff int64, length int64) (*storhub.FileMetadata, error) {
 	_ = ctx
 	if _, err := hub.StatPath(project, dst); err != nil {
@@ -193,6 +199,13 @@ func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcO
 		}
 		if _, err := hub.CreateFile(project, dst); err != nil {
 			return nil, err
+		}
+		srcEntry, serr := hub.StatPath(project, src)
+		if serr != nil {
+			return nil, serr
+		}
+		if cerr := hub.Chmod(project, dst, srcEntry.Mode&0o7777&^0o6000); cerr != nil {
+			return nil, cerr
 		}
 	}
 	var meta *storhub.FileMetadata

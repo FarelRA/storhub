@@ -125,3 +125,89 @@ func TestSweepExpiredSharesBoundsRegistry(t *testing.T) {
 		t.Fatalf("expected all expired records swept, got %d", got)
 	}
 }
+
+// seedShareEscapeTree builds a share lane where public/ holds an absolute
+// escape link, a relative escape link, a chained escape (in-scope hop to
+// an escaping hop), an in-scope link, and a dangling in-scope link,
+// alongside the outside world-readable target they point at.
+func seedShareEscapeTree(t *testing.T) (*fakeRESTClient, *restrictedClient) {
+	t.Helper()
+	ctx := context.Background()
+	client := newFakeRESTClient()
+	for _, dir := range []string{"public", "private"} {
+		if err := client.MkdirContext(ctx, "demo", dir); err != nil {
+			t.Fatalf("seed %s: %v", dir, err)
+		}
+	}
+	if _, err := client.CreateFileContext(ctx, "demo", "private/keys.txt"); err != nil {
+		t.Fatalf("seed keys: %v", err)
+	}
+	if _, err := client.WriteFileAtContext(ctx, "demo", "private/keys.txt", 0, []byte("top-secret")); err != nil {
+		t.Fatalf("write keys: %v", err)
+	}
+	if _, err := client.CreateFileContext(ctx, "demo", "public/doc.txt"); err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	for link, target := range map[string]string{
+		"public/abs":   "/private/keys.txt",
+		"public/rel":   "../private/keys.txt",
+		"public/mid":   "doc.txt",
+		"public/chain": "hop",
+		"public/hop":   "/private/keys.txt",
+		"public/inner": "doc.txt",
+		"public/dead":  "gone.txt",
+	} {
+		if _, err := client.SymlinkContext(ctx, "demo", target, link); err != nil {
+			t.Fatalf("seed link %s: %v", link, err)
+		}
+	}
+	return client, newRestrictedClient(client, "demo", "public")
+}
+
+func assertShareDenied(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: escaping symlink served, want denial", what)
+	}
+	if !strings.Contains(err.Error(), "not shared") && !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("%s: wrong denial: %v", what, err)
+	}
+}
+
+// A symlink inside the shared subtree pointing outside must not serve
+// outside bytes, metadata, target strings, or xattrs to share visitors.
+func TestShareSymlinkEscapeDenied(t *testing.T) {
+	t.Parallel()
+	_, share := seedShareEscapeTree(t)
+	ctx := context.Background()
+	for _, link := range []string{"public/abs", "public/rel", "public/chain"} {
+		if _, err := share.ReadFileAtContext(ctx, "demo", link, 0, 64); err == nil || !strings.Contains(err.Error(), "not shared") {
+			t.Fatalf("read %s: want scope denial, got %v", link, err)
+		}
+		assertShareDenied(t, func() error { _, err := share.StatPathContext(ctx, "demo", link); return err }(), "stat "+link)
+		assertShareDenied(t, func() error { _, err := share.ReadlinkContext(ctx, "demo", link); return err }(), "readlink "+link)
+		assertShareDenied(t, func() error { _, err := share.GetXAttrContext(ctx, "demo", link, "user.a"); return err }(), "getxattr "+link)
+		assertShareDenied(t, func() error { _, err := share.ListXAttrContext(ctx, "demo", link); return err }(), "listxattr "+link)
+		assertShareDenied(t, func() error { _, err := share.ReadDirContext(ctx, "demo", link); return err }(), "readdir "+link)
+	}
+}
+
+// In-scope links keep working, and a dangling in-scope link still stats
+// as itself (only escapes fail closed).
+func TestShareSymlinkInScopeAllowed(t *testing.T) {
+	t.Parallel()
+	_, share := seedShareEscapeTree(t)
+	ctx := context.Background()
+	if target, err := share.ReadlinkContext(ctx, "demo", "public/inner"); err != nil || target != "doc.txt" {
+		t.Fatalf("in-scope readlink: %q %v", target, err)
+	}
+	if entry, err := share.StatPathContext(ctx, "demo", "public/inner"); err != nil || !entry.IsSymlink {
+		t.Fatalf("in-scope stat: %+v %v", entry, err)
+	}
+	if _, err := share.ReadFileAtContext(ctx, "demo", "public/inner", 0, 64); err != nil {
+		t.Fatalf("in-scope read delegates: %v", err)
+	}
+	if entry, err := share.StatPathContext(ctx, "demo", "public/dead"); err != nil || !entry.IsSymlink {
+		t.Fatalf("dangling in-scope stat must stay visible: %+v %v", entry, err)
+	}
+}
