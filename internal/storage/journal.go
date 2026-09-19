@@ -283,22 +283,29 @@ func (h *StorHub) journalOverCap(project string, appendSeq uint64) bool {
 // also the cap-compaction path: appendOpLocked calls it when the op-stack or
 // journal byte cap crosses even though no commit succeeded — the rewrite is
 // compaction to the folded survivors, not acknowledgment.
+//
+// Locking: journalMu is held across the whole critical section (handle
+// close plus tmp write plus fsync plus rename). Rewrite is rare (commit
+// success plus cap compaction) and both call sites already hold pm.mu, so
+// the order stays pm.mu then journalMu with no reverse path (journal code
+// never takes pm.mu). Appenders only take journalMu briefly and block for
+// the rewrite window instead of losing lines to the rename race (F2).
 func (h *StorHub) journalRewrite(project string, ops []Op) {
 	path := h.journalPath(project)
 	if path == "" {
 		return
 	}
+	h.journalMu.Lock()
+	defer h.journalMu.Unlock()
 	// Drop the open append handle first: the rename below replaces the file,
 	// and a lingering handle would keep appending to the unlinked inode (and
 	// its pending fsync would target the wrong file). The next append reopens
 	// the new file.
-	h.journalMu.Lock()
 	if f, ok := h.journalFiles[project]; ok {
 		_ = f.Close()
 		delete(h.journalFiles, project)
 		delete(h.journalDirty, project)
 	}
-	h.journalMu.Unlock()
 	if len(ops) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			logging.Warn(h.projectLogger(project), "op journal clear failed", "err", err)

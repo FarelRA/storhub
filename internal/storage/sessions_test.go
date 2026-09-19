@@ -577,3 +577,98 @@ func TestParseOpenMode(t *testing.T) {
 		t.Fatal("bogus mode must fail")
 	}
 }
+
+func TestSessionCommitAsOpenerNotCloser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	proj := "project-session-opener"
+	adminCtx := shfs.WithIdentity(ctx, shfs.Identity{UID: 0, GID: 0, Admin: true})
+	userA := sessUserCtx(1001)
+
+	if err := hub.MkdirContext(adminCtx, proj, "sub"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := hub.ChmodContext(adminCtx, proj, "sub", 0o777); err != nil {
+		t.Fatalf("chmod sub: %v", err)
+	}
+	id := mustOpenSession(t, hub, userA, proj, "", SessionReadWrite)
+	if _, err := hub.WriteSession(userA, id, 0, []byte("hi")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := hub.LinkSession(userA, id, "sub/a.txt"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// An admin closes a user's session: the files must still belong to
+	// the opener who staged the bytes, not to the admin.
+	if err := hub.CloseSession(adminCtx, id); err != nil {
+		t.Fatalf("admin close: %v", err)
+	}
+	meta, _, err := hub.loadRepoMetadataFresh(ctx, proj)
+	if err != nil {
+		t.Fatalf("fresh load: %v", err)
+	}
+	got := meta.FindFile("sub/a.txt")
+	if got == nil {
+		t.Fatal("committed file missing")
+	}
+	if got.UID != 1001 {
+		t.Fatalf("commit owner: want opener 1001, got %d", got.UID)
+	}
+}
+
+func TestSessionRelinkRescuesTakenTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	proj := "project-session-relink"
+	adminCtx := shfs.WithIdentity(ctx, shfs.Identity{UID: 0, GID: 0, Admin: true})
+	userA := sessUserCtx(1001)
+
+	if err := hub.MkdirContext(adminCtx, proj, "sub"); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := hub.ChmodContext(adminCtx, proj, "sub", 0o777); err != nil {
+		t.Fatalf("chmod sub: %v", err)
+	}
+	id := mustOpenSession(t, hub, userA, proj, "", SessionReadWrite)
+	if _, err := hub.WriteSession(userA, id, 0, []byte("data")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := hub.LinkSession(userA, id, "sub/a.txt"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// A concurrent writer takes the linked target before close.
+	seed := writeTempFile(t, t.TempDir(), "rival.bin", []byte("rival"))
+	if _, err := hub.UploadFileContext(adminCtx, proj, "sub/a.txt", seed); err != nil {
+		t.Fatalf("rival upload: %v", err)
+	}
+	if err := hub.CloseSession(userA, id); err == nil {
+		t.Fatal("close over a taken target must fail, got nil")
+	}
+	// Relink to a free name rescues the staged bytes; the rival keeps
+	// its own content untouched.
+	if err := hub.RelinkSession(userA, id, "sub/b.txt"); err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+	if err := hub.CloseSession(userA, id); err != nil {
+		t.Fatalf("close after relink: %v", err)
+	}
+	meta, _, err := hub.loadRepoMetadataFresh(ctx, proj)
+	if err != nil {
+		t.Fatalf("fresh load: %v", err)
+	}
+	rescued := meta.FindFile("sub/b.txt")
+	if rescued == nil {
+		t.Fatal("relocated file missing")
+	}
+	rival := meta.FindFile("sub/a.txt")
+	if rival == nil {
+		t.Fatal("rival file missing")
+	}
+	if rescued.Inode == rival.Inode {
+		t.Fatal("relink must not disturb the rival entry")
+	}
+}

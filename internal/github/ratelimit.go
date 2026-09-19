@@ -111,15 +111,23 @@ type rateGovernor struct {
 	now      func() time.Time
 	inflight chan struct{}
 
-	mu         sync.Mutex
-	budget     budgetState
-	tokens     float64
-	lastRefill time.Time
-	winStart   time.Time
-	winPoints  int64
-	winContent int64
-	warnedHigh bool
-	warnedLow  bool
+	mu              sync.Mutex
+	budget          budgetState
+	tokens          float64
+	lastRefill      time.Time
+	winStart        time.Time
+	winPoints       int64
+	winContent      int64
+	warnedHigh      bool
+	warnedLow       bool
+	contentInflight int64
+	// readWaits counts interactive-read admissions delayed by the point
+	// window; contentWaits counts content-class delays. Operators use
+	// the pair to see inversion happening.
+	readWaits     uint64
+	contentWaits  uint64
+	readDenied    uint64
+	contentDenied uint64
 }
 
 func newRateGovernor(cfg storcfg.Config, logger *slog.Logger, sleep func(context.Context, time.Duration) error) *rateGovernor {
@@ -204,7 +212,50 @@ func classifyFlags(content, assetUpload bool) requestClass {
 	return requestRead
 }
 
-// acquire is the compat entry point: the (cost, content, assetUpload)
+// readPointReserve returns the point-window share reserved for reads:
+// 10 percent of the window, at least 1 and at most all-but-one so a
+// tiny test window still admits one content request. Content classes
+// see an effective budget of pointsPerMin minus this share; reads see
+// the full window. Starvation bound: a read waits at most one window
+// rollover regardless of bulk backlog.
+func (g *rateGovernor) readPointReserve() int64 {
+	r := g.cfg.pointsPerMin / 10
+	if r < 1 {
+		r = 1
+	}
+	if r >= g.cfg.pointsPerMin {
+		r = g.cfg.pointsPerMin - 1
+	}
+	if r < 0 {
+		r = 0
+	}
+	return r
+}
+
+// readSlotReserve returns the inflight slots reserved for reads: one
+// quarter of concurrency, at least 1. Content classes cap at
+// concurrency minus this share.
+func (g *rateGovernor) readSlotReserve() int64 {
+	r := g.cfg.concurrency / 4
+	if r < 1 {
+		r = 1
+	}
+	if r >= g.cfg.concurrency {
+		r = g.cfg.concurrency - 1
+	}
+	if r < 0 {
+		r = 0
+	}
+	return r
+}
+
+// GovernorStats reports per-class wait and deny counters.
+func (g *rateGovernor) GovernorStats() (readWaits, contentWaits, readDenied, contentDenied uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.readWaits, g.contentWaits, g.readDenied, g.contentDenied
+}
+
 // triple is how the pre-enum governor tests drive admission. New code
 // calls acquireClass with a classified requestClass instead.
 func (g *rateGovernor) acquire(ctx context.Context, cost int64, content, assetUpload bool) (func(), error) {
@@ -230,14 +281,60 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 	for {
 		wait, apiErr := g.reserve(cost, class)
 		if apiErr != nil {
+			g.mu.Lock()
+			if class == requestRead {
+				g.readDenied++
+			} else {
+				g.contentDenied++
+			}
+			g.mu.Unlock()
 			return nil, apiErr
 		}
 		if wait == 0 {
 			break
 		}
+		g.mu.Lock()
+		if class == requestRead {
+			g.readWaits++
+		} else {
+			g.contentWaits++
+		}
+		g.mu.Unlock()
 		logging.Warn(g.logger, "rate limit throttle", "wait", wait.Round(time.Millisecond), "cost", cost, "class", class.String())
 		if err := g.sleep(ctx, throttleJitter(wait)); err != nil {
 			return nil, err
+		}
+	}
+	// Read-lane inflight reservation: content classes cap at
+	// concurrency minus the read share, so a bulk storm cannot fill
+	// every slot and starve an interactive read behind slot waits.
+	// The check plus increment commit under mu; the chan take follows.
+	// Reads skip the cap and take directly.
+	isContent := class != requestRead
+	if isContent {
+		for {
+			g.mu.Lock()
+			limit := g.cfg.concurrency - g.readSlotReserve()
+			if g.contentInflight < limit {
+				g.contentInflight++
+				g.mu.Unlock()
+				break
+			}
+			g.mu.Unlock()
+			if g.cfg.maxWait < 0 {
+				g.rollback(cost, class)
+				return nil, g.denyLocked(false, "read lane reserved: content inflight at cap")
+			}
+			select {
+			case <-ctx.Done():
+				g.rollback(cost, class)
+				return nil, ctx.Err()
+			default:
+			}
+			if err := g.sleep(ctx, 10*time.Millisecond); err != nil {
+				g.rollback(cost, class)
+				return nil, err
+			}
 		}
 	}
 	select {
@@ -246,8 +343,25 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 		// The zero-wait reservation was already committed in reserve();
 		// the request will never be sent, so undo the accounting instead
 		// of over-counting a phantom request.
+		if isContent {
+			g.mu.Lock()
+			if g.contentInflight > 0 {
+				g.contentInflight--
+			}
+			g.mu.Unlock()
+		}
 		g.rollback(cost, class)
 		return nil, ctx.Err()
+	}
+	if isContent {
+		return func() {
+			<-g.inflight
+			g.mu.Lock()
+			if g.contentInflight > 0 {
+				g.contentInflight--
+			}
+			g.mu.Unlock()
+		}, nil
 	}
 	return func() { <-g.inflight }, nil
 }
@@ -414,7 +528,11 @@ func (g *rateGovernor) windowWaitLocked(now time.Time, cost int64, class request
 		g.winContent = 0
 	}
 	var wait time.Duration
-	if g.winPoints+cost > g.cfg.pointsPerMin {
+	effectivePoints := g.cfg.pointsPerMin
+	if class != requestRead {
+		effectivePoints -= g.readPointReserve()
+	}
+	if g.winPoints+cost > effectivePoints {
 		pointWait := secondaryWindow - now.Sub(g.winStart)
 		if g.tooLongLocked(pointWait) {
 			return 0, g.denyLocked(false, "per-minute point budget exhausted")

@@ -269,14 +269,28 @@ type SessionStat struct {
 	Stale bool
 }
 
-// openSession is one live handle.
+// openSession is one live handle. mu serializes operations on this handle
+// ID so distinct handles proceed in parallel once the table lock is
+// dropped across network I/O. Fields written after insert (path on link,
+// pin/revision/sizes/staging/dirty/applied/ranges/lastUse/tmp) are guarded
+// by mu. project/mode/ownerUID/hasOpener/ttl are immutable after insert
+// and safe to read under the table lock. destroyed marks removal from the
+// table; holders of mu check it after re-acquiring the table lock.
 type openSession struct {
-	id           string
-	project      string
-	path         string
-	mode         OpenMode
-	ownerUID     uint32
-	hasOpener    bool
+	mu        sync.Mutex
+	id        string
+	project   string
+	path      string
+	mode      OpenMode
+	ownerUID  uint32
+	hasOpener bool
+	// opener pins the open-time caller identity for the commit path:
+	// staged bytes are the opener's work, so ownership and
+	// privilege-clearing follow the opener even when someone else
+	// (necessarily the opener or an admin, per authorize) triggers the
+	// commit. Without this an admin closing a user's session would
+	// reassign its files to the admin.
+	opener       shfs.Identity
 	revision     string
 	pinned       FileMeta
 	pinnedChunks map[int64]ChunkInfo
@@ -293,6 +307,7 @@ type openSession struct {
 	ranges       []byteRange
 	lastUse      time.Time
 	ttl          time.Duration
+	destroyed    bool
 }
 
 // sessionHubState is one hub's session table plus policy.
@@ -402,14 +417,22 @@ func constantTimeIDEqual(stored, presented string) bool {
 
 // getLiveLocked resolves a handle id to its live session, sweeping it when
 // expired. Unknown, mismatched, and expired ids answer StaleSessionError.
-// Caller holds sh.mu.
+// Caller holds sh.mu. On success the session mu is held (order sh then s);
+// the caller must Unlock the session and must not take sh.mu while holding
+// it (release s.mu first, then re-acquire in sh-then-s order).
 func (sh *sessionHubState) getLiveLocked(handleID string, now time.Time) (*openSession, error) {
 	s, ok := sh.byID[handleID]
 	if !ok || !constantTimeIDEqual(s.id, handleID) {
 		return nil, newStaleSessionError(handleID, "unknown handle")
 	}
+	s.mu.Lock()
+	if s.destroyed {
+		s.mu.Unlock()
+		return nil, newStaleSessionError(handleID, "unknown handle")
+	}
 	if s.expired(now) {
 		sh.destroyLocked(s, true)
+		s.mu.Unlock()
 		return nil, newStaleSessionError(handleID, "expired")
 	}
 	return s, nil
@@ -418,8 +441,9 @@ func (sh *sessionHubState) getLiveLocked(handleID string, now time.Time) (*openS
 // destroyLocked closes the staging temp and forgets the handle.
 // quarantine moves an unlinked scratch temp aside for manual recovery
 // instead of deleting it; named-session temps are always removed.
-// Caller holds sh.mu.
+// Caller holds sh.mu and s.mu (order sh then s).
 func (sh *sessionHubState) destroyLocked(s *openSession, quarantine bool) {
+	s.destroyed = true
 	if s.tmp != nil {
 		_ = s.tmp.Close()
 		s.tmp = nil
@@ -435,12 +459,25 @@ func (sh *sessionHubState) destroyLocked(s *openSession, quarantine bool) {
 }
 
 // sweepExpiredLocked reaps idle handles. Runs on every open (no background
-// goroutine by design). Caller holds sh.mu.
+// goroutine by design). Caller holds sh.mu. Busy sessions (TryLock fails)
+// are skipped: the holder bumps lastUse on completion, so skipping never
+// leaks an idle handle and never stalls the table behind a slow commit.
 func (sh *sessionHubState) sweepExpiredLocked(now time.Time) {
 	for _, s := range sh.byID {
+		if !s.mu.TryLock() {
+			continue
+		}
+		if s.destroyed {
+			s.mu.Unlock()
+			continue
+		}
 		if s.expired(now) {
 			sh.destroyLocked(s, true)
+			// destroyLocked leaves s.mu held; release for next entry.
+			s.mu.Unlock()
+			continue
 		}
+		s.mu.Unlock()
 	}
 }
 
@@ -554,14 +591,10 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	now := sh.now()
-
 	sh.sweepExpiredLocked(now)
-
 	id := shfs.IdentityFromContext(ctx)
 	hasOpener := shfs.IdentityPresent(ctx)
-
 	projectCount, userCount := 0, 0
 	for _, s := range sh.byID {
 		if s.project == project {
@@ -571,19 +604,23 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 			userCount++
 		}
 	}
-	if projectCount >= sh.maxPerProject {
-		return "", fmt.Errorf("open session %s: %w (cap %d)", project, ErrSessionProjectBusy, sh.maxPerProject)
+	maxPerProject, maxPerUser := sh.maxPerProject, sh.maxPerUser
+	defaultTTL, maxTTL := sh.defaultTTL, sh.maxTTL
+	sh.mu.Unlock()
+
+	if projectCount >= maxPerProject {
+		return "", fmt.Errorf("open session %s: %w (cap %d)", project, ErrSessionProjectBusy, maxPerProject)
 	}
-	if userCount >= sh.maxPerUser {
-		return "", fmt.Errorf("open session: %w (cap %d)", ErrSessionUserBusy, sh.maxPerUser)
+	if userCount >= maxPerUser {
+		return "", fmt.Errorf("open session: %w (cap %d)", ErrSessionUserBusy, maxPerUser)
 	}
 
 	ttl := openOpts.ttl
 	if ttl <= 0 {
-		ttl = sh.defaultTTL
+		ttl = defaultTTL
 	}
-	if ttl > sh.maxTTL {
-		ttl = sh.maxTTL
+	if ttl > maxTTL {
+		ttl = maxTTL
 	}
 
 	s := &openSession{
@@ -591,6 +628,7 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		mode:       mode,
 		ownerUID:   id.UID,
 		hasOpener:  hasOpener,
+		opener:     id,
 		appendOnly: true,
 		lastUse:    now,
 		ttl:        ttl,
@@ -600,6 +638,7 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		s.baseSize = 0
 		s.curSize = 0
 	} else {
+		// Network I/O outside any session-table lock.
 		if err := h.pinSessionTarget(ctx, s, path, mode); err != nil {
 			return "", err
 		}
@@ -613,20 +652,24 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 	s.tmpName = tmp.Name
 
 	if mode&SessionTruncate != 0 && !s.created {
-		if err := h.hydrateSessionLocked(ctx, s); err != nil {
+		s.mu.Lock()
+		if herr := h.hydrateSessionLocked(ctx, s); herr != nil {
+			s.mu.Unlock()
 			_ = tmp.File.Close()
 			_ = os.Remove(tmp.Name)
-			return "", err
+			return "", herr
 		}
-		if err := s.tmp.Truncate(0); err != nil {
+		if terr := s.tmp.Truncate(0); terr != nil {
+			s.mu.Unlock()
 			_ = tmp.File.Close()
 			_ = os.Remove(tmp.Name)
-			return "", fmt.Errorf("truncate staged session: %w", err)
+			return "", fmt.Errorf("truncate staged session: %w", terr)
 		}
 		s.curSize = 0
 		s.dirty = true
 		s.fullImage = true
 		s.appendOnly = false
+		s.mu.Unlock()
 	}
 
 	handleID, err := newSessionID()
@@ -636,12 +679,38 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		return "", err
 	}
 	s.id = handleID
+	sh.mu.Lock()
+	// Re-check caps under the lock: concurrent opens may have filled the
+	// table during the network window above. Sweep again (cheap, skips
+	// busy sessions) then admit or fail without leaking the temp.
+	sh.sweepExpiredLocked(sh.now())
+	projectCount, userCount = 0, 0
+	for _, other := range sh.byID {
+		if other.project == project {
+			projectCount++
+		}
+		if other.ownerUID == id.UID {
+			userCount++
+		}
+	}
+	if projectCount >= sh.maxPerProject || userCount >= sh.maxPerUser {
+		sh.mu.Unlock()
+		_ = tmp.File.Close()
+		_ = os.Remove(tmp.Name)
+		if projectCount >= sh.maxPerProject {
+			return "", fmt.Errorf("open session %s: %w (cap %d)", project, ErrSessionProjectBusy, sh.maxPerProject)
+		}
+		return "", fmt.Errorf("open session: %w (cap %d)", ErrSessionUserBusy, sh.maxPerUser)
+	}
 	sh.byID[handleID] = s
+	sh.mu.Unlock()
 	return handleID, nil
 }
 
 // pinSessionTarget validates the path shape, resolves DAC once, and pins
-// the content layout for a named open. Caller holds sh.mu.
+// the content layout for a named open. No session-table lock is held;
+// the target session is not yet published so no per-session lock is
+// needed either.
 func (h *StorHub) pinSessionTarget(ctx context.Context, s *openSession, path string, mode OpenMode) error {
 	if err := shfs.ValidateAccessPathShape(path); err != nil {
 		return err
@@ -732,7 +801,8 @@ func newSessionTemp() (*sessionTempFile, error) {
 // hydrateSessionLocked materializes the pinned snapshot into the staging
 // temp on first mutation, so later reads and a full-image commit serve the
 // handle's own bytes. Reads before the first write serve the pin directly
-// with no download beyond what they ask for. Caller holds sh.mu.
+// with no download beyond what they ask for. Caller holds s.mu; the
+// download runs outside the table lock so other sessions proceed.
 func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) error {
 	if s.staged {
 		return nil
@@ -768,18 +838,22 @@ func (s *openSession) readStagedRange(start, end int64) ([]byte, error) {
 
 // ReadSession serves [offset, offset+length) from the pinned snapshot plus
 // the handle's own staged writes. Reads at or past EOF return zero bytes
-// with a nil error.
+// with a nil error. Table lock covers lookup only; the pinned download
+// runs under the per-session lock so a slow read never stalls other
+// sessions.
 func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
 	if offset < 0 || length < 0 {
 		return nil, fmt.Errorf("read session: offset and length must be non-negative")
 	}
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return nil, err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
 	}
@@ -802,7 +876,12 @@ func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, leng
 		}
 	} else {
 		pinned := s.pinned.Clone()
-		out, err = h.ReadPinnedFileContext(ctx, s.project, &pinned, s.pinnedChunks, offset, end-offset)
+		pinnedChunks := s.pinnedChunks
+		project := s.project
+		// Release per-session lock across network? No: same-handle
+		// serialization requires holding s.mu, but other sessions hold
+		// different s.mu so they proceed. Table lock is already dropped.
+		out, err = h.ReadPinnedFileContext(ctx, project, &pinned, pinnedChunks, offset, end-offset)
 		if err != nil {
 			return nil, err
 		}
@@ -813,15 +892,18 @@ func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, leng
 
 // WriteSession stages data at offset (or at the current end when opened
 // with SessionAppend). Holes zero-fill. Staging is local only: no network,
-// no journal, invisible to everyone else until Sync or Close.
+// no journal, invisible to everyone else until Sync or Close. Table lock
+// covers lookup only; hydrate plus staging run under the per-session lock.
 func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return 0, err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return 0, err
 	}
@@ -877,18 +959,20 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 }
 
 // TruncateSession stages a resize. Shrinks and grows both commit as a full
-// image; a no-op size is a no-op success.
+// image; a no-op size is a no-op success. Table lock covers lookup only.
 func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("truncate session: size must be non-negative")
 	}
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return err
 	}
@@ -916,14 +1000,18 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 
 // StatSession reports the handle's project, path, current size, dirty
 // state, mode, and staleness against the current committed revision.
+// Table lock covers lookup only; the cached revision read runs under the
+// per-session lock.
 func (h *StorHub) StatSession(ctx context.Context, handleID string) (SessionStat, error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return SessionStat{}, err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return SessionStat{}, err
 	}
@@ -939,66 +1027,115 @@ func (h *StorHub) StatSession(ctx context.Context, handleID string) (SessionStat
 	// committed SHA against the open-time pin. It takes metaMu then pm.mu
 	// for reading, matching every other reader, and never triggers a
 	// remote load (a stat that performs network I/O could fail a pure
-	// local query on a backend outage). Lock order sh.mu -> metaMu/pm.mu
-	// matches the commit path, which already holds sh.mu across hub verbs.
+	// local query on a backend outage). No session-table lock is held
+	// here, only the per-session lock, so stats never stall commits.
 	if _, curSHA, ok := h.cachedRepoMetadataReadonly(s.project); ok {
 		stat.Stale = s.revision != curSHA
 	}
 	return stat, nil
 }
 
+// resolveLinkTarget validates a link/relink target without mutating:
+// shape, resolve, walk, parent presence, parent write, kind conflicts,
+// and target absence. Shared by LinkSession (unlinked handles only) and
+// RelinkSession (rescues a handle whose target was taken by a concurrent
+// writer). Caller holds s.mu; metadata reads run under it like the rest
+// of the session slow path.
+func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path string) (string, error) {
+	if err := shfs.ValidateAccessPathShape(path); err != nil {
+		return "", err
+	}
+	if err := h.ensureRepo(ctx, s.project); err != nil {
+		return "", err
+	}
+	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	if err != nil {
+		return "", err
+	}
+	cleanName, traversed, err := shfs.ResolveAccessPath(live, path, false)
+	if err != nil {
+		return "", err
+	}
+	if cleanName == "" {
+		return "", fmt.Errorf("link session: path is required")
+	}
+	if err := shfs.CheckWalkResolved(ctx, live, traversed); err != nil {
+		return "", err
+	}
+	if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
+		return "", err
+	}
+	if err := shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed); err != nil {
+		return "", err
+	}
+	if live.HasDirectory(cleanName) {
+		return "", shfs.IsDirectory(cleanName)
+	}
+	if live.FindFile(cleanName) != nil {
+		return "", shfs.AlreadyExists(cleanName)
+	}
+	return cleanName, nil
+}
+
 // LinkSession names an unlinked scratch handle, DAC-checked at link time
 // like create (parent must exist, parent-write required, target must not
 // exist). Linking stages the creation, so link-then-close persists.
+// Table lock covers lookup only; the metadata checks run under the
+// per-session lock.
 func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error {
-	if err := shfs.ValidateAccessPathShape(path); err != nil {
-		return err
-	}
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return err
 	}
 	if s.path != "" {
 		return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
 	}
-	if err := h.ensureRepo(ctx, s.project); err != nil {
-		return err
-	}
-	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {
 		return err
-	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(live, path, false)
-	if err != nil {
-		return err
-	}
-	if cleanName == "" {
-		return fmt.Errorf("link session: path is required")
-	}
-	if err := shfs.CheckWalkResolved(ctx, live, traversed); err != nil {
-		return err
-	}
-	if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
-		return err
-	}
-	if err := shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed); err != nil {
-		return err
-	}
-	if live.HasDirectory(cleanName) {
-		return shfs.IsDirectory(cleanName)
-	}
-	if live.FindFile(cleanName) != nil {
-		return shfs.AlreadyExists(cleanName)
 	}
 	s.path = cleanName
 	s.created = true
 	s.dirty = true
+	s.lastUse = sh.now()
+	return nil
+}
+
+// RelinkSession retargets a handle to a new path: the rescue for a
+// commit that failed with AlreadyExists because a concurrent writer
+// took the linked target. Without it the handle is wedged (close fails
+// on the taken target, link refuses the named handle) until TTL expiry.
+// Same checks as LinkSession; the new target must be absent. Marks the
+// handle dirty so the staged bytes commit at the new path on close.
+func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) error {
+	sh := h.sessionHub()
+	sh.mu.Lock()
+	s, err := sh.getLiveLocked(handleID, sh.now())
+	if err != nil {
+		sh.mu.Unlock()
+		return err
+	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.authorize(ctx); err != nil {
+		return err
+	}
+	cleanName, err := h.resolveLinkTarget(ctx, s, path)
+	if err != nil {
+		return err
+	}
+	s.path = cleanName
+	s.created = true
+	s.dirty = true
+	s.applied = false
 	s.lastUse = sh.now()
 	return nil
 }
@@ -1019,7 +1156,11 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error 
 // staged write clears the applied marker. The per-hub commit mutex makes
 // the verb sequence plus drain exclusive across sessions. DAC is
 // re-validated against live state and fails loud.
-// Caller holds sh.mu.
+// Caller holds s.mu (per-session); the table lock is never held across the
+// verb plus drain network window, so one slow commit never stalls other
+// sessions. Same-handle exclusion comes from s.mu, cross-session commit
+// exclusion from commitMu (order s.mu then commitMu; hub verbs underneath
+// take pm.mu, never session locks, so no cycle).
 func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, s *openSession) error {
 	if !s.dirty {
 		return nil
@@ -1027,8 +1168,17 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 	if s.path == "" {
 		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionUnlinked)
 	}
+	// Commit as the opener (see the opener field): ownership and
+	// privilege decisions follow whoever staged the bytes. The closer's
+	// identity mattered only at authorize time (opener or admin may
+	// trigger). DAC is rechecked below against live state, so a revoked
+	// opener still fails loud instead of publishing.
+	commitCtx := ctx
+	if s.hasOpener {
+		commitCtx = shfs.WithIdentity(ctx, s.opener)
+	}
 	if !s.staged && s.baseSize > 0 {
-		if err := h.hydrateSessionLocked(ctx, s); err != nil {
+		if err := h.hydrateSessionLocked(commitCtx, s); err != nil {
 			return err
 		}
 	}
@@ -1036,7 +1186,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 	sh.commitMu.Lock()
 	defer sh.commitMu.Unlock()
 
-	if err := h.recheckSessionDAC(ctx, s); err != nil {
+	if err := h.recheckSessionDAC(commitCtx, s); err != nil {
 		return err
 	}
 
@@ -1044,13 +1194,13 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 		var err error
 		switch {
 		case s.created:
-			_, err = h.UploadFileContext(ctx, s.project, s.path, s.tmpName)
+			_, err = h.UploadFileContext(commitCtx, s.project, s.path, s.tmpName)
 		case s.fullImage:
 			var staged *os.File
 			staged, err = os.Open(s.tmpName)
 			if err == nil {
 				defer func() { _ = staged.Close() }()
-				_, err = h.ReplaceFileFromReaderContext(ctx, s.project, s.path, staged, shfs.WithSize(s.curSize))
+				_, err = h.ReplaceFileFromReaderContext(commitCtx, s.project, s.path, staged, shfs.WithSize(s.curSize))
 			}
 			if err != nil {
 				err = fmt.Errorf("commit session %s: %w", shortSHA(s.id), err)
@@ -1059,7 +1209,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 			var tail []byte
 			tail, err = s.readStagedRange(s.baseSize, s.curSize)
 			if err == nil {
-				_, err = h.AppendFileContext(ctx, s.project, s.path, tail)
+				_, err = h.AppendFileContext(commitCtx, s.project, s.path, tail)
 			}
 		default:
 			var edits []shfs.RangeEdit
@@ -1068,7 +1218,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 				if len(edits) == 0 {
 					return fmt.Errorf("commit session %s: staged state with no dirty ranges", shortSHA(s.id))
 				}
-				_, err = h.PatchFileRangesContext(ctx, s.project, s.path, edits)
+				_, err = h.PatchFileRangesContext(commitCtx, s.project, s.path, edits)
 			}
 		}
 		if err != nil {
@@ -1076,7 +1226,7 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 		}
 		s.applied = true
 	}
-	if err := h.DrainProjectContext(ctx, s.project); err != nil {
+	if err := h.DrainProjectContext(commitCtx, s.project); err != nil {
 		return err
 	}
 	return nil
@@ -1129,7 +1279,8 @@ func (h *StorHub) sessionRangeEdits(s *openSession) ([]shfs.RangeEdit, error) {
 }
 
 // repinSessionLocked refreshes the pin to the just-committed live state and
-// clears staging. Caller holds sh.mu.
+// clears staging. Caller holds s.mu; the metadata load runs outside the
+// table lock.
 func (h *StorHub) repinSessionLocked(ctx context.Context, s *openSession) error {
 	live, sha, err := h.loadRepoMetadataReadonly(ctx, s.project)
 	if err != nil {
@@ -1169,14 +1320,18 @@ func (h *StorHub) repinSessionLocked(ctx context.Context, s *openSession) error 
 // SyncSession commits staged state without closing, then re-pins to the
 // committed state. It drains the commit it makes and fails loud, retaining
 // staged state for retry. Sync with no staged state is a no-op success.
+// Table lock covers lookup only; commit plus repin run under the
+// per-session lock.
 func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return err
 	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
 	if err := s.authorize(ctx); err != nil {
 		return err
 	}
@@ -1199,29 +1354,57 @@ func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
 // the handle is destroyed, so close means durable). Close with no staged
 // state is a no-op success. Close on unlinked scratch without a prior link
 // discards the temp with no commit. A failed commit retains the handle and
-// its staged state for retry.
+// its staged state for retry. Table lock covers lookup and final destroy
+// only; the commit runs under the per-session lock.
 func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	s, err := sh.getLiveLocked(handleID, sh.now())
 	if err != nil {
+		sh.mu.Unlock()
 		return err
 	}
+	sh.mu.Unlock()
+	// getLiveLocked returns with the per-session lock held across the
+	// commit so two closes of the same ID still serialize; distinct
+	// handles hold different locks.
 	if err := s.authorize(ctx); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	if s.path == "" {
-		sh.destroyLocked(s, false)
-		return nil
+	if s.destroyed {
+		s.mu.Unlock()
+		return newStaleSessionError(handleID, "unknown handle")
 	}
-	if !s.dirty {
-		sh.destroyLocked(s, false)
+	if s.path == "" || !s.dirty {
+		// Destroy needs the table lock in sh-then-s order: release s.mu
+		// first, then re-acquire both and re-validate.
+		s.mu.Unlock()
+		sh.mu.Lock()
+		victim, verr := sh.getLiveLocked(handleID, sh.now())
+		if verr != nil {
+			sh.mu.Unlock()
+			return verr
+		}
+		// getLiveLocked holds s.mu and sh.mu; destroy then release both.
+		sh.destroyLocked(victim, false)
+		victim.mu.Unlock()
+		sh.mu.Unlock()
 		return nil
 	}
 	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	sh.destroyLocked(s, false)
+	s.mu.Unlock()
+	sh.mu.Lock()
+	victim, verr := sh.getLiveLocked(handleID, sh.now())
+	if verr != nil {
+		sh.mu.Unlock()
+		return verr
+	}
+	sh.destroyLocked(victim, false)
+	victim.mu.Unlock()
+	sh.mu.Unlock()
 	return nil
 }

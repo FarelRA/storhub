@@ -1292,6 +1292,28 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 		}
 		return 0
 	}
+	// Re-read the authoritative path under lock after the DAC window:
+	// a concurrent rename rebind (now serialized on opMu, but possibly
+	// landing before opMu acquisition or racing the pre-lock capture)
+	// may have moved the handle. Fail closed on mismatch so bytes never
+	// land at the pre-rename name and DAC is never evaluated for the
+	// wrong path. The overlay stays dirty for retry at the new name.
+	h.mu.Lock()
+	curHandlePath := h.path
+	curHandleDetached := h.deleted || curHandlePath == ""
+	h.mu.Unlock()
+	curStatePath := h.writeState.path
+	curStateDetached := h.writeState.deleted || curStatePath == ""
+	if curHandleDetached || curStateDetached {
+		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
+		return 0
+	}
+	if curHandlePath != handlePath || curStatePath != handlePath {
+		h.writeState.mu.Unlock()
+		h.writeState.opMu.Unlock()
+		return syscall.ENOENT
+	}
 	targetPath := handlePath
 	baseSize := h.writeState.baseSize
 	logicalSize := h.writeState.logicalSize

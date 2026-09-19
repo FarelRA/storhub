@@ -156,6 +156,14 @@ type Filesystem struct {
 	// never start it). Stopped early in Close so no notification fires
 	// into teardown.
 	stopInvalPoll func()
+	// Notify observability (F7): parked-notify gauge plus counters.
+	// notifyParked counts notifies currently blocked on a slot;
+	// notifyParkedTotal counts every slot wait observed; notifyCoalesced
+	// counts duplicates folded into a pending notify. Behavior is
+	// unchanged: backpressure stays by design, only observed.
+	notifyParked      atomic.Int64
+	notifyParkedTotal atomic.Uint64
+	notifyCoalesced   atomic.Uint64
 }
 
 // maxConcurrentNotifies bounds in-flight kernel cache notifications per
@@ -577,6 +585,34 @@ func (s *Filesystem) Unmount() error {
 	return nil
 }
 
+// closeOpMuTimeout bounds how long Close waits for one writeState's opMu
+// before quarantining-and-returning. Documented bound: 5 seconds per
+// state, so Close latency tracks state count, never the slowest commit.
+const closeOpMuTimeout = 5 * time.Second
+
+// waitOpMuBounded TryLocks mu until timeout, polling without holding any
+// filesystem lock. Reports whether the lock was acquired (caller must
+// Unlock on true). The poll interval keeps Close responsive while an
+// in-flight commit holds opMu across its network window.
+func waitOpMuBounded(mu *sync.Mutex, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if mu.TryLock() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return mu.TryLock()
+}
+
+// pathForLog snapshots the writeState path for error logs without racing
+// committers: best effort under mu.
+func (w *inodeWriteState) pathForLog() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.path
+}
+
 func (s *Filesystem) Close() error {
 	s.debugf("close start project=%s", s.project)
 	s.mu.Lock()
@@ -608,9 +644,19 @@ func (s *Filesystem) Close() error {
 	// Preserve uncommitted overlay data before tearing down; deleting it
 	// would silently discard acknowledged writes. opMu is taken per state
 	// so a quarantine cannot slip into the network window of an
-	// in-flight commit and nil out its temp mid-flight.
+	// in-flight commit and nil out its temp mid-flight. The wait is
+	// bounded (closeOpMuTimeout per state): an in-flight Flush, Fsync,
+	// Release, or O_SYNC commit holding opMu across minutes of upload
+	// must not wedge Close. On timeout the state is left in place for
+	// the startup sweep plus an error log naming the inode, so in-flight
+	// work is never lost silently.
 	for _, writeState := range writeStates {
-		writeState.opMu.Lock()
+		if !writeState.opMu.TryLock() {
+			if !waitOpMuBounded(&writeState.opMu, closeOpMuTimeout) {
+				s.errorf("close: state busy past bound, leaving overlay for startup sweep inode=%d path=%s", writeState.inode, writeState.pathForLog())
+				continue
+			}
+		}
 		if writeState.hasUncommittedChanges() {
 			writeState.quarantineTempsReason(quarantineReasonClose)
 		}
@@ -1214,6 +1260,12 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 		handle.mu.Unlock()
 	}
 	if writeState != nil {
+		// Serialize path rebinding against in-flight commits: commit
+		// holds opMu across its DAC window plus network window, so
+		// taking opMu here (order opMu before mu, matching commit)
+		// closes the stale-path race. Snapshot was taken without
+		// holding opMu, so no lock cycle with committers.
+		writeState.opMu.Lock()
 		writeState.mu.Lock()
 		if writeState.path == oldPath {
 			if newPath != "" {
@@ -1224,6 +1276,7 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 			}
 		}
 		writeState.mu.Unlock()
+		writeState.opMu.Unlock()
 	}
 }
 
@@ -1259,11 +1312,15 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 	}
 	s.mu.RUnlock()
 	for _, writeState := range writeStates {
+		// Same opMu-before-mu order as commit, closing the directory
+		// remap race the same way as the single-path rebind above.
+		writeState.opMu.Lock()
 		writeState.mu.Lock()
 		if shfs.IsParentOrSame(oldPath, writeState.path) {
 			writeState.path = shfs.RemapPath(oldPath, newPath, writeState.path)
 		}
 		writeState.mu.Unlock()
+		writeState.opMu.Unlock()
 	}
 }
 

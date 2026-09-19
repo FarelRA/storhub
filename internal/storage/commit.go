@@ -33,6 +33,14 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 // backpressure, never dropped acknowledged ops.
 func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	beforeBytes := pm.opStack.bytes
+	// Heal a nil rebase baseline left by a cold hydrate: every mutation
+	// funnels through here holding pm.mu after hydration, so the live
+	// tree is the truth the pending ops were built on. Sharing the
+	// pointer matches storeRepoMetadata practice; published trees are
+	// immutable under COW discipline, so no clone is needed.
+	if pm.baseTree == nil && pm.meta != nil {
+		pm.baseTree = pm.meta
+	}
 	delta := pm.opStack.appendWithDelta(op)
 	h.journalAppend(project, delta)
 	if pm.opStack.bytes >= opStackMaxBytes || h.journalOverCap(project, pm.opStack.maxSeq()) {
@@ -450,6 +458,14 @@ func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *comm
 	// on success below. cowTree is a shallow copy over immutable entries,
 	// so the commit no longer deep-copies every Chunks/XAttrs.
 	working := cowTree(pm.meta)
+	// Defensive backfill for the same nil-baseline case: a commit can
+	// snapshot dirty state whose mutations predated the appendOpLocked
+	// heal above (or arrived via a path that bypassed it). The snapshot
+	// carries the baseline the rebase fingerprints on conflict, so a nil
+	// baseline here would degrade the first conflict exactly as before.
+	if pm.baseTree == nil && pm.meta != nil {
+		pm.baseTree = pm.meta
+	}
 	snap := &commitSnapshot{
 		working:     working,
 		previousSHA: pm.sha,

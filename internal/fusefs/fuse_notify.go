@@ -287,6 +287,30 @@ func safeNotifyContentAsync(node *storhubNode) {
 	})
 }
 
+// notifySlotWarnThreshold is the slot-wait duration past which a warn log
+// fires (operator action: remount). No timeout or drop: dropped
+// invalidations would turn into up to 60s of stale reads via entry and
+// attr timeouts, so the block stays by design and only gains visibility.
+const notifySlotWarnThreshold = 5 * time.Second
+
+// NotifyStats reports parked-notify observability: currently parked,
+// total slot waits observed, and coalesced duplicates folded.
+func (s *Filesystem) NotifyStats() (parked int64, total uint64, coalesced uint64) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	return s.notifyParked.Load(), s.notifyParkedTotal.Load(), s.notifyCoalesced.Load()
+}
+
+// NotifyParked reports how many notifies are currently parked on kernel
+// backpressure.
+func (s *Filesystem) NotifyParked() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.notifyParked.Load()
+}
+
 // beginNotify marks a notification pending and takes a concurrency slot.
 // It reports false when an identical notification is already queued: the
 // duplicate coalesces into the pending one (post-commit invalidation
@@ -308,6 +332,7 @@ func (s *Filesystem) beginNotify(key notifyKey) bool {
 	s.notifyMu.Lock()
 	if _, pending := s.notifyQueued[key]; pending {
 		s.notifyMu.Unlock()
+		s.notifyCoalesced.Add(1)
 		return false
 	}
 	s.notifyQueued[key] = struct{}{}
@@ -320,7 +345,17 @@ func (s *Filesystem) beginNotify(key notifyKey) bool {
 	// burst, absorbed as gentle backpressure with every invalidation
 	// preserved; only a wedged kernel (unusable mount regardless) stalls
 	// here, never normal operation.
+	// Observability only: time the slot wait, count parked notifies, and
+	// warn past the threshold. No timeout, no drop.
+	start := time.Now()
+	s.notifyParked.Add(1)
+	s.notifyParkedTotal.Add(1)
 	s.notifySlots <- struct{}{}
+	parked := time.Since(start)
+	s.notifyParked.Add(-1)
+	if parked >= notifySlotWarnThreshold {
+		logging.Warn(s.log(), "notify slot wait past threshold; kernel backpressure suspected, remount if persistent", "wait", parked.Round(time.Millisecond), "parked", s.notifyParked.Load())
+	}
 	return true
 }
 

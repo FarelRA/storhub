@@ -160,6 +160,32 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if file == nil {
 		return nil, 0, syscall.ENOENT
 	}
+	// Close the stat-then-pin window: a REST rename, replace, or unlink
+	// landing between the stat and the pin changes which inode the path
+	// names. When the pinned layout names a different inode than the
+	// stat entry, retry the pair once; a persistent mismatch fails
+	// ENOENT so the kernel retries the lookup instead of opening a
+	// mixed identity (pre-race inode bookkeeping with post-race bytes).
+	if file.Inode != entry.Inode {
+		entryRetry, errRetry := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
+		if errRetry != nil {
+			return nil, 0, errnoFromError(errRetry)
+		}
+		repoRetry, _, metaRetryErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
+		if metaRetryErr != nil {
+			return nil, 0, errnoFromError(metaRetryErr)
+		}
+		fileRetry := repoRetry.FindFile(targetPath)
+		if fileRetry == nil {
+			return nil, 0, syscall.ENOENT
+		}
+		if fileRetry.Inode != entryRetry.Inode {
+			return nil, 0, syscall.ENOENT
+		}
+		entry = entryRetry
+		repoMeta = repoRetry
+		file = fileRetry
+	}
 	// The mount runs with NullPermissions, so the kernel enforces no
 	// DAC at all - this server is the only gate. A write-open must carry
 	// write permission on the file, or any user could overwrite any file
