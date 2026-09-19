@@ -314,7 +314,7 @@ func (a *App) runSessionStat(cmd *cobra.Command, args []string) error {
 		Path:    stat.Path,
 		Size:    stat.Size,
 		Dirty:   stat.Dirty,
-		Stale:   sessionIsStale(stat),
+		Stale:   stat.Stale,
 		Mode:    stat.Mode.String(),
 	}
 	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -529,17 +528,4 @@ func (a *App) runSync(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.stderr, "synced %s\n", args[0])
 	return nil
-}
-
-// sessionIsStale reports the handle's staleness bit: the parallel agent
-// adds a Stale bool to storage.SessionStat (pin revision vs current HEAD).
-// Reflection keeps this compiling before and after that field lands;
-// absent means not stale.
-func sessionIsStale(stat any) bool {
-	v := reflect.ValueOf(stat)
-	if !v.IsValid() {
-		return false
-	}
-	f := v.FieldByName("Stale")
-	return f.IsValid() && f.Kind() == reflect.Bool && f.Bool()
 }
