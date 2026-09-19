@@ -645,6 +645,12 @@ func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *
 		pm.dirty = false
 		pm.lastCommit = h.config.Now()
 		pm.opStack.clearUpTo(snap.opSeq)
+		// The adopted tree is normalized (repaired stats/counters), not
+		// byte-identical to the published one: bump so version watchers
+		// (cross-surface invalidation) observe the swap. Guards are
+		// equality-based, so extra bumps only cause extra invalidations,
+		// never missed ones.
+		pm.version++
 	} else if didRebase {
 		// A mutation landed mid-commit AND the commit rebased: the
 		// committed tree carries upstream changes the live tree lacks, so
@@ -661,13 +667,26 @@ func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *
 				logging.Error(h.projectLogger(project), "mid-commit mutation replay failed; committed state retained", "err", err)
 				pm.opStack.clear()
 				pm.meta = working
+				// Same bump: falling back to the committed tree swaps in
+				// upstream content the live tree lacks.
+				pm.version++
 			} else {
 				rebased.Normalize(project, h.config.Now().Unix())
 				rebased.RecomputeStats()
 				pm.meta = rebased
+				// Rebased tree carries upstream changes the live tree
+				// lacks: bump so watchers observe the arrival (see the
+				// version-match branch above for the invariant), and mark
+				// unknown fan-out scope (upstream paths are not tracked
+				// here).
+				pm.version++
+				notePublishedPathsLocked(pm, nil)
 			}
 		} else {
 			pm.meta = working
+			// Same bump: the adopted tree differs from the previously
+			// published one (upstream content landed).
+			pm.version++
 		}
 		pm.lastCommit = h.config.Now()
 	} else {

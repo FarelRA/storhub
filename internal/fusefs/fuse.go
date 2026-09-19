@@ -141,6 +141,11 @@ type Filesystem struct {
 	// handles of the same file version bounds the per-open metadata cost.
 	pinnedMu sync.Mutex
 	pinned   map[pinnedKey]*pinnedContent
+	// stopInvalPoll ends the cross-surface fan-out loop started in New;
+	// nil until started (tests driving pollInvalidationsOnce directly
+	// never start it). Stopped early in Close so no notification fires
+	// into teardown.
+	stopInvalPoll func()
 }
 
 // maxConcurrentNotifies bounds in-flight kernel cache notifications per
@@ -485,6 +490,7 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
 	fsys.lockCond = sync.NewCond(&fsys.mu)
+	fsys.stopInvalPoll = fsys.startInvalidationPoll()
 	return fsys
 }
 
@@ -564,6 +570,11 @@ func (s *Filesystem) Close() error {
 	}
 	s.closing = true
 	s.mu.Unlock()
+	// Stop fan-out first: no invalidation may fire into teardown (its
+	// entry/content notifies would race unmounting).
+	if s.stopInvalPoll != nil {
+		s.stopInvalPoll()
+	}
 	// A failed Unmount must not be swallowed - the mount may still
 	// be live, which is exactly the state the quarantine-on-close path
 	// defends. Data preservation still runs first; the error surfaces afterwards.

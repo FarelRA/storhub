@@ -1003,14 +1003,93 @@ func (h *StorHub) ProjectVersion(project string) (uint64, bool) {
 	return pm.version, true
 }
 
+// maxRecentPaths bounds the per-project publish ring for invalidation
+// fan-out: with 64 entries a 1s poller survives a 64-publish burst
+// without losing scope; older entries evict, and a consumer whose
+// baseline predates the oldest retained entry gets unknown-scope (safe,
+// invalidate broadly) instead of a silent miss.
+const maxRecentPaths = 64
+
+// pathVersion is one publish's namespace footprint: a strictly increasing
+// fan-out sequence number plus the touched paths, or nil paths for
+// unknown scope (remote-truth swap, conflict-rebase adopt). The sequence
+// is dedicated (not pm.version) because the version bump happens after
+// the note in publish flows; sharing it would let two concurrent
+// publishes stamp the same version and lose entries at the cursor.
+type pathVersion struct {
+	seq   uint64
+	paths []string
+}
+
+// notePublishedPathsLocked records one publish's footprint in the ring.
+// Caller holds pm.mu for writing (it runs inside publishTreeLocked's
+// contract, or another spot holding pm.mu across the swap). Nil paths
+// marks unknown scope.
+func notePublishedPathsLocked(pm *projectMetadata, paths []string) {
+	pm.fanoutSeq++
+	pm.recent = append(pm.recent, pathVersion{seq: pm.fanoutSeq, paths: paths})
+	if len(pm.recent) > maxRecentPaths {
+		pm.recent = append([]pathVersion(nil), pm.recent[len(pm.recent)-maxRecentPaths:]...)
+	}
+}
+
+// PublishedPathsSince returns the namespace paths published after the
+// since cursor, plus the current cursor for the next call. unknown
+// reports that scope was lost (unknown-scope entry in range, ring
+// overflow past the baseline, or project not resident): the caller must
+// invalidate broadly instead of trusting the path list. Empty paths with
+// unknown=false means nothing changed.
+func (h *StorHub) PublishedPathsSince(project string, since uint64) (paths []string, unknown bool, current uint64) {
+	h.metaMu.RLock()
+	pm, ok := h.metaCache[project]
+	h.metaMu.RUnlock()
+	if !ok {
+		return nil, true, 0
+	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	current = pm.fanoutSeq
+	if len(pm.recent) == 0 {
+		return nil, false, current
+	}
+	// The ring retains a contiguous suffix of sequences, so the window
+	// is complete when the baseline touches it: at or just before the
+	// oldest retained sequence (a zero baseline against a ring starting
+	// at 1 is complete; nothing could have evicted yet). Anything older
+	// may have missed evicted entries.
+	if oldest := pm.recent[0].seq; since+1 < oldest {
+		return nil, true, current
+	}
+	seen := make(map[string]struct{})
+	for _, entry := range pm.recent {
+		if entry.seq <= since {
+			continue
+		}
+		if entry.paths == nil {
+			return nil, true, current
+		}
+		for _, p := range entry.paths {
+			seen[p] = struct{}{}
+		}
+	}
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	return paths, false, current
+}
+
 // publishTreeLocked swaps a mutated COW copy in as the new shared truth.
 // It rebuilds the derived indexes so the published tree is clean and
 // exclusively owned: a lock-free reader's index read (NLink/DirNLink/
 // FindFilesByInode) then hits a fresh index and never triggers a rebuild
 // write that would race other readers. Caller holds pm.mu for writing.
-func publishTreeLocked(pm *projectMetadata, tree *RepoMetadata) {
+// paths records this publish's namespace footprint in the fan-out ring
+// (nil = unknown scope); the ring append runs under the same mu hold, so
+// every swap carries exactly one entry and consumers cannot miss one.
+func publishTreeLocked(pm *projectMetadata, tree *RepoMetadata, paths []string) {
 	tree.RebuildIndexes()
 	pm.meta = tree
+	notePublishedPathsLocked(pm, paths)
 }
 
 // storeRepoMetadata caches remote truth for a project. The tree's own version
@@ -1046,6 +1125,9 @@ func (h *StorHub) storeRepoMetadata(project string, meta *RepoMetadata, sha stri
 		}
 		pm.dirty = true
 		pm.version++
+		// Remote-truth swap with local pending ops: whole-tree content
+		// arrives with unknown namespace scope for fan-out purposes.
+		notePublishedPathsLocked(pm, nil)
 		pm.mu.Unlock()
 		return
 	}
@@ -1065,6 +1147,9 @@ func (h *StorHub) storeRepoMetadata(project string, meta *RepoMetadata, sha stri
 	pm.dirty = false // Just stored, so not dirty
 	pm.opStack.clear()
 	pm.version++
+	// Clean remote-truth swap: same unknown-scope treatment (a fresh
+	// load can move any entry).
+	notePublishedPathsLocked(pm, nil)
 	pm.mu.Unlock()
 	h.journalRewrite(project, nil)
 }

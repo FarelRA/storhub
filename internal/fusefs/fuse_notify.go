@@ -2,7 +2,9 @@ package fusefs
 
 import (
 	"log/slog"
+	"path"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -357,4 +359,99 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 		}
 		deleteFn(parent, name, child)
 	})
+}
+
+// invalidationPollInterval paces the cross-surface fan-out poll: an idle
+// tick costs one cheap version read, and a tick that observes moves
+// notifies exactly the changed entries. One second bounds cross-surface
+// staleness near zero without measurable idle cost.
+const invalidationPollInterval = time.Second
+
+// publishedPathsSource is the hub capability behind fan-out: the
+// namespace paths published after a cursor, or unknown scope when the
+// window was lost. StorHub implements it (PublishedPathsSince); hubs
+// without it (test doubles) leave the poller idle and timeout expiry
+// keeps working unchanged.
+type publishedPathsSource interface {
+	PublishedPathsSince(project string, since uint64) (paths []string, unknown bool, current uint64)
+}
+
+// pollInvalidationsOnce consumes one fan-out window: paths changed since
+// last are entry-notified (positive and negative dentries alike) plus
+// content-notified where the path resolves to a tracked inode; unknown
+// scope notifies every tracked path. It returns the new cursor.
+// Deterministic and lock-free of test doubles: tests drive it directly,
+// the background loop calls the same method.
+func (s *Filesystem) pollInvalidationsOnce(last uint64) uint64 {
+	src, ok := s.hub.(publishedPathsSource)
+	if !ok {
+		return last
+	}
+	paths, unknown, current := src.PublishedPathsSince(s.project, last)
+	if unknown {
+		s.invalidateAllTracked()
+		return current
+	}
+	for _, p := range paths {
+		s.invalidatePath(p)
+	}
+	return current
+}
+
+// invalidatePath notifies the kernel caches for one changed namespace
+// path: the entry (which also clears a cached negative) plus content
+// where the path currently resolves to a tracked inode. The root entry
+// has no parent/name form, so only its content cache is touched.
+func (s *Filesystem) invalidatePath(p string) {
+	if p == "" {
+		s.notifyKernelContentChanged(1)
+		return
+	}
+	dir, base := path.Split(p)
+	s.notifyEntryForPath(strings.TrimSuffix(dir, "/"), base)
+	s.mu.RLock()
+	ino, ok := s.pathToInode[p]
+	s.mu.RUnlock()
+	if ok {
+		s.notifyKernelContentChanged(ino)
+	}
+}
+
+// invalidateAllTracked notifies every tracked path: the unknown-scope
+// fallback when the fan-out window was lost (ring overflow, remote-truth
+// swap, rebase adopt). Rare by construction; O(cached) each time. Kernel
+// negatives for never-seen names are not tracked anywhere, so they stay
+// bounded by the entry timeout instead.
+func (s *Filesystem) invalidateAllTracked() {
+	s.mu.RLock()
+	all := make([]string, 0, len(s.pathToInode))
+	for p := range s.pathToInode {
+		all = append(all, p)
+	}
+	s.mu.RUnlock()
+	for _, p := range all {
+		s.invalidatePath(p)
+	}
+}
+
+// startInvalidationPoll runs the fan-out loop with its own cursor until
+// the returned stop closes. One parked goroutine per mount; each idle
+// tick is a single cheap version read.
+func (s *Filesystem) startInvalidationPoll() (stop func()) {
+	stopCh := make(chan struct{})
+	var once sync.Once
+	var last uint64
+	go func() {
+		ticker := time.NewTicker(invalidationPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				last = s.pollInvalidationsOnce(last)
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(stopCh) }) }
 }

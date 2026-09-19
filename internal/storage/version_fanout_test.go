@@ -60,3 +60,75 @@ func TestProjectVersionSurvivesRemoteSwap(t *testing.T) {
 		t.Fatalf("remote-truth swap must advance the version: %d -> %d", before, after)
 	}
 }
+
+func TestPublishedPathsSinceExactScopes(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "fanout-paths"
+
+	if _, unknown, _ := hub.PublishedPathsSince(project, 0); !unknown {
+		t.Fatal("unknown project must report unknown scope")
+	}
+	seedMeta(t, hub, project, "docs", "a.txt", 1)
+	// Baseline after seeding: the initial cold load records unknown
+	// scope (a fresh load can move any entry), so exactness is asserted
+	// only for publishes after the baseline.
+	_, _, cur := hub.PublishedPathsSince(project, 0)
+	seedMeta(t, hub, project, "docs", "b.txt", 2)
+	paths, unknown, cur := hub.PublishedPathsSince(project, cur)
+	if unknown {
+		t.Fatal("fresh publishes must not report unknown scope")
+	}
+	found := map[string]bool{}
+	for _, p := range paths {
+		found[p] = true
+	}
+	if !found["docs/b.txt"] {
+		t.Fatalf("seed publish must list docs/b.txt, got %q", paths)
+	}
+	again, unknown, cur2 := hub.PublishedPathsSince(project, cur)
+	if unknown || len(again) != 0 {
+		t.Fatalf("no new publishes: want empty exact window, got %q unknown=%v", again, unknown)
+	}
+	if cur2 != cur {
+		t.Fatalf("cursor must not advance without publishes: %d -> %d", cur, cur2)
+	}
+}
+
+func TestPublishedPathsSinceOverflowIsUnknown(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "fanout-overflow"
+	seedMeta(t, hub, project, "docs", "a.txt", 1)
+
+	pm := hub.getOrCreateProjectMeta(project)
+	pm.mu.Lock()
+	for i := 0; i < maxRecentPaths+10; i++ {
+		notePublishedPathsLocked(pm, []string{"docs/a.txt"})
+	}
+	pm.mu.Unlock()
+
+	if _, unknown, _ := hub.PublishedPathsSince(project, 0); !unknown {
+		t.Fatal("baseline predating the ring must report unknown scope")
+	}
+}
+
+func TestPublishedPathsSinceSwapIsUnknown(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "fanout-swap-scope"
+	seedMeta(t, hub, project, "docs", "a.txt", 1)
+
+	_, _, cur := hub.PublishedPathsSince(project, 0)
+	remote := NewRepoMetadata(project)
+	remote.EnsureDirectory("docs", 1700000000)
+	remote.Normalize(project, 1700000000)
+	hub.storeRepoMetadata(project, remote, "swap-token", nil, 0)
+
+	if _, unknown, _ := hub.PublishedPathsSince(project, cur); !unknown {
+		t.Fatal("remote-truth swap must report unknown scope")
+	}
+}

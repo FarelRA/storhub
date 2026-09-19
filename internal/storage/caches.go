@@ -75,6 +75,14 @@ type projectMetadata struct {
 	// pointer instead of a per-path SHA map (~100 B/path resident), and
 	// the fingerprint is only paid on the rare conflict path. Guarded by mu.
 	baseTree *metadata.RepoMetadata
+	// recent is the bounded ring of namespace paths each local publish
+	// touched, newest last, for cross-surface invalidation fan-out (see
+	// notePublishedPathsLocked). A nil paths entry means unknown scope
+	// (remote-truth swap, rebase adopt): consumers invalidate broadly.
+	// fanoutSeq is the ring's dedicated cursor, bumped once per recorded
+	// publish. Guarded by mu.
+	recent    []pathVersion
+	fanoutSeq uint64
 	// objectCount is the running total of index objects written for this
 	// project (from the manifest), used for the history-accumulation
 	// threshold warning. Guarded by mu.

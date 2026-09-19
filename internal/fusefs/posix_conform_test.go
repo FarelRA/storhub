@@ -87,6 +87,20 @@ type pcHub struct {
 	dirs      map[string]*pcDir
 	byInode   map[uint64]*pcFile
 	nextInode uint64
+	// fanoutFn scripts the PublishedPathsSince journal for fan-out
+	// tests (nil = capability absent, poller stays idle). Real REST
+	// publishes are simulated by calling pcHub verbs directly, then
+	// pointing this at the touched paths.
+	fanoutFn func(since uint64) (paths []string, unknown bool, current uint64)
+}
+
+// PublishedPathsSince serves the scripted fan-out journal, or reports
+// the capability absent when no script is installed.
+func (h *pcHub) PublishedPathsSince(_ string, since uint64) ([]string, bool, uint64) {
+	if h.fanoutFn == nil {
+		return nil, false, since
+	}
+	return h.fanoutFn(since)
 }
 
 func newPCHub() *pcHub {
