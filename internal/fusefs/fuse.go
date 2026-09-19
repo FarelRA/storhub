@@ -517,8 +517,13 @@ func (s *Filesystem) Mount(mountPoint string) error {
 		s.debugf("mount failed project=%s target=%s err=%v", s.project, mountPoint, err)
 		return err
 	}
+	// Publish under mu like every other server access (connected(),
+	// Wait, Unmount): concurrent notify readers must observe this write
+	// through the mutex, never as a data race.
+	s.mu.Lock()
 	s.server = server
 	s.unmounted = false
+	s.mu.Unlock()
 	s.debugf("mount ready project=%s target=%s", s.project, mountPoint)
 	return nil
 }
