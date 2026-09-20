@@ -49,11 +49,14 @@ func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	}
 	switch {
 	case len(pm.opStack.ops) == maxPendingOpsPerProject:
+		h.pressure.noteCapCross()
 		logging.Warn(h.projectLogger(project), "pending op stack hit residency cap; commit will be force-retried until it drains", "ops", maxPendingOpsPerProject)
 	case beforeBytes < opStackMaxBytes && pm.opStack.bytes >= opStackMaxBytes:
+		h.pressure.noteCapCross()
 		logging.Warn(h.projectLogger(project), "pending op stack hit byte cap; commit will be force-retried until it drains", "bytes", pm.opStack.bytes)
 	}
 	if pm.opStack.needsForceFlush() {
+		h.pressure.noteForceRetry()
 		// Force-retry the commit the moment the stack crosses a
 		// residency bound: the sweeper tick is gone, so the crossing
 		// mutation itself must wake the loop. pm.triggerCh is read
@@ -634,6 +637,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 			return "", "", 0, false, &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: snap.version}
 		}
 		didRebase = true
+		h.pressure.noteRebase()
 		working = rebased
 		working.LastMod = now
 		previousSHA = upstreamSHA
@@ -770,6 +774,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	commitSHA, contentSHA, newObjectCount, didRebase, err := h.publishWithRebase(ctx, project, pm, snap, started)
 	if err != nil {
+		h.pressure.noteCommitFailure(project)
 		// The snapshot published nothing: roll its mark back so later
 		// appends still coalesce against these ops. A stale mark would
 		// leave the live stack split while the journal fold merges,
@@ -782,6 +787,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	h.applyCommittedTree(project, pm, snap, commitSHA, contentSHA, newObjectCount, didRebase)
 
+	h.pressure.noteCommitSuccess(project)
 	h.warnHistoryThreshold(project, pm)
 	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
 

@@ -37,6 +37,15 @@ const (
 	// defaultHistoryWarnObjects is the advisory commit-time threshold
 	// Default() ships with; an explicit zero disables the warning.
 	defaultHistoryWarnObjects = 5000
+	// defaultMaxConsecutiveCommitFailures is the degraded-mode trip point
+	// Default() ships with: 8 consecutive commit failures degrade one
+	// project. Against the suite's injected-failure counts (at most 2
+	// consecutive commit failures in any existing test, plus up to 3
+	// asset-layer upload attempts that never touch the commit streak) 8
+	// is 4x headroom over the observed max, so transient blips can never
+	// trip it, while a genuinely sick backend degrades after a handful
+	// of failures instead of piling up unbounded uncommitted work.
+	defaultMaxConsecutiveCommitFailures = 8
 )
 
 type AtimePolicy string
@@ -134,8 +143,15 @@ type Config struct {
 	// (Default() enables it; WithDefaults preserves an explicit zero
 	// instead of overwriting the disable).
 	HistoryWarnObjects uint64
-	Now                func() time.Time
-	Sleep              func(context.Context, time.Duration) error
+	// MaxConsecutiveCommitFailures is the degraded-mode trip point: a
+	// project whose commits fail this many times consecutively stops
+	// admitting new mutations until an explicit ReEnableProject. It is
+	// count-valued, so unlike the timeout/patience knobs it is NOT
+	// expressed in TickUnit/PatienceUnit bases. Zero takes Default()
+	// (WithDefaults fills it); negative fails Validate.
+	MaxConsecutiveCommitFailures int
+	Now                          func() time.Time
+	Sleep                        func(context.Context, time.Duration) error
 }
 
 // Time units: every timeout, patience, wait, and TTL in the system
@@ -196,8 +212,12 @@ func Default() Config {
 		GitCacheDir:           defaultGitCacheDir(),
 		ObjectCacheMaxEntries: 8192,
 		HistoryWarnObjects:    defaultHistoryWarnObjects,
-		Now:                   time.Now,
-		Sleep:                 SleepWithContext,
+		// 8 consecutive commit failures degrade one project: 4x headroom
+		// over the suite's injected-failure max (2), fast enough to stop
+		// new work piling onto a sick backend within a handful of tries.
+		MaxConsecutiveCommitFailures: defaultMaxConsecutiveCommitFailures,
+		Now:                          time.Now,
+		Sleep:                        SleepWithContext,
 	}
 }
 
@@ -282,6 +302,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.ObjectCacheMaxEntries == 0 {
 		c.ObjectCacheMaxEntries = defaults.ObjectCacheMaxEntries
+	}
+	if c.MaxConsecutiveCommitFailures == 0 {
+		c.MaxConsecutiveCommitFailures = defaults.MaxConsecutiveCommitFailures
 	}
 	// HistoryWarnObjects: see the WithDefaults godoc — zero disables.
 	if c.Now == nil {
@@ -437,6 +460,9 @@ func (c Config) Validate() error {
 	}
 	if c.ObjectCacheMaxEntries < 0 {
 		return fmt.Errorf("ObjectCacheMaxEntries must be >= 0, got %d", c.ObjectCacheMaxEntries)
+	}
+	if c.MaxConsecutiveCommitFailures < 0 {
+		return fmt.Errorf("MaxConsecutiveCommitFailures must be >= 0, got %d", c.MaxConsecutiveCommitFailures)
 	}
 	if c.BaseRetryDelay < 0 {
 		return fmt.Errorf("BaseRetryDelay must be >= 0, got %v", c.BaseRetryDelay)

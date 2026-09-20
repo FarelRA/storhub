@@ -712,6 +712,7 @@ func (h *StorHub) sweepCachesOnce() {
 			trigger := s.pm.triggerCh
 			stillDirty := s.pm.dirty && len(s.pm.opStack.ops) >= maxPendingOpsPerProject
 			if !stale && stillDirty {
+				h.pressure.noteForceRetry()
 				// Retry the failing commit; the stack can never be dropped
 				// (acknowledged mutations), only pushed.
 				select {

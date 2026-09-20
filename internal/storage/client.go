@@ -157,6 +157,11 @@ type StorHub struct {
 	// capWarned records that the MaxTrackedProjects overflow warning has
 	// fired for the current threshold crossing; guarded by metaMu.
 	capWarned bool
+	// pressure is the commit-pipeline pressure registry (item A1):
+	// cap-cross events, force-retry pokes, commit outcomes with
+	// per-project failure streaks, and rebases. Zero value is
+	// ready; every method guards itself with the registry mutex.
+	pressure pressureRegistry
 }
 
 // isValidation422 matches a 422 whose structured errors[] array carries the

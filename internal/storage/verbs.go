@@ -67,6 +67,11 @@ func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, er
 }
 
 func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
+	// Degraded-mode admission first: refuse before any upload work mints
+	// assets that could never commit.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	return h.uploadFileContext(ctx, project, fileName, inputPath)
 }
 
@@ -75,6 +80,11 @@ func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMeta, e
 }
 
 func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string, opts ...shfs.MutateOption) (*FileMeta, error) {
+	// Degraded-mode admission first: refuse before the revision check pays
+	// for a remote load.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
@@ -90,6 +100,10 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	defer func() {
 		h.logOpFinish(project, "patch-file", started, err, "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
 	}()
+	// Degraded-mode admission before the revision check's remote load.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
@@ -147,6 +161,10 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	defer func() {
 		h.logOpFinish(project, "patch-file-ranges", started, err, "path", fileName, "edits", len(edits))
 	}()
+	// Degraded-mode admission before any chunk uploads mint assets.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -792,6 +810,12 @@ func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 // asserts the old Clone return — it must be updated to pin read-only
 // sharing instead of copying.)
 func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*metadata.RepoMetadata) error, message string) (*metadata.RepoMetadata, error) {
+	// Degraded-mode admission: every fs/posix mutation funnels through
+	// here, so one gate covers them all. Recovery verbs bypass
+	// structurally (they commit directly, never through this funnel).
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	pm, err := h.getOrCreateProjectMetaAdmitted(project)
 	if err != nil {
 		return nil, err
@@ -1029,6 +1053,10 @@ func (h *StorHub) publishTxLocked(project string, pm *projectMetadata, candidate
 }
 
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {
+	// Degraded-mode admission: a rewrite mints chunks like any mutation.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	ranges := make([]byteRange, len(dirtyRanges))
 	for i, dirty := range dirtyRanges {
 		ranges[i] = byteRange{start: dirty.Start, end: dirty.End}

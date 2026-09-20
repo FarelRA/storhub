@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -506,4 +507,305 @@ func (h *StorHub) pruneAndSquashUntracked(ctx context.Context, project string, h
 		}
 	}
 	return nil
+}
+
+// Item A10 chunk GC: orphan-rate/sprawl metrics plus conservative
+// catalog compaction.
+//
+// WHAT IT RECLAIMS: chunk catalog records (ChunkInfo entries keyed by
+// chunk ID) that no root references. It never touches release assets:
+// the remote bytes stay until the existing PurgeUntracked reclaims
+// them, so a catalog prune can never destroy bytes a stale reader
+// still needs. Existing cleanup/purge semantics are untouched; this
+// is a separate entry point sharing only the dirty-gate vocabulary.
+//
+// REFERENCE MARKING (roots, all must hold for collection):
+//   - live files: every chunk ID in every file entry of the candidate
+//     tree (the manifest-referenced set).
+//   - pending ops: every File.Chunks reference plus every Chunks-map
+//     key in the live opStack. The on-disk journal is the durable
+//     mirror of the opStack (appendWithDelta deltas folded by foldOps),
+//     so covering the live stack covers the journal: a chunk the
+//     journal will replay is always referenced by the op that carries
+//     it. The prune itself commits through UpdateRepoMetadataContext,
+//     whose intent recorder synthesizes an OpChunkPrune whose replay
+//     (applyChunkPruneOp) defensively skips still-referenced IDs, so a
+//     crash between delete and commit replays safe.
+//   - in-flight commit snapshots: snapshots are copies of opStack ops
+//     still present in the live stack (cleared only by clearUpTo on
+//     success), hence covered by the pending-ops union above.
+//   - baseTree (last committed tree): NOT a root. The live tree already
+//     is baseTree plus applied ops; nothing restores baseTree wholesale
+//     (a rollback to an older revision restores that revision's whole
+//     catalog with it, so collecting a live-orphan an old revision
+//     names is safe).
+//   - pinned sessions: NOT scanned as roots; instead any live session
+//     handle for the project refuses the compaction outright (fail
+//     loud, typed). Sessions pin only file-referenced IDs copied at
+//     open and read through their own copy, so the refusal is strictly
+//     conservative. WHY refusal over union: the session table lock and
+//     pm.mu have no defined order, and a handle can publish between a
+//     pre-scan and the delete; refusal plus the txn discipline below
+//     closes that window without inventing a lock order.
+//
+// COMMIT-RACE DISCIPLINE: classification and deletion happen inside ONE
+// UpdateRepoMetadataContext transaction holding pm.mu exclusively. A
+// concurrent writer either lands before the txn (its IDs are visible
+// in the candidate tree or the opStack union) or blocks until after
+// (its fresh AllocateChunkID values postdate the delete set). A chunk
+// referenced mid-compaction therefore always survives. Session opens
+// pin from a tree read that serializes against the same exclusive
+// lock, so a racing open pins post-GC state.
+//
+// DEFAULT POSTURE: OFF. There is no background trigger, no threshold,
+// no auto-run: compaction is an explicit operator call, dry-run first.
+// WHY OFF: this codebase has no purge-wide write fence (see the purge
+// residual-race note), and silent automatic deletion of catalog
+// records risks exactly the unforgivable failure. The operator runs
+// ScanChunkGC (read-only), then CompactOrphanChunks dry-run, reads the
+// per-object log, then compacts for real.
+
+// ChunkGCResult reports what a scan saw or a compaction did (or would
+// do under DryRun). DeletedIDs is sorted ascending for stable logs.
+type ChunkGCResult struct {
+	DryRun           bool    `json:"dry_run"`
+	ScannedChunks    int     `json:"scanned_chunks"`
+	OrphanChunks     int     `json:"orphan_chunks"`
+	OrphanBytes      int64   `json:"orphan_bytes"`
+	CollectedChunks  int     `json:"collected_chunks"`
+	CollectedBytes   int64   `json:"collected_bytes"`
+	DeletedIDs       []int64 `json:"deleted_ids,omitempty"`
+	RefusedBySession bool    `json:"refused_by_session,omitempty"`
+}
+
+// ChunkGCRefusedError is the loud typed refusal: compaction never
+// deletes silently under doubt (live session, bad project).
+type ChunkGCRefusedError struct {
+	Project string
+	Reason  string
+}
+
+func (e *ChunkGCRefusedError) Error() string {
+	return fmt.Sprintf("chunk GC refused for project %s: %s", e.Project, e.Reason)
+}
+
+// errChunkGCNoop aborts a compaction transaction with no publish when
+// classification finds zero orphans. Internal sentinel, never surfaced:
+// the caller translates it into a zero-result success so a no-op run
+// stays side-effect free (no dirty mark, no empty commit).
+var errChunkGCNoop = errors.New("chunk GC: nothing to collect")
+
+// chunkGCHasLiveSession reports whether any non-destroyed session
+// handle names the project. Conservative: expiry is ignored, a handle
+// present in the table blocks until it is closed or reaped.
+func (h *StorHub) chunkGCHasLiveSession(project string) bool {
+	sh := h.sessionHub()
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	for _, s := range sh.byID {
+		if s == nil || s.destroyed {
+			continue
+		}
+		if s.project == project {
+			return true
+		}
+	}
+	return false
+}
+
+// chunkGCRoots unions the live-tree file references with the pending-op
+// references (file payloads plus catalog keys). ops is the live stack
+// copy; callers holding pm.mu may pass the stack directly.
+func chunkGCRoots(tree *RepoMetadata, ops []Op) map[int64]struct{} {
+	roots := make(map[int64]struct{})
+	for _, file := range tree.Files() {
+		for _, id := range file.Chunks {
+			roots[id] = struct{}{}
+		}
+	}
+	for _, op := range ops {
+		if op.File != nil {
+			for _, id := range op.File.Chunks {
+				roots[id] = struct{}{}
+			}
+		}
+		for id := range op.Chunks {
+			roots[id] = struct{}{}
+		}
+	}
+	return roots
+}
+
+// chunkGCClassify splits the catalog into sorted orphan IDs plus their
+// unreachable byte total. Pure function, no I/O, so tests can pin the
+// keep-vs-collect decision without a hub.
+func chunkGCClassify(catalog map[int64]ChunkInfo, roots map[int64]struct{}) (orphans []int64, unreachable int64) {
+	for id, info := range catalog {
+		if _, ok := roots[id]; ok {
+			continue
+		}
+		orphans = append(orphans, id)
+		unreachable += info.Size
+	}
+	sort.Slice(orphans, func(i, j int) bool { return orphans[i] < orphans[j] })
+	return orphans, unreachable
+}
+
+// ScanChunkGC is the phase-1 read-only probe: it classifies orphans,
+// publishes the scan counter plus the last-scan gauges to the pressure
+// registry, logs loudly, and mutates nothing. Safe under live
+// sessions (it deletes nothing, so the session gate does not apply).
+func (h *StorHub) ScanChunkGC(ctx context.Context, project string) (*ChunkGCResult, error) {
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	pm := h.lookupProjectMeta(project)
+	if pm == nil {
+		// Untracked project: nothing cached, nothing to classify.
+		// No entry is created as a side effect (read-only means
+		// read-only).
+		h.pressure.noteChunkGCScan()
+		h.pressure.noteOrphanSnapshot(0, 0)
+		return &ChunkGCResult{DryRun: true}, nil
+	}
+	pm.mu.RLock()
+	roots := chunkGCRoots(pm.meta, append([]Op(nil), pm.opStack.ops...))
+	scanned := len(pm.meta.Chunks())
+	orphans, unreachable := chunkGCClassify(pm.meta.Chunks(), roots)
+	pm.mu.RUnlock()
+
+	_ = ctx
+	h.pressure.noteChunkGCScan()
+	h.pressure.noteOrphanSnapshot(uint64(len(orphans)), uint64(unreachable))
+	logging.Info(h.projectLogger(project), "chunk GC scan",
+		"scanned", scanned, "orphans", len(orphans), "unreachable_bytes", unreachable)
+	return &ChunkGCResult{
+		DryRun:        true,
+		ScannedChunks: scanned,
+		OrphanChunks:  len(orphans),
+		OrphanBytes:   unreachable,
+		DeletedIDs:    append([]int64(nil), orphans...),
+	}, nil
+}
+
+// CompactOrphanChunks compacts unreachable chunk catalog records.
+// dryRun=true classifies and logs without deleting (same numbers the
+// real run would act on, barring concurrent writers). dryRun=false
+// deletes inside one metadata transaction (see the race discipline
+// above) and records the collection counters. A live session for the
+// project refuses loudly with *ChunkGCRefusedError and deletes
+// nothing. Release assets are never touched.
+func (h *StorHub) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*ChunkGCResult, error) {
+	if err := validateProject(project); err != nil {
+		return nil, err
+	}
+	if h.chunkGCHasLiveSession(project) {
+		logging.Warn(h.projectLogger(project), "chunk GC refused: live session holds pins")
+		return nil, &ChunkGCRefusedError{Project: project, Reason: "live session pins chunks; close sessions and retry"}
+	}
+	if dryRun {
+		res, err := h.ScanChunkGC(ctx, project)
+		if err != nil {
+			return nil, err
+		}
+		res.RefusedBySession = false
+		logging.Info(h.projectLogger(project), "chunk GC dry-run would collect",
+			"orphans", res.OrphanChunks, "unreachable_bytes", res.OrphanBytes, "ids", res.DeletedIDs)
+		return res, nil
+	}
+	pm := h.lookupProjectMeta(project)
+	if pm == nil {
+		h.pressure.noteChunkGCScan()
+		h.pressure.noteOrphanSnapshot(0, 0)
+		return &ChunkGCResult{}, nil
+	}
+	// Snapshot the pending-op roots BEFORE the transaction, under a
+	// read lock. WHY not read pm.opStack inside fn: the transaction
+	// resolves its own pm (an idle eviction could swap the entry
+	// between our lookup and the txn), and dereferencing our possibly
+	// stale pm under the txn's lock would be an unlocked read of a
+	// revivable stack. The snapshot pairs with the candidate inside
+	// fn; appends racing between snapshot and commit are still safe:
+	// every verb mints FRESH chunk IDs (never reuses an orphan ID),
+	// a racing verb serialized behind this txn looks its chunks up
+	// in the post-GC candidate and fails loud ("chunk not found")
+	// instead of corrupting, and the synthesized OpChunkPrune replay
+	// defensively skips still-referenced IDs on crash replay.
+	pm.mu.RLock()
+	pendingOps := append([]Op(nil), pm.opStack.ops...)
+	pm.mu.RUnlock()
+	// The transaction holds pm.mu exclusively across classify+delete,
+	// so concurrent writers serialize around us: a writer either
+	// landed before (visible in the candidate or the snapshot above)
+	// or blocks until after (fresh IDs postdate the delete set).
+	var deleted []int64
+	var collectedBytes int64
+	var scanned int
+	_, err := h.UpdateRepoMetadataContext(ctx, project, func(candidate *RepoMetadata) error {
+		// No session re-check in here: the table mutex and pm.mu
+		// have no defined lock order (session close/sync takes the
+		// table lock then enters a metadata txn), so nesting the
+		// table lock under the txn-owned pm.mu risks deadlock. The
+		// single pre-check plus the serialization argument in the
+		// package doc is the whole gate: a handle racing the gate
+		// pins from a tree read serialized against this txn, so it
+		// either blocked the run up front or pins post-GC state.
+		roots := chunkGCRoots(candidate, pendingOps)
+		scanned = len(candidate.Chunks())
+		orphans, _ := chunkGCClassify(candidate.Chunks(), roots)
+		if len(orphans) == 0 {
+			// Abort the transaction with no publish: a no-op
+			// compaction must stay side-effect free (no dirty
+			// mark, no empty commit, no journal line).
+			return errChunkGCNoop
+		}
+		for _, id := range orphans {
+			// Defensive re-check: the opStack union above was built
+			// from the same critical section, but a paranoid second
+			// membership test costs nothing and turns any future
+			// refactor that splits classify from delete into a
+			// keep-instead-of-collect mistake, never the reverse.
+			if _, ok := roots[id]; ok {
+				continue
+			}
+			info, ok := candidate.Chunks()[id]
+			if !ok {
+				continue
+			}
+			candidate.DeleteChunk(id)
+			deleted = append(deleted, id)
+			collectedBytes += info.Size
+		}
+		return nil
+	}, "storhub: chunk GC compact orphans")
+	if err != nil {
+		if errors.Is(err, errChunkGCNoop) {
+			h.pressure.noteChunkGCScan()
+			h.pressure.noteOrphanSnapshot(0, 0)
+			logging.Info(h.projectLogger(project), "chunk GC compaction complete",
+				"scanned", scanned, "collected", 0, "collected_bytes", 0)
+			return &ChunkGCResult{ScannedChunks: scanned}, nil
+		}
+		return nil, err
+	}
+	h.pressure.noteChunkGCScan()
+	h.pressure.noteOrphanSnapshot(0, 0)
+	if len(deleted) > 0 {
+		h.pressure.noteChunkGCCollected(uint64(len(deleted)), uint64(collectedBytes))
+	}
+	// Loud per-object logging: the operator reconstructs exactly what
+	// one compaction removed from this project's catalog.
+	for _, id := range deleted {
+		logging.Info(h.projectLogger(project), "chunk GC collected orphan chunk", "chunk_id", id)
+	}
+	logging.Info(h.projectLogger(project), "chunk GC compaction complete",
+		"scanned", scanned, "collected", len(deleted), "collected_bytes", collectedBytes)
+	return &ChunkGCResult{
+		ScannedChunks:   scanned,
+		OrphanChunks:    len(deleted),
+		OrphanBytes:     collectedBytes,
+		CollectedChunks: len(deleted),
+		CollectedBytes:  collectedBytes,
+		DeletedIDs:      append([]int64(nil), deleted...),
+	}, nil
 }
