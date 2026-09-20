@@ -87,18 +87,18 @@ func shortFakeHandle(id string) string {
 	return id
 }
 
+// fakeStaleSession builds the typed stale error for the shared core: the
+// core owns the unknown/expired rules, this one line owns the error value
+// so lookups keep asserting errors.Is against the storage sentinel.
+func fakeStaleSession(handleID, reason string) error {
+	return &storage.StaleSessionError{HandleID: handleID, Reason: reason}
+}
+
 // liveFakeSessionLocked resolves a handle, sweeping it when expired.
+// Lookup and lazy reap live in the shared core; owner checks stay here.
 // Caller holds c.mu.
 func (c *fakeRESTClient) liveFakeSessionLocked(id string) (*fakeSession, error) {
-	s, ok := c.sessions[id]
-	if !ok {
-		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
-	}
-	if test.Expired(s.expires, time.Now()) {
-		delete(c.sessions, id)
-		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
-	}
-	return s, nil
+	return test.LiveSession(c.sessions, id, func(s *fakeSession) time.Time { return s.expires }, time.Now(), fakeStaleSession)
 }
 
 // authorizeFakeSessionLocked mirrors the manager: no identity or admin
@@ -117,13 +117,10 @@ func (c *fakeRESTClient) authorizeFakeSessionLocked(ctx context.Context, id stri
 	return fmt.Errorf("session %s: %w (owner uid %d): %w", shortFakeHandle(id), storage.ErrSessionOwnerMismatch, s.ownerUID, syscall.EPERM)
 }
 
-// sweepFakeSessionsLocked reaps expired handles. Caller holds c.mu.
+// sweepFakeSessionsLocked reaps expired handles via the shared core.
+// Caller holds c.mu.
 func (c *fakeRESTClient) sweepFakeSessionsLocked(now time.Time) {
-	for id, s := range c.sessions {
-		if test.Expired(s.expires, now) {
-			delete(c.sessions, id)
-		}
-	}
+	test.SweepExpiredSessions(c.sessions, func(s *fakeSession) time.Time { return s.expires }, now)
 }
 
 func (c *fakeRESTClient) fakeSessionTTL() time.Duration {
@@ -173,10 +170,10 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 	}
 	now := time.Now()
 	c.sweepFakeSessionsLocked(now)
-	// Honor requested TTLs through the shared clamp (default knob when
+	// Honor requested TTLs through the shared core (default knob when
 	// unset); every operation past expiry fails stale in
 	// liveFakeSessionLocked.
-	ttl := test.ClampTTL(storage.RequestedTTL(opts), c.fakeSessionTTL(), time.Hour)
+	expires := test.SessionExpiryAt(now, storage.RequestedTTL(opts), c.fakeSessionTTL(), time.Hour)
 	ownerUID := shfs.IdentityFromContext(ctx).UID
 	maxProject, maxUser := c.fakeSessionCaps()
 	projectCount, userCount := 0, 0
@@ -226,7 +223,7 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 		data:     data,
 		ownerUID: ownerUID,
 		hasOwner: shfs.IdentityPresent(ctx),
-		expires:  now.Add(ttl),
+		expires:  expires,
 	}
 	if path != "" {
 		if node, ok := c.project(project).files[path]; ok {
@@ -422,7 +419,7 @@ func (c *fakeRESTClient) nameFakeSessionLocked(s *fakeSession, path string) erro
 	}
 	if parent := parentPath(clean); parent != "" {
 		if _, ok := p.dirs[parent]; !ok {
-			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+			return test.MissingSessionParent(parent)
 		}
 	}
 	s.path = clean

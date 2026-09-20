@@ -31,7 +31,8 @@ func (m *MemSurface) OpenScratch(ttl time.Duration) (ScratchSession, error) {
 }
 
 func (h *memScratch) expired() bool {
-	return !time.Now().Before(h.deadline)
+	// Single wall-clock comparison shared with the fakes (see Expired).
+	return Expired(h.deadline, time.Now())
 }
 
 func (h *memScratch) checkUsable() error {

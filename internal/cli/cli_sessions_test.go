@@ -269,11 +269,10 @@ func (h *pcFakeHub) OpenSession(_ context.Context, project, path string, mode st
 	if h.sessions == nil {
 		h.sessions = map[string]*pcSession{}
 	}
-	// Honor requested TTLs through the shared clamp (default when
+	// Honor requested TTLs through the shared session core (default when
 	// unset); every operation past expiry fails stale, checked in
 	// livePCSessionLocked.
-	ttl := test.ClampTTL(storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
-	expires := time.Now().Add(ttl)
+	expires := test.SessionExpiryAt(time.Now(), storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
 	var data []byte
 	var ino uint64
 	if path != "" {
@@ -302,21 +301,21 @@ func (h *pcFakeHub) OpenSession(_ context.Context, project, path string, mode st
 	return id, nil
 }
 
+// pcStaleSession builds the typed stale error for the shared core: the
+// core owns the unknown/expired rules, this one line owns the error value
+// so lookups keep asserting errors.Is against the storage sentinel.
+func pcStaleSession(handleID, reason string) error {
+	return &storage.StaleSessionError{HandleID: handleID, Reason: reason}
+}
+
 func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
-	s, ok := h.sessions[id]
-	if !ok {
-		// Unknown ids answer stale like expired ones, mirroring the
-		// product (and the sibling fakes): an id that was never
-		// issued and one that lapsed are indistinguishable, so every
-		// operation past the first expiry keeps reporting stale
-		// instead of degrading to NotFound.
-		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
-	}
-	if test.Expired(s.expires, time.Now()) {
-		delete(h.sessions, id)
-		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
-	}
-	return s, nil
+	// Unknown ids answer stale like expired ones, mirroring the
+	// product (and the sibling fakes): an id that was never
+	// issued and one that lapsed are indistinguishable, so every
+	// operation past the first expiry keeps reporting stale
+	// instead of degrading to NotFound. Lookup and lazy reap live
+	// in the shared core; the table shape stays here.
+	return test.LiveSession(h.sessions, id, func(s *pcSession) time.Time { return s.expires }, time.Now(), pcStaleSession)
 }
 
 func (h *pcFakeHub) ReadSession(_ context.Context, handleID string, offset, length int64) ([]byte, error) {
@@ -465,7 +464,7 @@ func (h *pcFakeHub) LinkSession(_ context.Context, handleID, path string) error 
 	}
 	if parent := pcParentOf(p); parent != "" {
 		if !h.dirs[parent] {
-			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+			return test.MissingSessionParent(parent)
 		}
 	}
 	s.path = p
@@ -496,7 +495,7 @@ func (h *pcFakeHub) RelinkSession(_ context.Context, handleID, path string) erro
 	}
 	if parent := pcParentOf(p); parent != "" {
 		if !h.dirs[parent] {
-			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+			return test.MissingSessionParent(parent)
 		}
 	}
 	s.path = p
