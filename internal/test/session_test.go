@@ -1,4 +1,4 @@
-package sessiontest
+package test
 
 import (
 	"testing"

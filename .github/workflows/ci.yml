@@ -38,12 +38,12 @@ jobs:
           # Bounds use context/SleepWithContext, waits use injected sleep,
           # and the only AfterFunc is cancellation-to-event (fuse_lock):
           # journal durability rides the commit trigger, not a clock.
-          # internal/posixconform is harness, not prod (scenario table,
+          # internal/test is harness, not prod (scenario table,
           # oracle, runner: sleeps there drive expiry proofs under
           # test budgets, never ship). Any other hit is a
           # regression: justify it in 22-event-purity-plan.md or route
           # it through the approved shape.
-          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/posixconform/' || true)
+          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/test/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             exit 1
@@ -187,7 +187,7 @@ jobs:
           ./internal/cli/...
 
   benchmark-budgets:
-    # POSIX hot-path budgets (internal/posixconform/budgets_test.go): the
+    # POSIX hot-path budgets (internal/test/budgets_test.go): the
     # FUSE benches need /dev/fuse and the ceilings were baselined on
     # linux/amd64, so this stays on ubuntu-24.04 and never fans out to
     # arm64 or cross builds. STORHUB_BENCH=1 opts the enforcement in; a
@@ -204,7 +204,7 @@ jobs:
       - name: benchmark budgets
         env:
           STORHUB_BENCH: "1"
-        run: go test -count=1 -run 'TestBudgetTableSane|TestBenchmarkBudgets' -v ./internal/posixconform/
+        run: go test -count=1 -run 'TestBudgetTableSane|TestBenchmarkBudgets' -v ./internal/test/
 
   build-cross:
     runs-on: ubuntu-24.04

@@ -1,10 +1,10 @@
-// Package sessiontest groups test-only session helpers in one place.
+// Session TTL helpers shared by the oracle and the CLI/REST fakes.
 //
 // Boundary: production owns session semantics (internal/storage); the
-// CLI/REST conformance fakes must not each reimplement TTL clamping and
-// expiry checks. Shared pure helpers live here, imported only by _test
-// files, never by prod code.
-package sessiontest
+// fakes must not each reimplement TTL clamping and expiry checks.
+// ClampTTL is the single implementation so the fakes and the oracle
+// agree with production.
+package test
 
 import "time"
 

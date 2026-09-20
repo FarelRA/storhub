@@ -11,8 +11,8 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/sessiontest"
 	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/FarelRA/storhub/internal/test"
 )
 
 // cli_sessions_test.go: Phase 2B session manager over the CLI.
@@ -273,7 +273,7 @@ func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode 
 	// Honor requested TTLs through the shared clamp (default when
 	// unset); every operation past expiry fails stale, checked in
 	// livePCSessionLocked.
-	ttl := sessiontest.ClampTTL(storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
+	ttl := test.ClampTTL(storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
 	expires := time.Now().Add(ttl)
 	var data []byte
 	var ino uint64
@@ -313,7 +313,7 @@ func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
 		// instead of degrading to NotFound.
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
 	}
-	if sessiontest.Expired(s.expires, time.Now()) {
+	if test.Expired(s.expires, time.Now()) {
 		delete(h.sessions, id)
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
 	}

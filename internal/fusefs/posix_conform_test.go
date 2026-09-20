@@ -19,14 +19,14 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
-	"github.com/FarelRA/storhub/internal/posixconform"
+	"github.com/FarelRA/storhub/internal/test"
 )
 
 // This file implements the POSIX conformance surface over a real FUSE
 // mount. A production-faithful in-memory Hub (pcHub) backs the mount, the
 // adapter (pcSurface) maps every Surface method to real syscalls on the
 // mount point, and TestPosixConformFUSE runs the shared 30-scenario table
-// in internal/posixconform against it.
+// in internal/test against it.
 //
 // Backend fidelity notes (mirrors production, not convenience):
 //   - Data commits (replace, patch ranges, range rewrite) clear
@@ -44,12 +44,12 @@ import (
 //
 // Compile-time conformance checks.
 var (
-	_ Hub                     = (*pcHub)(nil)
-	_ posixconform.Surface    = (*pcSurface)(nil)
-	_ posixconform.PunchHoler = (*pcSurface)(nil)
-	_ posixconform.Handle     = (*pcHandle)(nil)
-	_ posixconform.SeekHandle = (*pcHandle)(nil)
-	_ posixconform.Handle     = (*pcPathHandle)(nil)
+	_ Hub             = (*pcHub)(nil)
+	_ test.Surface    = (*pcSurface)(nil)
+	_ test.PunchHoler = (*pcSurface)(nil)
+	_ test.Handle     = (*pcHandle)(nil)
+	_ test.SeekHandle = (*pcHandle)(nil)
+	_ test.Handle     = (*pcPathHandle)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -908,7 +908,7 @@ func (h *pcHub) ChunkSize() int64 {
 }
 
 // ---------------------------------------------------------------------------
-// Adapter: posixconform.Surface over real mount syscalls.
+// Adapter: test.Surface over real mount syscalls.
 // ---------------------------------------------------------------------------
 
 // pcSurface maps Surface paths (absolute, slash separated) onto a FUSE
@@ -920,7 +920,7 @@ type pcSurface struct {
 // join validates a Surface path and maps it under the mount point.
 func (s *pcSurface) join(p string) (string, error) {
 	if p == "" || p[0] != '/' {
-		return "", posixconform.ErrInvalid
+		return "", test.ErrInvalid
 	}
 	return filepath.Join(s.mount, strings.TrimPrefix(p, "/")), nil
 }
@@ -935,21 +935,21 @@ func pcTranslate(err error) error {
 	}
 	switch {
 	case errors.Is(err, syscall.ENOENT):
-		return posixconform.ErrNotFound
+		return test.ErrNotFound
 	case errors.Is(err, syscall.EEXIST):
-		return posixconform.ErrExists
+		return test.ErrExists
 	case errors.Is(err, syscall.EISDIR):
-		return posixconform.ErrIsDir
+		return test.ErrIsDir
 	case errors.Is(err, syscall.ENOTDIR):
-		return posixconform.ErrNotDir
+		return test.ErrNotDir
 	case errors.Is(err, syscall.ENOTEMPTY):
-		return posixconform.ErrNotEmpty
+		return test.ErrNotEmpty
 	case errors.Is(err, syscall.ELOOP):
-		return posixconform.ErrLoop
+		return test.ErrLoop
 	case errors.Is(err, syscall.EINVAL):
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	case errors.Is(err, syscall.EBADF):
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	return err
 }
@@ -965,7 +965,7 @@ func (s *pcSurface) CreateFile(p string, perm uint32, exclusive bool) error {
 		// a no-op, but any create over a directory or symlink collides,
 		// and exclusive create over anything collides.
 		if exclusive || fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-			return posixconform.ErrExists
+			return test.ErrExists
 		}
 		return nil
 	}
@@ -983,7 +983,7 @@ func (s *pcSurface) CreateFile(p string, perm uint32, exclusive bool) error {
 	return pcTranslate(f.Close())
 }
 
-func (s *pcSurface) Open(p string, mode posixconform.OpenMode) (posixconform.Handle, error) {
+func (s *pcSurface) Open(p string, mode test.OpenMode) (test.Handle, error) {
 	full, err := s.join(p)
 	if err != nil {
 		return nil, err
@@ -993,7 +993,7 @@ func (s *pcSurface) Open(p string, mode posixconform.OpenMode) (posixconform.Han
 	// compiles on non-Linux hosts; the scenario fails loudly off-Linux
 	// instead, like the renameat2 helper below.
 	const pcOPath = 0o10000000
-	if mode == posixconform.OpenPath {
+	if mode == test.OpenPath {
 		fd, err := syscall.Open(full, pcOPath, 0)
 		if err != nil {
 			return nil, pcTranslate(err)
@@ -1002,25 +1002,25 @@ func (s *pcSurface) Open(p string, mode posixconform.OpenMode) (posixconform.Han
 	}
 	var flags int
 	switch mode {
-	case posixconform.OpenReadOnly:
+	case test.OpenReadOnly:
 		flags = os.O_RDONLY
-	case posixconform.OpenWriteOnly:
+	case test.OpenWriteOnly:
 		flags = os.O_WRONLY | os.O_CREATE
-	case posixconform.OpenReadWrite:
+	case test.OpenReadWrite:
 		flags = os.O_RDWR | os.O_CREATE
-	case posixconform.OpenAppend:
+	case test.OpenAppend:
 		flags = os.O_WRONLY | os.O_CREATE | os.O_APPEND
-	case posixconform.OpenTruncate:
+	case test.OpenTruncate:
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	default:
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	f, err := os.OpenFile(full, flags, 0o644)
 	if err != nil {
 		return nil, pcTranslate(err)
 	}
 	h := &pcHandle{f: f, mode: mode}
-	if mode == posixconform.OpenAppend {
+	if mode == test.OpenAppend {
 		if fi, err := f.Stat(); err == nil {
 			h.cursor = fi.Size()
 		}
@@ -1028,26 +1028,26 @@ func (s *pcSurface) Open(p string, mode posixconform.OpenMode) (posixconform.Han
 	return h, nil
 }
 
-func (s *pcSurface) Stat(p string) (posixconform.Stat, error) {
+func (s *pcSurface) Stat(p string) (test.Stat, error) {
 	full, err := s.join(p)
 	if err != nil {
-		return posixconform.Stat{}, err
+		return test.Stat{}, err
 	}
 	fi, err := os.Stat(full)
 	if err != nil {
-		return posixconform.Stat{}, pcTranslate(err)
+		return test.Stat{}, pcTranslate(err)
 	}
 	if fi.IsDir() {
-		return posixconform.Stat{}, posixconform.ErrIsDir
+		return test.Stat{}, test.ErrIsDir
 	}
-	var st posixconform.Stat
+	var st test.Stat
 	st.Size = fi.Size()
 	mode := uint32(fi.Mode().Perm())
 	if fi.Mode()&os.ModeSetuid != 0 {
-		mode |= posixconform.SetUIDBit
+		mode |= test.SetUIDBit
 	}
 	if fi.Mode()&os.ModeSetgid != 0 {
-		mode |= posixconform.SetGIDBit
+		mode |= test.SetGIDBit
 	}
 	st.Mode = mode
 	st.MTime = fi.ModTime().UnixNano()
@@ -1064,7 +1064,7 @@ func (s *pcSurface) Truncate(p string, size int64) error {
 		return err
 	}
 	if size < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	return pcTranslate(os.Truncate(full, size))
 }
@@ -1073,10 +1073,10 @@ func (s *pcSurface) Truncate(p string, size int64) error {
 // setgid) to an os.FileMode.
 func pcFileMode(mode uint32) os.FileMode {
 	fm := os.FileMode(mode & 0o777)
-	if mode&posixconform.SetUIDBit != 0 {
+	if mode&test.SetUIDBit != 0 {
 		fm |= os.ModeSetuid
 	}
-	if mode&posixconform.SetGIDBit != 0 {
+	if mode&test.SetGIDBit != 0 {
 		fm |= os.ModeSetgid
 	}
 	return fm
@@ -1131,7 +1131,7 @@ func (s *pcSurface) Unlink(p string) error {
 		return pcTranslate(err)
 	}
 	if fi.IsDir() {
-		return posixconform.ErrIsDir
+		return test.ErrIsDir
 	}
 	return pcTranslate(os.Remove(full))
 }
@@ -1181,7 +1181,7 @@ func (s *pcSurface) Rmdir(p string) error {
 		return pcTranslate(err)
 	}
 	if !fi.IsDir() {
-		return posixconform.ErrNotDir
+		return test.ErrNotDir
 	}
 	return pcTranslate(os.Remove(full))
 }
@@ -1192,7 +1192,7 @@ func (s *pcSurface) Symlink(target, linkPath string) error {
 		return err
 	}
 	if target == "" {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	return pcTranslate(os.Symlink(target, full))
 }
@@ -1215,7 +1215,7 @@ func (s *pcSurface) ReadRange(p string, offset, length int64) ([]byte, error) {
 		return nil, err
 	}
 	if offset < 0 || length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	f, err := os.Open(full)
 	if err != nil {
@@ -1227,10 +1227,10 @@ func (s *pcSurface) ReadRange(p string, offset, length int64) ([]byte, error) {
 		return nil, pcTranslate(err)
 	}
 	if fi.IsDir() {
-		return nil, posixconform.ErrIsDir
+		return nil, test.ErrIsDir
 	}
 	if offset >= fi.Size() {
-		return nil, posixconform.ErrUnsatisfiableRange
+		return nil, test.ErrUnsatisfiableRange
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -1321,10 +1321,10 @@ func (s *pcSurface) CompareAndWrite(p string, offset int64, data []byte, token u
 		return err
 	}
 	if current != token {
-		return posixconform.ErrPrecondition{Expected: token, Actual: current}
+		return test.ErrPrecondition{Expected: token, Actual: current}
 	}
 	if offset < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	f, err := os.OpenFile(full, os.O_WRONLY, 0)
 	if err != nil {
@@ -1358,7 +1358,7 @@ func (s *pcSurface) PunchHole(p string, off, length int64) error {
 		return err
 	}
 	if off < 0 || length < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	if length == 0 {
 		return nil
@@ -1370,7 +1370,7 @@ func (s *pcSurface) PunchHole(p string, off, length int64) error {
 	defer func() { _ = f.Close() }()
 	if err := pcFallocatePunchHole(int64(f.Fd()), off, length); err != nil {
 		if errors.Is(err, syscall.EOPNOTSUPP) {
-			return fmt.Errorf("punch hole %s: %w", p, posixconform.ErrUnsupported)
+			return fmt.Errorf("punch hole %s: %w", p, test.ErrUnsupported)
 		}
 		return pcTranslate(err)
 	}
@@ -1388,31 +1388,31 @@ func (s *pcSurface) PunchHole(p string, off, length int64) error {
 type pcHandle struct {
 	mu     sync.Mutex
 	f      *os.File
-	mode   posixconform.OpenMode
+	mode   test.OpenMode
 	cursor int64
 	closed bool
 }
 
 func (h *pcHandle) readable() bool {
-	return h.mode == posixconform.OpenReadOnly || h.mode == posixconform.OpenReadWrite
+	return h.mode == test.OpenReadOnly || h.mode == test.OpenReadWrite
 }
 
 func (h *pcHandle) writable() bool {
-	return h.mode == posixconform.OpenWriteOnly || h.mode == posixconform.OpenReadWrite ||
-		h.mode == posixconform.OpenAppend || h.mode == posixconform.OpenTruncate
+	return h.mode == test.OpenWriteOnly || h.mode == test.OpenReadWrite ||
+		h.mode == test.OpenAppend || h.mode == test.OpenTruncate
 }
 
 func (h *pcHandle) PRead(offset int64, length int) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, posixconform.ErrClosed
+		return nil, test.ErrClosed
 	}
 	if !h.readable() {
-		return nil, posixconform.ErrAccess
+		return nil, test.ErrAccess
 	}
 	if offset < 0 || length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -1439,13 +1439,13 @@ func (h *pcHandle) PWrite(offset int64, data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return 0, posixconform.ErrClosed
+		return 0, test.ErrClosed
 	}
 	if !h.writable() {
-		return 0, posixconform.ErrAccess
+		return 0, test.ErrAccess
 	}
 	if offset < 0 {
-		return 0, posixconform.ErrInvalid
+		return 0, test.ErrInvalid
 	}
 	written := 0
 	for written < len(data) {
@@ -1465,13 +1465,13 @@ func (h *pcHandle) Read(length int) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, posixconform.ErrClosed
+		return nil, test.ErrClosed
 	}
 	if !h.readable() {
-		return nil, posixconform.ErrAccess
+		return nil, test.ErrAccess
 	}
 	if length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -1499,12 +1499,12 @@ func (h *pcHandle) Write(data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return 0, posixconform.ErrClosed
+		return 0, test.ErrClosed
 	}
 	if !h.writable() {
-		return 0, posixconform.ErrAccess
+		return 0, test.ErrAccess
 	}
-	if h.mode == posixconform.OpenAppend {
+	if h.mode == test.OpenAppend {
 		// The fd was opened O_APPEND, so the kernel forces every write
 		// to the end of file regardless of the cursor.
 		written := 0
@@ -1544,13 +1544,13 @@ func (h *pcHandle) Truncate(size int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	if !h.writable() {
-		return posixconform.ErrAccess
+		return test.ErrAccess
 	}
 	if size < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	return pcTranslate(h.f.Truncate(size))
 }
@@ -1559,7 +1559,7 @@ func (h *pcHandle) Sync() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	return pcTranslate(h.f.Sync())
 }
@@ -1568,7 +1568,7 @@ func (h *pcHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	h.closed = true
 	return pcTranslate(h.f.Close())
@@ -1583,12 +1583,12 @@ const (
 	pcSeekHole = 4
 )
 
-// SeekData implements posixconform.SeekHandle over a real mount fd.
+// SeekData implements test.SeekHandle over a real mount fd.
 func (h *pcHandle) SeekData(off int64) (int64, error) {
 	return h.pcSeek(off, pcSeekData)
 }
 
-// SeekHole implements posixconform.SeekHandle over a real mount fd.
+// SeekHole implements test.SeekHandle over a real mount fd.
 func (h *pcHandle) SeekHole(off int64) (int64, error) {
 	return h.pcSeek(off, pcSeekHole)
 }
@@ -1597,10 +1597,10 @@ func (h *pcHandle) pcSeek(off int64, whence int) (int64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return 0, posixconform.ErrClosed
+		return 0, test.ErrClosed
 	}
 	if off < 0 {
-		return 0, posixconform.ErrInvalid
+		return 0, test.ErrInvalid
 	}
 	n, err := h.f.Seek(off, whence)
 	if err != nil {
@@ -1608,7 +1608,7 @@ func (h *pcHandle) pcSeek(off int64, whence int) (int64, error) {
 		// EOF); surface it as the harness unsatisfiable-range sentinel
 		// so scenarios match with errors.Is.
 		if errors.Is(err, syscall.ENXIO) {
-			return 0, fmt.Errorf("seek: %w", posixconform.ErrUnsatisfiableRange)
+			return 0, fmt.Errorf("seek: %w", test.ErrUnsatisfiableRange)
 		}
 		return 0, pcTranslate(err)
 	}
@@ -1629,9 +1629,9 @@ func (h *pcPathHandle) deny() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
-	return posixconform.ErrAccess
+	return test.ErrAccess
 }
 
 func (h *pcPathHandle) PRead(_ int64, _ int) ([]byte, error) {
@@ -1658,7 +1658,7 @@ func (h *pcPathHandle) Sync() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	return nil
 }
@@ -1667,7 +1667,7 @@ func (h *pcPathHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	h.closed = true
 	return pcTranslate(syscall.Close(h.fd))
@@ -1676,7 +1676,7 @@ func (h *pcPathHandle) Close() error {
 // pcScenarioBudget bounds one scenario. A wedged mount (for example the
 // concurrent-append commit deadlock documented in the program notes) must
 // surface as a loud per-scenario FAIL, never as a hung suite. Enforced by
-// posixconform.RunWithBudget; the timeout flag below drives lazy teardown.
+// test.RunWithBudget; the timeout flag below drives lazy teardown.
 const pcScenarioBudget = 45 * time.Second
 
 // pcTeardownBudget bounds unmount plus server close after one scenario. A
@@ -1705,10 +1705,10 @@ func pcLazyUnmount(mountPoint string) {
 // the mount down. A fresh mount per scenario keeps one wedged scenario
 // from denying signal from the rest: scenario paths are unique per the
 // harness, and so is the server behind them here.
-func pcRunScenario(t *testing.T, index, total int, sc posixconform.Scenario) posixconform.Result {
+func pcRunScenario(t *testing.T, index, total int, sc test.Scenario) test.Result {
 	t.Helper()
-	fail := func(format string, args ...any) posixconform.Result {
-		return posixconform.Result{Name: sc.Name, Pass: false, Error: fmt.Sprintf(format, args...)}
+	fail := func(format string, args ...any) test.Result {
+		return test.Result{Name: sc.Name, Pass: false, Error: fmt.Sprintf(format, args...)}
 	}
 	t.Logf("scenario %d/%d %s: mounting", index+1, total, sc.Name)
 	parent, err := os.MkdirTemp("", "pc-fuse-conform-*")
@@ -1747,7 +1747,7 @@ func pcRunScenario(t *testing.T, index, total int, sc posixconform.Scenario) pos
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	result := posixconform.RunWithBudget(&pcSurface{mount: mountPoint}, []posixconform.Scenario{sc}, pcScenarioBudget)[0]
+	result := test.RunWithBudget(&pcSurface{mount: mountPoint}, []test.Scenario{sc}, pcScenarioBudget)[0]
 	if result.TimedOut {
 		pcLazyUnmount(mountPoint)
 	}
@@ -1826,13 +1826,13 @@ func TestPosixConformFUSE(t *testing.T) {
 		t.Skipf("posix conformance over FUSE needs /dev/fuse: %v", err)
 	}
 	pcPreflight(t)
-	table := posixconform.Filter(posixconform.Table, posixconform.SurfaceFUSE)
+	table := test.Filter(test.Table, test.SurfaceFUSE)
 	total := len(table)
 	t.Logf("posix conformance over FUSE: %d scenarios, fresh mount each", total)
 	// PC_ONLY focuses one scenario by exact name (e.g. debugging a single
 	// RED case without paying for 30 fresh mounts). Empty runs the table.
 	only := os.Getenv("PC_ONLY")
-	results := make([]posixconform.Result, 0, total)
+	results := make([]test.Result, 0, total)
 	for i, sc := range table {
 		if only != "" && sc.Name != only {
 			continue
@@ -1845,7 +1845,7 @@ func TestPosixConformFUSE(t *testing.T) {
 			t.Errorf("FAIL %s: %s", result.Name, result.Error)
 		}
 	}
-	passed, failed := posixconform.Summary(results)
+	passed, failed := test.Summary(results)
 	t.Logf("posixconform FUSE: %d passed, %d failed, %d total", passed, failed, len(results))
 	if failed > 0 {
 		t.Fatalf("%d scenario(s) failed over the FUSE mount", failed)

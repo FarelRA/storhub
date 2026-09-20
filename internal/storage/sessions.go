@@ -228,12 +228,12 @@ func WithSessionTTL(d time.Duration) SessionOption {
 }
 
 // RequestedTTL folds SessionOptions and reports the requested idle TTL:
-// <=0 means "hub default". Conformance doubles (internal/sessiontest,
-// plus the CLI/REST fakes) honor it so the shared table can drive handle
-// expiry; production clamps it to [default, max] at open. It lives in
-// prod code only because SessionOption closes over unexported state that
-// no external test package can decode; the clamping itself is owned by
-// sessiontest.ClampTTL so fakes share one implementation.
+// <=0 means "hub default". Conformance doubles (the oracle plus the
+// CLI/REST fakes) honor it so the shared table can drive handle expiry;
+// production clamps it to [default, max] at open. It lives in prod code
+// only because SessionOption closes over unexported state that no
+// external test package can decode; the clamping itself is owned by
+// test.ClampTTL so fakes share one implementation.
 func RequestedTTL(opts []SessionOption) time.Duration {
 	var o sessionOpenOptions
 	for _, fn := range opts {

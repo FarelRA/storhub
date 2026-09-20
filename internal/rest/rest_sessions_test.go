@@ -13,8 +13,8 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/sessiontest"
 	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/FarelRA/storhub/internal/test"
 )
 
 // rest_sessions_test.go: Phase 2B session manager over REST.
@@ -94,7 +94,7 @@ func (c *fakeRESTClient) liveFakeSessionLocked(id string) (*fakeSession, error) 
 	if !ok {
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
 	}
-	if sessiontest.Expired(s.expires, time.Now()) {
+	if test.Expired(s.expires, time.Now()) {
 		delete(c.sessions, id)
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
 	}
@@ -120,7 +120,7 @@ func (c *fakeRESTClient) authorizeFakeSessionLocked(ctx context.Context, id stri
 // sweepFakeSessionsLocked reaps expired handles. Caller holds c.mu.
 func (c *fakeRESTClient) sweepFakeSessionsLocked(now time.Time) {
 	for id, s := range c.sessions {
-		if sessiontest.Expired(s.expires, now) {
+		if test.Expired(s.expires, now) {
 			delete(c.sessions, id)
 		}
 	}
@@ -176,7 +176,7 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 	// Honor requested TTLs through the shared clamp (default knob when
 	// unset); every operation past expiry fails stale in
 	// liveFakeSessionLocked.
-	ttl := sessiontest.ClampTTL(storage.RequestedTTL(opts), c.fakeSessionTTL(), time.Hour)
+	ttl := test.ClampTTL(storage.RequestedTTL(opts), c.fakeSessionTTL(), time.Hour)
 	ownerUID := shfs.IdentityFromContext(ctx).UID
 	maxProject, maxUser := c.fakeSessionCaps()
 	projectCount, userCount := 0, 0

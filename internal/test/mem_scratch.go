@@ -1,12 +1,8 @@
-package posixconform
+package test
 
 import (
 	"time"
 )
-
-// memScratchDefaultTTL mirrors the product default when OpenScratch gets
-// a non-positive TTL: the description lives until reaped, never forever.
-const memScratchDefaultTTL = 10 * time.Minute
 
 // memScratch is a pathless open file description over private bytes,
 // the oracle half of ScratchSession. Writes stage privately; Link binds
@@ -29,7 +25,7 @@ var _ ScratchSession = (*memScratch)(nil)
 // OpenScratch implements SessionSurface.OpenScratch on the oracle.
 func (m *MemSurface) OpenScratch(ttl time.Duration) (ScratchSession, error) {
 	if ttl <= 0 {
-		ttl = memScratchDefaultTTL
+		ttl = DefaultTTL
 	}
 	return &memScratch{mem: m, deadline: time.Now().Add(ttl)}, nil
 }

@@ -1,4 +1,4 @@
-package posixconform
+package test
 
 // Benchmark budgets with teeth (plan Phase 0 requirement, H7).
 //
@@ -17,7 +17,7 @@ package posixconform
 // var only the table-sanity test runs, so a normal `go test` stays fast:
 // enforcement reruns ~33k bench iterations across two packages and
 // belongs in CI, not in every local edit-compile loop. Run it with:
-// STORHUB_BENCH=1 go test -count=1 -run 'TestBudget' ./internal/posixconform/
+// STORHUB_BENCH=1 go test -count=1 -run 'TestBudget' ./internal/test/
 //
 // Methodology: ceilings are 1.5x the best-of-3 ns/op measured 2026-09-19
 // on this box (2-CPU linux/amd64, benchtime=3000x, -count=3), rounded up;

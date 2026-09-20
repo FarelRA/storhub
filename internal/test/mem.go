@@ -1,4 +1,4 @@
-package posixconform
+package test
 
 import (
 	"strings"

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FarelRA/storhub/internal/posixconform"
+	"github.com/FarelRA/storhub/internal/test"
 )
 
 const pcProject = "demo"
@@ -32,7 +32,7 @@ type restConformAdapter struct {
 type restConformHandle struct {
 	adapter *restConformAdapter
 	rest    string
-	mode    posixconform.OpenMode
+	mode    test.OpenMode
 	mu      sync.Mutex
 	cursor  int64
 	closed  bool
@@ -61,8 +61,8 @@ type restConformHandle struct {
 // truncate happen through stateless verbs before the session opens, and
 // append cursors stay adapter-side, so the session never needs
 // create/truncate/append bits.
-func pcSessionMode(m posixconform.OpenMode) string {
-	if m == posixconform.OpenReadOnly {
+func pcSessionMode(m test.OpenMode) string {
+	if m == test.OpenReadOnly {
 		return "r"
 	}
 	return "r+"
@@ -217,31 +217,31 @@ func mapPCStatus(status int, data []byte, what string) error {
 	lower := strings.ToLower(detail + " " + code)
 	switch status {
 	case http.StatusNotFound:
-		return fmt.Errorf("%s: %w: %s", what, posixconform.ErrNotFound, detail)
+		return fmt.Errorf("%s: %w: %s", what, test.ErrNotFound, detail)
 	case http.StatusGone:
-		return fmt.Errorf("%s: %w: %s", what, posixconform.ErrStale, detail)
+		return fmt.Errorf("%s: %w: %s", what, test.ErrStale, detail)
 	case http.StatusConflict:
 		switch {
 		case strings.Contains(lower, "not empty"):
-			return fmt.Errorf("%s: %w: %s", what, posixconform.ErrNotEmpty, detail)
+			return fmt.Errorf("%s: %w: %s", what, test.ErrNotEmpty, detail)
 		case strings.Contains(lower, "is a directory"):
-			return fmt.Errorf("%s: %w: %s", what, posixconform.ErrIsDir, detail)
+			return fmt.Errorf("%s: %w: %s", what, test.ErrIsDir, detail)
 		case strings.Contains(lower, "not a directory"):
-			return fmt.Errorf("%s: %w: %s", what, posixconform.ErrNotDir, detail)
+			return fmt.Errorf("%s: %w: %s", what, test.ErrNotDir, detail)
 		default:
-			return fmt.Errorf("%s: %w: %s", what, posixconform.ErrExists, detail)
+			return fmt.Errorf("%s: %w: %s", what, test.ErrExists, detail)
 		}
 	case http.StatusBadRequest:
-		return fmt.Errorf("%s: %w: %s", what, posixconform.ErrInvalid, detail)
+		return fmt.Errorf("%s: %w: %s", what, test.ErrInvalid, detail)
 	case http.StatusRequestedRangeNotSatisfiable:
-		return fmt.Errorf("%s: %w: %s", what, posixconform.ErrUnsatisfiableRange, detail)
+		return fmt.Errorf("%s: %w: %s", what, test.ErrUnsatisfiableRange, detail)
 	case http.StatusPreconditionFailed:
 		return fmt.Errorf("%s: precondition failed: %s", what, detail)
 	default:
 		if status >= 200 && status < 300 {
 			return nil
 		}
-		return fmt.Errorf("%s: %w: status %d: %s", what, posixconform.ErrInvalid, status, detail)
+		return fmt.Errorf("%s: %w: status %d: %s", what, test.ErrInvalid, status, detail)
 	}
 }
 
@@ -254,10 +254,10 @@ func (a *restConformAdapter) statEntry(pcPath string) (*EntryInfo, string, error
 	}
 	var nr nodeResponse
 	if err := json.Unmarshal(data, &nr); err != nil {
-		return nil, "", fmt.Errorf("stat %s: %w: decode: %v", pcPath, posixconform.ErrInvalid, err)
+		return nil, "", fmt.Errorf("stat %s: %w: decode: %v", pcPath, test.ErrInvalid, err)
 	}
 	if nr.Entry == nil {
-		return nil, "", fmt.Errorf("stat %s: %w: empty entry", pcPath, posixconform.ErrNotFound)
+		return nil, "", fmt.Errorf("stat %s: %w: empty entry", pcPath, test.ErrNotFound)
 	}
 	etag := nr.ETag
 	if etag == "" {
@@ -291,7 +291,7 @@ func (a *restConformAdapter) resolve(pcPath string) (string, *EntryInfo, string,
 		}
 		current = target
 	}
-	return current, nil, "", fmt.Errorf("too many levels resolving %s: %w", pcPath, posixconform.ErrLoop)
+	return current, nil, "", fmt.Errorf("too many levels resolving %s: %w", pcPath, test.ErrLoop)
 }
 
 func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool) error {
@@ -312,25 +312,25 @@ func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool
 				return nil
 			}
 		}
-		return fmt.Errorf("create %s: %w: %s", path, posixconform.ErrExists, strings.TrimSpace(string(data)))
+		return fmt.Errorf("create %s: %w: %s", path, test.ErrExists, strings.TrimSpace(string(data)))
 	}
 	if status == http.StatusNotFound {
-		return fmt.Errorf("create %s: %w: %s", path, posixconform.ErrNotFound, strings.TrimSpace(string(data)))
+		return fmt.Errorf("create %s: %w: %s", path, test.ErrNotFound, strings.TrimSpace(string(data)))
 	}
 	return mapPCStatus(status, data, "create "+path)
 }
 
-func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posixconform.Handle, error) {
+func (a *restConformAdapter) Open(path string, mode test.OpenMode) (test.Handle, error) {
 	resolved, entry, _, statErr := a.resolve(path)
 	if statErr != nil {
-		if !errors.Is(statErr, posixconform.ErrNotFound) {
+		if !errors.Is(statErr, test.ErrNotFound) {
 			return nil, statErr
 		}
-		if mode == posixconform.OpenReadOnly {
-			return nil, fmt.Errorf("open %s: %w", path, posixconform.ErrNotFound)
+		if mode == test.OpenReadOnly {
+			return nil, fmt.Errorf("open %s: %w", path, test.ErrNotFound)
 		}
 		if err := a.CreateFile(path, 0o644, false); err != nil {
-			if !errors.Is(err, posixconform.ErrExists) {
+			if !errors.Is(err, test.ErrExists) {
 				return nil, err
 			}
 		}
@@ -339,10 +339,10 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 		}
 	} else {
 		if entry.IsDir {
-			return nil, fmt.Errorf("open %s: %w", path, posixconform.ErrIsDir)
+			return nil, fmt.Errorf("open %s: %w", path, test.ErrIsDir)
 		}
 	}
-	if mode == posixconform.OpenTruncate {
+	if mode == test.OpenTruncate {
 		rp := trimPCPath(resolved)
 		target := pcBase(a.project) + "/content?path=" + url.QueryEscape(rp) + "&op=truncate&size=0"
 		status, _, data := a.do(http.MethodPatch, target, nil, nil)
@@ -366,12 +366,12 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode, session: id, ino: entry.Inode}, nil
 }
 
-func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
+func (a *restConformAdapter) Stat(path string) (test.Stat, error) {
 	_, entry, _, err := a.resolve(path)
 	if err != nil {
-		return posixconform.Stat{}, err
+		return test.Stat{}, err
 	}
-	return posixconform.Stat{
+	return test.Stat{
 		Size:  entry.Size,
 		Mode:  entry.Mode,
 		UID:   entry.UID,
@@ -382,7 +382,7 @@ func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
 
 func (a *restConformAdapter) Truncate(path string, size int64) error {
 	if size < 0 {
-		return fmt.Errorf("truncate %s: %w: negative size", path, posixconform.ErrInvalid)
+		return fmt.Errorf("truncate %s: %w: negative size", path, test.ErrInvalid)
 	}
 	rp := trimPCPath(path)
 	target := pcBase(a.project) + "/content?path=" + url.QueryEscape(rp) + "&op=truncate&size=" + fmt.Sprintf("%d", size)
@@ -479,14 +479,14 @@ func (a *restConformAdapter) Readlink(linkPath string) (string, error) {
 		return "", err
 	}
 	if !entry.IsSymlink {
-		return "", fmt.Errorf("readlink %s: %w: not a symlink", linkPath, posixconform.ErrInvalid)
+		return "", fmt.Errorf("readlink %s: %w: not a symlink", linkPath, test.ErrInvalid)
 	}
 	return entry.SymlinkTarget, nil
 }
 
 func (a *restConformAdapter) ReadRange(path string, offset, length int64) ([]byte, error) {
 	if offset < 0 || length < 0 {
-		return nil, fmt.Errorf("readrange %s: %w: negative offset or length", path, posixconform.ErrInvalid)
+		return nil, fmt.Errorf("readrange %s: %w: negative offset or length", path, test.ErrInvalid)
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -505,7 +505,7 @@ func (a *restConformAdapter) ReadRange(path string, offset, length int64) ([]byt
 	case http.StatusOK, http.StatusPartialContent:
 		return data, nil
 	case http.StatusRequestedRangeNotSatisfiable:
-		return nil, fmt.Errorf("readrange %s: %w", path, posixconform.ErrUnsatisfiableRange)
+		return nil, fmt.Errorf("readrange %s: %w", path, test.ErrUnsatisfiableRange)
 	default:
 		return nil, mapPCStatus(status, data, "readrange "+path)
 	}
@@ -543,14 +543,14 @@ func (a *restConformAdapter) Revision(path string) (uint64, error) {
 		return 0, err
 	}
 	if etag == "" {
-		return 0, fmt.Errorf("revision %s: %w: missing etag", path, posixconform.ErrInvalid)
+		return 0, fmt.Errorf("revision %s: %w: missing etag", path, test.ErrInvalid)
 	}
 	return a.rememberToken(etag), nil
 }
 
 func (a *restConformAdapter) CompareAndWrite(path string, offset int64, data []byte, token uint64) error {
 	if offset < 0 {
-		return fmt.Errorf("cas %s: %w: negative offset", path, posixconform.ErrInvalid)
+		return fmt.Errorf("cas %s: %w: negative offset", path, test.ErrInvalid)
 	}
 	etag, ok := a.lookupETag(token)
 	if !ok {
@@ -572,25 +572,25 @@ func (a *restConformAdapter) CompareAndWrite(path string, offset int64, data []b
 		if statErr == nil && currentETag != "" {
 			actual = a.rememberToken(currentETag)
 		}
-		return posixconform.ErrPrecondition{Expected: token, Actual: actual}
+		return test.ErrPrecondition{Expected: token, Actual: actual}
 	}
 	_ = resp
 	return mapPCStatus(status, resp, "cas "+path)
 }
 
-func canPCRead(m posixconform.OpenMode) bool {
-	return m == posixconform.OpenReadOnly || m == posixconform.OpenReadWrite
+func canPCRead(m test.OpenMode) bool {
+	return m == test.OpenReadOnly || m == test.OpenReadWrite
 }
 
-func canPCWrite(m posixconform.OpenMode) bool {
-	return m != posixconform.OpenReadOnly
+func canPCWrite(m test.OpenMode) bool {
+	return m != test.OpenReadOnly
 }
 
 func (h *restConformHandle) checkClosed() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return fmt.Errorf("handle: %w", posixconform.ErrClosed)
+		return fmt.Errorf("handle: %w", test.ErrClosed)
 	}
 	return nil
 }
@@ -607,7 +607,7 @@ func (h *restConformHandle) statLinked() (entry *EntryInfo, linked bool, err err
 	h.mu.Unlock()
 	entry, _, serr := h.adapter.statEntry("/" + h.rest)
 	if serr != nil {
-		if errors.Is(serr, posixconform.ErrNotFound) {
+		if errors.Is(serr, test.ErrNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, serr
@@ -641,10 +641,10 @@ func (h *restConformHandle) PRead(offset int64, length int) ([]byte, error) {
 	mode := h.mode
 	h.mu.Unlock()
 	if !canPCRead(mode) {
-		return nil, fmt.Errorf("pread: %w", posixconform.ErrAccess)
+		return nil, fmt.Errorf("pread: %w", test.ErrAccess)
 	}
 	if offset < 0 || length < 0 {
-		return nil, fmt.Errorf("pread: %w: negative offset or length", posixconform.ErrInvalid)
+		return nil, fmt.Errorf("pread: %w: negative offset or length", test.ErrInvalid)
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -660,7 +660,7 @@ func (h *restConformHandle) PRead(offset int64, length int) ([]byte, error) {
 	if err == nil {
 		return got, nil
 	}
-	if !errors.Is(err, posixconform.ErrNotFound) {
+	if !errors.Is(err, test.ErrNotFound) {
 		return nil, err
 	}
 	// Racedetach between the stat and the fetch: same session fallback.
@@ -675,10 +675,10 @@ func (h *restConformHandle) PWrite(offset int64, data []byte) (int, error) {
 	mode := h.mode
 	h.mu.Unlock()
 	if !canPCWrite(mode) {
-		return 0, fmt.Errorf("pwrite: %w", posixconform.ErrAccess)
+		return 0, fmt.Errorf("pwrite: %w", test.ErrAccess)
 	}
 	if offset < 0 {
-		return 0, fmt.Errorf("pwrite: %w: negative offset", posixconform.ErrInvalid)
+		return 0, fmt.Errorf("pwrite: %w: negative offset", test.ErrInvalid)
 	}
 	if len(data) == 0 {
 		return 0, nil
@@ -705,10 +705,10 @@ func (h *restConformHandle) Read(length int) ([]byte, error) {
 	cursor := h.cursor
 	h.mu.Unlock()
 	if !canPCRead(mode) {
-		return nil, fmt.Errorf("read: %w", posixconform.ErrAccess)
+		return nil, fmt.Errorf("read: %w", test.ErrAccess)
 	}
 	if length < 0 {
-		return nil, fmt.Errorf("read: %w: negative length", posixconform.ErrInvalid)
+		return nil, fmt.Errorf("read: %w: negative length", test.ErrInvalid)
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -744,13 +744,13 @@ func (h *restConformHandle) Write(data []byte) (int, error) {
 	cursor := h.cursor
 	h.mu.Unlock()
 	if !canPCWrite(mode) {
-		return 0, fmt.Errorf("write: %w", posixconform.ErrAccess)
+		return 0, fmt.Errorf("write: %w", test.ErrAccess)
 	}
 	if len(data) == 0 {
 		return 0, nil
 	}
 	off := cursor
-	if mode == posixconform.OpenAppend {
+	if mode == test.OpenAppend {
 		entry, linked, err := h.statLinked()
 		if err != nil {
 			return 0, err
@@ -785,10 +785,10 @@ func (h *restConformHandle) Truncate(size int64) error {
 	mode := h.mode
 	h.mu.Unlock()
 	if !canPCWrite(mode) {
-		return fmt.Errorf("truncate: %w", posixconform.ErrAccess)
+		return fmt.Errorf("truncate: %w", test.ErrAccess)
 	}
 	if size < 0 {
-		return fmt.Errorf("truncate: %w: negative size", posixconform.ErrInvalid)
+		return fmt.Errorf("truncate: %w: negative size", test.ErrInvalid)
 	}
 	// Staged through the session, then committed like writes: the pin
 	// refreshes and a later unlink still serves the truncated view.
@@ -817,7 +817,7 @@ func (h *restConformHandle) Close() error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return fmt.Errorf("close: %w", posixconform.ErrClosed)
+		return fmt.Errorf("close: %w", test.ErrClosed)
 	}
 	h.mu.Unlock()
 	// Session close commits staged state (discarding when the path went
@@ -834,7 +834,7 @@ func (h *restConformHandle) Close() error {
 	return nil
 }
 
-func (a *restConformAdapter) OpenScratch(ttl time.Duration) (posixconform.ScratchSession, error) {
+func (a *restConformAdapter) OpenScratch(ttl time.Duration) (test.ScratchSession, error) {
 	ttlRaw := ""
 	if ttl > 0 {
 		ttlRaw = ttl.String()
@@ -863,7 +863,7 @@ func (h *restScratchHandle) checkClosed() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return fmt.Errorf("scratch: %w", posixconform.ErrClosed)
+		return fmt.Errorf("scratch: %w", test.ErrClosed)
 	}
 	return nil
 }
@@ -873,7 +873,7 @@ func (h *restScratchHandle) PRead(offset int64, length int) ([]byte, error) {
 		return nil, err
 	}
 	if offset < 0 || length < 0 {
-		return nil, fmt.Errorf("scratch pread: %w: negative offset or length", posixconform.ErrInvalid)
+		return nil, fmt.Errorf("scratch pread: %w: negative offset or length", test.ErrInvalid)
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -893,7 +893,7 @@ func (h *restScratchHandle) PWrite(offset int64, data []byte) (int, error) {
 		return 0, err
 	}
 	if offset < 0 {
-		return 0, fmt.Errorf("scratch pwrite: %w: negative offset", posixconform.ErrInvalid)
+		return 0, fmt.Errorf("scratch pwrite: %w: negative offset", test.ErrInvalid)
 	}
 	if len(data) == 0 {
 		return 0, nil
@@ -920,7 +920,7 @@ func (h *restScratchHandle) Read(length int) ([]byte, error) {
 	cursor := h.cursor
 	h.mu.Unlock()
 	if length < 0 {
-		return nil, fmt.Errorf("scratch read: %w: negative length", posixconform.ErrInvalid)
+		return nil, fmt.Errorf("scratch read: %w: negative length", test.ErrInvalid)
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -960,7 +960,7 @@ func (h *restScratchHandle) Truncate(size int64) error {
 		return err
 	}
 	if size < 0 {
-		return fmt.Errorf("scratch truncate: %w: negative size", posixconform.ErrInvalid)
+		return fmt.Errorf("scratch truncate: %w: negative size", test.ErrInvalid)
 	}
 	target := "/api/v1/handles/" + h.session + "/truncate"
 	status, _, data := h.adapter.doJSON(http.MethodPost, target, sessionTruncateRequest{Size: size}, nil)
@@ -1010,7 +1010,7 @@ func (h *restScratchHandle) Close() error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return fmt.Errorf("scratch close: %w", posixconform.ErrClosed)
+		return fmt.Errorf("scratch close: %w", test.ErrClosed)
 	}
 	h.mu.Unlock()
 	// A failed close (taken target) leaves the description open for
@@ -1036,8 +1036,8 @@ func TestPosixConformREST(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	adapter := &restConformAdapter{handler: handler, project: pcProject, etagBy: map[uint64]string{}}
-	results := posixconform.Run(adapter, posixconform.Filter(posixconform.Table, posixconform.SurfaceREST))
-	passed, failed := posixconform.Summary(results)
+	results := test.Run(adapter, test.Filter(test.Table, test.SurfaceREST))
+	passed, failed := test.Summary(results)
 	for _, r := range results {
 		if r.Pass {
 			t.Logf("PASS %s", r.Name)

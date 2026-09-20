@@ -1,7 +1,7 @@
 package cli
 
 // POSIX conformance adapter: drives the real cobra CLI (App) in-process so
-// the shared table in internal/posixconform executes against CLI commands.
+// the shared table in internal/test executes against CLI commands.
 //
 // Mapping (honest, gaps fail loudly):
 //   CreateFile      -> `touch` (never truncates, so non-exclusive create
@@ -63,14 +63,14 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/posixconform"
 	storage "github.com/FarelRA/storhub/internal/storage"
+	"github.com/FarelRA/storhub/internal/test"
 	"github.com/FarelRA/storhub/storhub"
 )
 
 var (
-	_ posixconform.Surface = (*cliPOSIXSurface)(nil)
-	_ posixconform.Handle  = (*cliHandle)(nil)
+	_ test.Surface = (*cliPOSIXSurface)(nil)
+	_ test.Handle  = (*cliHandle)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -732,7 +732,7 @@ func (h *pcFakeHub) DrainProjectContext(ctx context.Context, project string) err
 // Surface adapter driving the CLI.
 // ---------------------------------------------------------------------------
 
-// cliPOSIXSurface implements posixconform.Surface by invoking real CLI
+// cliPOSIXSurface implements test.Surface by invoking real CLI
 // commands on a fresh App per operation.
 type cliPOSIXSurface struct {
 	project string
@@ -756,7 +756,7 @@ func (s *cliPOSIXSurface) runCLI(args []string) ([]byte, error) {
 // spelling the CLI accepts.
 func cliPath(p string) (string, error) {
 	if len(p) < 2 || p[0] != '/' {
-		return "", posixconform.ErrInvalid
+		return "", test.ErrInvalid
 	}
 	return strings.TrimPrefix(p, "/"), nil
 }
@@ -770,27 +770,27 @@ func pcTranslateErr(err error) error {
 	}
 	switch {
 	case errors.Is(err, shfs.ErrNotFound):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrNotFound, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrNotFound, err)
 	case errors.Is(err, shfs.ErrAlreadyExists):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrExists, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrExists, err)
 	case errors.Is(err, shfs.ErrIsDirectory):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrIsDir, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrIsDir, err)
 	case errors.Is(err, shfs.ErrNotDirectory):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrNotDir, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrNotDir, err)
 	case errors.Is(err, shfs.ErrNotEmpty):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrNotEmpty, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrNotEmpty, err)
 	case errors.Is(err, syscall.ELOOP):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrLoop, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrLoop, err)
 	case errors.Is(err, storage.ErrSessionLinked):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrExists, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrExists, err)
 	case errors.Is(err, storage.ErrStaleSession):
-		return fmt.Errorf("%w (cli: %v)", posixconform.ErrStale, err)
+		return fmt.Errorf("%w (cli: %v)", test.ErrStale, err)
 	}
 	for _, sentinel := range []error{
-		posixconform.ErrNotFound, posixconform.ErrExists, posixconform.ErrIsDir,
-		posixconform.ErrNotDir, posixconform.ErrNotEmpty, posixconform.ErrLoop,
-		posixconform.ErrUnsatisfiableRange, posixconform.ErrClosed,
-		posixconform.ErrAccess, posixconform.ErrInvalid, posixconform.ErrStale,
+		test.ErrNotFound, test.ErrExists, test.ErrIsDir,
+		test.ErrNotDir, test.ErrNotEmpty, test.ErrLoop,
+		test.ErrUnsatisfiableRange, test.ErrClosed,
+		test.ErrAccess, test.ErrInvalid, test.ErrStale,
 	} {
 		if errors.Is(err, sentinel) {
 			return err
@@ -834,12 +834,12 @@ func (s *cliPOSIXSurface) CreateFile(path string, perm uint32, exclusive bool) e
 	return nil
 }
 
-func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixconform.Handle, error) {
+func (s *cliPOSIXSurface) Open(path string, mode test.OpenMode) (test.Handle, error) {
 	switch mode {
-	case posixconform.OpenReadOnly, posixconform.OpenWriteOnly,
-		posixconform.OpenReadWrite, posixconform.OpenAppend, posixconform.OpenTruncate:
+	case test.OpenReadOnly, test.OpenWriteOnly,
+		test.OpenReadWrite, test.OpenAppend, test.OpenTruncate:
 	default:
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if _, err := cliPath(path); err != nil {
 		return nil, err
@@ -848,10 +848,10 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 	// handle addresses the target, and loops surface ErrLoop here.
 	resolved, entry, err := s.followLinks(path)
 	if err != nil {
-		if !errors.Is(err, posixconform.ErrNotFound) {
+		if !errors.Is(err, test.ErrNotFound) {
 			return nil, err
 		}
-		if mode == posixconform.OpenReadOnly {
+		if mode == test.OpenReadOnly {
 			return nil, err
 		}
 		// Every other mode creates a missing file, so materialize it
@@ -864,9 +864,9 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 		}
 	}
 	if entry.IsDir {
-		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
+		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", test.ErrIsDir, path)
 	}
-	if mode == posixconform.OpenTruncate {
+	if mode == test.OpenTruncate {
 		rel, _ := cliPath(resolved)
 		if _, err := s.runCLI([]string{"truncate", "--token", "x", s.project, rel, "0"}); err != nil {
 			return nil, pcTranslateErr(err)
@@ -876,7 +876,7 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 		}
 	}
 	h := &cliHandle{surface: s, path: resolved, mode: mode}
-	if mode == posixconform.OpenAppend {
+	if mode == test.OpenAppend {
 		st, err := s.statViaCLI(resolved)
 		if err != nil {
 			return nil, err
@@ -922,18 +922,18 @@ func (s *cliPOSIXSurface) followLinks(path string) (string, *storhub.EntryInfo, 
 		dir := current[:strings.LastIndex(current, "/")]
 		current = dir + "/" + target
 	}
-	return current, nil, fmt.Errorf("%w: too many levels resolving %s", posixconform.ErrLoop, path)
+	return current, nil, fmt.Errorf("%w: too many levels resolving %s", test.ErrLoop, path)
 }
 
-func (s *cliPOSIXSurface) Stat(path string) (posixconform.Stat, error) {
+func (s *cliPOSIXSurface) Stat(path string) (test.Stat, error) {
 	_, entry, err := s.followLinks(path)
 	if err != nil {
-		return posixconform.Stat{}, err
+		return test.Stat{}, err
 	}
 	if entry.IsDir {
-		return posixconform.Stat{}, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
+		return test.Stat{}, fmt.Errorf("%w: cli stat shows %s is a directory", test.ErrIsDir, path)
 	}
-	return posixconform.Stat{
+	return test.Stat{
 		Size: entry.Size, Mode: entry.Mode, UID: entry.UID, GID: entry.GID, MTime: entry.ModifiedAt,
 	}, nil
 }
@@ -944,7 +944,7 @@ func (s *cliPOSIXSurface) Truncate(path string, size int64) error {
 		return err
 	}
 	if size < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	if _, err := s.runCLI([]string{"truncate", "--token", "x", s.project, rel, strconv.FormatInt(size, 10)}); err != nil {
 		return pcTranslateErr(err)
@@ -1044,7 +1044,7 @@ func (s *cliPOSIXSurface) Symlink(target, linkPath string) error {
 		return err
 	}
 	if strings.TrimSpace(target) == "" {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	if _, err := s.runCLI([]string{"symlink", "--token", "x", s.project, target, rel}); err != nil {
 		return pcTranslateErr(err)
@@ -1063,7 +1063,7 @@ func (s *cliPOSIXSurface) Readlink(linkPath string) (string, error) {
 		return "", err
 	}
 	if !entry.IsSymlink {
-		return "", fmt.Errorf("%w: cli stat shows %s is not a symlink", posixconform.ErrInvalid, linkPath)
+		return "", fmt.Errorf("%w: cli stat shows %s is not a symlink", test.ErrInvalid, linkPath)
 	}
 	rel, _ := cliPath(linkPath)
 	out, err := s.runCLI([]string{"readlink", "--token", "x", s.project, rel})
@@ -1083,17 +1083,17 @@ func (s *cliPOSIXSurface) ReadRange(path string, offset, length int64) ([]byte, 
 		return nil, err
 	}
 	if offset < 0 || length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	resolved, entry, err := s.followLinks(path)
 	if err != nil {
 		return nil, err
 	}
 	if entry.IsDir {
-		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", posixconform.ErrIsDir, path)
+		return nil, fmt.Errorf("%w: cli stat shows %s is a directory", test.ErrIsDir, path)
 	}
 	if offset >= entry.Size {
-		return nil, fmt.Errorf("%w: offset %d at or past size %d", posixconform.ErrUnsatisfiableRange, offset, entry.Size)
+		return nil, fmt.Errorf("%w: offset %d at or past size %d", test.ErrUnsatisfiableRange, offset, entry.Size)
 	}
 	rel, _ := cliPath(resolved)
 	data, err := s.runCLI([]string{"cat", "--token", "x", s.project, rel})
@@ -1101,7 +1101,7 @@ func (s *cliPOSIXSurface) ReadRange(path string, offset, length int64) ([]byte, 
 		return nil, pcTranslateErr(err)
 	}
 	if offset > int64(len(data)) {
-		return nil, fmt.Errorf("%w: file shrank under read", posixconform.ErrUnsatisfiableRange)
+		return nil, fmt.Errorf("%w: file shrank under read", test.ErrUnsatisfiableRange)
 	}
 	end := offset + length
 	if end > int64(len(data)) {
@@ -1150,7 +1150,7 @@ func (s *cliPOSIXSurface) CompareAndWrite(path string, offset int64, data []byte
 		return err
 	}
 	if offset < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	rev := strconv.FormatUint(token, 10)
 	if _, err := s.runCLI([]string{"write", "--token", "x", "--expected-revision", rev, s.project, rel, strconv.FormatInt(offset, 10), string(data)}); err != nil {
@@ -1159,7 +1159,7 @@ func (s *cliPOSIXSurface) CompareAndWrite(path string, offset int64, data []byte
 			if statErr != nil {
 				return statErr
 			}
-			return posixconform.ErrPrecondition{Expected: token, Actual: current}
+			return test.ErrPrecondition{Expected: token, Actual: current}
 		}
 		return pcTranslateErr(err)
 	}
@@ -1174,7 +1174,7 @@ type cliHandle struct {
 	mu      sync.Mutex
 	surface *cliPOSIXSurface
 	path    string
-	mode    posixconform.OpenMode
+	mode    test.OpenMode
 	cursor  int64
 	closed  bool
 	// ino pins the open-time inode: after unlink+recreate the path
@@ -1197,8 +1197,8 @@ type cliHandle struct {
 // "r+" are used: the adapter enforces fd legality locally, create and
 // truncate happen through one-shot verbs first, and append cursors stay
 // adapter-side.
-func cliSessionMode(m posixconform.OpenMode) string {
-	if m == posixconform.OpenReadOnly {
+func cliSessionMode(m test.OpenMode) string {
+	if m == test.OpenReadOnly {
 		return "r"
 	}
 	return "r+"
@@ -1272,12 +1272,12 @@ func (h *cliHandle) sessionSize() (int64, error) {
 }
 
 func (h *cliHandle) readable() bool {
-	return h.mode == posixconform.OpenReadOnly || h.mode == posixconform.OpenReadWrite
+	return h.mode == test.OpenReadOnly || h.mode == test.OpenReadWrite
 }
 
 func (h *cliHandle) writable() bool {
-	return h.mode == posixconform.OpenWriteOnly || h.mode == posixconform.OpenReadWrite ||
-		h.mode == posixconform.OpenAppend || h.mode == posixconform.OpenTruncate
+	return h.mode == test.OpenWriteOnly || h.mode == test.OpenReadWrite ||
+		h.mode == test.OpenAppend || h.mode == test.OpenTruncate
 }
 
 // statLinkedLocked stats h.path and reports whether it still names the
@@ -1288,7 +1288,7 @@ func (h *cliHandle) statLinkedLocked() (entry *storhub.EntryInfo, linked bool, e
 	ino := h.ino
 	entry, err = h.surface.statViaCLI(h.path)
 	if err != nil {
-		if errors.Is(err, posixconform.ErrNotFound) {
+		if errors.Is(err, test.ErrNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -1313,13 +1313,13 @@ func (h *cliHandle) PRead(offset int64, length int) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, posixconform.ErrClosed
+		return nil, test.ErrClosed
 	}
 	if !h.readable() {
-		return nil, posixconform.ErrAccess
+		return nil, test.ErrAccess
 	}
 	if offset < 0 || length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if _, linked, err := h.statLinkedLocked(); err != nil {
 		return nil, err
@@ -1337,7 +1337,7 @@ func (h *cliHandle) PRead(offset int64, length int) ([]byte, error) {
 		// The path is gone (unlinked or renamed away) but the open
 		// description survives: serve the session pin plus staged
 		// writes. Only NotFound falls back; anything else propagates.
-		if !errors.Is(pcTranslateErr(err), posixconform.ErrNotFound) {
+		if !errors.Is(pcTranslateErr(err), test.ErrNotFound) {
 			return nil, err
 		}
 		sess, serr := h.sessionRead(offset, length)
@@ -1360,13 +1360,13 @@ func (h *cliHandle) PWrite(offset int64, data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return 0, posixconform.ErrClosed
+		return 0, test.ErrClosed
 	}
 	if !h.writable() {
-		return 0, posixconform.ErrAccess
+		return 0, test.ErrAccess
 	}
 	if offset < 0 {
-		return 0, posixconform.ErrInvalid
+		return 0, test.ErrInvalid
 	}
 	// Staged through the session, then committed: the bytes publish
 	// immediately (cross-handle visibility, stat size) and the pin
@@ -1385,13 +1385,13 @@ func (h *cliHandle) Read(length int) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, posixconform.ErrClosed
+		return nil, test.ErrClosed
 	}
 	if !h.readable() {
-		return nil, posixconform.ErrAccess
+		return nil, test.ErrAccess
 	}
 	if length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if _, linked, err := h.statLinkedLocked(); err != nil {
 		return nil, err
@@ -1405,7 +1405,7 @@ func (h *cliHandle) Read(length int) ([]byte, error) {
 	}
 	data, err := h.catLocked()
 	if err != nil {
-		if !errors.Is(pcTranslateErr(err), posixconform.ErrNotFound) {
+		if !errors.Is(pcTranslateErr(err), test.ErrNotFound) {
 			return nil, err
 		}
 		sess, serr := h.sessionRead(h.cursor, length)
@@ -1431,13 +1431,13 @@ func (h *cliHandle) Write(data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return 0, posixconform.ErrClosed
+		return 0, test.ErrClosed
 	}
 	if !h.writable() {
-		return 0, posixconform.ErrAccess
+		return 0, test.ErrAccess
 	}
 	off := h.cursor
-	if h.mode == posixconform.OpenAppend {
+	if h.mode == test.OpenAppend {
 		// O_APPEND forces the cursor to the end on every cursor write.
 		// Detached mid-append (unlinked, renamed, or recycled), the
 		// session size is the end.
@@ -1474,13 +1474,13 @@ func (h *cliHandle) Truncate(size int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	if !h.writable() {
-		return posixconform.ErrAccess
+		return test.ErrAccess
 	}
 	if size < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	// Staged through the session, then committed like writes: the pin
 	// refreshes and a later unlink still serves the truncated view.
@@ -1494,7 +1494,7 @@ func (h *cliHandle) Sync() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	// Session sync commits, repins, and the close flag drains the
 	// project; plain session sync is the fsync equivalent here because
@@ -1512,7 +1512,7 @@ func (h *cliHandle) Close() error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	h.mu.Unlock()
 	// Session close commits staged state (discarding when the path went
@@ -1540,7 +1540,7 @@ type cliScratchHandle struct {
 	closed  bool
 }
 
-func (s *cliPOSIXSurface) OpenScratch(ttl time.Duration) (posixconform.ScratchSession, error) {
+func (s *cliPOSIXSurface) OpenScratch(ttl time.Duration) (test.ScratchSession, error) {
 	ttlRaw := ""
 	if ttl > 0 {
 		ttlRaw = ttl.String()
@@ -1556,7 +1556,7 @@ func (h *cliScratchHandle) checkClosed() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	return nil
 }
@@ -1566,7 +1566,7 @@ func (h *cliScratchHandle) PRead(offset int64, length int) ([]byte, error) {
 		return nil, err
 	}
 	if offset < 0 || length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -1584,7 +1584,7 @@ func (h *cliScratchHandle) PWrite(offset int64, data []byte) (int, error) {
 		return 0, err
 	}
 	if offset < 0 {
-		return 0, posixconform.ErrInvalid
+		return 0, test.ErrInvalid
 	}
 	if len(data) == 0 {
 		return 0, nil
@@ -1604,7 +1604,7 @@ func (h *cliScratchHandle) Read(length int) ([]byte, error) {
 	cursor := h.cursor
 	h.mu.Unlock()
 	if length < 0 {
-		return nil, posixconform.ErrInvalid
+		return nil, test.ErrInvalid
 	}
 	if length == 0 {
 		return []byte{}, nil
@@ -1644,7 +1644,7 @@ func (h *cliScratchHandle) Truncate(size int64) error {
 		return err
 	}
 	if size < 0 {
-		return posixconform.ErrInvalid
+		return test.ErrInvalid
 	}
 	if _, err := h.surface.runCLI([]string{"session", "truncate", "--token", "x", "--handle", h.session, strconv.FormatInt(size, 10)}); err != nil {
 		return pcTranslateErr(err)
@@ -1694,7 +1694,7 @@ func (h *cliScratchHandle) Close() error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return posixconform.ErrClosed
+		return test.ErrClosed
 	}
 	h.mu.Unlock()
 	if _, err := h.surface.runCLI([]string{"session", "close", "--token", "x", "--handle", h.session, "--sync"}); err != nil {
@@ -1722,7 +1722,7 @@ func TestPosixConformCLI(t *testing.T) {
 	}
 
 	adapter := &cliPOSIXSurface{project: "pc"}
-	results := posixconform.Run(adapter, posixconform.Filter(posixconform.Table, posixconform.SurfaceCLI))
+	results := test.Run(adapter, test.Filter(test.Table, test.SurfaceCLI))
 
 	t.Logf("POSIX conformance via CLI: %d scenarios", len(results))
 	for _, r := range results {
@@ -1732,7 +1732,7 @@ func TestPosixConformCLI(t *testing.T) {
 			t.Logf("FAIL %s: %s", r.Name, r.Error)
 		}
 	}
-	passed, failed := posixconform.Summary(results)
+	passed, failed := test.Summary(results)
 	t.Logf("posixconform CLI: %d passed, %d failed, %d total", passed, failed, len(results))
 	if failed > 0 {
 		t.Fatalf("%d scenario(s) failed against the CLI surface", failed)
