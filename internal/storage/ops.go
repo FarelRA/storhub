@@ -64,15 +64,25 @@ type Op struct {
 	// member lists existed take that path.
 	Members []string `json:"members"` // dir rename only
 
-	// SnapSeq is the opStack snapshot mark (lastSnapshotSeq) at append
-	// time: the highest op seq covered by a commit snapshot when this op
-	// was appended, 0 when no snapshot was outstanding. The journal fold
-	// replays each delta with its own mark, so merge decisions
-	// (rename-chain collapse, rename-then-delete) reproduce the live
-	// stack exactly even when a commit snapshot was in flight mid-chain.
-	// Absent in journals written before snapshot marks existed, which
-	// decode as 0 (merge everything, the old behavior).
+	// SnapSeq is retained for READ compatibility only: journals written
+	// before generations existed stamped the snapshot mark outstanding at
+	// append time here (`snap` key, 0 when none). New deltas never set it
+	// (the generation boundary subsumes the mark), and the fold ignores
+	// it: legacy marked lines merge freely within the legacy generation.
+	// Shape-divergence vs the old fold is possible only for a chain split
+	// by an in-flight snapshot at crash time, and both shapes replay to
+	// the same tree (pinned by TestJournalGenCompatSnapMarkedLinesConverge),
+	// so no reader needs the mark back. The field and its JSON key stay
+	// so old lines keep parsing.
 	SnapSeq uint64 `json:"snap,omitempty"`
+
+	// Gen is the op's generation: the open generation at append time.
+	// Merges (rename-chain collapse, rename-then-delete) apply only
+	// within one generation, so a commit freeze between two appends keeps
+	// them split in the live stack and in every refold. Absent in
+	// journals written before generations existed, which decode as 0
+	// (the legacy generation: merge freely, the old behavior).
+	Gen uint64 `json:"gen,omitempty"`
 }
 
 // ConflictResolution records one policy decision made while replaying ops,
@@ -110,11 +120,14 @@ type opStack struct {
 	// incrementally by every mutation below (append/removeAt/clear/clearUpTo/
 	// reindex) so the byte cap needs no O(stack) recount.
 	bytes int64
-	// lastSnapshotSeq is the seq stamped at the most recent commit
-	// snapshot. Ops at or below it may be in flight inside that commit
-	// (its rebase replays the snapshot, not the live stack), so
-	// coalescing must never rewrite them.
-	lastSnapshotSeq uint64
+	// gen is the open generation. A commit snapshot freezes the stack:
+	// every op appended after the freeze lands in a strictly newer
+	// generation and never merges with a frozen op, so the fold can
+	// never span a commit boundary by construction. Zero means
+	// uninitialized (a fresh stack opens generation 1 on first append);
+	// 0 is also what pre-generation journal lines decode to, which is
+	// exactly the legacy behavior (those lines merge freely).
+	gen uint64
 }
 
 // opStackMaxBytes bounds one project's pending op stack by weight (64MiB),
@@ -293,6 +306,22 @@ func (s *opStack) append(op Op) {
 		op.Times = 1
 	}
 	s.initIndex()
+	// Generation stamping: a fresh stack opens generation 1 (0 is the
+	// legacy-journal decoding, never a live generation). An op that
+	// already carries a newer generation (journal refold, crash-replay
+	// hydrate) fast-forwards the open generation first, so its stamp
+	// survives and the merge rule below reproduces the fold exactly;
+	// ordinary mutations carry Gen 0 and take the open generation.
+	// Either way the stamped op satisfies op.Gen == s.gen afterwards,
+	// and every stacked op satisfies Gen <= s.gen: the merge rule
+	// (candidate.Gen == s.gen) is exactly "same open generation".
+	if s.gen == 0 {
+		s.gen = 1
+	}
+	if op.Gen > s.gen {
+		s.gen = op.Gen
+	}
+	op.Gen = s.gen
 	switch {
 	case isDeleteClass(op.Type):
 		// rename A->B followed by delete B nets to delete A; the transform
@@ -334,14 +363,17 @@ func (s *opStack) append(op Op) {
 		s.indexOp(op, len(s.ops)-1)
 	case op.Type == OpRename:
 		from, to := op.Paths[0], op.Paths[1]
-		if idx, ok := s.byTarget[from]; ok && idx == len(s.ops)-1 && s.ops[idx].Type == OpRename && s.ops[idx].Seq > s.lastSnapshotSeq {
+		if idx, ok := s.byTarget[from]; ok && idx == len(s.ops)-1 && s.ops[idx].Type == OpRename && s.ops[idx].Gen == s.gen {
 			// Adjacent chain: A->B then B->C collapses to A->C carrying
 			// the latest entry state. Non-adjacent chains stay split: an
 			// intervening op on B or C would change the net effect. A
-			// chain whose predecessor is at or below the last commit
-			// snapshot also stays split: the in-flight commit
-			// publishes A->B, so rewriting it to A->C would leave B as a
-			// phantom once the next rebase replays A->C.
+			// chain whose predecessor is in a frozen generation also
+			// stays split: the in-flight commit publishes A->B, so
+			// rewriting it to A->C would leave B as a phantom once the
+			// next rebase replays A->C. The structure excludes the
+			// interleaving the old snapshot mark policed: appends after
+			// a freeze land in a newer generation, so a cross-boundary
+			// pair can never satisfy the equality above.
 			s.bytes -= int64(approxOpBytes(s.ops[idx]))
 			existing := s.ops[idx]
 			delete(s.byTarget, existing.Paths[1])
@@ -409,28 +441,32 @@ func (s *opStack) appendWithDelta(op Op) Op {
 	}
 	delta := op
 	delta.Times = 1
-	// The delta carries the snapshot mark outstanding at append time, so
-	// the journal fold replays this op's merge decisions exactly as the
-	// live stack made them (see Op.SnapSeq).
-	delta.SnapSeq = s.lastSnapshotSeq
+	// The delta carries the open generation at append time, so the
+	// journal fold replays this op's merge decisions exactly as the
+	// live stack made them: same-generation pairs merge, frozen pairs
+	// stay split. The old snapshot mark (SnapSeq) is no longer stamped:
+	// journal lines shrink by the `snap` key and recovery needs no marks.
 	s.append(op)
 	delta.Seq = s.seq
+	delta.Gen = s.gen
 	return delta
 }
 
 // deleteTransform applies the rename-then-delete collapse for a delete-class
 // op whose target path is a pending adjacent rename target. Returns true
-// when the op was rewritten (caller re-runs its matching). A rename already
-// inside the in-flight commit snapshot must not be consumed (same
-// boundary as the chain merge): the commit publishes A->B, so the delete has
-// to survive as "delete B" for the next replay, not collapse to "delete A".
+// when the op was rewritten (caller re-runs its matching). A rename in a
+// frozen generation must not be consumed (same boundary as the chain
+// merge): the commit publishes A->B, so the delete has to survive as
+// "delete B" for the next replay, not collapse to "delete A". The
+// structure excludes the old mark-check interleaving: only the open
+// generation satisfies Gen == s.gen, so a frozen rename can never match.
 func (s *opStack) deleteTransform(op *Op) bool {
 	path := opPath(*op)
 	idx, ok := s.byTarget[path]
 	if !ok || idx != len(s.ops)-1 || s.ops[idx].Type != OpRename {
 		return false
 	}
-	if s.ops[idx].Seq <= s.lastSnapshotSeq {
+	if s.ops[idx].Gen != s.gen {
 		return false
 	}
 	op.Times += s.ops[idx].Times
@@ -443,6 +479,10 @@ func (s *opStack) deleteTransform(op *Op) bool {
 // Appends always stamp op.Seq with the newest sequence number, so an op
 // coalesced by a mutation that landed mid-commit carries a seq above the
 // snapshot and survives - exactly the ops the next commit must include.
+// (Those survivors also carry a newer generation than the frozen batch,
+// so the generation boundary agrees with the seq cutoff by construction;
+// the seq comparison stays because drain targets and resolutions number
+// by seq, not by generation.)
 func (s *opStack) clearUpTo(seq uint64) {
 	kept := make([]Op, 0, len(s.ops))
 	var keptBytes int64
@@ -463,6 +503,12 @@ func (s *opStack) clear() {
 	s.byTarget = nil
 	s.pruneIdx = -1
 	s.bytes = 0
+	// Reset the open generation: the stack is empty, so no merge partner
+	// survives, and a later hydrate (crash-replay appends folded journal
+	// ops) must fast-forward from the JOURNAL's generations, not restamp
+	// them upward into a stale open generation — restamping would merge
+	// chains the fold kept split and break fold==live after recovery.
+	s.gen = 0
 }
 
 // reindex rebuilds the lookup maps from scratch after bulk mutation. The
@@ -500,30 +546,30 @@ func (s *opStack) snapshot() []Op {
 	return out
 }
 
-// noteSnapshot records that everything up to seq may now be in flight in a
-// commit; coalescing must not rewrite those ops. Returns the previous mark
-// so a failed publish (which published nothing) can restore it via
-// rollbackSnapshot and keep later merges valid.
-func (s *opStack) noteSnapshot(seq uint64) uint64 {
-	prev := s.lastSnapshotSeq
-	if seq > s.lastSnapshotSeq {
-		s.lastSnapshotSeq = seq
+// freeze seals the open generation for one commit: it returns the pending
+// ops (the exact publish batch, a copy the commit owns) plus the frozen
+// generation, and opens a strictly newer generation for later appends.
+// The frozen batch is immutable from here on; the commit publishes
+// exactly it, and clearUpTo drops exactly it on success.
+//
+// A failed publish needs no rollback call: there is no mark to restore.
+// The sealed ops keep their generation, post-freeze appends landed in a
+// newer one, and the merge rule never spans generations — so the next
+// freeze simply seals every still-pending generation at once, and both
+// the live stack and any refold agree on the split. This is the property
+// the old noteSnapshot/rollbackSnapshot pair maintained by hand:
+// rollbackSnapshot existed because a stale mark poisoned later merges
+// (live split vs fold merged); with the boundary in the structure, a
+// failed snapshot leaves nothing behind that a mark-restore could fix.
+func (s *opStack) freeze() ([]Op, uint64) {
+	batch := s.snapshot()
+	frozen := s.gen
+	if s.gen == 0 {
+		s.gen = 1
+		frozen = 1
 	}
-	return prev
-}
-
-// rollbackSnapshot undoes noteSnapshot(seq) after a publish that failed
-// without publishing anything. The coalescing guards (rename-chain merge,
-// deleteTransform) treat snapshotted ops as in-flight-published; a failed
-// snapshot left in place poisons later merges (the live stack stays split
-// while the journal fold merges, breaking fold/stack equivalence), so the
-// mark must fall back. Only rolls back when no newer snapshot superseded
-// it; commitMu serializes snapshotters per project, so equality means this
-// snapshot is still the latest.
-func (s *opStack) rollbackSnapshot(seq, prev uint64) {
-	if s.lastSnapshotSeq == seq {
-		s.lastSnapshotSeq = prev
-	}
+	s.gen++
+	return batch, frozen
 }
 
 func (s *opStack) maxSeq() uint64 { return s.seq }
@@ -537,18 +583,21 @@ func (s *opStack) maxSeq() uint64 { return s.seq }
 // journalAppend/journalRead); the fold accumulates Times exactly as live
 // coalescing does.
 //
-// Each delta also carries the snapshot mark outstanding at its append time
-// (Op.SnapSeq), and the fold replays each line under its own mark: merge
-// decisions (rename-chain collapse, rename-then-delete) then reproduce the
-// live stack exactly, including chains split by an in-flight commit
-// snapshot. Marks share numbering with op seqs, so the fold also preserves
-// the journaled seqs (the stack counter fast-forwards to each line); only
-// the merge shape, order, and numbering must match, which is what the
-// equivalence tests pin.
+// Each delta also carries its append-time generation (Op.Gen), and append
+// tracks it line by line, merging only within one generation: the fold
+// reproduces the live stack exactly, including chains split by a commit
+// freeze mid-chain. The old per-delta snapshot-mark replay is deleted:
+// with the boundary in the structure, no mark is needed to steer merge
+// decisions, and legacy marked lines (SnapSeq>0, Gen 0) merge freely while
+// still replaying to the same tree as the old split fold
+// (TestJournalGenCompatSnapMarkedLinesConverge). Marks share numbering
+// with op seqs only historically; the fold still preserves the journaled
+// seqs (the stack counter fast-forwards to each line) because drain
+// targets and resolutions number by them — only the merge shape, order,
+// and numbering must match, which is what the equivalence tests pin.
 func foldOps(ops []Op) []Op {
 	stack := &opStack{}
 	for _, op := range ops {
-		stack.lastSnapshotSeq = op.SnapSeq
 		if op.Seq > stack.seq {
 			stack.seq = op.Seq - 1
 		}

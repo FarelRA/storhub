@@ -24,6 +24,22 @@ import (
 // rename-then-delete, which post-coalescing tails cannot reproduce. Times
 // accumulates during the fold from per-delta Times=1 lines.
 //
+// Each delta carries its append-time generation (Op.Gen, `gen` key); the
+// fold merges only within one generation, so a chain split by a commit
+// freeze mid-chain refolds split exactly like the live stack. The old
+// snapshot mark (`snap` key) is no longer written; lines carrying it
+// (pre-generation journals) still parse and merge within the legacy
+// generation.
+//
+// Deltas are kept deliberately (the A9 commit-time-formatting question):
+// the rename-then-delete transform consumes a live rename that a
+// tail-journaled line would already have rewritten away — journaling
+// [rename A->B tail, del A tail] refolds to TWO ops while the live stack
+// holds ONE, a divergence no generation tag can repair because the
+// history the transform needed is gone. Tails cannot reproduce
+// history-sensitive collapses; deltas replay the identical append
+// sequence, so convergence is structural.
+//
 // The journal file is bounded by journalMaxBytes (64MiB): crossing the cap
 // rewrites the journal to the folded survivors even though no commit
 // succeeded (compaction, not acknowledgment) — acknowledged ops are never
@@ -68,7 +84,8 @@ func (h *StorHub) journalPath(project string) string {
 // journalAppend appends one op line. The op MUST be the pre-coalescing delta
 // (appendWithDelta): journaling post-coalescing tails diverges the folded
 // journal from the live stack on cross-transaction rename chains and
-// rename-then-delete. Times is forced to 1 defensively — accumulation
+// rename-then-delete (see the header note: the transform's history is
+// gone from tails). Times is forced to 1 defensively — accumulation
 // happens in the fold, so a stored Times>1 (old post-coalescing journals,
 // re-appended survivors) would inflate the folded total.
 // Best-effort: a journal write failure is logged and never fails the

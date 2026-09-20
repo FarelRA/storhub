@@ -8,40 +8,15 @@ import (
 	"testing"
 )
 
-// A failed commit snapshot must not poison later coalescing. The rename
-// chain A->B, B->C collapses to A->C only when the predecessor postdates
-// the last snapshot mark; a snapshot whose publish failed published
-// nothing, so its mark has to roll back. Without the rollback the live
-// stack stays split while the journal fold merges, breaking fold/stack
-// equivalence (TestJournalFoldEquivalenceAcrossRenameChain flake).
-func TestFailedSnapshotRollbackKeepsRenameMerge(t *testing.T) {
-	t.Parallel()
-	var stack opStack
-	stack.appendWithDelta(Op{Type: OpRename, Paths: []string{"a.txt", "b.txt"}})
-	prev := stack.noteSnapshot(stack.maxSeq())
-	stack.rollbackSnapshot(stack.maxSeq(), prev)
-	stack.appendWithDelta(Op{Type: OpRename, Paths: []string{"b.txt", "c.txt"}})
-	if len(stack.ops) != 1 {
-		t.Fatalf("chain must merge after failed-snapshot rollback, got %d ops", len(stack.ops))
-	}
-	got := stack.ops[0]
-	if len(got.Paths) != 2 || got.Paths[0] != "a.txt" || got.Paths[1] != "c.txt" {
-		t.Fatalf("merged chain must be a.txt->c.txt, got %+v", got.Paths)
-	}
-}
-
-// Without the rollback the mark stays and the chain stays split: pins
-// the guard the rollback exists to lift.
-func TestSnapshotMarkBlocksMergeWithoutRollback(t *testing.T) {
-	t.Parallel()
-	var stack opStack
-	stack.appendWithDelta(Op{Type: OpRename, Paths: []string{"a.txt", "b.txt"}})
-	stack.noteSnapshot(stack.maxSeq())
-	stack.appendWithDelta(Op{Type: OpRename, Paths: []string{"b.txt", "c.txt"}})
-	if len(stack.ops) != 2 {
-		t.Fatalf("unrolled snapshot must keep the chain split, got %d ops", len(stack.ops))
-	}
-}
+// NOTE: the snapshot-mark machinery this file once pinned (noteSnapshot /
+// rollbackSnapshot) is deleted: the generational boundary subsumes it, so
+// a failed snapshot leaves nothing to restore. Its stronger replacements
+// live in generation_test.go (TestGenerationFailedCommitNeedsNoRollback,
+// TestGenerationFreezeSplitsRenameChain,
+// TestGenerationDeleteTransformRespectsBoundary). What stays here is the
+// deterministic end-to-end pin of the original flake, which must hold
+// under EITHER mechanism: a failed commit between T1 and T2 must keep
+// fold==live.
 
 // Deterministic end-to-end pin of the flake: a failed commit landing
 // between T1 and T2 must not split the chain. Drives commitProjectMetadata

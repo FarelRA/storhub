@@ -453,21 +453,25 @@ type commitSnapshot struct {
 	version     uint64
 	ops         []Op
 	opSeq       uint64
-	// prevSnapshotSeq is the opStack mark before this snapshot took it:
-	// a failed publish restores it so coalescing stays valid.
-	prevSnapshotSeq uint64
-	baseTree        *RepoMetadata
-	objectCount     uint64
-	headSplit       bool
-	now             int64
+	// snapGen is the frozen generation this snapshot publishes: the commit
+	// owns every pending op at or below it, and clearUpTo drops exactly
+	// those on success. No prev-mark is kept: a failed publish restores
+	// nothing, because the generation boundary needs no restoring (see
+	// opStack.freeze).
+	snapGen     uint64
+	baseTree    *RepoMetadata
+	objectCount uint64
+	headSplit   bool
+	now         int64
 }
 
 // snapshotCommitState snapshots the dirty state for one commit: a private
-// working copy plus the op batch the message describes. Only ops at or below
-// the snapshot seq may be dropped on success (mutations landing mid-commit
-// carry higher seqs and stay); recording the snapshot seq lets coalescing
-// refuse to rewrite ops in flight inside this commit. Returns nil when clean
-// (nothing to do). Exits with pm.mu released on every path.
+// working copy plus the op batch the message describes. The freeze seals
+// the open generation into the batch and opens a newer one, so mutations
+// landing mid-commit neither join the batch nor merge into it; recording
+// the snapshot seq lets the success path drop exactly the published ops.
+// Returns nil when clean (nothing to do). Exits with pm.mu released on
+// every path.
 func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *commitSnapshot {
 	pm.mu.Lock()
 	if !pm.dirty {
@@ -492,14 +496,17 @@ func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *comm
 		working:     working,
 		previousSHA: pm.sha,
 		version:     pm.version,
-		ops:         pm.opStack.snapshot(),
 		opSeq:       pm.opStack.maxSeq(),
 		baseTree:    pm.baseTree,
 		objectCount: pm.objectCount,
 		headSplit:   working.IsSplit(),
 		now:         h.config.Now().UnixNano(),
 	}
-	snap.prevSnapshotSeq = pm.opStack.noteSnapshot(snap.opSeq)
+	// The freeze is the generational boundary (JBD2 shape): the batch
+	// below is exactly the frozen generation, and every append after
+	// this point lands in a newer one. Snapshot and freeze are one
+	// critical section under pm.mu, so no append can slip between them.
+	snap.ops, snap.snapGen = pm.opStack.freeze()
 	pm.mu.Unlock()
 	return snap
 }
@@ -775,13 +782,16 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	commitSHA, contentSHA, newObjectCount, didRebase, err := h.publishWithRebase(ctx, project, pm, snap, started)
 	if err != nil {
 		h.pressure.noteCommitFailure(project)
-		// The snapshot published nothing: roll its mark back so later
-		// appends still coalesce against these ops. A stale mark would
-		// leave the live stack split while the journal fold merges,
-		// breaking fold/stack equivalence (rename-chain flake).
-		pm.mu.Lock()
-		pm.opStack.rollbackSnapshot(snap.opSeq, snap.prevSnapshotSeq)
-		pm.mu.Unlock()
+		// The snapshot published nothing, and there is no mark to roll
+		// back: the frozen batch keeps its generation, post-freeze
+		// appends live in a newer one, and the merge rule never spans
+		// generations — so later appends still coalesce exactly as the
+		// journal fold replays them, with no restore step that could be
+		// forgotten or raced. The next snapshot seals every pending
+		// generation at once. (This deletes the old rollbackSnapshot:
+		// a stale snapshot mark used to poison later merges, leaving
+		// the live stack split while the fold merged; the structure now
+		// excludes that interleaving, so the failure path is empty.)
 		return err
 	}
 

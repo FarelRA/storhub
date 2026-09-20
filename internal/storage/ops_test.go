@@ -132,11 +132,13 @@ func TestOpStackSnapshotNotAliasedByRenameCoalesce(t *testing.T) {
 	}
 }
 
-// TestOpStackRenameChainAcrossSnapshotStaysSplit pins the snapshot-boundary rule: a rename whose
-// predecessor is inside the in-flight commit snapshot must NOT collapse into
-// it. The commit publishes A->B; a merged A->C in the surviving stack would
-// replay as "remove A (absent), write C" and leave B as a phantom duplicate.
-func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
+// TestOpStackRenameChainAcrossGenerationBoundaryStaysSplit pins the
+// generation-boundary rule: a rename whose predecessor sits in a frozen
+// generation must NOT collapse into it. The commit publishes A->B; a merged
+// A->C in the surviving stack would replay as "remove A (absent), write C"
+// and leave B as a phantom duplicate. (Replaces the snapshot-mark version
+// of this test: the freeze is now structural, not a mark the commit sets.)
+func TestOpStackRenameChainAcrossGenerationBoundaryStaysSplit(t *testing.T) {
 	t.Parallel()
 	stack := &opStack{}
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
@@ -144,7 +146,7 @@ func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
 		Type: OpRename, Paths: []string{"a.txt", "b.txt"}, Cause: "mv",
 		Timestamp: 100, File: &file, Chunks: map[int64]ChunkInfo{},
 	})
-	stack.noteSnapshot(stack.maxSeq()) // commit snapshots [A->B] and publishes it
+	stack.freeze() // commit freezes [A->B] into its publish batch
 
 	stack.append(Op{
 		Type: OpRename, Paths: []string{"b.txt", "c.txt"}, Cause: "mv",
@@ -171,11 +173,12 @@ func TestOpStackRenameChainAcrossSnapshotStaysSplit(t *testing.T) {
 	}
 }
 
-// TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit pins the snapshot boundary
-// for the rename-then-delete collapse: with A->B in flight, deleting B must
-// survive as "delete B" (the next replay removes the committed B), not
-// collapse to "delete A" (a no-op that strands B).
-func TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit(t *testing.T) {
+// TestOpStackRenameThenDeleteAcrossGenerationBoundaryStaysSplit pins the
+// generation boundary for the rename-then-delete collapse: with A->B
+// frozen, deleting B must survive as "delete B" (the next replay removes
+// the committed B), not collapse to "delete A" (a no-op that strands B).
+// (Replaces the snapshot-mark version: same invariant, new mechanism.)
+func TestOpStackRenameThenDeleteAcrossGenerationBoundaryStaysSplit(t *testing.T) {
 	t.Parallel()
 	stack := &opStack{}
 	file := FileMeta{Size: 5, Mode: 0o644, Inode: 3, Chunks: []int64{}}
@@ -183,7 +186,7 @@ func TestOpStackRenameThenDeleteAcrossSnapshotStaysSplit(t *testing.T) {
 		Type: OpRename, Paths: []string{"a.txt", "b.txt"}, Cause: "mv",
 		Timestamp: 100, File: &file, Chunks: map[int64]ChunkInfo{},
 	})
-	stack.noteSnapshot(stack.maxSeq())
+	stack.freeze()
 
 	stack.append(Op{Type: OpDeleteFile, Paths: []string{"b.txt"}, Cause: "unlink", Timestamp: 200})
 	if len(stack.ops) != 2 {
