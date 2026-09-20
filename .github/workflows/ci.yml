@@ -38,9 +38,12 @@ jobs:
           # Bounds use context/SleepWithContext, waits use injected sleep,
           # and the only AfterFunc is cancellation-to-event (fuse_lock):
           # journal durability rides the commit trigger, not a clock.
-          # Any hit below is a regression: justify it in
-          # 22-event-purity-plan.md or route it through the approved shape.
-          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go || true)
+          # internal/posixconform is harness, not prod (scenario table,
+          # oracle, runner: sleeps there drive expiry proofs under
+          # test budgets, never ship). Any other hit is a
+          # regression: justify it in 22-event-purity-plan.md or route
+          # it through the approved shape.
+          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/posixconform/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             exit 1
