@@ -63,6 +63,16 @@ type Op struct {
 	// legacy (move the live subtree); only journals written before
 	// member lists existed take that path.
 	Members []string `json:"members"` // dir rename only
+
+	// SnapSeq is the opStack snapshot mark (lastSnapshotSeq) at append
+	// time: the highest op seq covered by a commit snapshot when this op
+	// was appended, 0 when no snapshot was outstanding. The journal fold
+	// replays each delta with its own mark, so merge decisions
+	// (rename-chain collapse, rename-then-delete) reproduce the live
+	// stack exactly even when a commit snapshot was in flight mid-chain.
+	// Absent in journals written before snapshot marks existed, which
+	// decode as 0 (merge everything, the old behavior).
+	SnapSeq uint64 `json:"snap,omitempty"`
 }
 
 // ConflictResolution records one policy decision made while replaying ops,
@@ -399,6 +409,10 @@ func (s *opStack) appendWithDelta(op Op) Op {
 	}
 	delta := op
 	delta.Times = 1
+	// The delta carries the snapshot mark outstanding at append time, so
+	// the journal fold replays this op's merge decisions exactly as the
+	// live stack made them (see Op.SnapSeq).
+	delta.SnapSeq = s.lastSnapshotSeq
 	s.append(op)
 	delta.Seq = s.seq
 	return delta
@@ -487,10 +501,28 @@ func (s *opStack) snapshot() []Op {
 }
 
 // noteSnapshot records that everything up to seq may now be in flight in a
-// commit; coalescing must not rewrite those ops.
-func (s *opStack) noteSnapshot(seq uint64) {
+// commit; coalescing must not rewrite those ops. Returns the previous mark
+// so a failed publish (which published nothing) can restore it via
+// rollbackSnapshot and keep later merges valid.
+func (s *opStack) noteSnapshot(seq uint64) uint64 {
+	prev := s.lastSnapshotSeq
 	if seq > s.lastSnapshotSeq {
 		s.lastSnapshotSeq = seq
+	}
+	return prev
+}
+
+// rollbackSnapshot undoes noteSnapshot(seq) after a publish that failed
+// without publishing anything. The coalescing guards (rename-chain merge,
+// deleteTransform) treat snapshotted ops as in-flight-published; a failed
+// snapshot left in place poisons later merges (the live stack stays split
+// while the journal fold merges, breaking fold/stack equivalence), so the
+// mark must fall back. Only rolls back when no newer snapshot superseded
+// it; commitMu serializes snapshotters per project, so equality means this
+// snapshot is still the latest.
+func (s *opStack) rollbackSnapshot(seq, prev uint64) {
+	if s.lastSnapshotSeq == seq {
+		s.lastSnapshotSeq = prev
 	}
 }
 
@@ -504,9 +536,22 @@ func (s *opStack) maxSeq() uint64 { return s.seq }
 // fold-specific chain/delete handling. Journal lines carry Times=1 (see
 // journalAppend/journalRead); the fold accumulates Times exactly as live
 // coalescing does.
+//
+// Each delta also carries the snapshot mark outstanding at its append time
+// (Op.SnapSeq), and the fold replays each line under its own mark: merge
+// decisions (rename-chain collapse, rename-then-delete) then reproduce the
+// live stack exactly, including chains split by an in-flight commit
+// snapshot. Marks share numbering with op seqs, so the fold also preserves
+// the journaled seqs (the stack counter fast-forwards to each line); only
+// the merge shape, order, and numbering must match, which is what the
+// equivalence tests pin.
 func foldOps(ops []Op) []Op {
 	stack := &opStack{}
 	for _, op := range ops {
+		stack.lastSnapshotSeq = op.SnapSeq
+		if op.Seq > stack.seq {
+			stack.seq = op.Seq - 1
+		}
 		stack.append(op)
 	}
 	return stack.ops

@@ -446,10 +446,13 @@ type commitSnapshot struct {
 	version     uint64
 	ops         []Op
 	opSeq       uint64
-	baseTree    *RepoMetadata
-	objectCount uint64
-	headSplit   bool
-	now         int64
+	// prevSnapshotSeq is the opStack mark before this snapshot took it:
+	// a failed publish restores it so coalescing stays valid.
+	prevSnapshotSeq uint64
+	baseTree        *RepoMetadata
+	objectCount     uint64
+	headSplit       bool
+	now             int64
 }
 
 // snapshotCommitState snapshots the dirty state for one commit: a private
@@ -489,7 +492,7 @@ func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *comm
 		headSplit:   working.IsSplit(),
 		now:         h.config.Now().UnixNano(),
 	}
-	pm.opStack.noteSnapshot(snap.opSeq)
+	snap.prevSnapshotSeq = pm.opStack.noteSnapshot(snap.opSeq)
 	pm.mu.Unlock()
 	return snap
 }
@@ -756,6 +759,13 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	commitSHA, contentSHA, newObjectCount, didRebase, err := h.publishWithRebase(ctx, project, pm, snap, started)
 	if err != nil {
+		// The snapshot published nothing: roll its mark back so later
+		// appends still coalesce against these ops. A stale mark would
+		// leave the live stack split while the journal fold merges,
+		// breaking fold/stack equivalence (rename-chain flake).
+		pm.mu.Lock()
+		pm.opStack.rollbackSnapshot(snap.opSeq, snap.prevSnapshotSeq)
+		pm.mu.Unlock()
 		return err
 	}
 
