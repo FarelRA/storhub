@@ -28,7 +28,7 @@ const (
 	defaultRateContentPerMin = 60
 	defaultRateConcurrency   = 16
 
-	secondaryWindow   = time.Minute
+	secondaryWindow   = 12 * storcfg.PatienceUnit
 	warnRemainingHigh = 200
 	warnRemainingLow  = 50
 )
@@ -504,7 +504,7 @@ func (g *rateGovernor) hourlyWaitLocked(now time.Time, cost int64, class request
 	if g.tooLongLocked(untilReset) {
 		return 0, g.denyLocked(true, fmt.Sprintf("hourly budget at reserve (%d left), resets in %s", g.budget.remaining, untilReset.Round(time.Second)))
 	}
-	return untilReset + time.Second, nil
+	return untilReset + 20*storcfg.TickUnit, nil
 }
 
 // pacingWaitLocked refills the sustainable-pace token bucket and returns

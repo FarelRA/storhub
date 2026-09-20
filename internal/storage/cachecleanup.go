@@ -196,7 +196,7 @@ func reapOrphaned(logger *slog.Logger, bases ...string) int {
 // client's own timeout, minutes), so anything older died with its uploader
 // (audit 31: ReapOrphanedCaches swept git/objects/legacy-tmp but never
 // rest/upload-*).
-const spoolOrphanAge = time.Hour
+const spoolOrphanAge = 720 * storcfg.PatienceUnit // 1 hour
 
 // reapSpoolDir removes upload-* spool files older than maxAge by mtime in
 // dir (flat layout, no per-upload dirs). Live uploads hold young files;

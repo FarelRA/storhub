@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
@@ -32,7 +33,7 @@ const (
 	defaultRESTBasePath      = "/api/v1"
 	defaultRESTStreamChunk   = 1 << 20
 	defaultRESTPatchBodySize = 8 << 20
-	defaultRESTShareTTL      = 7 * 24 * time.Hour
+	defaultRESTShareTTL      = 7 * 24 * 720 * storcfg.PatienceUnit // 7 days
 	maxRequestBodyMemory     = 32 << 10
 	// panicStackSize bounds the captured goroutine stack on panic recovery.
 	panicStackSize = 8192

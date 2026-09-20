@@ -30,3 +30,12 @@ func TestTimeUnitsPinned(t *testing.T) {
 		t.Fatalf("RateMaxWait must be 15m, got %v", d.RateMaxWait)
 	}
 }
+
+// Unexported defaults that also derive from the units: absolute values
+// pin behavior, whole multiples pin the symmetry.
+func TestDerivedDefaultsSymmetric(t *testing.T) {
+	t.Parallel()
+	if defaultRequestTimeout != 60*PatienceUnit {
+		t.Fatalf("defaultRequestTimeout must be 5m (60 units), got %v", defaultRequestTimeout)
+	}
+}

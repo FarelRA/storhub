@@ -29,3 +29,15 @@ func TestFusePatienceSymmetric(t *testing.T) {
 		}
 	}
 }
+
+// Kernel-side timeouts are chosen by us, so they derive from the units
+// like everything else; absolute values pin behavior.
+func TestKernelTimeoutsSymmetric(t *testing.T) {
+	t.Parallel()
+	if readOnlyEntryTimeout != 120*storcfg.PatienceUnit {
+		t.Fatalf("readOnlyEntryTimeout must be 10m (120 units), got %v", readOnlyEntryTimeout)
+	}
+	if readOnlyAttrTimeout != 120*storcfg.PatienceUnit {
+		t.Fatalf("readOnlyAttrTimeout must be 10m (120 units), got %v", readOnlyAttrTimeout)
+	}
+}

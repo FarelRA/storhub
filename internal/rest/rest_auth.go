@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -20,7 +21,7 @@ import (
 )
 
 const (
-	defaultRESTTokenTTL = 12 * time.Hour
+	defaultRESTTokenTTL = 12 * 720 * storcfg.PatienceUnit // 12 hours
 	restTokenIssuer     = "storhub"
 	restTokenAudience   = "storhub-rest"
 )

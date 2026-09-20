@@ -259,15 +259,15 @@ const defaultOverlayBufferSize = 128 * 1024
 // a big tree thousands of times per minute forever. Ten minutes cuts that
 // storm by 10x while bounding remote-visibility latency.
 const (
-	readOnlyEntryTimeout = 10 * time.Minute
-	readOnlyAttrTimeout  = 10 * time.Minute
+	readOnlyEntryTimeout = 120 * storcfg.PatienceUnit
+	readOnlyAttrTimeout  = 120 * storcfg.PatienceUnit
 )
 
 func DefaultOptions() Options {
 	return Options{
-		EntryTimeout:      60 * time.Second,
-		AttrTimeout:       60 * time.Second,
-		NegativeTimeout:   10 * time.Second,
+		EntryTimeout:      12 * storcfg.PatienceUnit,
+		AttrTimeout:       12 * storcfg.PatienceUnit,
+		NegativeTimeout:   2 * storcfg.PatienceUnit,
 		OverlayBufferSize: defaultOverlayBufferSize,
 		ExtraMountOpts:    []string{"noatime"},
 		Debug:             false,

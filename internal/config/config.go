@@ -22,7 +22,7 @@ import (
 const (
 	defaultAPIBaseURL      = "https://api.github.com"
 	defaultAPIVersion      = "2022-11-28"
-	defaultRequestTimeout  = 5 * time.Minute
+	defaultRequestTimeout  = 60 * PatienceUnit
 	defaultRepoDescription = "StorHub storage project"
 	// DefaultChunkSize and DefaultBufferSize are aliases of the chunking
 	// package's constants: the GitHub release-asset ceiling has one owner,
@@ -403,7 +403,7 @@ func newDefaultHTTPClient() *http.Client {
 	transport.MaxIdleConns = 4
 	transport.MaxIdleConnsPerHost = 2
 	transport.MaxConnsPerHost = 4
-	transport.IdleConnTimeout = 90 * time.Second
+	transport.IdleConnTimeout = 18 * PatienceUnit
 	return &http.Client{Timeout: defaultRequestTimeout, Transport: transport}
 }
 

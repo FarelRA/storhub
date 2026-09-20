@@ -34,3 +34,18 @@ func TestGithubTimeoutsSymmetric(t *testing.T) {
 		}
 	}
 }
+
+// Rate-window and asset-URL TTLs derive from the units; absolute values
+// pin behavior.
+func TestRateWindowSymmetric(t *testing.T) {
+	t.Parallel()
+	if secondaryWindow != 12*storcfg.PatienceUnit {
+		t.Fatalf("secondaryWindow must be 1m (12 units), got %v", secondaryWindow)
+	}
+	if assetURLSafetyMargin != 6*storcfg.PatienceUnit {
+		t.Fatalf("assetURLSafetyMargin must be 30s (6 units), got %v", assetURLSafetyMargin)
+	}
+	if assetURLFallbackTTL != 360*storcfg.PatienceUnit-assetURLSafetyMargin {
+		t.Fatalf("assetURLFallbackTTL must be 30m minus margin, got %v", assetURLFallbackTTL)
+	}
+}

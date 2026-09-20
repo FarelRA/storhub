@@ -33,3 +33,11 @@ func TestStorageTimeoutsSymmetric(t *testing.T) {
 		}
 	}
 }
+
+// Spool orphan age derives from the units like every other TTL.
+func TestSpoolOrphanAgeSymmetric(t *testing.T) {
+	t.Parallel()
+	if spoolOrphanAge != 720*storcfg.PatienceUnit {
+		t.Fatalf("spoolOrphanAge must be 1h (720 units), got %v", spoolOrphanAge)
+	}
+}

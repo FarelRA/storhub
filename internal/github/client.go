@@ -547,12 +547,12 @@ const (
 	// assetURLSafetyMargin is subtracted from a signed URL's authoritative
 	// expiry so the cache lapses just before the token does, forcing a
 	// proactive re-resolution instead of a reactive 618.
-	assetURLSafetyMargin = 30 * time.Second
+	assetURLSafetyMargin = 6 * storcfg.PatienceUnit
 	// assetURLFallbackTTL is assumed when a signed URL carries no parseable
 	// expiry. GitHub's front-door token is ~30 minutes, so re-resolve just
 	// before that; a too-long guess still self-heals via the 618 re-resolution
 	// path.
-	assetURLFallbackTTL = 30*time.Minute - assetURLSafetyMargin
+	assetURLFallbackTTL = 360*storcfg.PatienceUnit - assetURLSafetyMargin
 	// assetURLCacheCap bounds the signed-URL cache. Entries live ~30 min,
 	// so the useful working set is small by construction; the cap exists
 	// only so a long-lived mount touching millions of distinct chunks

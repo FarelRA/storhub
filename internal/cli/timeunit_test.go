@@ -42,3 +42,15 @@ func TestTeardownLadderSymmetric(t *testing.T) {
 		t.Fatalf("sequential teardown must total 18 units, got %v", total)
 	}
 }
+
+// HTTP server budgets derive from the units like the teardown ladder.
+func TestHTTPBudgetsSymmetric(t *testing.T) {
+	t.Parallel()
+	u := storcfg.PatienceUnit
+	if restReadHeaderBudget != 1*u {
+		t.Fatalf("restReadHeaderBudget must be 1 unit, got %v", restReadHeaderBudget)
+	}
+	if restIdleBudget != 24*u {
+		t.Fatalf("restIdleBudget must be 24 units, got %v", restIdleBudget)
+	}
+}
