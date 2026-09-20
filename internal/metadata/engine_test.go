@@ -1,3 +1,4 @@
+// Package metadata tests the metadata tree: indexes, JSON, and validation.
 package metadata
 
 import (

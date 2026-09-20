@@ -101,7 +101,7 @@ func copySourcePath(n *storhubNode, fhIn gofusefs.FileHandle) (string, syscall.E
 
 // copyDestPath resolves the clone destination: the output handle's path
 // when it still names a file, else the destination node's current path.
-func copyDestPath(fs *Filesystem, out *gofusefs.Inode, fhOut gofusefs.FileHandle) (string, syscall.Errno) {
+func copyDestPath(_ *Filesystem, out *gofusefs.Inode, fhOut gofusefs.FileHandle) (string, syscall.Errno) {
 	if h, ok := fhOut.(*storhubHandle); ok && h != nil {
 		h.mu.Lock()
 		targetPath, detached := h.path, h.deleted

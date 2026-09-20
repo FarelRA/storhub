@@ -619,7 +619,7 @@ func TestCreateBootstrapsWritableHandleWithoutRestat(t *testing.T) {
 	var replacedPath string
 	var replacedBytes []byte
 	fake := &stubHub{
-		createFile: func(_ context.Context, _ string, target string) (*meta.FileMeta, error) {
+		createFile: func(_ context.Context, _ string, _ string) (*meta.FileMeta, error) {
 			return &meta.FileMeta{
 				Inode:      8,
 				Mode:       0o644,
@@ -685,7 +685,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 	now := int64(31)
 	chmodCalled := false
 	fake := &stubHub{
-		createFile: func(_ context.Context, _ string, target string) (*meta.FileMeta, error) {
+		createFile: func(_ context.Context, _ string, _ string) (*meta.FileMeta, error) {
 			return &meta.FileMeta{
 				Inode:      9,
 				Mode:       0o644,
@@ -709,7 +709,7 @@ func TestCreateIgnoresModeAdjustmentRoundTrip(t *testing.T) {
 				return nil, syscall.ENOENT
 			}
 		},
-		replaceFile: func(_ context.Context, _ string, target, inputPath string) (*meta.FileMeta, error) {
+		replaceFile: func(_ context.Context, _ string, _, _ string) (*meta.FileMeta, error) {
 			return &meta.FileMeta{Inode: 9, Mode: 0o644, UID: 1000, GID: 1000, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 		chmod: func(_ context.Context, _ string, _ string, _ uint32) error {
@@ -742,7 +742,7 @@ func TestCreatePassesCallerIdentityAndRequestedMode(t *testing.T) {
 	var seenIdentity shfs.Identity
 	var seenMode uint32
 	fake := &stubHub{
-		createFile: func(ctx context.Context, _ string, target string) (*meta.FileMeta, error) {
+		createFile: func(ctx context.Context, _ string, _ string) (*meta.FileMeta, error) {
 			seenIdentity = shfs.IdentityFromContext(ctx)
 			seenMode, _ = shfs.CreateModeFromContext(ctx)
 			return &meta.FileMeta{Inode: 9, Mode: seenMode, UID: seenIdentity.UID, GID: seenIdentity.GID, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
@@ -941,7 +941,7 @@ func TestSafeNotifyDeleteDoesNotBlockCaller(t *testing.T) {
 	fsConnectedFunc = func(*Filesystem) bool { return true }
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	notifyDeleteFunc = func(parent *storhubNode, name string, child *storhubNode) {
+	notifyDeleteFunc = func(_ *storhubNode, _ string, _ *storhubNode) {
 		started <- struct{}{}
 		<-release
 	}
@@ -975,7 +975,7 @@ func TestSafeNotifyEntryDoesNotBlockCaller(t *testing.T) {
 	fsConnectedFunc = func(*Filesystem) bool { return true }
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	notifyEntryFunc = func(node *storhubNode, name string) {
+	notifyEntryFunc = func(_ *storhubNode, _ string) {
 		started <- struct{}{}
 		<-release
 	}
@@ -1324,7 +1324,7 @@ func (s *stubHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 	clone.RebuildIndexes()
 	return clone, "sha", nil
 }
-func (s *stubHub) ReadPinnedFileContext(ctx context.Context, project string, file *meta.FileMeta, chunks map[int64]meta.ChunkInfo, offset, length int64) ([]byte, error) {
+func (s *stubHub) ReadPinnedFileContext(ctx context.Context, project string, _ *meta.FileMeta, _ map[int64]meta.ChunkInfo, offset, length int64) ([]byte, error) {
 	if s.readFileAt != nil {
 		data, err := s.readFileAt(ctx, project, "stub", offset, length)
 		return data, err

@@ -77,6 +77,7 @@ func (m *RepoMetadata) reconcileCounters() {
 	}
 }
 
+// Validate checks the tree header, dirs, files, and cross-references.
 func (m *RepoMetadata) Validate() error {
 	if err := m.validateHeader(); err != nil {
 		return err
@@ -336,6 +337,7 @@ func validateStoredPathKey(path string) error {
 	return nil
 }
 
+// Validate checks that the directory entry is well-formed.
 func (d DirMeta) Validate() error {
 	if d.Inode == 0 {
 		return fmt.Errorf("directory inode is required")
@@ -343,6 +345,7 @@ func (d DirMeta) Validate() error {
 	return nil
 }
 
+// Validate checks that the file entry is well-formed.
 func (f FileMeta) Validate() error {
 	if f.Size < 0 {
 		return fmt.Errorf("file size must be non-negative")

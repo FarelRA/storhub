@@ -54,6 +54,7 @@ func readAheadBytes(chunkSize int64) int {
 	return int(size)
 }
 
+// Options configures a FUSE mount: timeouts, buffers, and mount flags.
 type Options struct {
 	EntryTimeout    time.Duration
 	AttrTimeout     time.Duration
@@ -97,6 +98,7 @@ func (o Options) isReadOnly() bool {
 	return false
 }
 
+// Filesystem is a mounted FUSE filesystem over one project.
 type Filesystem struct {
 	hub     Hub
 	project string
@@ -240,14 +242,15 @@ func (h *storhubHandle) isClosed() bool {
 	return h.closed
 }
 
-// Integration-test seam, deliberately exported: the storage↔FUSE
-// integration suite lives in internal/storage (storhub_test.go) and must
-// construct and drive handles/nodes across the package boundary. These
-// aliases exist only for that suite; do not use them in production code.
-type (
-	TestNode   = storhubNode
-	TestHandle = storhubHandle
-)
+// TestNode is an integration-test seam, deliberately exported: the
+// storage-FUSE integration suite lives in internal/storage
+// (storhub_test.go) and must construct and drive handles/nodes across the
+// package boundary. These aliases exist only for that suite; do not use
+// them in production code.
+type TestNode = storhubNode
+
+// TestHandle is the handle half of the integration-test seam; see TestNode.
+type TestHandle = storhubHandle
 
 // defaultOverlayBufferSize bounds each overlay copy-loop allocation when
 // the embedder did not configure Options.OverlayBufferSize.
@@ -263,6 +266,7 @@ const (
 	readOnlyAttrTimeout  = 120 * storcfg.PatienceUnit
 )
 
+// DefaultOptions returns Options with defaults applied.
 func DefaultOptions() Options {
 	return Options{
 		EntryTimeout:      12 * storcfg.PatienceUnit,
@@ -274,14 +278,17 @@ func DefaultOptions() Options {
 	}
 }
 
+// Options returns the effective mount options of the filesystem.
 func (s *Filesystem) Options() Options {
 	return s.opts
 }
 
+// RootNode returns the root node for tests; see TestNode.
 func (s *Filesystem) RootNode() *TestNode {
 	return s.root
 }
 
+// EnsureNodeForTest materializes the node for an entry; see TestNode.
 func (s *Filesystem) EnsureNodeForTest(ctx context.Context, entry *shfs.EntryInfo) *TestNode {
 	return s.ensureNode(ctx, entry)
 }
@@ -300,6 +307,7 @@ func (s *Filesystem) ResetNodeForTest(path string) {
 	delete(s.pathToInode, path)
 }
 
+// Hub is the storage surface a Filesystem mounts.
 type Hub interface {
 	StatPathContext(context.Context, string, string) (*shfs.EntryInfo, error)
 	ReadDirContext(context.Context, string, string) ([]shfs.DirEntry, error)
@@ -385,6 +393,7 @@ func claimMountLock(lockPath string) (*os.File, error) {
 	return f, nil
 }
 
+// New builds an unmounted Filesystem for the project over hub.
 func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
@@ -524,6 +533,7 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 	return fsys
 }
 
+// Mount mounts the filesystem at mountPoint and serves it.
 func (s *Filesystem) Mount(mountPoint string) error {
 	s.debugf("mount start project=%s target=%s allow_other=%t cache_dir=%s", s.project, mountPoint, s.opts.AllowOther, s.cacheDir)
 	options := &gofusefs.Options{
@@ -558,6 +568,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	return nil
 }
 
+// Wait blocks until the filesystem is unmounted.
 func (s *Filesystem) Wait() {
 	// Snapshot under the lock, then block outside it: server.Wait only
 	// returns after Unmount completes, and Unmount needs this mutex.
@@ -569,6 +580,7 @@ func (s *Filesystem) Wait() {
 	}
 }
 
+// Unmount detaches the filesystem from its mount point.
 func (s *Filesystem) Unmount() error {
 	s.mu.Lock()
 	server := s.server
@@ -720,6 +732,7 @@ func (w *inodeWriteState) pathForLog() string {
 	return w.path
 }
 
+// Close releases filesystem resources after unmount.
 func (s *Filesystem) Close() error {
 	s.debugf("close start project=%s", s.project)
 	s.mu.Lock()
@@ -1248,6 +1261,7 @@ func logRecoveryInventory(recoveryDir string, logger *slog.Logger) {
 		"dir", recoveryDir, "files", len(inventory), "bytes", total, "targets", strings.Join(targets, ","))
 }
 
+// Invalidate drops cached kernel entries after external mutation.
 func (s *Filesystem) Invalidate() {
 	// Snapshot the nodes under the lock, but issue kernel notifications
 	// after releasing it: NotifyContent writes to the FUSE connection and
@@ -1480,7 +1494,7 @@ func (s *Filesystem) Invalidations() uint64 {
 	return s.invalCount.Load()
 }
 
-func (s *Filesystem) ensureNode(ctx context.Context, entry *shfs.EntryInfo) *storhubNode {
+func (s *Filesystem) ensureNode(_ context.Context, entry *shfs.EntryInfo) *storhubNode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if node := s.nodes[entry.Inode]; node != nil {

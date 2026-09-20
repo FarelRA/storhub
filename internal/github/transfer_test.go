@@ -52,7 +52,7 @@ func TestTransferDeadlineHonorsConfiguredThroughput(t *testing.T) {
 func TestUploadCallerDeadlineSurfacesWithoutSpin(t *testing.T) {
 	t.Parallel()
 	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		posts.Add(1)
 		// Long enough to still be in-flight when the 30ms caller deadline
 		// fires (httptest.Close waits for it), short enough to keep the
@@ -90,7 +90,7 @@ func TestCanceledContextIsNeverRetriedAsTimeout(t *testing.T) {
 		t.Log("non-timeout op errors fall through to EOF check")
 	}
 	// A genuine client timeout IS retryable.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		time.Sleep(50 * time.Millisecond)
 	}))
 	defer srv.Close()

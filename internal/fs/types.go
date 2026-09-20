@@ -6,6 +6,7 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
 
+// EntryInfo is the stat-style view of one path used by StatPath.
 type EntryInfo struct {
 	Path          string            `json:"path"`
 	Kind          metadata.NodeKind `json:"kind,omitempty"`
@@ -61,6 +62,7 @@ func (e DirEntry) IsDirectory() bool { return e.IsDir }
 // IsLink reports the symlink flag behind one name.
 func (e DirEntry) IsLink() bool { return e.IsSymlink }
 
+// MetadataPatch carries one metadata-only update (mode, owner, times).
 type MetadataPatch struct {
 	HasMode  bool
 	Mode     uint32
@@ -79,7 +81,9 @@ type MetadataPatch struct {
 type XAttrMode uint32
 
 const (
-	XAttrCreate  XAttrMode = 1 << 0
+	// XAttrCreate fails SetXAttr with EEXIST when the name is present.
+	XAttrCreate XAttrMode = 1 << 0
+	// XAttrReplace fails SetXAttr with ENODATA when the name is absent.
 	XAttrReplace XAttrMode = 1 << 1
 )
 
@@ -113,6 +117,7 @@ func (e RangeEdit) End() int64 { return e.Start + e.DeleteSize }
 // Len reports how many bytes the edit inserts.
 func (e RangeEdit) Len() int64 { return int64(len(e.Data)) }
 
+// DirEntry is one child row of a directory listing.
 type DirEntry struct {
 	Name      string            `json:"name"`
 	Path      string            `json:"path"`
@@ -133,6 +138,11 @@ type DirEntry struct {
 	ChangedAt  int64 `json:"changed_at,omitempty"`
 }
 
+// FSStats keeps its short name: it is referenced as shfs.FSStats and
+// storhub.FSStats across storage, REST, CLI, and FUSE facades, so the
+// rename churn outweighs the stutter.
+//
+//revive:disable-next-line:exported
 type FSStats struct {
 	Files       int   `json:"files"`
 	Directories int   `json:"directories"`

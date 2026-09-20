@@ -54,6 +54,7 @@ type inodeWriteState struct {
 	pending           shfs.MetadataPatch
 }
 
+// ByteRange is one dirty byte span within a write handle.
 type ByteRange struct {
 	Start int64
 	End   int64
@@ -547,8 +548,8 @@ func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off i
 		return 0, nil
 	}
 	limit := int64(len(dest))
-	if max := w.logicalSize - off; limit > max {
-		limit = max
+	if capN := w.logicalSize - off; limit > capN {
+		limit = capN
 	}
 	filled := int64(0)
 	visibleBaseSize := minInt64(w.baseSize, w.logicalSize)
@@ -1519,7 +1520,7 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 
 // commitReplace handles the full-file replace path.
 // Caller must hold ws.mu. Releases and re-acquires ws.mu.
-func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
+func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, _ []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	// Load-then-use under h.mu; see commitTemp for why this cannot go
 	// nil mid-frame.
 	ws := h.snapshotWriteState()

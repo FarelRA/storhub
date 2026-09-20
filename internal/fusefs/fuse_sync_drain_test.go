@@ -78,7 +78,7 @@ func (d *drainProbeHub) setDrainErr(err error) {
 func syncDrainFixture(t *testing.T, flags uint32) (*Filesystem, *drainProbeHub, *storhubHandle) {
 	t.Helper()
 	probe := &drainProbeHub{stubHub: &stubHub{chunkSize: 64}}
-	probe.patchRanges = func(edits []shfs.RangeEdit) (*meta.FileMeta, error) {
+	probe.patchRanges = func(_ []shfs.RangeEdit) (*meta.FileMeta, error) {
 		probe.record("patch")
 		return &meta.FileMeta{}, nil
 	}

@@ -24,6 +24,7 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
+// Backend is the storage surface the fs Service verbs need.
 type Backend interface {
 	ValidateProjectName(project string) error
 	EnsureRepoContext(ctx context.Context, project string) error
@@ -42,6 +43,7 @@ type Backend interface {
 	DefaultOwnerIDs() (uint32, uint32)
 }
 
+// Service implements the file verbs over a Backend with per-project state.
 type Service struct {
 	backend Backend
 
@@ -61,8 +63,10 @@ type Service struct {
 // past the cap evict one arbitrary entry; the next op rebuilds it.
 const maxProjectStates = 256
 
+// PendingReleaseTag is the staging release tag for in-flight uploads.
 const PendingReleaseTag = "pending"
 
+// NewService builds a Service over the given backend.
 func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
@@ -195,6 +199,7 @@ func validateCreate(ctx context.Context, repo *meta.RepoMetadata, cleanPath stri
 	return nil
 }
 
+// CreateFileContext creates an empty file at filePath.
 func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "create", true, []any{"path", filePath}, func() error {
 		// Create addresses the new node itself (O_CREAT|O_EXCL never follows a
@@ -256,6 +261,7 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	return result, err
 }
 
+// MkdirContext creates the directory at dirPath.
 func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (err error) {
 	return s.withOp(project, "mkdir", true, []any{"path", dirPath}, func() error {
 		// mkdir never creates through a final symlink (EEXIST on the link
@@ -313,6 +319,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 	})
 }
 
+// RmdirContext removes the empty directory at dirPath.
 func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (err error) {
 	return s.withOp(project, "rmdir", true, []any{"path", dirPath}, func() error {
 		// rmdir removes the final component itself; a symlink there must not be
@@ -362,6 +369,7 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 	})
 }
 
+// RenameContext moves oldPath to newPath honoring mutate options.
 func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...MutateOption) (err error) {
 	return s.withOp(project, "rename", true, []any{"old_path", oldPath, "new_path", newPath}, func() error {
 		mutate := ApplyMutateOptions(opts)
@@ -558,6 +566,7 @@ func remapTree(repo *meta.RepoMetadata, oldBase, newBase string, now int64) {
 	}
 }
 
+// CopyContext duplicates srcPath to dstPath with fresh inodes.
 func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath string) (err error) {
 	return s.withOp(project, "copy", true, []any{"src", srcPath, "dst", dstPath}, func() error {
 		// cp follows symlinks at both endpoints: the source is read through
@@ -762,6 +771,7 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 	return nil
 }
 
+// TruncateFileContext resizes the file at filePath to size bytes.
 func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "truncate", true, []any{"path", filePath, "size", size}, func() error {
 		// truncate(2) has open() semantics: a final symlink is followed to its
@@ -868,6 +878,7 @@ func (s *Service) zeroExtendFile(ctx context.Context, project, cleanPath string,
 	return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, zeros)
 }
 
+// AppendFileContext appends data to the file at filePath.
 func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "append", true, []any{"path", filePath, "bytes", len(data)}, func() error {
 		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
@@ -898,6 +909,7 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	return result, err
 }
 
+// WriteFileAtContext writes data at offset in the file at filePath.
 func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "write-at", true, []any{"path", filePath, "offset", offset, "bytes", len(data)}, func() error {
 		// pwrite has open() semantics: a final symlink is followed.
@@ -948,8 +960,8 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 			return err
 		}
 		deleteSize := int64(len(data))
-		if max := file.Size - offset; deleteSize > max {
-			deleteSize = max
+		if capN := file.Size - offset; deleteSize > capN {
+			deleteSize = capN
 		}
 		result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, offset, deleteSize, data)
 		return err
@@ -957,6 +969,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	return result, err
 }
 
+// ReadFileAtContext reads length bytes at offset from the file at filePath.
 func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) (result []byte, err error) {
 	err = s.withOp(project, "read-at", false, []any{"path", filePath, "offset", offset, "length", length}, func() error {
 		// pread has open() semantics: a final symlink is followed.
@@ -1030,6 +1043,7 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 	return result, err
 }
 
+// StatPathContext returns the stat view of targetPath with lstat semantics.
 func (s *Service) StatPathContext(ctx context.Context, project, targetPath string) (result *EntryInfo, err error) {
 	err = s.withOp(project, "stat-path", false, []any{"path", targetPath}, func() error {
 		// lstat semantics: the final symlink is NOT followed; intermediate
@@ -1070,6 +1084,7 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 	return result, err
 }
 
+// StatFSContext returns aggregate filesystem counts for the project.
 func (s *Service) StatFSContext(ctx context.Context, project string) (result *FSStats, err error) {
 	err = s.withOp(project, "statfs", false, nil, func() error {
 		repo, sha, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
@@ -1140,6 +1155,7 @@ func (p *projectState) storeStatFS(sha string, stats *FSStats) {
 	p.statfsAt = time.Now()
 }
 
+// ReadDirContext lists the children of the directory at dirPath.
 func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (result []DirEntry, err error) {
 	err = s.withOp(project, "readdir", false, []any{"path", dirPath}, func() error {
 		// opendir follows a final symlink to a directory, so resolution is
@@ -1188,6 +1204,7 @@ func (s *Service) ReadDirContext(ctx context.Context, project, dirPath string) (
 	return result, err
 }
 
+// RequireParentDirectory fails when the parent of filePath is missing.
 func RequireParentDirectory(repo *meta.RepoMetadata, filePath string) error {
 	if parent := ParentPath(filePath); parent != "" && !repo.HasDirectory(parent) {
 		return fmt.Errorf("%w: parent directory does not exist: %s", ErrNotFound, parent)
@@ -1271,10 +1288,12 @@ func EntryFromDirEntry(e DirEntry, childPath string) *EntryInfo {
 	}
 }
 
+// DirEntryFromDirectory builds a listing row for one directory node.
 func DirEntryFromDirectory(dir meta.DirMeta, dirPath string, nlink int) DirEntry {
 	return DirEntry{Name: path.Base(dirPath), Path: dirPath, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: uint32(nlink), UID: dir.UID, GID: dir.GID, CreatedAt: dir.CreatedAt, ModifiedAt: dir.ModifiedAt, AccessedAt: dir.AccessedAt, ChangedAt: dir.ChangedAt}
 }
 
+// DirEntryFromFile builds a listing row for one file node.
 func DirEntryFromFile(file meta.FileMeta, filePath string, nlink int) DirEntry {
 	entry := DirEntry{Name: path.Base(filePath), Path: filePath, IsSymlink: file.Symlink != "", Size: file.Size, Inode: file.Inode, Mode: file.Mode, NLink: uint32(nlink), UID: file.UID, GID: file.GID, CreatedAt: file.UploadedAt, ModifiedAt: file.ModifiedAt, AccessedAt: file.AccessedAt, ChangedAt: file.ChangedAt}
 	if file.Symlink != "" {
@@ -1285,6 +1304,7 @@ func DirEntryFromFile(file meta.FileMeta, filePath string, nlink int) DirEntry {
 	return entry
 }
 
+// CountUniqueInodes counts distinct inodes across root, dirs, and files.
 func CountUniqueInodes(repo *meta.RepoMetadata) int {
 	seen := map[uint64]struct{}{repo.Root.Inode: {}}
 	for _, dir := range repo.Dirs() {

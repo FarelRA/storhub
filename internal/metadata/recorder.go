@@ -2,7 +2,7 @@ package metadata
 
 import "maps"
 
-// The intent recorder is the transaction-scoped half of intent-based op
+// IntentRecorder is the transaction-scoped half of intent-based op
 // synthesis. UpdateRepoMetadataContext attaches a recorder to the private
 // COW candidate before fn runs; every tracked mutator then records the
 // PRE-TRANSACTION state of the path it is about to change. After admission

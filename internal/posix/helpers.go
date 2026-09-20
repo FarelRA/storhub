@@ -20,7 +20,8 @@ func ApplyUploadIdentity(name string, existing *meta.FileMeta, file *meta.FileMe
 	meta.InitializeNewFileIdentityFields(file, now)
 }
 
-func ApplyUpdatedFileIdentity(name string, file *meta.FileMeta, existing *meta.FileMeta, now int64) {
+// ApplyUpdatedFileIdentity stamps update identity fields onto file.
+func ApplyUpdatedFileIdentity(_ string, file *meta.FileMeta, existing *meta.FileMeta, now int64) {
 	meta.PreserveFileIdentity(file, existing, now)
 	file.Symlink = ""
 	file.ModifiedAt = now
@@ -30,6 +31,7 @@ func ApplyUpdatedFileIdentity(name string, file *meta.FileMeta, existing *meta.F
 	}
 }
 
+// ReplaceInodeFamily rewrites every hardlink sibling with the updated entry.
 func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.FileMeta, updated meta.FileMeta, now int64) {
 	siblings := repo.FindFilesByInode(existing.Inode)
 	if len(siblings) == 0 {
@@ -57,10 +59,12 @@ func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.Fil
 	}
 }
 
+// DefaultOwnerIDs returns the process owner IDs for new nodes.
 func DefaultOwnerIDs() (uint32, uint32) {
 	return uint32(os.Getuid()), uint32(os.Getgid())
 }
 
+// ChooseNonZeroTime returns the first nonzero timestamp, or zero.
 func ChooseNonZeroTime(values ...int64) int64 {
 	for _, value := range values {
 		if value != 0 {
@@ -70,6 +74,7 @@ func ChooseNonZeroTime(values ...int64) int64 {
 	return 0
 }
 
+// CloneStringMap returns a copy of the string map, nil for empty.
 func CloneStringMap(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil

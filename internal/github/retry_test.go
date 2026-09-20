@@ -32,7 +32,7 @@ func TestRetryTaxonomy(t *testing.T) {
 	t.Parallel()
 	t.Run("idempotent GET retries then succeeds", func(t *testing.T) {
 		var hits atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			if hits.Add(1) <= 2 {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"message":"boom"}`))
@@ -76,7 +76,7 @@ func TestRetryTaxonomy(t *testing.T) {
 	t.Run("huge Retry-After is clamped", func(t *testing.T) {
 		var hits atomic.Int32
 		var sleeps []time.Duration
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			if hits.Add(1) == 1 {
 				w.Header().Set("Retry-After", "3600")
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -97,7 +97,7 @@ func TestRetryTaxonomy(t *testing.T) {
 
 	t.Run("canceled context is not retried", func(t *testing.T) {
 		var hits atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			hits.Add(1)
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
@@ -117,7 +117,7 @@ func TestRetryTaxonomy(t *testing.T) {
 func TestDownloadAssetStreamRejectsInvalidRange(t *testing.T) {
 	t.Parallel()
 	var unexpected atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		unexpected.Add(1)
 		w.WriteHeader(http.StatusNotFound)
 	}))

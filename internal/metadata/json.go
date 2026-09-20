@@ -54,6 +54,7 @@ func (m *RepoMetadata) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.toShadow())
 }
 
+// ToJSON serializes the tree to its legacy single-blob document form.
 func (m *RepoMetadata) ToJSON() ([]byte, error) {
 	// A blob document is always maxBlobVersion: version 6 is the split
 	// (manifest + objects) layout, which ToJSON cannot express. The in-memory

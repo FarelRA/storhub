@@ -1,3 +1,4 @@
+// Command storhub is the StorHub command line interface.
 package main
 
 import (

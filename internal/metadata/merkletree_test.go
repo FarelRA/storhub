@@ -179,7 +179,7 @@ func TestMerkleMutationRewritesOnlyChain(t *testing.T) {
 
 // collectNodeShas walks the tree objects and records dirPath -> node sha by
 // re-deriving the structure (test helper only; not used by production code).
-func collectNodeShas(t *testing.T, m *RepoMetadata, res *TreeResult, out map[string]string) {
+func collectNodeShas(t *testing.T, _ *RepoMetadata, res *TreeResult, out map[string]string) {
 	t.Helper()
 	// Rebuild the path->sha map by loading nodes and matching content.
 	var walk func(dirPath, sha string)

@@ -26,7 +26,7 @@ func privStatHub(mode uint32) *stubHub {
 	}
 }
 
-func privOpenWriter(t *testing.T, fsys *Filesystem, ctx context.Context) *storhubHandle {
+func privOpenWriter(ctx context.Context, t *testing.T, fsys *Filesystem) *storhubHandle {
 	t.Helper()
 	h, err := fsys.newHandle(ctx, 7, "priv.bin", syscall.O_WRONLY, &writeBootstrap{baseSize: 4})
 	if err != nil {
@@ -51,7 +51,7 @@ func TestOverlayWriteStagesClearedModeNonAdmin(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	if _, errno := h.Write(callerCtx(1000, 1000), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}
@@ -79,7 +79,7 @@ func TestOverlayPWriteStagesClearedModeSetgid(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	if _, errno := h.Write(callerCtx(1000, 1000), []byte("y"), 2); errno != 0 {
 		t.Fatalf("pwrite: %v", errno)
 	}
@@ -96,7 +96,7 @@ func TestOverlayWriteAdminKeepsBits(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, callerCtx(0, 0))
+	h := privOpenWriter(callerCtx(0, 0), t, fsys)
 	if _, errno := h.Write(callerCtx(0, 0), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}
@@ -114,7 +114,7 @@ func TestOverlayWriteNoIdentityClears(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, context.Background())
+	h := privOpenWriter(context.Background(), t, fsys)
 	if _, errno := h.Write(context.Background(), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}
@@ -132,7 +132,7 @@ func TestOverlayWriteAlreadyClearStagesNothing(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	if _, errno := h.Write(callerCtx(1000, 1000), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}
@@ -151,7 +151,7 @@ func TestExplicitChmodOverwritesStagedClear(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "priv.bin", Inode: 7, Size: 4, Mode: 0o4755, UID: 1000, GID: 1000, NLink: 1})
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	if _, errno := h.Write(callerCtx(1000, 1000), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}
@@ -185,7 +185,7 @@ func TestOverlayFtruncateStagesClearedMode(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := fsys.ensureNode(context.Background(), &shfs.EntryInfo{Path: "priv.bin", Inode: 7, Size: 4, Mode: 0o6750, UID: 1000, GID: 1000, NLink: 1})
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	var attr fuse.SetAttrIn
 	attr.Valid = fuse.FATTR_SIZE
 	attr.Size = 2
@@ -223,7 +223,7 @@ func TestCommitForwardsClearedModeWithoutResurrect(t *testing.T) {
 		t.Fatalf("new filesystem: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	if _, errno := h.Write(callerCtx(1000, 1000), []byte("x"), 0); errno != 0 {
 		t.Fatalf("write: %v", errno)
 	}

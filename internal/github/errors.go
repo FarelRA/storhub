@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// APIError is a GitHub API failure with status, message, and headers.
 type APIError struct {
 	StatusCode     int
 	Message        string
@@ -50,6 +51,7 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("github API error (%d): %s", e.StatusCode, message)
 }
 
+// NotFound reports whether the failure is a 404.
 func (e *APIError) NotFound() bool { return e != nil && e.StatusCode == http.StatusNotFound }
 
 // IsValidationIssue matches status + structured code: a 422 whose

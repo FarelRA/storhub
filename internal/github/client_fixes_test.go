@@ -144,7 +144,7 @@ func TestPermanentTransportFailuresNotRetryable(t *testing.T) {
 func TestDeleteRepoTreatsNotFoundAsSuccess(t *testing.T) {
 	t.Parallel()
 	var hits int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"message":"Not Found"}`))

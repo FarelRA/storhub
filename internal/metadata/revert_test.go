@@ -424,8 +424,8 @@ func TestRevertDanglingChunkAdjustsSize(t *testing.T) {
 
 func TestRevertRejectsRoot(t *testing.T) {
 	t.Parallel()
-	hist := buildTree(t, func(m *RepoMetadata) {})
-	cur := buildTree(t, func(m *RepoMetadata) {})
+	hist := buildTree(t, func(_ *RepoMetadata) {})
+	cur := buildTree(t, func(_ *RepoMetadata) {})
 	if err := RevertSubtree(cur, hist, "", 300000000000); err == nil {
 		t.Fatal("reverting the root must be rejected")
 	}

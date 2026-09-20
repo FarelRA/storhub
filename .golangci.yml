@@ -5,9 +5,14 @@ linters:
     - govet
     - ineffassign
     - misspell
+    - revive
     - staticcheck
     - unconvert
     - unused
+  exclusions:
+    rules:
+      - path: web/node_modules/
+        linters: [revive]
 
 formatters:
   enable:

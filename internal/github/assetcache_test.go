@@ -1,3 +1,4 @@
+// Package github tests the GitHub API client against a mock server.
 package github
 
 import (

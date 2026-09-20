@@ -30,6 +30,7 @@ import (
 // fills) are part of that single contract rather than a divergent copy.
 type Backend = shfs.Backend
 
+// Service implements POSIX metadata verbs over a Backend.
 type Service struct {
 	backend Backend
 
@@ -46,6 +47,7 @@ type Service struct {
 // rebuilds it.
 const maxProjectLoggers = 256
 
+// NewService builds a Service over the given backend.
 func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
 }
@@ -104,6 +106,7 @@ func (s *Service) withOp(project, op string, args []any, fn func() error, quiet 
 	return fn()
 }
 
+// SymlinkContext creates a symlink at linkPath pointing at target.
 func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "symlink", []any{"target", target, "path", linkPath}, func() error {
 		if err := s.backend.ValidateProjectName(project); err != nil {
@@ -194,6 +197,7 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 	return result, err
 }
 
+// ReadlinkContext returns the target of the symlink at linkPath.
 func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string) (target string, err error) {
 	err = s.withOp(project, "readlink", []any{"path", linkPath}, func() error {
 		if err := shfs.ValidateAccessPathShape(linkPath); err != nil {
@@ -225,6 +229,7 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 	return target, err
 }
 
+// LinkContext creates a hardlink at newPath for existingPath.
 func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPath string) (result *meta.FileMeta, err error) {
 	err = s.withOp(project, "link", []any{"source", existingPath, "path", newPath}, func() error {
 		if err := shfs.ValidateAccessPathShape(existingPath); err != nil {
@@ -412,6 +417,7 @@ func (s *Service) loadWorkCopy(repo *meta.RepoMetadata, targetPath string) (tx *
 	return nil, nil, nil, s.backend.FileNotFound(key)
 }
 
+// ChmodContext changes the mode of targetPath.
 func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) (err error) {
 	err = s.withOp(project, "chmod", []any{"path", targetPath, "mode", mode}, func() error {
 		entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
@@ -448,6 +454,7 @@ func (s *Service) ChmodContext(ctx context.Context, project, targetPath string, 
 	return err
 }
 
+// ChownContext changes the owner of targetPath.
 func (s *Service) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) (err error) {
 	err = s.withOp(project, "chown", []any{"path", targetPath, "uid", uid, "gid", gid}, func() error {
 		entryForAccess, err := s.lookupEntryForAccess(ctx, project, targetPath)
@@ -505,6 +512,7 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 	return err
 }
 
+// ChtimesContext changes the access and modification times of targetPath.
 func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) (err error) {
 	err = s.withOp(project, "chtimes", []any{"path", targetPath, "atime", atime, "mtime", mtime}, func() error {
 		entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
@@ -672,6 +680,7 @@ func (s *Service) SetXAttrContext(ctx context.Context, project, targetPath, attr
 	return err
 }
 
+// GetXAttrContext returns the extended attribute value for attr.
 func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr string) (result []byte, err error) {
 	err = s.withOp(project, "getxattr", []any{"path", targetPath, "attr", attr}, func() error {
 		if strings.TrimSpace(attr) == "" {
@@ -703,6 +712,7 @@ func (s *Service) GetXAttrContext(ctx context.Context, project, targetPath, attr
 	return result, err
 }
 
+// ListXAttrContext lists the extended attribute names of targetPath.
 func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath string) (result []string, err error) {
 	err = s.withOp(project, "listxattr", []any{"path", targetPath}, func() error {
 		repo, cleanPath, traversed, file, dir, err := s.lookupPathResolved(ctx, project, targetPath)
@@ -729,6 +739,7 @@ func (s *Service) ListXAttrContext(ctx context.Context, project, targetPath stri
 	return result, err
 }
 
+// RemoveXAttrContext removes the extended attribute attr from targetPath.
 func (s *Service) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) (err error) {
 	err = s.withOp(project, "removexattr", []any{"path", targetPath, "attr", attr}, func() error {
 		if strings.TrimSpace(attr) == "" {
@@ -807,6 +818,7 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 	}, nil)
 }
 
+// ApplyMetadataPatchContext applies a metadata-only patch to targetPath.
 func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) (err error) {
 	err = s.withOp(project, "apply-metadata-patch", []any{"path", targetPath, "has_mode", patch.HasMode, "has_owner", patch.HasOwner, "has_times", patch.HasTimes}, func() error {
 		if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
@@ -976,6 +988,7 @@ func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath 
 	return shfs.EntryFromDirectory(dir, cleanPath, repo.DirNLink(cleanPath)), nil
 }
 
+// UpdateFileFamily applies mutate to every hardlink sibling of inode.
 func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.FileMeta)) error {
 	names := repo.FindFilesByInode(inode)
 	if len(names) == 0 {
@@ -1004,6 +1017,7 @@ func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.F
 	return nil
 }
 
+// TouchInodeFamilyChangedAt refreshes ctime across one inode family.
 func TouchInodeFamilyChangedAt(repo *meta.RepoMetadata, inode uint64, now int64) error {
 	return UpdateFileFamily(repo, inode, func(current *meta.FileMeta) {
 		current.ChangedAt = now

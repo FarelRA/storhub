@@ -1,3 +1,4 @@
+// Package logging provides structured logging setup and HTTP capture.
 package logging
 
 import "net/http"

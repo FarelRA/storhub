@@ -33,7 +33,7 @@ func TestMainHelpAndErrorExit(t *testing.T) {
 	}
 }
 
-func TestMainHelperProcess(t *testing.T) {
+func TestMainHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}

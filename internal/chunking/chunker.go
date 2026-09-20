@@ -20,9 +20,12 @@ import (
 )
 
 const (
+	// MaxReleaseAssetSize is GitHub's hard ceiling on one release asset.
 	MaxReleaseAssetSize int64 = (2 * 1024 * 1024 * 1024) - 1
-	DefaultChunkSize    int64 = MaxReleaseAssetSize
-	DefaultBufferSize         = 1 * 1024 * 1024
+	// DefaultChunkSize is the default per-chunk upload size.
+	DefaultChunkSize int64 = MaxReleaseAssetSize
+	// DefaultBufferSize is the default I/O buffer size for transfers.
+	DefaultBufferSize = 1 * 1024 * 1024
 )
 
 // ChunkReader reads one chunk-sized window of the underlying file. It is a
@@ -48,6 +51,7 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
+// Seek moves the window cursor; see ChunkReader.
 func (c *ChunkReader) Seek(offset int64, whence int) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -159,6 +163,7 @@ func (s *StreamingChunker) NumChunks() int {
 	return s.numChunks
 }
 
+// Close releases the underlying file of the chunker.
 func (s *StreamingChunker) Close() error {
 	return s.file.Close()
 }

@@ -41,7 +41,7 @@ func TestFstatSeesStagedOverlay(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := overlayNode(t, fsys)
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	var attr fuse.SetAttrIn
 	attr.Valid = fuse.FATTR_MODE | fuse.FATTR_SIZE
 	attr.Mode = 0o600
@@ -95,7 +95,7 @@ func TestFstatViaHandleAfterUnregister(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := overlayNode(t, fsys)
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	var attr fuse.SetAttrIn
 	attr.Valid = fuse.FATTR_MODE
 	attr.Mode = 0o600

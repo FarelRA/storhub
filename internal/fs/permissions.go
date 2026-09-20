@@ -10,6 +10,8 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
+// Identity is the caller asserted for one operation: owner IDs, admin
+// flag, umask, and supplementary groups for DAC checks.
 type Identity struct {
 	UID    uint32
 	GID    uint32
@@ -29,10 +31,14 @@ const (
 	accessExec                      = 0o1
 )
 
+// Access bits for DAC checks: read, write, and execute.
 const (
-	AccessRead  = accessRead
+	// AccessRead requires read permission on the node.
+	AccessRead = accessRead
+	// AccessWrite requires write permission on the node.
 	AccessWrite = accessWrite
-	AccessExec  = accessExec
+	// AccessExec requires execute (traversal) permission on the node.
+	AccessExec = accessExec
 )
 
 type nodeAttrs struct {
@@ -49,6 +55,7 @@ type createMode struct {
 	set  bool
 }
 
+// WithIdentity attaches the caller identity to the context.
 func WithIdentity(ctx context.Context, id Identity) context.Context {
 	id.Groups = uniqueGIDs(id.Groups)
 	if id.GID != 0 {
@@ -65,6 +72,7 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey, id)
 }
 
+// IdentityFromContext returns the caller identity or a process fallback.
 func IdentityFromContext(ctx context.Context) Identity {
 	if ctx != nil {
 		if id, ok := ctx.Value(identityContextKey).(Identity); ok {
@@ -79,6 +87,7 @@ func IdentityFromContext(ctx context.Context) Identity {
 	return Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
 }
 
+// IdentityPresent reports whether the context carries an identity.
 func IdentityPresent(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -87,6 +96,7 @@ func IdentityPresent(ctx context.Context) bool {
 	return ok
 }
 
+// OwnerIDsForCreate returns the owner IDs new nodes are stamped with.
 func OwnerIDsForCreate(ctx context.Context, fallbackUID, fallbackGID uint32) (uint32, uint32) {
 	if !IdentityPresent(ctx) {
 		return fallbackUID, fallbackGID
@@ -95,10 +105,12 @@ func OwnerIDsForCreate(ctx context.Context, fallbackUID, fallbackGID uint32) (ui
 	return id.UID, id.GID
 }
 
+// WithCreateMode attaches an explicit creation mode to the context.
 func WithCreateMode(ctx context.Context, mode uint32) context.Context {
 	return context.WithValue(ctx, createModeContextKey, createMode{mode: mode & 0o7777, set: true})
 }
 
+// CreateModeFromContext returns the explicit creation mode, if any.
 func CreateModeFromContext(ctx context.Context) (uint32, bool) {
 	if ctx == nil {
 		return 0, false
@@ -110,6 +122,7 @@ func CreateModeFromContext(ctx context.Context) (uint32, bool) {
 	return mode.mode, true
 }
 
+// ApplyCreateMode resolves the creation mode from context or fallback.
 func ApplyCreateMode(ctx context.Context, fallback uint32) uint32 {
 	id := IdentityFromContext(ctx)
 	mode := fallback & 0o7777
@@ -119,14 +132,17 @@ func ApplyCreateMode(ctx context.Context, fallback uint32) uint32 {
 	return mode &^ (id.Umask & 0o7777)
 }
 
+// CheckReadAccess verifies read permission on the file at filePath.
 func CheckReadAccess(ctx context.Context, repo *meta.RepoMetadata, filePath string) error {
 	return checkPathAccess(ctx, repo, filePath, accessRead)
 }
 
+// CheckWriteAccess verifies write permission on the file at filePath.
 func CheckWriteAccess(ctx context.Context, repo *meta.RepoMetadata, filePath string) error {
 	return checkPathAccess(ctx, repo, filePath, accessWrite)
 }
 
+// CheckListDirAccess verifies list permission on the directory at dirPath.
 func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath string) error {
 	if err := CheckWalk(ctx, repo, dirPath); err != nil {
 		return err
@@ -252,6 +268,7 @@ func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struc
 	return checkAccess(id, attrs, accessExec)
 }
 
+// CheckParentWrite verifies write permission on the parent of targetPath.
 func CheckParentWrite(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
 	parent := ParentPath(targetPath)
 	if err := CheckWalk(ctx, repo, parent); err != nil {
@@ -267,6 +284,7 @@ func CheckParentWrite(ctx context.Context, repo *meta.RepoMetadata, targetPath s
 	return checkAccess(IdentityFromContext(ctx), attrs, accessWrite|accessExec)
 }
 
+// CanChmod reports whether the caller may change the entry mode.
 func CanChmod(ctx context.Context, entry *EntryInfo) error {
 	id := IdentityFromContext(ctx)
 	if id.Admin || id.UID == entry.UID {
@@ -275,6 +293,7 @@ func CanChmod(ctx context.Context, entry *EntryInfo) error {
 	return syscall.EPERM
 }
 
+// SanitizeChmodMode clears privilege bits unprivileged callers must not set.
 func SanitizeChmodMode(ctx context.Context, entry *EntryInfo, mode uint32) uint32 {
 	mode &= 0o7777
 	id := IdentityFromContext(ctx)
@@ -287,6 +306,7 @@ func SanitizeChmodMode(ctx context.Context, entry *EntryInfo, mode uint32) uint3
 	return mode
 }
 
+// SanitizeWrittenFileMode clears setuid and setgid bits from a mode.
 func SanitizeWrittenFileMode(mode uint32) uint32 {
 	return mode &^ 0o6000
 }
@@ -370,10 +390,12 @@ func isNowish(requested, now int64) bool {
 	return diff <= 2_000_000_000
 }
 
+// CanAccessEntry checks one entry against an explicit identity and need.
 func CanAccessEntry(id Identity, entry *EntryInfo, need int) error {
 	return checkAccess(id, nodeAttrsFromEntry(entry), need)
 }
 
+// ApplyParentInheritance applies setgid and group inheritance from parent.
 func ApplyParentInheritance(repo *meta.RepoMetadata, targetPath string, isDir bool, mode, uid, gid uint32) (uint32, uint32, uint32) {
 	parent := ParentPath(targetPath)
 	attrs, err := lookupNode(repo, parent)
@@ -389,6 +411,7 @@ func ApplyParentInheritance(repo *meta.RepoMetadata, targetPath string, isDir bo
 	return mode, uid, gid
 }
 
+// CheckStickyDelete enforces sticky-bit deletion rules for targetPath.
 func CheckStickyDelete(ctx context.Context, repo *meta.RepoMetadata, parentPath, targetPath string) error {
 	parent, err := lookupNode(repo, parentPath)
 	if err != nil {
@@ -411,6 +434,7 @@ func CheckStickyDelete(ctx context.Context, repo *meta.RepoMetadata, parentPath,
 	return syscall.EPERM
 }
 
+// TouchDirectory refreshes the mtime and ctime of one directory node.
 func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now int64) {
 	if repo == nil {
 		return
@@ -427,6 +451,7 @@ func TouchDirectory(repo *meta.RepoMetadata, dirPath string, now int64) {
 	}
 }
 
+// TouchParentDirectory refreshes the parent of targetPath after mutation.
 func TouchParentDirectory(repo *meta.RepoMetadata, targetPath string, now int64) {
 	TouchDirectory(repo, ParentPath(targetPath), now)
 }

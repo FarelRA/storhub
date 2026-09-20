@@ -343,7 +343,7 @@ func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
 	now := int64(77)
 	renames := 0
 	hub := &stubHub{
-		createFile: func(_ context.Context, _ string, target string) (*meta.FileMeta, error) {
+		createFile: func(_ context.Context, _ string, _ string) (*meta.FileMeta, error) {
 			return &meta.FileMeta{Inode: 101, Size: 0, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}, nil
 		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {

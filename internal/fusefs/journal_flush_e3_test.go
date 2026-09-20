@@ -29,7 +29,7 @@ func (f *flushProbeHub) FlushJournals() {
 func flushFixture(t *testing.T, flags uint32) (*Filesystem, *flushProbeHub, *storhubHandle) {
 	t.Helper()
 	probe := &flushProbeHub{drainProbeHub: &drainProbeHub{stubHub: &stubHub{chunkSize: 64}}}
-	probe.patchRanges = func(edits []shfs.RangeEdit) (*meta.FileMeta, error) {
+	probe.patchRanges = func(_ []shfs.RangeEdit) (*meta.FileMeta, error) {
 		probe.record("patch")
 		return &meta.FileMeta{}, nil
 	}

@@ -1737,15 +1737,16 @@ func pcRunScenario(t *testing.T, index, total int, sc test.Scenario) test.Result
 	// the root to answer before running the scenario.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := os.Stat(mountPoint); err == nil {
+		_, err := os.Stat(mountPoint)
+		if err == nil {
 			break
-		} else if time.Now().After(deadline) {
+		}
+		if time.Now().After(deadline) {
 			_ = fsys.Unmount()
 			_ = fsys.Close()
 			return fail("mount point never became ready: %v", err)
-		} else {
-			time.Sleep(20 * time.Millisecond)
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	result := test.RunWithBudget(&pcSurface{mount: mountPoint}, []test.Scenario{sc}, pcScenarioBudget)[0]
 	if result.TimedOut {
@@ -1819,9 +1820,7 @@ func pcPreflight(t *testing.T) {
 // either way. Environments without a working FUSE skip instead of faking
 // results.
 func TestPosixConformFUSE(t *testing.T) {
-	if os.Getenv("STORHUB_CONFORMANCE") == "" {
-		t.Skip("conformance suite runs only with STORHUB_CONFORMANCE=1 (Phase 0 RED: known deviations open)")
-	}
+	test.RequireConformance(t)
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skipf("posix conformance over FUSE needs /dev/fuse: %v", err)
 	}
@@ -1831,7 +1830,7 @@ func TestPosixConformFUSE(t *testing.T) {
 	t.Logf("posix conformance over FUSE: %d scenarios, fresh mount each", total)
 	// PC_ONLY focuses one scenario by exact name (e.g. debugging a single
 	// RED case without paying for 30 fresh mounts). Empty runs the table.
-	only := os.Getenv("PC_ONLY")
+	only := test.ConformOnly()
 	results := make([]test.Result, 0, total)
 	for i, sc := range table {
 		if only != "" && sc.Name != only {

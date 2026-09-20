@@ -16,7 +16,7 @@ func TestPhase5ReadLaneReservation(t *testing.T) {
 	cfg.RateContentPerMin = 100
 	cfg.RateMaxWait = time.Hour
 	cfg.MaxConcurrentRequests = 16
-	g := newRateGovernor(cfg, nil, func(_ context.Context, d time.Duration) error { return nil })
+	g := newRateGovernor(cfg, nil, func(_ context.Context, _ time.Duration) error { return nil })
 	ctx := context.Background()
 	// Bulk content burst consumes the content-visible share (10 minus
 	// reserve). With points=10 the reserve is 1, so content caps at 9.

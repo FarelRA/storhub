@@ -155,7 +155,7 @@ func (d *storhubDirHandle) Seekdir(ctx context.Context, off uint64) syscall.Errn
 }
 
 // Releasedir implements gofusefs.FileReleasedirer.
-func (d *storhubDirHandle) Releasedir(ctx context.Context, releaseFlags uint32) {}
+func (d *storhubDirHandle) Releasedir(_ context.Context, _ uint32) {}
 
 // Lookup implements gofusefs.FileLookuper: READDIRPLUS asks the directory
 // handle, not the node, to fill each child's EntryOut. The snapshot

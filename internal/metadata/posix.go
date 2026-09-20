@@ -5,10 +5,13 @@ import (
 	"time"
 )
 
+// NodeKind discriminates file system node types.
 type NodeKind string
 
 const (
-	NodeKindFile    NodeKind = "file"
+	// NodeKindFile marks a regular file node.
+	NodeKindFile NodeKind = "file"
+	// NodeKindSymlink marks a symlink node.
 	NodeKindSymlink NodeKind = "symlink"
 )
 

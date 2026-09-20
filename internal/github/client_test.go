@@ -184,7 +184,7 @@ func TestUploadAssetFailsFastOnDistantReset(t *testing.T) {
 	t.Parallel()
 	var posts atomic.Int32
 	var sleeps []time.Duration
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		posts.Add(1)
 		rateLimitResponse(w, 43*time.Minute, true)
 	}))
@@ -212,7 +212,7 @@ func TestUploadAssetRetriesOnHeaderlessRateLimit(t *testing.T) {
 	// whose only signal is the message text, no x-ratelimit headers at
 	// all. The upload must be classified as rate limited and retried.
 	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if posts.Add(1) == 1 {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for user ID 69133683."}`))
@@ -434,7 +434,7 @@ func TestPrimaryRateLimitWaitHonorsResetOnce(t *testing.T) {
 	var gets atomic.Int32
 	var sleeps []time.Duration
 	resetAt := time.Now().Add(5 * time.Second)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if gets.Add(1) == 1 {
 			w.Header().Set("X-RateLimit-Limit", "5000")
 			w.Header().Set("X-RateLimit-Remaining", "0")
@@ -639,7 +639,7 @@ func TestDownloadAssetStreamBodySurvivesReturn(t *testing.T) {
 	mux.HandleFunc("/repos/o/p/releases/assets/7", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, fmt.Sprintf("/cdn/7?sp=r&se=%s&sig=testsig", time.Now().Add(5*time.Minute).UTC().Format(time.RFC3339)), http.StatusFound)
 	})
-	mux.HandleFunc("/cdn/7", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/cdn/7", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
 		flusher := w.(http.Flusher)
 		for written := 0; written < len(payload); {

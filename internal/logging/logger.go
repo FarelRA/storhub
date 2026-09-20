@@ -11,15 +11,22 @@ import (
 )
 
 const (
+	// LevelDebug enables debug logs.
 	LevelDebug = "debug"
-	LevelInfo  = "info"
-	LevelWarn  = "warn"
+	// LevelInfo enables info logs.
+	LevelInfo = "info"
+	// LevelWarn enables warning logs.
+	LevelWarn = "warn"
+	// LevelError enables error logs.
 	LevelError = "error"
 
-	FormatText   = "text"
+	// FormatText selects plain text log output.
+	FormatText = "text"
+	// FormatPretty selects human-friendly log output.
 	FormatPretty = "pretty"
 )
 
+// Options configures the logger: level, format, color, and output.
 type Options struct {
 	Level  string
 	Format string
@@ -27,6 +34,7 @@ type Options struct {
 	Output io.Writer
 }
 
+// NewLogger builds a structured logger from the options.
 func NewLogger(opts Options) *slog.Logger {
 	output := opts.Output
 	if output == nil {
@@ -66,18 +74,22 @@ func resolve(logger *slog.Logger) *slog.Logger {
 	return logger
 }
 
+// Debug logs a debug message through the logger.
 func Debug(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Debug(msg, args...)
 }
 
+// Info logs an info message through the logger.
 func Info(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Info(msg, args...)
 }
 
+// Warn logs a warning message through the logger.
 func Warn(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Warn(msg, args...)
 }
 
+// Error logs an error message through the logger.
 func Error(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Error(msg, args...)
 }

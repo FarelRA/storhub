@@ -36,7 +36,7 @@ func TestChownStagesClearedModeNonAdmin(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := chownNode(t, fsys, 0o4755)
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	var attr fuse.SetAttrIn
 	chownGIDSame(&attr)
 	var out fuse.AttrOut
@@ -67,7 +67,7 @@ func TestChownAdminKeepsBits(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := chownNode(t, fsys, 0o4755)
-	h := privOpenWriter(t, fsys, callerCtx(0, 0))
+	h := privOpenWriter(callerCtx(0, 0), t, fsys)
 	var attr fuse.SetAttrIn
 	attr.Valid = fuse.FATTR_UID | fuse.FATTR_GID
 	attr.Uid = 2000
@@ -91,7 +91,7 @@ func TestChownAfterExplicitChmodClears(t *testing.T) {
 	}
 	defer func() { _ = fsys.Close() }()
 	node := chownNode(t, fsys, 0o755)
-	h := privOpenWriter(t, fsys, callerCtx(1000, 1000))
+	h := privOpenWriter(callerCtx(1000, 1000), t, fsys)
 	var chmod fuse.SetAttrIn
 	chmod.Valid = fuse.FATTR_MODE
 	chmod.Mode = 0o4755

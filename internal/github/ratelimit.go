@@ -450,21 +450,21 @@ func (g *rateGovernor) reserve(cost int64, class requestClass) (time.Duration, *
 	now := g.now()
 
 	var wait time.Duration
-	if w, err := g.hourlyWaitLocked(now, cost, class); err != nil {
+	w, err := g.hourlyWaitLocked(now, cost, class)
+	if err != nil {
 		return 0, err
-	} else {
-		wait = maxDuration(wait, w)
 	}
+	wait = maxDuration(wait, w)
 	tokens, w, err := g.pacingWaitLocked(now, cost, class)
 	if err != nil {
 		return 0, err
 	}
 	wait = maxDuration(wait, w)
-	if w, err := g.windowWaitLocked(now, cost, class); err != nil {
+	w, err = g.windowWaitLocked(now, cost, class)
+	if err != nil {
 		return 0, err
-	} else {
-		wait = maxDuration(wait, w)
 	}
+	wait = maxDuration(wait, w)
 	if wait == 0 {
 		g.commitReservationLocked(now, cost, class, tokens)
 	}

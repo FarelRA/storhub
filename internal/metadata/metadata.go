@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// ChunkInfo is one content chunk record: size, offsets, and release asset.
 type ChunkInfo struct {
 	Size        int64  `json:"s"`
 	Offset      int64  `json:"o,omitempty"`
@@ -22,6 +23,7 @@ type ChunkInfo struct {
 // XAttrMap holds extended attributes as raw bytes. JSON values are base64
 type XAttrMap map[string][]byte
 
+// Clone returns a deep copy of the attribute map.
 func (x XAttrMap) Clone() XAttrMap {
 	if len(x) == 0 {
 		return nil
@@ -33,6 +35,7 @@ func (x XAttrMap) Clone() XAttrMap {
 	return dst
 }
 
+// FileMeta is one stored file or symlink entry with identity and times.
 type FileMeta struct {
 	// Normalize materializes Chunks as an empty (non-nil) slice for every
 	// regular file and symlink - it is NEVER nil after normalization, and
@@ -55,6 +58,7 @@ type FileMeta struct {
 	XAttrs XAttrMap `json:"x,omitempty"`
 }
 
+// Clone returns a deep copy of the file entry.
 func (f FileMeta) Clone() FileMeta {
 	clone := f
 	if f.Chunks != nil {
@@ -64,6 +68,7 @@ func (f FileMeta) Clone() FileMeta {
 	return clone
 }
 
+// DirMeta is one stored directory entry with identity and times.
 type DirMeta struct {
 	// Timestamps are Unix NANOSECONDS (time.Time.UnixNano), never seconds.
 	CreatedAt  int64    `json:"cr"`
@@ -77,18 +82,21 @@ type DirMeta struct {
 	XAttrs     XAttrMap `json:"x,omitempty"`
 }
 
+// Clone returns a deep copy of the directory entry.
 func (d DirMeta) Clone() DirMeta {
 	clone := d
 	clone.XAttrs = d.XAttrs.Clone()
 	return clone
 }
 
+// ReleaseRef is one chunk-holding release with its asset count.
 type ReleaseRef struct {
 	AssetCount int `json:"ac"`
 	// CreatedAt is a Unix NANOSECONDS timestamp (time.Time.UnixNano).
 	CreatedAt int64 `json:"cr"`
 }
 
+// RepoMetadata is the full stored tree of one project.
 type RepoMetadata struct {
 	Version    int    `json:"v"`
 	Project    string `json:"p"`
@@ -145,6 +153,10 @@ type noCopy struct{}
 func (*noCopy) Lock()   {}
 func (*noCopy) Unlock() {}
 
+// MetadataRevision keeps its name: it is referenced across storage,
+// REST, CLI, and test helpers, so the rename churn outweighs the stutter.
+//
+//revive:disable-next-line:exported
 type MetadataRevision struct {
 	CommitSHA string `json:"commit_sha"`
 	Message   string `json:"message"`
@@ -152,6 +164,7 @@ type MetadataRevision struct {
 	CommittedAt int64 `json:"committed_at"`
 }
 
+// NewRepoMetadata builds an empty stamped tree for the project.
 func NewRepoMetadata(project string) *RepoMetadata {
 	now := time.Now().UnixNano()
 	uid, gid := defaultOwnerIDs()
@@ -184,8 +197,6 @@ func newBareRepoMetadata() *RepoMetadata {
 	}
 }
 
-// Clone produces an independent snapshot of the tree. See Clone for the
-// sharing contract.
 // Dirs returns the stored directory map. READ-ONLY: do not write through it.
 func (m *RepoMetadata) Dirs() map[string]DirMeta { return m.dirs }
 
@@ -205,6 +216,7 @@ func (m *RepoMetadata) Chunk(id int64) (ChunkInfo, bool) {
 	return c, ok
 }
 
+// Clone produces an independent snapshot of the tree with shared indexes.
 func (m *RepoMetadata) Clone() *RepoMetadata {
 	// Sharing contract: the four stored maps are copied (so entry
 	// insert/remove/replace on either side is invisible to the other), but
@@ -321,6 +333,7 @@ func xattrMapFromStrings(src map[string]string) XAttrMap {
 	return dst
 }
 
+// Normalize canonicalizes the tree: maps, entries, order, and stats.
 func (m *RepoMetadata) Normalize(project string, now int64) {
 	// Version is preserved (it records the document/layout the tree came from
 	// or will become), never forced here: a legacy blob stays maxBlobVersion
@@ -381,6 +394,7 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 	// Indexes are rebuilt by RecomputeStats above; no second rebuild here.
 }
 
+// RecomputeStats rebuilds file counts, sizes, and asset counts from maps.
 func (m *RepoMetadata) RecomputeStats() {
 	totalFiles := 0
 	totalSize := int64(0)
@@ -459,6 +473,7 @@ func (m *RepoMetadata) PruneUnreferencedChunks() int {
 	return removed
 }
 
+// Normalize canonicalizes the directory entry in place.
 func (d *DirMeta) Normalize() {
 	// Mode 0 is an explicit deny-all (000), not an unset field: it
 	// survives verbatim. Creation defaults live on the creation paths
@@ -471,7 +486,8 @@ func (d *DirMeta) Normalize() {
 	d.XAttrs = normalizeXAttrs(d.XAttrs)
 }
 
-// Explicit-zero contract: a stored Mode 0 means chmod 000, and Normalize
+// Normalize canonicalizes the file entry in place under the
+// explicit-zero contract: a stored Mode 0 means chmod 000, and Normalize
 // preserves it. The unset sentinel for creates is handled one layer up:
 // UpsertFile routes fresh nodes through initializeNewFileIdentityFields
 // (which defaults a zero mode), EnsureDirectory stamps directory modes
@@ -505,6 +521,7 @@ func (f *FileMeta) Normalize() {
 	f.XAttrs = normalizeXAttrs(f.XAttrs)
 }
 
+// GetRelease returns a snapshot of the release ref for tag, if present.
 func (m *RepoMetadata) GetRelease(tag string) *ReleaseRef {
 	// Snapshot footgun (same as FindFile): the pointer targets a copy of the
 	// map value, so field mutations of the result are silently dropped.
@@ -516,6 +533,7 @@ func (m *RepoMetadata) GetRelease(tag string) *ReleaseRef {
 	return nil
 }
 
+// HasDirectory reports whether the directory key exists (root always does).
 func (m *RepoMetadata) HasDirectory(path string) bool {
 	path = normalizeStoredPath(path)
 	if path == "" {
@@ -525,6 +543,7 @@ func (m *RepoMetadata) HasDirectory(path string) bool {
 	return ok
 }
 
+// GetDirectory returns a snapshot of the directory entry, if present.
 func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
 	path = normalizeStoredPath(path)
 	if path == "" {
@@ -537,6 +556,7 @@ func (m *RepoMetadata) GetDirectory(path string) *DirMeta {
 	return nil
 }
 
+// EnsureDirectory creates the directory and missing parents as needed.
 func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 	path = normalizeStoredPath(path)
 	if path == "" || m.HasDirectory(path) {
@@ -557,6 +577,7 @@ func (m *RepoMetadata) EnsureDirectory(path string, now int64) {
 	m.recordDirPut(path, DirMeta{}, false)
 }
 
+// RemoveDirectory deletes the directory key, reporting whether it existed.
 func (m *RepoMetadata) RemoveDirectory(path string) bool {
 	path = normalizeStoredPath(path)
 	old, ok := m.dirs[path]
@@ -569,6 +590,7 @@ func (m *RepoMetadata) RemoveDirectory(path string) bool {
 	return true
 }
 
+// DirectoryChildren lists the immediate child dirs and files of a path.
 func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	path = normalizeStoredPath(path)
 	// Lazily rebuilt: every tracked mutation maintains the child lists
@@ -588,6 +610,7 @@ func (m *RepoMetadata) DirectoryChildren(path string) (dirs, files []string) {
 	return cloneStrings(d.childDirs[path]), cloneStrings(d.childFiles[path])
 }
 
+// EnsureRelease returns the release ref for tag, creating it when missing.
 func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) (*ReleaseRef, error) {
 	// Snapshot footgun (same as FindFile/GetRelease): the returned pointer
 	// targets a copy, so mutating its fields never reaches stored state.
@@ -624,6 +647,7 @@ func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) (*ReleaseRef, 
 	return &ref, nil
 }
 
+// UpsertFile stores the file entry, preserving identity across updates.
 func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 	name = normalizeStoredPath(name)
 	// Clone the caller's value so later mutations of its slices cannot
@@ -695,6 +719,7 @@ func (m *RepoMetadata) SetDirAtime(path string, atime int64) bool {
 	return false
 }
 
+// FindFilesByInode lists the file names sharing one inode.
 func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 	m.ensureIndexes()
 	names := m.derived.filesByInode[inode]
@@ -734,6 +759,7 @@ func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
 	m.recordDirPut(path, existing, existed)
 }
 
+// RemoveFile deletes the file key, reporting whether it existed.
 func (m *RepoMetadata) RemoveFile(name string) bool {
 	name = normalizeStoredPath(name)
 	old, ok := m.files[name]
@@ -747,6 +773,7 @@ func (m *RepoMetadata) RemoveFile(name string) bool {
 	return true
 }
 
+// RemoveRelease deletes the release ref, parking counts for reuse.
 func (m *RepoMetadata) RemoveRelease(tag string) bool {
 	tag = strings.TrimSpace(tag)
 	old, ok := m.releases[tag]
@@ -860,6 +887,7 @@ func (m *RepoMetadata) PutRelease(tag string, ref ReleaseRef) error {
 	return nil
 }
 
+// AllFiles returns deep copies of every file entry sorted by name.
 func (m *RepoMetadata) AllFiles() []FileMeta {
 	names := make([]string, 0, len(m.files))
 	for name := range m.files {
@@ -902,6 +930,7 @@ func (m *RepoMetadata) DirNLink(path string) int {
 	return 2 + len(m.derived.childDirs[path])
 }
 
+// FileNLink returns the hardlink count of the named file.
 func (m *RepoMetadata) FileNLink(name string) int {
 	file, ok := m.files[normalizeStoredPath(name)]
 	if !ok {
@@ -910,6 +939,7 @@ func (m *RepoMetadata) FileNLink(name string) int {
 	return m.NLink(file.Inode)
 }
 
+// NLink returns the hardlink count of one inode.
 func (m *RepoMetadata) NLink(inode uint64) int {
 	m.ensureIndexes()
 	return len(m.derived.filesByInode[inode])

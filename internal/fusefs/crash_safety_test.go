@@ -1,3 +1,4 @@
+// Package fusefs tests crash safety of the FUSE write path.
 package fusefs
 
 import (

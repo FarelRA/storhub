@@ -27,7 +27,8 @@ const (
 	// DefaultChunkSize and DefaultBufferSize are aliases of the chunking
 	// package's constants: the GitHub release-asset ceiling has one owner,
 	// so a limit change cannot drift between the two spellings.
-	DefaultChunkSize  = chunking.DefaultChunkSize
+	DefaultChunkSize = chunking.DefaultChunkSize
+	// DefaultBufferSize is the default per-operation transfer buffer size.
 	DefaultBufferSize = chunking.DefaultBufferSize
 	// MaxBufferSize bounds the per-operation transfer buffer Validate
 	// accepts. Buffers are allocated per sync.Pool New, so an unbounded
@@ -48,14 +49,19 @@ const (
 	defaultMaxConsecutiveCommitFailures = 8
 )
 
+// AtimePolicy selects the access-time update policy.
 type AtimePolicy string
 
 const (
+	// AtimeRelatime updates atime at most once per interval.
 	AtimeRelatime AtimePolicy = "relatime"
-	AtimeStrict   AtimePolicy = "strictatime"
-	AtimeNo       AtimePolicy = "noatime"
+	// AtimeStrict updates atime on every read.
+	AtimeStrict AtimePolicy = "strictatime"
+	// AtimeNo never updates atime.
+	AtimeNo AtimePolicy = "noatime"
 )
 
+// Config tunes a StorHub client: endpoints, sizing, retries, and logging.
 type Config struct {
 	// Logger, when set, is the logger. Supplying it together with any of
 	// the LogLevel/LogFormat/LogColor/LogOutput knobs fails Validate
@@ -173,6 +179,7 @@ const (
 	PatienceUnit = 5 * time.Second
 )
 
+// Default returns Config with all defaults applied.
 func Default() Config {
 	return Config{
 		APIBaseURL:            defaultAPIBaseURL,

@@ -583,8 +583,8 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 		return fuse.ReadResultData(nil), 0, true
 	}
 	limit := int64(len(dest))
-	if max := logical - off; limit > max {
-		limit = max
+	if capN := logical - off; limit > capN {
+		limit = capN
 	}
 	dirty := append([]ByteRange(nil), state.dirtyRanges...)
 	temp := state.temp

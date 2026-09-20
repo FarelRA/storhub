@@ -63,6 +63,7 @@ func normalizeStoredPath(value string) string {
 	return cleaned
 }
 
+// ParentPath returns the parent directory key of a stored path.
 func ParentPath(value string) string {
 	value = normalizeStoredPath(value)
 	if value == "" {
@@ -75,6 +76,7 @@ func ParentPath(value string) string {
 	return parent
 }
 
+// IsParentOrSame reports whether child equals parent or lives under it.
 func IsParentOrSame(parent, child string) bool {
 	parent = normalizeStoredPath(parent)
 	child = normalizeStoredPath(child)
@@ -84,6 +86,7 @@ func IsParentOrSame(parent, child string) bool {
 	return child == parent || strings.HasPrefix(child, parent+"/")
 }
 
+// RemapPath rewrites target from under oldBase to under newBase.
 func RemapPath(oldBase, newBase, target string) string {
 	if target == oldBase {
 		return newBase
