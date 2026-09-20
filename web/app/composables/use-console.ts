@@ -5,7 +5,7 @@ import type {
   EntryInfo,
   Principal,
   ProjectStats,
-  PruneResult,
+  PurgeResult,
   Revision,
   Share,
 } from '~/utils/api-types'
@@ -486,36 +486,12 @@ export function useConsole() {
     return postOp(`Rollback to ${sha.slice(0, 10)}`, 'rollback', { commit_sha: sha })
   }
 
-  interface PurgeResult {
-    project?: string
-    status?: string
-    deleted_releases?: number
-    deleted_assets?: number
-  }
-
-  async function purgeUntracked(): Promise<boolean> {
-    const result = await run('Purge untracked', async () => {
-      const payload = await postJSON<PurgeResult>(projectURL('/ops/purge'), {})
-      await refreshAll()
-      return payload
-    })
-    if (result) {
-      toasts.info(`Purged ${result.deleted_releases ?? 0} releases, ${result.deleted_assets ?? 0} assets`)
-    }
-    return result !== null
-  }
-
-  // Revert a single path (file or directory subtree) to a historical revision,
-  // leaving the rest of the tree untouched. A revert is a new commit.
-  async function revertPath(path: string, sha: string): Promise<boolean> {
-    return postOp(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
-  }
-
-  // Granular prune: reclaim orphaned index objects, untracked assets, or
+  // Granular purge: reclaim orphaned index objects, untracked assets, or
   // (git backend) collapsed history. Returns the typed result for display.
-  async function prune(scope: string, keep: number, dryRun: boolean): Promise<PruneResult | null> {
-    return run(`Prune ${scope}`, async () => {
-      const payload = await postJSON<PruneResult>(projectURL('/ops/prune'), {
+  // A bare call (no scope) purges untracked assets, the classic reclaim.
+  async function purge(scope = 'assets', keep = 0, dryRun = false): Promise<PurgeResult | null> {
+    return run(`Purge ${scope}`, async () => {
+      const payload = await postJSON<PurgeResult>(projectURL('/ops/purge'), {
         scope,
         keep,
         dry_run: dryRun,
@@ -523,6 +499,12 @@ export function useConsole() {
       if (!dryRun) await refreshAll()
       return payload
     })
+  }
+
+  // Revert a single path (file or directory subtree) to a historical revision,
+  // leaving the rest of the tree untouched. A revert is a new commit.
+  async function revertPath(path: string, sha: string): Promise<boolean> {
+    return postOp(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
   }
 
   async function createShare(path: string, expiresInSeconds?: number): Promise<Share | null> {
@@ -731,8 +713,7 @@ export function useConsole() {
     deleteProject,
     rollbackRevision,
     revertPath,
-    purgeUntracked,
-    prune,
+    purge,
     downloadEntry,
     copyDirectLink,
     focusEntry,

@@ -271,7 +271,7 @@ func (m *RepoMetadata) checkTotals(totalFiles int, totalSize int64) error {
 
 	// Note: chunk.Release tags are intentionally allowed to reference tags
 	// absent from the Releases catalog - DeleteRelease hides catalog entries
-	// while live chunks keep pointing at them, and PurgeUntracked treats any
+	// while live chunks keep pointing at them, and purge treats any
 	// chunk-referenced release as tracked.
 	assetCounts := make(map[string]int)
 	for _, chunk := range m.chunks {

@@ -46,7 +46,7 @@ func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 	fresh.Files()["fresh.txt"] = metadata.FileMeta{Chunks: []int64{chunkID}, Size: 1, Inode: inode}
 	backend.setMetadata(t, project, fresh)
 
-	_, _ = hub.PurgeUntracked(project)
+	_, _ = hub.PurgeProject(project, "assets", 0, false)
 	if backend.repo(project).releasesByTag["v-orphan"] == nil {
 		t.Fatal("purge deleted a release committed after the cached snapshot (stale read)")
 	}
@@ -82,7 +82,7 @@ func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 		return false
 	})
 
-	result, err := hub.PurgeUntracked(project)
+	result, err := hub.PurgeProject(project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 // Purge must refuse when the project has uncommitted in-flight state:
 // classifying against a dirty tree (or overwriting it on prune-commit)
 // risks deleting releases a pending commit is about to reference.
-func TestPurgeRefusesDirtyProject(t *testing.T) {
+func TestPurgeAssetsRefusesDirtyProject(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -119,7 +119,7 @@ func TestPurgeRefusesDirtyProject(t *testing.T) {
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
-	if _, err := hub.PurgeUntracked(project); err == nil {
+	if _, err := hub.PurgeProject(project, "assets", 0, false); err == nil {
 		t.Fatal("purge must refuse a project with uncommitted dirty state")
 	}
 }
@@ -220,7 +220,7 @@ func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	}
 	// And a full purge afterwards still deletes nothing (assets reaped
 	// above are gone; the fence plus fresh classification agree).
-	res, err := hub.PurgeUntrackedContext(ctx, project)
+	res, err := hub.PurgeContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}

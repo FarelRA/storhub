@@ -434,7 +434,7 @@ func (m *RepoMetadata) RecomputeStats() {
 // and the catalog grows monotonically until metadata hits the size ceiling
 // and every subsequent commit fails permanently. Callers must only prune at
 // points where no retained history still needs the records (storhub prunes
-// immediately before squashing git history, after PurgeUntracked has
+// immediately before squashing git history, after purge has
 // reclaimed the corresponding remote assets) - a rollback to an older
 // revision restores its own chunk catalog wholesale.
 //

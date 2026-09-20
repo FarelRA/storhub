@@ -211,7 +211,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"sync", "--token", "x", "demo"},
 		{"revisions", "--token", "x", "demo"},
 		{"rollback", "--token", "x", "demo", "deadbeef"},
-		{"prune", "--token", "x", "demo", "objects", "--dry-run"},
+		{"purge", "--token", "x", "demo", "objects", "--dry-run"},
 		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
 		{"serve", "--token", "x", "demo", mountDir, "--allow-anonymous"},
@@ -223,7 +223,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	// Status chatter belongs on stderr; stdout carries only data.
 	chatter := stderr()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "truncated", "changed mode of docs/readme.txt to 0640", "changed ownership of docs/readme.txt to 1:2", "touched docs/readme.txt", "symlinked", "linked", "synced demo", "rolled back demo to deadbeef", "would prune demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "truncated", "changed mode of docs/readme.txt to 0640", "changed ownership of docs/readme.txt to 1:2", "touched docs/readme.txt", "symlinked", "linked", "synced demo", "rolled back demo to deadbeef", "would purge demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
 		if !strings.Contains(chatter, want) {
 			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
@@ -494,9 +494,9 @@ func TestNegativeChunkSizeIsUsageError(t *testing.T) {
 	}
 }
 
-// TestPruneScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
+// TestPurgeScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
 // be rejected by the CLI as usage errors (exit 2) before any hub exists.
-func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
+func TestPurgeScopeAndKeepAreUsageErrors(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	var created int
@@ -505,22 +505,22 @@ func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
 		return &fakeHub{t: t}, nil
 	}
 	app, _, _ := newTestApp(t)
-	err := app.Run([]string{"prune", "--token", "x", "demo", "bogus"})
-	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "prune scope") {
+	err := app.Run([]string{"purge", "--token", "x", "demo", "bogus"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "purge scope") {
 		t.Fatalf("bad scope must be a usage error, got %v", err)
 	}
-	err = app.Run([]string{"prune", "--token", "x", "demo", "objects", "--keep", "0"})
+	err = app.Run([]string{"purge", "--token", "x", "demo", "objects", "--keep", "0"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
 		t.Fatalf("--keep 0 must be a usage error, got %v", err)
 	}
-	err = app.Run([]string{"prune", "--token", "x", "demo", "all", "--keep", "-3"})
+	err = app.Run([]string{"purge", "--token", "x", "demo", "all", "--keep", "-3"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
 		t.Fatalf("negative --keep must be a usage error, got %v", err)
 	}
 	if created != 0 {
 		t.Fatalf("usage errors must not build a hub, created=%d", created)
 	}
-	if err := app.Run([]string{"prune", "--token", "x", "demo", "history", "--keep", "2"}); err != nil {
+	if err := app.Run([]string{"purge", "--token", "x", "demo", "history", "--keep", "2"}); err != nil {
 		t.Fatalf("valid prune must still run: %v", err)
 	}
 }
@@ -882,11 +882,8 @@ func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevis
 func (h *fakeHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
 	return nil
 }
-func (h *fakeHub) PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error) {
-	return &storhub.PurgeResult{}, nil
-}
-func (h *fakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
-	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
+func (h *fakeHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
+	return &storhub.PurgeResult{Scope: storhub.PurgeScope(scope), DryRun: dryRun}, nil
 }
 func (h *fakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return fakeMount{}, nil

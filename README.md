@@ -53,7 +53,7 @@ StorHub is not intended to replace a local SSD filesystem or a database storage 
 - Supports upload, replace, patch, append, truncate, and download
 - Exposes filesystem-style operations such as create, rename, readdir, stat, and delete
 - Tracks POSIX-like metadata including mode, uid, gid, timestamps, symlinks, hardlinks, and xattrs
-- Supports metadata revision history, rollback, per-path revert, prune, cleanup, and purge operations
+- Supports metadata revision history, rollback, per-path revert, cleanup, and purge operations
 - Provides a public FUSE facade for mounted access
 - Includes a CLI for terminal-first workflows
 
@@ -134,9 +134,9 @@ Common commands:
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
 - inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
-- recovery and cleanup: `rollback` (whole index), `purge` (untracked releases and assets), `prune <project> [objects|assets|history|all]` (reclaims garbage under the full-history retention policy; supports `--dry-run` and `--keep`)
+- recovery and cleanup: `rollback` (whole index), `purge <project> [objects|assets|history|all]` (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dry-run` and `--keep`)
 - admin: `delete-project` (removes the project repository outright; `--yes` is mandatory)
-- local cache: `cache prune` (reclaims cache directories left by crashed processes; offline, no token needed)
+- local cache: `cache purge` (reclaims cache directories left by crashed processes; offline, no token needed)
 - web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
 - mount: `mount`
 - both at once: `serve` (FUSE mount + REST API from one process over one shared hub, so writes through either surface are immediately visible to the other)
@@ -211,7 +211,7 @@ storhub/
 
 Lifecycle: project dirs are removed on clean `Shutdown`; directories
 left by crashed processes are reclaimed at next startup, by `mount`,
-and by `storhub cache prune` (offline, no token needed). A directory
+and by `storhub cache purge` (offline, no token needed). A directory
 held by a live process is never touched: concurrent mounts fail fast
 with the holder's pid instead. Out-of-space failures name the exact
 cache directory and point at `STORHUB_CACHE_DIR`.
@@ -354,12 +354,12 @@ Revision and maintenance APIs:
   the reverted subtree's assets are validated against live releases before
   and after, so restoring a path whose bytes were purged fails loudly
 - `PurgeUntracked`
-- `Prune` / `PruneContext` / `PruneProject`: granular reclamation under the
+- `Purge` / `PurgeContext` / `PurgeProject`: granular reclamation under the
   full-history retention policy; scopes `objects` (index objects referenced
   by no retained manifest), `assets` (unreferenced release assets),
   `history` (collapse old manifests into one checkpoint, git backend only),
   and `all`; `keep` is a compaction threshold, `dryRun` reports without
-  deleting, and prune refuses while uncommitted metadata changes are pending
+  deleting, and purge refuses while uncommitted metadata changes are pending
 - `CleanupProject`
 - `DeleteRelease`
 - `DeleteProject`
@@ -400,7 +400,7 @@ REST endpoint groups:
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...`: streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
 - `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap: storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...`: extended attribute inspection and mutation
-- `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge, prune
+- `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge
 - `?sync=1` on any mutating endpoint drains the project's journal before responding (fsync-class: pre-call data is remote-durable on success). Drain failure answers `500` naming the project; the mutation is already published and journaled, so retry-or-verify, never silent loss
 - journal group-commit window: acknowledged mutations are journal-persistent for same-machine recovery before acknowledgment, but the journal fsync itself is coalesced on a short window (100ms), so a hard crash inside the window can drop acknowledged-but-uncommitted ops. Anything that survived the window redrives from the journal; only `?sync=1` (or CLI `--sync`, or session sync/close with sync) makes a call remote-durable before it returns
 - `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}`: share management for the project (creator or admin)
@@ -415,7 +415,7 @@ Authenticated REST:
 - authorization uses StorHub owner/group/mode metadata, so REST operations follow UNIX-style checks instead of a separate ACL model
 - directory traversal requires execute/search permission on each ancestor directory
 - create, unlink, rename, and rmdir operations are authorized from parent directory write+execute permission
-- rollback, revert-path, purge, prune, and project deletion are restricted to admin identities; `chown` of ownership is admin-only, but a file owner may change the group to any group they belong to (owner chgrp, no admin needed)
+- rollback, revert-path, purge, and project deletion are restricted to admin identities; `chown` of ownership is admin-only, but a file owner may change the group to any group they belong to (owner chgrp, no admin needed)
 
 Minimal authenticated REST setup:
 
@@ -606,7 +606,7 @@ Storage model:
 - logical index: `.storhub/index.json` manifest plus content-addressed objects under `.storhub/objects/` (v5 split layout); legacy projects keep a `.storhub/metadata.json` blob until their first write splits it
 - history: Git commit history of the index (manifest revisions plus the objects they reference)
 - rollback: republish an earlier revision's snapshot as a new commit (a revert, not a history rewrite); `revert-path` does the same for a single path
-- prune: reclaim what no retained manifest references (orphaned objects, unreferenced assets) and compact history on the git backend
+- purge: reclaim what no retained manifest references (orphaned objects, unreferenced assets) and compact history on the git backend
 
 Writeback model:
 

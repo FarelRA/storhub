@@ -514,8 +514,8 @@ func (a *restConformAdapter) Sync(path string) error {
 	// No standalone flush endpoint exists; a dry-run prune with ?sync=1
 	// drains the project journal without mutating anything, which is
 	// exactly the durability the scenario pins.
-	target := pcBase(a.project) + "/ops/prune?sync=1"
-	status, _, data := a.doJSON(http.MethodPost, target, pruneRequest{Scope: "all", DryRun: true}, nil)
+	target := pcBase(a.project) + "/ops/purge?sync=1"
+	status, _, data := a.doJSON(http.MethodPost, target, purgeRequest{Scope: "all", DryRun: true}, nil)
 	if status != http.StatusOK {
 		return mapPCStatus(status, data, "sync "+path)
 	}

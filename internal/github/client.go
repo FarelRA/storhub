@@ -1044,7 +1044,7 @@ func (c *Client) uploadAssetAttempt(ctx context.Context, endpoint, assetName str
 		// asset exists unless the full body lands - and the bodyFactory
 		// rewinds the reader for every attempt. A lost response after
 		// finalize can leave an orphan under this attempt's random name;
-		// unreferenced assets are exactly what PurgeUntracked removes.
+		// unreferenced assets are exactly what the assets purge scope removes.
 	}, size)
 	if err != nil {
 		return 0, err

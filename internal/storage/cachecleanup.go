@@ -238,7 +238,7 @@ func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
 // ReapOrphanedCaches reclaims storhub cache leftovers in the standard
 // locations: the git base, the object cache base, crashed-upload spool
 // files (by mtime), and the legacy temp-directory pattern. Used by hub
-// startup and by `storhub cache prune`.
+// startup and by `storhub cache purge`.
 func ReapOrphanedCaches(logger *slog.Logger) int {
 	return ReapOrphanedCachesForBase(logger, storcfg.CacheBase())
 }

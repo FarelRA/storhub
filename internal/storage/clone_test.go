@@ -616,7 +616,7 @@ func TestCloneRangePurgeSafety(t *testing.T) {
 			}
 		}
 	}
-	purged, err := hub.PurgeUntrackedContext(ctx, project)
+	purged, err := hub.PurgeContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge with survivor: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestCloneRangePurgeSafety(t *testing.T) {
 			t.Fatal("orphaned asset not classified for purge after deleting all clones")
 		}
 	}
-	purged, err = hub.PurgeUntrackedContext(ctx, project)
+	purged, err = hub.PurgeContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge after delete all: %v", err)
 	}

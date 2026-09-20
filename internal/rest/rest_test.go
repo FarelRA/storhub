@@ -44,11 +44,11 @@ func TestRESTRevertPathAndPrune(t *testing.T) {
 	}
 
 	// Prune returns a typed result echoing scope + dry_run.
-	pruneResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune",
-		pruneRequest{Scope: "objects", DryRun: true}, http.StatusOK)
-	var pr pruneResponse
+	pruneResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/purge",
+		purgeRequest{Scope: "objects", DryRun: true}, http.StatusOK)
+	var pr purgeResponse
 	decodeJSONBody(t, pruneResp, &pr)
-	if pr.Scope != "objects" || !pr.DryRun || pr.Status != "pruned" {
+	if pr.Scope != "objects" || !pr.DryRun || pr.Status != "purged" {
 		t.Fatalf("unexpected prune response: %+v", pr)
 	}
 }
@@ -1268,21 +1268,7 @@ func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, c
 	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
 }
 
-func (c *fakeRESTClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
-	return &storage.PurgeResult{}, nil
-}
-
-func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.getExistingProject(project); err != nil {
-		return err
-	}
-	c.revertPaths = append(c.revertPaths, path+"@"+commitSHA)
-	return nil
-}
-
-func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+func (c *fakeRESTClient) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := c.getExistingProject(project); err != nil {
@@ -1293,9 +1279,19 @@ func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string
 	switch scope {
 	case "objects", "assets", "history", "all":
 	default:
-		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|all)", scope)
+		return nil, fmt.Errorf("unknown purge scope %q (want objects|assets|history|all)", scope)
 	}
-	return &storage.PruneResult{Scope: storage.PruneScope(scope), DryRun: dryRun}, nil
+	return &storage.PurgeResult{Scope: storage.PurgeScope(scope), DryRun: dryRun}, nil
+}
+
+func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.getExistingProject(project); err != nil {
+		return err
+	}
+	c.revertPaths = append(c.revertPaths, path+"@"+commitSHA)
+	return nil
 }
 
 func (c *fakeRESTClient) DeleteProjectContext(ctx context.Context, project string) error {

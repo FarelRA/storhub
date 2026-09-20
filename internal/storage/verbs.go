@@ -315,7 +315,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 		return nil, err
 	}
 
-	// Register the release holding the new chunks so PurgeUntracked cannot
+	// Register the release holding the new chunks so purge cannot
 	// delete live data. buildPatchedChunksFresh EnsureReleases only on a local
 	// clone that is discarded here. Mutations apply to a private COW copy;
 	// publish only on success.
@@ -407,7 +407,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 		return nil, err
 	}
 
-	// Register the release holding the new chunks so PurgeUntracked cannot
+	// Register the release holding the new chunks so purge cannot
 	// delete live data. buildRewrittenChunks EnsureReleases only on a local
 	// clone that is discarded here. Mutations apply to a private COW copy;
 	// publish only on success.
@@ -1013,7 +1013,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 		pm.sizeCapped = true
 		h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, afterSize, h.config.Now().UTC().Sub(started))
 		logging.Error(h.projectLogger(project), "metadata update rejected: single index object over ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
-		return fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run PurgeUntracked to shrink", maxMetadataBytes)
+		return fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run purge to shrink", maxMetadataBytes)
 	}
 	// The tree exceeds the old blob ceiling but splits into small
 	// objects: admitted under the split layout.

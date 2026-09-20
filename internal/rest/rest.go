@@ -114,8 +114,7 @@ type Client interface {
 	ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
 	RevertPathContext(ctx context.Context, project, path, commitSHA string) error
-	PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error)
-	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error)
+	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error)
 	DeleteProjectContext(ctx context.Context, project string) error
 	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	// DrainProjectContext blocks until everything published before the call
@@ -437,7 +436,6 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/rollback", h.handleRollback)
 	r.Post("/ops/revert-path", h.handleRevertPath)
 	r.Post("/ops/purge", h.handlePurge)
-	r.Post("/ops/prune", h.handlePrune)
 	r.Get("/shares", h.handleProjectSharesGet)
 	r.Post("/shares", h.handleProjectSharesPost)
 	r.Get("/shares/{shareID}", h.handleProjectShareGet)
@@ -840,7 +838,7 @@ func mappedCode(status int) string {
 // would surface as 500s echoing internal wording.
 //
 // Canonical query/body parsers: exactly three — parseNonNegativeInt,
-// parseBoolStrict, parsePruneScope. Do not add a fourth idiom; CLI-side
+// parseBoolStrict, parsePurgeScope. Do not add a fourth idiom; CLI-side
 // parsing mirrors parseNonNegativeInt via parseNonNegativeArg (usageError).
 
 func requireNonEmptyPath(field, value string) error {
@@ -881,19 +879,19 @@ func parseBoolStrict(raw, field string) (bool, error) {
 	}
 }
 
-// parsePruneScope validates a prune scope against the storage constants
+// parsePurgeScope validates a purge scope against the storage constants
 // (the single source of the objects|assets|history|all set). Empty means
 // "all". Unknown scopes answer 400 with the known set as guidance.
-func parsePruneScope(raw string) (storage.PruneScope, error) {
+func parsePurgeScope(raw string) (storage.PurgeScope, error) {
 	scope := strings.TrimSpace(raw)
 	if scope == "" {
-		return storage.PruneAll, nil
+		return storage.PurgeAll, nil
 	}
-	switch storage.PruneScope(scope) {
-	case storage.PruneObjects, storage.PruneAssets, storage.PruneHistory, storage.PruneAll:
-		return storage.PruneScope(scope), nil
+	switch storage.PurgeScope(scope) {
+	case storage.PurgeObjects, storage.PurgeAssets, storage.PurgeHistory, storage.PurgeAll:
+		return storage.PurgeScope(scope), nil
 	default:
-		return "", errBadRequest(`prune scope must be one of "objects", "assets", "history", "all"`)
+		return "", errBadRequest(`purge scope must be one of "objects", "assets", "history", "all"`)
 	}
 }
 

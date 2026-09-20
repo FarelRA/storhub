@@ -127,18 +127,18 @@ describe('rollbackRevision payload', () => {
   })
 })
 
-describe('prune payload', () => {
+describe('purge payload', () => {
   it('POSTs {scope, keep, dry_run:true} and skips the refresh for dry runs', async () => {
     const c = useConsole()
-    await c.prune('history', 1, true)
-    expect(bodyOf('/ops/prune')).toEqual({ scope: 'history', keep: 1, dry_run: true })
+    await c.purge('history', 1, true)
+    expect(bodyOf('/ops/purge')).toEqual({ scope: 'history', keep: 1, dry_run: true })
     expect(calls.some((x) => x.url.includes('/children'))).toBe(false)
   })
 
-  it('POSTs {scope, keep, dry_run:false} and refreshes after a real prune', async () => {
+  it('POSTs {scope, keep, dry_run:false} and refreshes after a real purge', async () => {
     const c = useConsole()
-    await c.prune('objects', 1, false)
-    expect(bodyOf('/ops/prune')).toEqual({ scope: 'objects', keep: 1, dry_run: false })
+    await c.purge('objects', 1, false)
+    expect(bodyOf('/ops/purge')).toEqual({ scope: 'objects', keep: 1, dry_run: false })
     expect(calls.some((x) => x.url.includes('/projects/demo/children'))).toBe(true)
   })
 })

@@ -566,17 +566,11 @@ func (c *authorizedClient) RevertPathContext(ctx context.Context, project, path,
 	}
 	return c.base.RevertPathContext(ctx, project, path, commitSHA)
 }
-func (c *authorizedClient) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
+func (c *authorizedClient) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
 	if !c.principal.Admin {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.PurgeUntrackedContext(ctx, project)
-}
-func (c *authorizedClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
-	if !c.principal.Admin {
-		return nil, errForbidden("permission denied")
-	}
-	return c.base.PruneContext(ctx, project, scope, keep, dryRun)
+	return c.base.PurgeContext(ctx, project, scope, keep, dryRun)
 }
 func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project string) error {
 	if !c.principal.Admin {

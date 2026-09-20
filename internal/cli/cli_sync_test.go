@@ -70,7 +70,7 @@ func TestCLISyncDrainFailureLoud(t *testing.T) {
 // TestCLISyncCoversEveryMutation walks every mutating command with --sync
 // and asserts exactly one drain call. Read-only commands (download, ls,
 // stat, cat, revisions), long-running surfaces (mount, rest, serve), and
-// local-only maintenance (cache prune) take no --sync flag by design.
+// local-only maintenance (cache purge) take no --sync flag by design.
 func TestCLISyncCoversEveryMutation(t *testing.T) {
 	localFile := filepath.Join(t.TempDir(), "upload.txt")
 	if err := os.WriteFile(localFile, []byte("hello world"), 0o644); err != nil {
@@ -91,7 +91,7 @@ func TestCLISyncCoversEveryMutation(t *testing.T) {
 		{name: "patch", args: []string{"patch", "--token", "x", "--sync", "demo", "docs/f.txt", "1", "2", "x"}},
 		{name: "rollback", args: []string{"rollback", "--token", "x", "--sync", "demo", "deadbeef"}},
 		{name: "purge", args: []string{"purge", "--token", "x", "--sync", "demo"}},
-		{name: "prune", args: []string{"prune", "--token", "x", "--sync", "demo", "objects"}},
+		{name: "prune", args: []string{"purge", "--token", "x", "--sync", "demo", "objects"}},
 		{name: "delete-project", args: []string{"delete-project", "--token", "x", "--sync", "--yes", "demo"}},
 	}
 	for _, tc := range cases {

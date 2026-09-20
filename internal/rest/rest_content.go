@@ -962,5 +962,5 @@ func parseByteRange(header string, size int64) (start, end int64, partial bool, 
 }
 
 // NOTE: query parsers live in rest.go as the canonical three
-// (parseNonNegativeInt/parseBoolStrict/parsePruneScope); do not add
+// (parseNonNegativeInt/parseBoolStrict/parsePurgeScope); do not add
 // handler-local variants here.

@@ -15,11 +15,6 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
-type PurgeResult struct {
-	DeletedReleases int `json:"deleted_releases"`
-	DeletedAssets   int `json:"deleted_assets"`
-}
-
 func (h *StorHub) DeleteFile(project, fileName string) error {
 	return h.DeleteFileContext(context.Background(), project, fileName)
 }
@@ -230,9 +225,6 @@ func (h *StorHub) projectHasUncommittedState(project string) bool {
 // lease), which this codebase has no primitive for yet. The gate removes
 // the cheap, common case — a visibly dirty tree — while true
 // concurrent-write-during-purge remains callers-must-quiesce territory.
-func (h *StorHub) PurgeUntracked(project string) (*PurgeResult, error) {
-	return h.PurgeUntrackedContext(context.Background(), project)
-}
 
 // purge task types, hoisted so the purge tail and the prune-assets dry-run
 // share one classification (audit 18: dry-run must report would-delete
@@ -253,39 +245,38 @@ func purgeIsRetryable(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.IsRetryable()
 }
 
-func (h *StorHub) PurgeUntrackedContext(ctx context.Context, project string) (*PurgeResult, error) {
+func purgeAssetsLive(h *StorHub, ctx context.Context, project string, res *PurgeResult) error {
 	if err := validateProject(project); err != nil {
-		return nil, err
+		return err
 	}
 	// Fail closed on in-flight state: a dirty tree means a mutation is
-	// still converging, and classifying (or prune-committing) against it
-	// risks deleting releases a pending commit is about to reference.
-	// Flush first, then purge.
+	// still converging, and classifying against it risks deleting
+	// releases a pending commit is about to reference. Flush first,
+	// then purge.
 	if h.projectHasUncommittedState(project) {
-		return nil, fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
+		return fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
 	}
 	releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// Optimistic fence against concurrent writers landing between
 	// classification and deletion (audit: purge check-then-act race).
 	releaseTasks, assetTasks, err = h.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	result := &PurgeResult{}
-	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, result); err != nil {
-		return nil, err
+	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, res); err != nil {
+		return err
 	}
 	// Drop chunk records and squash only when something actually changed
 	// (audit 18): the old tail ran UpdateRepoMetadataContext +
 	// commitProjectMetadata unconditionally, so a no-op purge still
 	// dirtied the tree and landed a manifest commit per run.
-	if err := h.pruneAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0); err != nil {
-		return nil, err
+	if err := h.purgeAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0); err != nil {
+		return err
 	}
-	return result, nil
+	return nil
 }
 
 // classifyUntracked loads fresh truth (never the cached snapshot: files
@@ -436,7 +427,7 @@ func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTa
 	return nil
 }
 
-// pruneAndSquashUntracked drops chunk records nothing references anymore
+// purgeAndSquashUntracked drops chunk records nothing references anymore
 // and squashes legacy history. This is only safe at this exact point: the
 // deletes above reclaimed the remote assets of unreferenced chunks, so no
 // retained revision can still download them (rollback across a purge is
@@ -449,7 +440,7 @@ func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTa
 // tree dirty unconditionally, so calling it for a zero-prune run would
 // still land a manifest commit. Skipping the Update/commit/squash tail on
 // a true no-op keeps purge side-effect free.
-func (h *StorHub) pruneAndSquashUntracked(ctx context.Context, project string, hadDeletes bool) error {
+func (h *StorHub) purgeAndSquashUntracked(ctx context.Context, project string, hadDeletes bool) error {
 	if !hadDeletes {
 		// Read-only no-op probe on fresh truth: a clone the Update never
 		// sees, so the shared tree stays clean when there is nothing to
@@ -514,7 +505,7 @@ func (h *StorHub) pruneAndSquashUntracked(ctx context.Context, project string, h
 //
 // WHAT IT RECLAIMS: chunk catalog records (ChunkInfo entries keyed by
 // chunk ID) that no root references. It never touches release assets:
-// the remote bytes stay until the existing PurgeUntracked reclaims
+// the remote bytes stay until the existing purge reclaims
 // them, so a catalog prune can never destroy bytes a stale reader
 // still needs. Existing cleanup/purge semantics are untouched; this
 // is a separate entry point sharing only the dirty-gate vocabulary.

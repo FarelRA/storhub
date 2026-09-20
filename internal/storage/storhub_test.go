@@ -964,7 +964,7 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 	}
 }
 
-func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
+func TestPurgeAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -1007,7 +1007,7 @@ func TestPurgeUntrackedRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	backend.addAssetToRelease(t, "project-purge", manualRelease.tag, "manual.bin", []byte("manual orphan"))
 	backend.addAssetToRelease(t, "project-purge", trackedRelease, "extra.bin", []byte("extra orphan"))
 
-	result, err := hub.PurgeUntracked("project-purge")
+	result, err := hub.PurgeProject("project-purge", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
@@ -4659,8 +4659,8 @@ func mustMetadataRevision(t *testing.T, hub *StorHub, project, message string) M
 
 // Regression test for the purge data-destruction chain: a patch that spills
 // into a new release must register that release in the metadata catalog so
-// PurgeUntracked cannot delete it (GitHub cascade-deletes its assets).
-func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
+// The assets purge cannot delete it (GitHub cascade-deletes its assets).
+func TestPurgeAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -4696,7 +4696,7 @@ func TestPurgeUntrackedKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatal("expected patch to spill into a second release")
 	}
 
-	result, err := hub.PurgeUntracked("project-purge-spill")
+	result, err := hub.PurgeProject("project-purge-spill", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
@@ -4743,7 +4743,7 @@ func mustBytes(t *testing.T, res fuse.ReadResult, buf []byte) []byte {
 	return got
 }
 
-func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
+func TestPurgeAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -4766,7 +4766,7 @@ func TestPurgeUntrackedPrunesUnreferencedChunks(t *testing.T) {
 		t.Fatalf("expected stale chunk records before purge, got %d", totalBefore)
 	}
 
-	if _, err := hub.PurgeUntracked("project-prune"); err != nil {
+	if _, err := hub.PurgeProject("project-prune", "assets", 0, false); err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
 

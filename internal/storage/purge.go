@@ -14,14 +14,14 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// Granular prune. Full-history retention is a deliberate choice (locked
+// Granular purge. Full-history retention is a deliberate choice (locked
 // decision), so nothing referenced by any retained manifest is ever
-// auto-deleted; prune is explicit and reclaims only genuine garbage:
+// auto-deleted; purge is explicit and reclaims only genuine garbage:
 //
 //	objects   content-addressed index objects referenced by NO retained
 //	          manifest (orphans from failed CAS attempts, or garbage left
 //	          after a history compaction). Both backends.
-//	assets    unreferenced release assets (the existing PurgeUntracked).
+//	assets    unreferenced release assets (the assets scope below).
 //	          Both backends.
 //	history   collapse every manifest older than the checkpoint into ONE
 //	          commit (git backend only): keep is a threshold (compact only
@@ -29,23 +29,23 @@ import (
 //	          checkpoint survives, so keep > 1 is rejected rather than
 //	          silently destroying the retention it implies. On REST,
 //	          history is GitHub-owned and the contents API cannot delete
-//	          revisions, so prune reports that honestly instead of
+//	          revisions, so purge reports that honestly instead of
 //	          pretending.
 //	all       history (where possible) + objects + assets.
 
-// PruneScope selects what a prune run reclaims.
-type PruneScope string
+// PurgeScope selects what a purge run reclaims.
+type PurgeScope string
 
 const (
-	PruneObjects PruneScope = "objects"
-	PruneAssets  PruneScope = "assets"
-	PruneHistory PruneScope = "history"
-	PruneAll     PruneScope = "all"
+	PurgeObjects PurgeScope = "objects"
+	PurgeAssets  PurgeScope = "assets"
+	PurgeHistory PurgeScope = "history"
+	PurgeAll     PurgeScope = "all"
 )
 
-// PruneResult reports what a prune did (or would do, under DryRun).
-type PruneResult struct {
-	Scope            PruneScope `json:"scope"`
+// PurgeResult reports what a purge did (or would do, under DryRun).
+type PurgeResult struct {
+	Scope            PurgeScope `json:"scope"`
 	DryRun           bool       `json:"dry_run"`
 	DeletedObjects   int        `json:"deleted_objects"`
 	DeletedReleases  int        `json:"deleted_releases"`
@@ -54,82 +54,82 @@ type PruneResult struct {
 	Notes            []string   `json:"notes,omitempty"`
 }
 
-// PruneProject is the context-free CLI/embedder entry point: scope is one of
+// PurgeProject is the context-free CLI/embedder entry point: scope is one of
 // "objects", "assets", "history", or "all".
-func (h *StorHub) PruneProject(project, scope string, keep int, dryRun bool) (*PruneResult, error) {
-	return h.PruneContext(context.Background(), project, scope, keep, dryRun)
+func (h *StorHub) PurgeProject(project, scope string, keep int, dryRun bool) (*PurgeResult, error) {
+	return h.PurgeContext(context.Background(), project, scope, keep, dryRun)
 }
 
-// PruneContext is the string-scoped entry point used by the REST layer (scope
-// is "objects"|"assets"|"history"|"all"); it adapts to the typed Prune.
-func (h *StorHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*PruneResult, error) {
-	return h.Prune(ctx, project, PruneScope(scope), keep, dryRun)
+// PurgeContext is the string-scoped entry point used by the REST layer (scope
+// is "objects"|"assets"|"history"|"all"); it adapts to the typed Purge.
+func (h *StorHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*PurgeResult, error) {
+	return h.Purge(ctx, project, PurgeScope(scope), keep, dryRun)
 }
 
-// PruneRequest is the flag-free prune invocation: scope selects what to
+// PurgeRequest is the flag-free purge invocation: scope selects what to
 // reclaim, keep is the history-compaction threshold (git only; keep > 1 is
 // rejected), dryRun reports without deleting. It replaces the
-// boolean-flag Prune(..., keep, dryRun) 4-way switch with per-scope
+// boolean-flag Purge(..., keep, dryRun) 4-way switch with per-scope
 // methods sharing one validation front.
-type PruneRequest struct {
-	Scope  PruneScope
+type PurgeRequest struct {
+	Scope  PurgeScope
 	Keep   int
 	DryRun bool
 }
 
-// PruneReq runs a PruneRequest. Prune/PruneContext/PruneProject are thin
+// PurgeReq runs a PurgeRequest. Purge/PurgeContext/PurgeProject are thin
 // public-compat wrappers over it.
-func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest) (*PruneResult, error) {
+func (h *StorHub) PurgeReq(ctx context.Context, project string, req PurgeRequest) (*PurgeResult, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
 	if h.projectHasUncommittedState(project) {
-		return nil, fmt.Errorf("prune refused for project %s: uncommitted metadata changes pending; flush before pruning", project)
+		return nil, fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
 	}
-	res := &PruneResult{Scope: req.Scope, DryRun: req.DryRun}
+	res := &PurgeResult{Scope: req.Scope, DryRun: req.DryRun}
 	switch req.Scope {
-	case PruneAssets:
-		if err := h.pruneAssets(ctx, project, res); err != nil {
+	case PurgeAssets:
+		if err := h.purgeAssets(ctx, project, res); err != nil {
 			return nil, err
 		}
-	case PruneObjects:
-		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
+	case PurgeObjects:
+		if err := h.purgeObjects(ctx, project, res, req.DryRun); err != nil {
 			return nil, err
 		}
-	case PruneHistory:
-		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
+	case PurgeHistory:
+		if err := h.purgeHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
 			return nil, err
 		}
-	case PruneAll:
-		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
+	case PurgeAll:
+		if err := h.purgeHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
 			return nil, err
 		}
-		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
+		if err := h.purgeObjects(ctx, project, res, req.DryRun); err != nil {
 			return nil, err
 		}
-		if err := h.pruneAssets(ctx, project, res); err != nil {
+		if err := h.purgeAssets(ctx, project, res); err != nil {
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|all)", req.Scope)
+		return nil, fmt.Errorf("unknown purge scope %q (want objects|assets|history|all)", req.Scope)
 	}
 	return res, nil
 }
 
-// Prune runs the requested scope. keep is a history-compaction threshold
+// Purge runs the requested scope. keep is a history-compaction threshold
 // (git): compaction runs only when manifest commits exceed keep, and it
 // collapses every older manifest into ONE checkpoint commit, so exactly one
 // revision survives; keep > 1 is rejected because it would promise a
 // retention the checkpoint cannot provide. dryRun reports without deleting.
-func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, keep int, dryRun bool) (*PruneResult, error) {
-	return h.PruneReq(ctx, project, PruneRequest{Scope: scope, Keep: keep, DryRun: dryRun})
+func (h *StorHub) Purge(ctx context.Context, project string, scope PurgeScope, keep int, dryRun bool) (*PurgeResult, error) {
+	return h.PurgeReq(ctx, project, PurgeRequest{Scope: scope, Keep: keep, DryRun: dryRun})
 }
 
-func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult) error {
+func (h *StorHub) purgeAssets(ctx context.Context, project string, res *PurgeResult) error {
 	if res.DryRun {
-		// Dry-run reports the would-delete counts (PruneResult contract:
-		// "what a prune did (or would do, under DryRun)"), like
-		// pruneObjects reports len(orphans). Classification is
+		// Dry-run reports the would-delete counts (PurgeResult contract:
+		// "what a purge did (or would do, under DryRun)"), like
+		// purgeObjects reports len(orphans). Classification is
 		// side-effect free; nothing is deleted.
 		releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
 		if err != nil {
@@ -144,29 +144,23 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		}
 		return nil
 	}
-	purged, err := h.PurgeUntrackedContext(ctx, project)
-	if err != nil {
-		return err
-	}
-	res.DeletedReleases = purged.DeletedReleases
-	res.DeletedAssets = purged.DeletedAssets
-	return nil
+	return purgeAssetsLive(h, ctx, project, res)
 }
 
-// pruneObjects deletes index objects referenced by no retained manifest.
-func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneResult, dryRun bool) error {
+// purgeObjects deletes index objects referenced by no retained manifest.
+func (h *StorHub) purgeObjects(ctx context.Context, project string, res *PurgeResult, dryRun bool) error {
 	// Detect the layout from actual HEAD, not the (possibly uninitialized)
-	// cache: a legacy single-blob project has no objects to prune.
+	// cache: a legacy single-blob project has no objects to purge.
 	headData, _, headFound, err := h.readIndexHead(ctx, project)
 	if err != nil {
 		return err
 	}
 	if !headFound {
-		res.Notes = append(res.Notes, "objects: project has no index yet (uninitialized); nothing to prune")
+		res.Notes = append(res.Notes, "objects: project has no index yet (uninitialized); nothing to purge")
 		return nil
 	}
 	if !meta.IsManifest(headData) {
-		res.Notes = append(res.Notes, "objects: project still uses the legacy single-blob layout; no content-addressed objects to prune (it migrates on its next write)")
+		res.Notes = append(res.Notes, "objects: project still uses the legacy single-blob layout; no content-addressed objects to purge (it migrates on its next write)")
 		return nil
 	}
 	referenced, err := h.referencedObjects(ctx, project, headData)
@@ -200,15 +194,15 @@ func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneRe
 	if err := h.deleteRepoObjects(ctx, project, orphans, cache); err != nil {
 		return err
 	}
-	logging.Info(h.projectLogger(project), "pruned orphaned index objects", "count", len(orphans))
+	logging.Info(h.projectLogger(project), "purged orphaned index objects", "count", len(orphans))
 	return nil
 }
 
 // referencedObjects unions every object reachable from any retained manifest
 // (the current one plus every historical revision still in git/file history).
 // Every failure to read or parse a revision is fatal: a revision that cannot
-// be classified must abort the prune, never be skipped — silently dropping
-// one revision from the union would orphan (and let prune delete) the objects
+// be classified must abort the purge, never be skipped — silently dropping
+// one revision from the union would orphan (and let purge delete) the objects
 // only it references, including the live tree if the skipped read was HEAD.
 func (h *StorHub) referencedObjects(ctx context.Context, project string, headData []byte) (map[string]bool, error) {
 	referenced := map[string]bool{}
@@ -226,19 +220,19 @@ func (h *StorHub) referencedObjects(ctx context.Context, project string, headDat
 		return nil, err
 	}
 	if len(revs) == 0 {
-		return nil, fmt.Errorf("enumerate manifest revisions for %s: no history found for a split-layout project; refusing to prune (an empty union would orphan every object)", project)
+		return nil, fmt.Errorf("enumerate manifest revisions for %s: no history found for a split-layout project; refusing to purge (an empty union would orphan every object)", project)
 	}
 	for _, rev := range revs {
 		data, found, rerr := h.readIndexRevision(ctx, project, rev.CommitSHA)
 		if rerr != nil {
-			return nil, fmt.Errorf("read manifest revision %s: %w (prune aborted: an unreadable revision cannot be classified)", shortSHA(rev.CommitSHA), rerr)
+			return nil, fmt.Errorf("read manifest revision %s: %w (purge aborted: an unreadable revision cannot be classified)", shortSHA(rev.CommitSHA), rerr)
 		}
 		if !found || !meta.IsManifest(data) {
 			continue // not a split-era manifest revision (legacy blob or vanished)
 		}
 		manifest, perr := meta.ParseManifest(data)
 		if perr != nil {
-			return nil, fmt.Errorf("parse manifest revision %s: %w (prune aborted)", shortSHA(rev.CommitSHA), perr)
+			return nil, fmt.Errorf("parse manifest revision %s: %w (purge aborted)", shortSHA(rev.CommitSHA), perr)
 		}
 		if err := h.addManifestReachable(ctx, project, manifest, referenced); err != nil {
 			return nil, err
@@ -287,7 +281,7 @@ type objectRef struct {
 }
 
 // contentsListingCap is GitHub's hard cap on a contents-API directory
-// listing: larger directories are truncated or rejected outright. Prune
+// listing: larger directories are truncated or rejected outright. Purge
 // must never classify reachability from a possibly truncated enumeration —
 // an object the cap hid would be deleted as an orphan. This equals
 // releaseAssetCap numerically but is a different ceiling (API listing page
@@ -317,12 +311,12 @@ func (h *StorHub) listRepoObjects(ctx context.Context, project string) ([]object
 			return nil, nil
 		}
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
-			return nil, fmt.Errorf("enumerate objects for %s: GitHub refuses oversized contents listings (the API caps a directory at %d entries); this project is too large to prune over REST, use the git backend: %w", project, contentsListingCap, err)
+			return nil, fmt.Errorf("enumerate objects for %s: GitHub refuses oversized contents listings (the API caps a directory at %d entries); this project is too large to purge over REST, use the git backend: %w", project, contentsListingCap, err)
 		}
 		return nil, err
 	}
 	if len(dirs) >= contentsListingCap {
-		return nil, fmt.Errorf("enumerate objects for %s: the objects root listing returned %d entries, at GitHub's contents-API cap; the enumeration may be truncated and prune refuses to delete from a partial union", project, len(dirs))
+		return nil, fmt.Errorf("enumerate objects for %s: the objects root listing returned %d entries, at GitHub's contents-API cap; the enumeration may be truncated and purge refuses to delete from a partial union", project, len(dirs))
 	}
 	for _, d := range dirs {
 		if d.Type != "dir" {
@@ -333,7 +327,7 @@ func (h *StorHub) listRepoObjects(ctx context.Context, project string) ([]object
 			return nil, fmt.Errorf("enumerate objects under %s: %w", d.Path, ferr)
 		}
 		if len(files) >= contentsListingCap {
-			return nil, fmt.Errorf("enumerate objects under %s: listing returned %d entries, at GitHub's contents-API cap; the enumeration may be truncated and prune refuses to delete from a partial union", d.Path, len(files))
+			return nil, fmt.Errorf("enumerate objects under %s: listing returned %d entries, at GitHub's contents-API cap; the enumeration may be truncated and purge refuses to delete from a partial union", d.Path, len(files))
 		}
 		for _, f := range files {
 			if f.Type == "dir" {
@@ -369,7 +363,7 @@ func (h *StorHub) deleteRepoObjects(ctx context.Context, project string, orphans
 			paths = append(paths, o.path)
 		}
 		head := repo.headCommitSHA()
-		if _, err := repo.deleteCommitPushCAS(ctx, paths, "storhub: prune orphaned index objects", head); err != nil {
+		if _, err := repo.deleteCommitPushCAS(ctx, paths, "storhub: purge orphaned index objects", head); err != nil {
 			return err
 		}
 		for _, o := range orphans {
@@ -384,13 +378,13 @@ func (h *StorHub) deleteRepoObjects(ctx context.Context, project string, orphans
 		if o.blobSHA == "" {
 			continue
 		}
-		if _, err := h.gh.DeleteFileContent(ctx, h.owner, project, o.path, o.blobSHA, "storhub: prune orphaned index object"); err != nil {
+		if _, err := h.gh.DeleteFileContent(ctx, h.owner, project, o.path, o.blobSHA, "storhub: purge orphaned index object"); err != nil {
 			var apiErr *ghapi.APIError
 			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusConflict) {
 				// 404: already gone upstream. 409: the path no longer holds
 				// the blob we meant to delete. Either way the cached bytes
 				// are not what upstream has, so drop the entry and let a
-				// later prune retry.
+				// later purge retry.
 				drop(o.path)
 				continue
 			}
@@ -401,7 +395,7 @@ func (h *StorHub) deleteRepoObjects(ctx context.Context, project string, orphans
 	return nil
 }
 
-// pruneHistory compacts old manifests into a checkpoint. Git backend only:
+// purgeHistory compacts old manifests into a checkpoint. Git backend only:
 // REST history is GitHub-owned and the contents API cannot delete revisions,
 // so we say so rather than pretend to reclaim space we cannot touch.
 //
@@ -409,9 +403,9 @@ func (h *StorHub) deleteRepoObjects(ctx context.Context, project string, orphans
 // exactly one revision survives: keep is a threshold that gates whether
 // compaction runs at all, never a number of revisions retained. keep > 1
 // would promise retention the squash cannot deliver, so it is rejected.
-func (h *StorHub) pruneHistory(ctx context.Context, project string, keep int, res *PruneResult, dryRun bool) error {
+func (h *StorHub) purgeHistory(ctx context.Context, project string, keep int, res *PurgeResult, dryRun bool) error {
 	if keep > 1 {
-		return fmt.Errorf("prune history: keep=%d is not supported: compaction collapses all but the newest checkpoint into a single commit, so exactly one revision survives; use keep=1", keep)
+		return fmt.Errorf("purge history: keep=%d is not supported: compaction collapses all but the newest checkpoint into a single commit, so exactly one revision survives; use keep=1", keep)
 	}
 	if keep < 1 {
 		keep = 1 // "keep nothing" is unrepresentable: the checkpoint must retain the current tree
@@ -437,11 +431,11 @@ func (h *StorHub) pruneHistory(ctx context.Context, project string, keep int, re
 		return err
 	}
 	head := repo.headCommitSHA()
-	if err := repo.squashTreeCAS(ctx, fmt.Sprintf("storhub: prune history (checkpoint, keep %d)", keep), head); err != nil {
+	if err := repo.squashTreeCAS(ctx, fmt.Sprintf("storhub: purge history (checkpoint, keep %d)", keep), head); err != nil {
 		return err
 	}
 	res.HistoryCompacted = true
-	logging.Info(h.projectLogger(project), "pruned index history to a checkpoint", "revisions", len(revs), "keep", keep)
+	logging.Info(h.projectLogger(project), "purged index history to a checkpoint", "revisions", len(revs), "keep", keep)
 	return nil
 }
 

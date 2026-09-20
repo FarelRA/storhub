@@ -48,7 +48,7 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 			body: utimesRequest{Path: "docs/f.txt", Atime: time.Unix(0, 1700000000123456789).UTC(), Mtime: time.Unix(0, 1700000000123456789).UTC()},
 		},
 		{name: "purge", method: http.MethodPost, target: "/api/v1/projects/demo/ops/purge"},
-		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune", body: pruneRequest{Scope: "all"}},
+		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/purge", body: purgeRequest{Scope: "all"}},
 		{
 			name: "xattr-put", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
 			body: "value",

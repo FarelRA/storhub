@@ -74,7 +74,7 @@ func run() error {
 			return failedExit(&failed, err)
 		}
 	}
-	purge, err := hub.PurgeUntrackedContext(ctx, project)
+	purge, err := hub.PurgeContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		return failedExit(&failed, err)
 	}

@@ -57,12 +57,10 @@ type (
 	FSStats = shfs.FSStats
 	// NodeKind discriminates file system node types (file, symlink).
 	NodeKind = meta.NodeKind
-	// PurgeResult reports what PurgeUntracked removed and kept.
+	// PurgeResult reports what a granular purge reclaimed.
 	PurgeResult = impl.PurgeResult
-	// PruneResult reports what a granular prune reclaimed.
-	PruneResult = impl.PruneResult
-	// PruneScope selects what a prune run reclaims (objects|assets|history|all).
-	PruneScope = impl.PruneScope
+	// PurgeScope selects what a purge run reclaims (objects|assets|history|all).
+	PurgeScope = impl.PurgeScope
 	// APIError is an error returned by the GitHub API layer, carrying the
 	// HTTP status and parsed message.
 	APIError = ghapi.APIError
@@ -85,13 +83,13 @@ const (
 	NodeKindFile = meta.NodeKindFile
 	// NodeKindSymlink marks symlink entries in listings and stats.
 	NodeKindSymlink = meta.NodeKindSymlink
-	// Prune scope values accepted by PruneProject (objects|assets|history|all).
+	// Purge scope values accepted by PurgeProject (objects|assets|history|all).
 	// Aliased so callers (e.g. the CLI's argument validation) share one
 	// vocabulary with storage instead of duplicating string literals.
-	PruneObjects = impl.PruneObjects
-	PruneAssets  = impl.PruneAssets
-	PruneHistory = impl.PruneHistory
-	PruneAll     = impl.PruneAll
+	PurgeObjects = impl.PurgeObjects
+	PurgeAssets  = impl.PurgeAssets
+	PurgeHistory = impl.PurgeHistory
+	PurgeAll     = impl.PurgeAll
 )
 
 var (

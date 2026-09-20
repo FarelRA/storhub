@@ -135,8 +135,7 @@ type hubClient interface {
 	// Ctrl+C cancels them between units of work instead of killing the
 	// process mid-delete-loop.
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
-	PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error)
-	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
+	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error)
 	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 
@@ -345,7 +344,6 @@ Examples:
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
-	rootCmd.AddCommand(a.newPruneCmd())
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newSessionCmd())
@@ -614,105 +612,32 @@ Examples:
 
 func (a *App) newPurgeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "purge <project>",
-		Short: "Delete untracked releases and assets",
-		Long: `Purge deletes GitHub releases and assets that are not tracked in the project metadata.
-
-This cleans up orphaned releases and assets (e.g. from interrupted writes or manual interference).
-
-The serve-mode admin boundary covers the REST surface only: this
-command runs with local-process trust and performs no admin check
-(the REST purge endpoint is admin-gated).`,
-		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runPurge,
-	}
-	addSyncFlag(cmd)
-	return cmd
-}
-
-func (a *App) newPruneCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "prune <project> [objects|assets|history|all]",
-		Short: "Reclaim index objects, release assets, or git history",
-		Long: `Prune reclaims storage under the full-history retention policy.
+		Use:   "purge <project> [objects|assets|history|all]",
+		Short: "Reclaim objects, release assets, or git history",
+		Long: `Purge reclaims storage under the full-history retention policy.
 
   objects   delete content-addressed index objects referenced by no retained
-            manifest (orphans from failed commits or after a history prune)
-  assets    delete release assets tracked by no file (the classic purge)
+            manifest (orphans from failed commits or after a history purge)
+  assets    delete release assets tracked by no file (interrupted writes,
+            manual interference)
   history   collapse old index manifests into a checkpoint (git backend only;
             on the REST backend GitHub owns history and the API cannot delete
             revisions, so this reports honestly instead of pretending)
-  all       history (where possible) + objects + assets
+  all       history (where possible) + objects + assets (the default)
 
 Use --dry-run to see what would be reclaimed without deleting anything.
 --keep bounds history compaction (manifests newer than keep are retained).
 
 The serve-mode admin boundary covers the REST surface only: this
 command runs with local-process trust and performs no admin check
-(the REST prune endpoint is admin-gated).`,
+(the REST purge endpoint is admin-gated).`,
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
-		RunE: a.runPrune,
+		RunE: a.runPurge,
 	}
 	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
 	addSyncFlag(cmd)
 	return cmd
-}
-
-// validPruneScope mirrors the scopes Prune accepts, via the shared
-// storhub aliases rather than duplicated literals. The CLI checks before
-// building a hub so a typo is a usage error (exit 2), not a runtime
-// failure (exit 1) discovered deep inside storage.
-func validPruneScope(scope string) bool {
-	switch storhub.PruneScope(scope) {
-	case storhub.PruneObjects, storhub.PruneAssets, storhub.PruneHistory, storhub.PruneAll:
-		return true
-	default:
-		return false
-	}
-}
-
-func (a *App) runPrune(cmd *cobra.Command, args []string) error {
-	scope := "all"
-	if len(args) >= 2 {
-		scope = args[1]
-	}
-	if !validPruneScope(scope) {
-		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, all)", scope)}
-	}
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	keep, _ := cmd.Flags().GetInt("keep")
-	if keep < 1 {
-		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}
-	}
-	// Pruning can run for minutes; a Ctrl+C must cancel it between delete
-	// units instead of killing the process mid-loop.
-	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
-	if err != nil {
-		return err
-	}
-	defer stop()
-	result, err := hub.PruneContext(ctx, args[0], scope, keep, dryRun)
-	if err != nil {
-		return err
-	}
-	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
-		return err
-	}
-	verb := "pruned"
-	if dryRun {
-		verb = "would prune"
-	}
-	_, _ = fmt.Fprintf(a.stderr, "%s %s (%s): %d objects, %d releases, %d assets",
-		verb, args[0], result.Scope, result.DeletedObjects, result.DeletedReleases, result.DeletedAssets)
-	if result.HistoryCompacted {
-		_, _ = fmt.Fprint(a.stderr, ", history compacted")
-	}
-	_, _ = fmt.Fprintln(a.stderr)
-	for _, note := range result.Notes {
-		_, _ = fmt.Fprintf(a.stderr, "  note: %s\n", note)
-	}
-	return nil
 }
 
 func (a *App) newDeleteProjectCmd() *cobra.Command {
@@ -760,15 +685,15 @@ func (a *App) newCacheCmd() *cobra.Command {
 		Short: "Manage local cache directories",
 		Args:  usageArgs(cobra.NoArgs),
 	}
-	cmd.AddCommand(a.newCachePruneCmd())
+	cmd.AddCommand(a.newCachePurgeCmd())
 	return cmd
 }
 
-func (a *App) newCachePruneCmd() *cobra.Command {
+func (a *App) newCachePurgeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "prune",
+		Use:   "purge",
 		Short: "Reclaim cache directories left by crashed processes",
-		Long: `Cache prune removes storhub's local cache leftovers: per-project git worktrees
+		Long: `Cache purge removes storhub's local cache leftovers: per-project git worktrees
 whose owning process is gone, and legacy pre-XDG temp roots. Directories held by
 live processes are never touched. No network access, no token required.`,
 		Args: usageArgs(cobra.NoArgs),
@@ -924,7 +849,7 @@ func (a *App) mustCmdHub(cmd *cobra.Command, chunkSize int64, public bool) (hubC
 }
 
 // mustCmdHubCtx is mustCmdHub plus a signal context for the long one-shot
-// maintenance operations (prune/rollback/purge): hub, ctx, stop, err :=
+// maintenance operations (purge/rollback): hub, ctx, stop, err :=
 // a.mustCmdHubCtx(cmd, 0, false); defer stop().
 func (a *App) mustCmdHubCtx(cmd *cobra.Command, chunkSize int64, public bool) (hubClient, context.Context, context.CancelFunc, error) {
 	hub, err := a.mustCmdHub(cmd, chunkSize, public)
@@ -1377,22 +1302,47 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 }
 
 func (a *App) runPurge(cmd *cobra.Command, args []string) error {
-	// Purging walks delete loops that can outlive a patient terminal:
-	// Ctrl+C must cancel between deletions instead of killing the process.
+	scope := "all"
+	if len(args) >= 2 {
+		scope = args[1]
+	}
+	switch storhub.PurgeScope(scope) {
+	case storhub.PurgeObjects, storhub.PurgeAssets, storhub.PurgeHistory, storhub.PurgeAll:
+	default:
+		return &usageError{fmt.Errorf("invalid purge scope %q (known: objects, assets, history, all)", scope)}
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	keep, _ := cmd.Flags().GetInt("keep")
+	if keep < 1 {
+		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}
+	}
+	// Purging can run for minutes; a Ctrl+C must cancel it between delete
+	// units instead of killing the process mid-loop.
 	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
 	if err != nil {
 		return err
 	}
 	defer stop()
-	result, err := hub.PurgeUntrackedContext(ctx, args[0])
+	result, err := hub.PurgeContext(ctx, args[0], scope, keep, dryRun)
 	if err != nil {
 		return err
 	}
 	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(a.stderr, "purged %s: %d releases, %d assets deleted\n",
-		args[0], result.DeletedReleases, result.DeletedAssets)
+	verb := "purged"
+	if dryRun {
+		verb = "would purge"
+	}
+	_, _ = fmt.Fprintf(a.stderr, "%s %s (%s): %d objects, %d releases, %d assets",
+		verb, args[0], result.Scope, result.DeletedObjects, result.DeletedReleases, result.DeletedAssets)
+	if result.HistoryCompacted {
+		_, _ = fmt.Fprint(a.stderr, ", history compacted")
+	}
+	_, _ = fmt.Fprintln(a.stderr)
+	for _, note := range result.Notes {
+		_, _ = fmt.Fprintf(a.stderr, "  note: %s\n", note)
+	}
 	return nil
 }
 

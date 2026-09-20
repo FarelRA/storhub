@@ -648,12 +648,8 @@ func (h *pcFakeHub) RollbackMetadataContext(ctx context.Context, project, commit
 	return errors.New("pcFakeHub: rollback not implemented")
 }
 
-func (h *pcFakeHub) PurgeUntrackedContext(ctx context.Context, project string) (*storhub.PurgeResult, error) {
-	return &storhub.PurgeResult{}, nil
-}
-
-func (h *pcFakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
-	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
+func (h *pcFakeHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
+	return &storhub.PurgeResult{Scope: storhub.PurgeScope(scope), DryRun: dryRun}, nil
 }
 
 func (h *pcFakeHub) DeleteProject(project string) error { return nil }

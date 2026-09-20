@@ -111,11 +111,7 @@ func (readOnlyShare) RevertPathContext(ctx context.Context, project, path, commi
 	return errReadOnly()
 }
 
-func (readOnlyShare) PurgeUntrackedContext(ctx context.Context, project string) (*storage.PurgeResult, error) {
-	return nil, errReadOnly()
-}
-
-func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+func (readOnlyShare) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
 	return nil, errReadOnly()
 }
 

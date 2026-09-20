@@ -221,13 +221,14 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 		},
 		{
 			name: "purge", method: http.MethodPost,
+			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/ops/purge", json: map[string]any{},
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "prune", method: http.MethodPost,
+			name: "purge-scoped", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
-			target: "/api/v1/projects/demo/ops/prune", json: map[string]any{},
+			target: "/api/v1/projects/demo/ops/purge", json: map[string]any{"scope": "objects", "dry_run": true},
 			wantStatus: http.StatusOK,
 		},
 		{

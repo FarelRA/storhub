@@ -432,8 +432,8 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "metadata too large") {
 		t.Fatalf("oversize mutation must be rejected at admission (want fail-fast 'metadata too large', got %v)", err)
 	}
-	if !strings.Contains(err.Error(), "PurgeUntracked") {
-		t.Fatalf("rejection must point at remediation (PurgeUntracked): %v", err)
+	if !strings.Contains(err.Error(), "purge") {
+		t.Fatalf("rejection must point at remediation (purge): %v", err)
 	}
 	pm := hub.getOrCreateProjectMeta("project-ceiling")
 	pm.mu.RLock()

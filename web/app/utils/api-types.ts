@@ -87,7 +87,7 @@ export interface Revision {
   committed_at?: number
 }
 
-export interface PruneResult {
+export interface PurgeResult {
   project: string
   status: string
   scope: string

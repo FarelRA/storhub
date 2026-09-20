@@ -155,7 +155,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 		return nil, err
 	}
 
-	// Register the release holding the new chunks so PurgeUntracked cannot
+	// Register the release holding the new chunks so purge cannot
 	// delete live data. PrepareReplaceContext EnsureReleases only on a local
 	// clone that is discarded before this call. All mutations apply to a
 	// private COW copy; the shared tree is swapped in only on success.
@@ -189,7 +189,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 		// The file vanished between the readonly pre-check and this
 		// locked re-check (concurrent delete). The chunks are already
 		// uploaded and their IDs already allocated into the catalog:
-		// roll both back or the assets leak until PurgeUntracked and the
+		// roll both back or the assets leak until purge and the
 		// catalog carries chunks no file references. The COW copy is
 		// discarded, so the shared tree never saw the allocation.
 		pm.mu.Unlock()
@@ -446,7 +446,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	}
 	// Rotation may have spread this file's chunks across releases;
 	// ensuring only the initial tag would strand rotated chunks outside
-	// the catalog where PurgeUntracked deletes live data.
+	// the catalog where purge deletes live data.
 	if err := ensureChunkReleases(tree, results, h.config.Now().UnixNano()); err != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, results)

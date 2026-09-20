@@ -218,8 +218,8 @@ func TestInputValidationReturnsBadRequest(t *testing.T) {
 		{"rollback branch sha", http.MethodPost, "/api/v1/projects/demo/ops/rollback", rollbackRequest{CommitSHA: "refs/heads/main"}},
 		{"rollback short sha", http.MethodPost, "/api/v1/projects/demo/ops/rollback", rollbackRequest{CommitSHA: "deadbe"}},
 		{"revert-path empty sha", http.MethodPost, "/api/v1/projects/demo/ops/revert-path", revertPathRequest{Path: "docs/f.txt"}},
-		{"prune unknown scope", http.MethodPost, "/api/v1/projects/demo/ops/prune", pruneRequest{Scope: "banana"}},
-		{"prune negative keep", http.MethodPost, "/api/v1/projects/demo/ops/prune", pruneRequest{Scope: "objects", Keep: -1}},
+		{"prune unknown scope", http.MethodPost, "/api/v1/projects/demo/ops/purge", purgeRequest{Scope: "banana"}},
+		{"prune negative keep", http.MethodPost, "/api/v1/projects/demo/ops/purge", purgeRequest{Scope: "objects", Keep: -1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,16 +246,16 @@ func TestInputValidationReturnsBadRequest(t *testing.T) {
 	}
 }
 
-func TestFakePruneRejectsUnknownScope(t *testing.T) {
+func TestFakePurgeRejectsUnknownScope(t *testing.T) {
 	t.Parallel()
 	client := newFakeRESTClient()
 	if err := client.MkdirContext(context.Background(), "demo", "seed"); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	if _, err := client.PruneContext(context.Background(), "demo", "banana", 0, true); err == nil || !strings.Contains(err.Error(), "unknown prune scope") {
+	if _, err := client.PurgeContext(context.Background(), "demo", "banana", 0, true); err == nil || !strings.Contains(err.Error(), "unknown purge scope") {
 		t.Fatalf("fake must mirror the storage scope contract, got: %v", err)
 	}
-	if _, err := client.PruneContext(context.Background(), "demo", "objects", 0, true); err != nil {
+	if _, err := client.PurgeContext(context.Background(), "demo", "objects", 0, true); err != nil {
 		t.Fatalf("valid scope must pass: %v", err)
 	}
 }
@@ -289,7 +289,7 @@ func TestValidationErrorsKeepTheirMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
-	resp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune", pruneRequest{Scope: "banana"}, http.StatusBadRequest)
+	resp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/purge", purgeRequest{Scope: "banana"}, http.StatusBadRequest)
 	body := string(readBody(t, resp))
 	if !strings.Contains(body, "objects") || !strings.Contains(body, "assets") {
 		t.Fatalf("400-class validation guidance must survive sanitization: %s", body)
@@ -601,7 +601,7 @@ func TestRecursiveQueryBoolParsing(t *testing.T) {
 	mustRequest(t, handler, http.MethodDelete, "/api/v1/projects/demo/nodes?path=docs&recursive=false", nil, nil, http.StatusNoContent)
 }
 
-func TestPruneAcceptsBodylessPOST(t *testing.T) {
+func TestPurgeAcceptsBodylessPOST(t *testing.T) {
 	t.Parallel()
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
@@ -609,11 +609,11 @@ func TestPruneAcceptsBodylessPOST(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
-	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune", nil, nil, http.StatusOK)
-	var pr pruneResponse
+	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/purge", nil, nil, http.StatusOK)
+	var pr purgeResponse
 	decodeJSONBody(t, resp, &pr)
-	if pr.Scope != "all" || pr.Status != "pruned" {
-		t.Fatalf("unexpected prune response: %+v", pr)
+	if pr.Scope != "assets" || pr.Status != "purged" {
+		t.Fatalf("unexpected purge response: %+v", pr)
 	}
 }
 
@@ -730,7 +730,7 @@ func TestOpsRoutesDenyNonAdminAndShareTokens(t *testing.T) {
 	}{
 		{"rollback", "/api/v1/projects/demo/ops/rollback", rollbackRequest{CommitSHA: validSHA}},
 		{"revert-path", "/api/v1/projects/demo/ops/revert-path", revertPathRequest{Path: "shared/readme.txt", CommitSHA: validSHA}},
-		{"prune", "/api/v1/projects/demo/ops/prune", pruneRequest{Scope: "objects", DryRun: true}},
+		{"purge", "/api/v1/projects/demo/ops/purge", purgeRequest{Scope: "objects", DryRun: true}},
 	}
 	for _, tc := range cases {
 		for _, caller := range []struct{ who, bearer string }{

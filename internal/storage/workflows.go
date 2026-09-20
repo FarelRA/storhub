@@ -639,7 +639,7 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 }
 
 // ensureChunkReleases registers every release holding new chunks in the
-// authoritative metadata so PurgeUntracked cannot delete live data and
+// authoritative metadata so purge cannot delete live data and
 // rollback validation can resolve chunk references. Rotation may spread one
 // file's chunks across releases; ensuring only the originally targeted tag
 // would strand the rotated chunks.
