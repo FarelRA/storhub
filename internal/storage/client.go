@@ -35,10 +35,10 @@ const maxMetadataBytes = 8 << 20
 //	  writers) previously re-listed + re-uploaded forever; exceeding the
 //	  cap fails loudly instead.
 //	maxNameRetries: bound on asset-name collision retries per chunk.
-//	maxPendingOpsPerProject, releaseCacheTTL, metaCacheIdleTTL,
-//	sweeperInterval live in caches.go (cache residency policy); they are
-//	referenced here for discoverability but defined there to keep the
-//	cache policy in one place.
+//	maxPendingOpsPerProject, releaseCacheTTL, metaCacheIdleTTL live in
+//	caches.go (cache residency policy); they are referenced here for
+//	discoverability but defined there to keep the cache policy in one
+//	place.
 const (
 	releaseAssetCap     = 1000
 	maxReleaseRotations = 5
@@ -147,8 +147,7 @@ type StorHub struct {
 	// WaitGroup-misuse window where Add raced Wait with a zero counter.
 	shutdownMu      sync.Mutex
 	shutdownStarted bool
-	// shutdownDone closes when every commit loop and the sweeper have
-	// exited (i.e. shutdownWg drains). It is created once and shared by
+	// shutdownDone closes when every commit loop has exited (i.e. shutdownWg drains). It is created once and shared by
 	// all Shutdown callers so a timed-out Shutdown does not strand a
 	// per-call waiter goroutine parked on Wg.Wait: the waiter below is
 	// the only one, and late callers observe the same channel.
@@ -298,10 +297,9 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	}
 	hub.fsSvc = shfs.NewService(hub)
 	hub.posixSvc = implposix.NewService(hub)
-	// The in-memory sweeper TTL-evicts idle clean caches and force-retries
-	// oversized pending stacks; it is ctx-bound and joined on Shutdown.
-	hub.shutdownWg.Add(1)
-	go hub.sweeperLoop()
+	// Phase E2: no sweeper goroutine. Idle eviction runs on the
+	// lookupOrInsert get path, release lists expire lazily on read, and
+	// over-cap stacks are force-retried by the crossing mutation itself.
 	return hub, nil
 }
 
@@ -350,7 +348,7 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 			h.baseCancel()
 		}
 		if h.shutdownCh != nil {
-			// Signal all commit loops (and the sweeper) to stop
+			// Signal all commit loops to stop
 			close(h.shutdownCh)
 		}
 	})
@@ -399,8 +397,18 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 
 	// Sweep: a trigger poke to a loop that already exited wakes
 	// nobody, and a post-shutdown mutation never had a live loop at
-	// all. Commit any still-dirty projects synchronously so Shutdown
-	// converges instead of dropping them.
+	// all. Run the manual sweep once (idle-evict clean entries and
+	// retry over-cap stacks), then commit any still-dirty projects
+	// synchronously so Shutdown converges instead of dropping them.
+	// A zero-value hub (uninitialized cache, as in CLI seam tests)
+	// skips the sweep exactly like the subscribe path degrades:
+	// there is nothing resident to evict or retry.
+	h.metaMu.RLock()
+	initialized := h.metaCache != nil
+	h.metaMu.RUnlock()
+	if initialized {
+		h.sweepCachesOnce()
+	}
 	if err := h.drainDirtyMetadata(ctx); err != nil {
 		return err
 	}

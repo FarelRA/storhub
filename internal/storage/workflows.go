@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -1021,6 +1022,111 @@ type pathVersion struct {
 	paths []string
 }
 
+// Push fan-out subscriber registry (Phase E1: the poller replacement).
+//
+// A FUSE mount subscribes at construction and unsubscribes at Close; every
+// publish then pokes its project's subscribers instead of each mount
+// polling PublishedPathsSince once a second. The registry lives in this
+// file (not on projectMetadata or StorHub) so the set and its harvest stay
+// together: notePublishedPathsLocked resolves subscribers by the
+// *projectMetadata pointer it already receives, so no call-site signature
+// changes and no publish semantics change.
+//
+// Records are keyed by pm pointer. When eviction drops a pm from the hub
+// cache, a recreated pm starts with no record: a subscribed mount misses
+// pushes for publishes that land on the new pm until it resubscribes, and
+// falls back to kernel entry/attr timeout expiry for those. That corner
+// needs an idle mount (eviction only takes clean, untouched projects) plus
+// a cross-surface write in the same window; it self-heals on the next
+// revalidation, which recreates nothing but refetches fresh truth.
+// Steady-state cost with no subscribers is one map lookup per publish;
+// with subscribers it is one snapshot plus one short-lived dispatch
+// goroutine per publish. There is no idle cost: no timers, no parked
+// per-mount goroutines.
+type fanoutProjectSubs struct {
+	hub     *StorHub
+	project string
+	subs    map[uint64]func()
+	nextID  uint64
+}
+
+var (
+	fanoutSubsMu sync.Mutex
+	fanoutSubs   = make(map[*projectMetadata]*fanoutProjectSubs)
+)
+
+// SubscribeProjectPublishes registers onPublish for pushes on project and
+// returns the current fan-out cursor plus an idempotent unsubscribe. The
+// cursor is read BEFORE the insert (not under one hold: two locks are
+// involved, so order is the guarantee): a publish landing between the read
+// and the insert is poked to the old set only, but the returned cursor
+// predates it, so the subscriber's first pull still covers it. Nil
+// callbacks are refused.
+func (h *StorHub) SubscribeProjectPublishes(project string, onPublish func()) (cursor uint64, unsubscribe func()) {
+	never := func() {}
+	if onPublish == nil {
+		return 0, never
+	}
+	// A zero-value hub (uninitialized cache, as in CLI seam tests that
+	// stub a bare &StorHub{}) cannot serve subscriptions: degrade to
+	// unsubscribed exactly like a hub without the capability, so mount
+	// construction never panics and timeout expiry keeps working.
+	h.metaMu.RLock()
+	initialized := h.metaCache != nil
+	h.metaMu.RUnlock()
+	if !initialized {
+		return 0, never
+	}
+	pm := h.getOrCreateProjectMeta(project)
+	pm.mu.RLock()
+	cursor = pm.fanoutSeq
+	pm.mu.RUnlock()
+
+	fanoutSubsMu.Lock()
+	rec := fanoutSubs[pm]
+	if rec == nil {
+		rec = &fanoutProjectSubs{hub: h, project: project, subs: make(map[uint64]func())}
+		fanoutSubs[pm] = rec
+	}
+	id := rec.nextID
+	rec.nextID++
+	rec.subs[id] = onPublish
+	fanoutSubsMu.Unlock()
+
+	var once sync.Once
+	return cursor, func() {
+		once.Do(func() {
+			fanoutSubsMu.Lock()
+			defer fanoutSubsMu.Unlock()
+			rec := fanoutSubs[pm]
+			if rec == nil {
+				return
+			}
+			delete(rec.subs, id)
+			if len(rec.subs) == 0 {
+				delete(fanoutSubs, pm)
+			}
+		})
+	}
+}
+
+// fanoutSnapshotLocked copies one publish's subscriber pokes. Callers hold
+// no registry-external lock except pm.mu for writing (it runs inside
+// notePublishedPathsLocked); the pokes themselves run later, without pm.mu.
+func fanoutSnapshotLocked(pm *projectMetadata) []func() {
+	fanoutSubsMu.Lock()
+	defer fanoutSubsMu.Unlock()
+	rec := fanoutSubs[pm]
+	if rec == nil || len(rec.subs) == 0 {
+		return nil
+	}
+	cbs := make([]func(), 0, len(rec.subs))
+	for _, cb := range rec.subs {
+		cbs = append(cbs, cb)
+	}
+	return cbs
+}
+
 // notePublishedPathsLocked records one publish's footprint in the ring.
 // Caller holds pm.mu for writing (it runs inside publishTreeLocked's
 // contract, or another spot holding pm.mu across the swap). Nil paths
@@ -1030,6 +1136,19 @@ func notePublishedPathsLocked(pm *projectMetadata, paths []string) {
 	pm.recent = append(pm.recent, pathVersion{seq: pm.fanoutSeq, paths: paths})
 	if len(pm.recent) > maxRecentPaths {
 		pm.recent = append([]pathVersion(nil), pm.recent[len(pm.recent)-maxRecentPaths:]...)
+	}
+	// Push harvest: snapshot this publish's subscriber pokes under the
+	// same mu hold that guards the ring, then poke without holding pm.mu.
+	// The hop is a fresh goroutine per publish that has subscribers, so a
+	// slow or backpressured subscriber never stalls the publisher and no
+	// synchronous kernel write ever runs under storage locks; the fuse
+	// side funnels delivery through its async notify slots.
+	if cbs := fanoutSnapshotLocked(pm); len(cbs) > 0 {
+		go func() {
+			for _, cb := range cbs {
+				cb()
+			}
+		}()
 	}
 }
 

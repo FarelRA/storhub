@@ -147,14 +147,13 @@ func approxOpBytes(op Op) int {
 }
 
 // needsForceFlush reports whether the stack crossed a residency bound (op
-// count or bytes). The sweeper force-retries the commit when true; ops are
-// never dropped for crossing.
+// count or bytes). The append site pokes the commit trigger when true; ops
+// are never dropped for crossing.
 //
-// Contract for the sweeper owner (caches.go sweepCachesOnce, ~line 583):
-// replace the count-only condition
-// `forceFlush := pm.dirty && len(pm.opStack.ops) >= maxPendingOpsPerProject`
-// with `forceFlush := pm.dirty && pm.opStack.needsForceFlush()` (still under
-// pm.mu). Everything else in the sweeper stays as-is.
+// Contract: the force-flush condition is count-or-bytes
+// (`len(s.ops) >= maxPendingOpsPerProject || s.bytes >= opStackMaxBytes`,
+// still evaluated under pm.mu), shared by the append-site poke and the
+// sweepCachesOnce retry leg. Everything else stays as-is.
 func (s *opStack) needsForceFlush() bool {
 	return len(s.ops) >= maxPendingOpsPerProject || s.bytes >= opStackMaxBytes
 }

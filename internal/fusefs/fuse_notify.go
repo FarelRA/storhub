@@ -37,17 +37,17 @@ func (s *Filesystem) HubProjectVersion() (uint64, bool) {
 
 // ProjectVersionWatcher subscribes one mount to its hub's version counter.
 // It owns only its last-seen baseline (no filesystem or hub state is
-// touched), so mounts without a poller pay nothing and dropping the
-// watcher leaks nothing. All methods are safe for concurrent use; the
-// poll callback runs on the poller's goroutine, where only async-safe
+// touched), so mounts without a subscription pay nothing and dropping the
+// watcher leaks nothing. All methods are safe for concurrent use; the push
+// callback runs on the hub's dispatch goroutine, where only async-safe
 // notify calls (notifyEntryForPath, notifyKernelContentChanged) belong.
 //
 // Fan-out wiring note: the watcher detects THAT the project moved; the
 // affected entry set comes from the caller, which notifies exactly those
-// entries (O(affected), no sweeps, no global invalidate). Comparing the
-// counter on the lookup/stat path itself and starting the background poll
-// at mount construction are follow-ups outside this file; tests drive the
-// loop explicitly and prove the kernel-visible result.
+// entries (O(affected), no sweeps, no global invalidate). Push delivery
+// (startFanoutPush) supersedes polling: the mount subscribes at
+// construction and the hub pokes it on every publish; tests drive Check
+// explicitly and prove the kernel-visible result.
 type ProjectVersionWatcher struct {
 	fs   *Filesystem
 	mu   sync.Mutex
@@ -83,33 +83,6 @@ func (w *ProjectVersionWatcher) Check() (cur uint64, changed bool) {
 		return cur, true
 	}
 	return cur, false
-}
-
-// StartPoll runs the subscriber loop: every interval it checks the counter
-// and invokes onChange (if non-nil) exactly once per observed movement.
-// The returned stop ends delivery; it is idempotent. The zero interval
-// resolves to one second.
-func (w *ProjectVersionWatcher) StartPoll(interval time.Duration, onChange func(cur uint64)) (stop func()) {
-	if interval <= 0 {
-		interval = time.Second
-	}
-	stopCh := make(chan struct{})
-	var once sync.Once
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				if cur, changed := w.Check(); changed && onChange != nil {
-					onChange(cur)
-				}
-			}
-		}
-	}()
-	return func() { once.Do(func() { close(stopCh) }) }
 }
 
 var (
@@ -452,17 +425,22 @@ func safeNotifyDelete(parent *storhubNode, name string, child *storhubNode) {
 	})
 }
 
-// invalidationPollInterval paces the cross-surface fan-out poll: an idle
-// tick costs one cheap version read, and a tick that observes moves
-// notifies exactly the changed entries. One second bounds cross-surface
-// staleness near zero without measurable idle cost.
-const invalidationPollInterval = time.Second
+// publishSubscribe is the hub capability behind push fan-out: register a
+// poke callback for a project's publishes, after which every publish
+// invokes it asynchronously. StorHub implements it
+// (SubscribeProjectPublishes); hubs without it (test doubles) leave the
+// mount unsubscribed and timeout expiry keeps working unchanged. The
+// returned cursor is the subscriber's baseline for pollInvalidationsOnce;
+// the returned unsubscribe ends delivery and is idempotent.
+type publishSubscribe interface {
+	SubscribeProjectPublishes(project string, onPublish func()) (cursor uint64, unsubscribe func())
+}
 
 // publishedPathsSource is the hub capability behind fan-out: the
 // namespace paths published after a cursor, or unknown scope when the
 // window was lost. StorHub implements it (PublishedPathsSince); hubs
-// without it (test doubles) leave the poller idle and timeout expiry
-// keeps working unchanged.
+// without it (test doubles) leave the push subscriber idle and timeout
+// expiry keeps working unchanged.
 type publishedPathsSource interface {
 	PublishedPathsSince(project string, since uint64) (paths []string, unknown bool, current uint64)
 }
@@ -471,8 +449,8 @@ type publishedPathsSource interface {
 // last are entry-notified (positive and negative dentries alike) plus
 // content-notified where the path resolves to a tracked inode; unknown
 // scope notifies every tracked path. It returns the new cursor.
-// Deterministic and lock-free of test doubles: tests drive it directly,
-// the background loop calls the same method.
+// Deterministic and lock-free of test doubles: tests and the push
+// subscriber drive it directly.
 func (s *Filesystem) pollInvalidationsOnce(last uint64) uint64 {
 	src, ok := s.hub.(publishedPathsSource)
 	if !ok {
@@ -525,24 +503,28 @@ func (s *Filesystem) invalidateAllTracked() {
 	}
 }
 
-// startInvalidationPoll runs the fan-out loop with its own cursor until
-// the returned stop closes. One parked goroutine per mount; each idle
-// tick is a single cheap version read.
-func (s *Filesystem) startInvalidationPoll() (stop func()) {
-	stopCh := make(chan struct{})
-	var once sync.Once
+// startFanoutPush subscribes this mount to its hub's publish fan-out and
+// returns the idempotent stop (unsubscribe) for Close. Each poke pulls
+// exactly its window through pollInvalidationsOnce under a dedicated
+// cursor mutex, so concurrent pokes serialize and no window is skipped or
+// double-applied. Unknown scope maps to the existing
+// invalidateAllTracked inside pollInvalidationsOnce. Registration is
+// synchronous and owns no goroutine and no timer: idle cost is zero, and
+// publish-to-invalidate latency is the async hop, not a tick interval.
+// Hubs without the capability yield a no-op stop (expiry fallback).
+func (s *Filesystem) startFanoutPush() (stop func()) {
+	never := func() {}
+	sub, ok := s.hub.(publishSubscribe)
+	if !ok {
+		return never
+	}
+	var mu sync.Mutex
 	var last uint64
-	go func() {
-		ticker := time.NewTicker(invalidationPollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				last = s.pollInvalidationsOnce(last)
-			}
-		}
-	}()
-	return func() { once.Do(func() { close(stopCh) }) }
+	last, unsubscribe := sub.SubscribeProjectPublishes(s.project, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		last = s.pollInvalidationsOnce(last)
+	})
+	var once sync.Once
+	return func() { once.Do(func() { unsubscribe() }) }
 }

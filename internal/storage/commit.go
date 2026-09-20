@@ -28,9 +28,9 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 //
 // Cap behavior is drop-never: crossing the op-count or either 64MiB byte
 // bound compacts the journal to the folded survivors (even though no commit
-// succeeded) and warns; the sweeper force-retries the commit until it
-// drains. Growth pressure beyond that only warns — never fail-loud
-// backpressure, never dropped acknowledged ops.
+// succeeded) and warns; the append site pokes the commit trigger directly
+// so the retry is immediate, not delayed. Growth pressure beyond that only
+// warns — never fail-loud backpressure, never dropped acknowledged ops.
 func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	beforeBytes := pm.opStack.bytes
 	// Heal a nil rebase baseline left by a cold hydrate: every mutation
@@ -51,6 +51,18 @@ func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 		logging.Warn(h.projectLogger(project), "pending op stack hit residency cap; commit will be force-retried until it drains", "ops", maxPendingOpsPerProject)
 	case beforeBytes < opStackMaxBytes && pm.opStack.bytes >= opStackMaxBytes:
 		logging.Warn(h.projectLogger(project), "pending op stack hit byte cap; commit will be force-retried until it drains", "bytes", pm.opStack.bytes)
+	}
+	if pm.opStack.needsForceFlush() {
+		// Force-retry the commit the moment the stack crosses a
+		// residency bound: the sweeper tick is gone, so the crossing
+		// mutation itself must wake the loop. pm.triggerCh is read
+		// live under the pm.mu hold every caller already takes, so no
+		// revival can swap the channel mid-send; the non-blocking
+		// send never blocks under lock.
+		select {
+		case pm.triggerCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -799,6 +811,13 @@ func (h *StorHub) DrainProjectContext(ctx context.Context, project string) error
 	if err := validateProject(project); err != nil {
 		return err
 	}
+	// Phase E3 (F5) explicit durability point: fsync every journal with
+	// pending appends before attempting the remote push, so the sync
+	// path (FUSE fsync/Flush/Release drain, O_SYNC, REST/CLI sync) never
+	// waits out the 100ms group-commit window, and a failed push still
+	// leaves the journal durable for retry. The AfterFunc timer itself
+	// stays as the async-burst latency bound.
+	h.flushJournals()
 	pm := h.getOrCreateProjectMeta(project)
 	// Snapshot the frontier under mu: every op at or below target was
 	// published before this call. A successful commit clears through its

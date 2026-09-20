@@ -342,7 +342,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			writeState.mu.Lock()
 			if err := writeState.setSizeLocked(0); err != nil {
 				writeState.mu.Unlock()
-				writeState.opMu.Unlock()
+				unlockOpMu(&writeState.opMu)
 				s.releaseWriteState(writeState)
 				s.mu.Lock()
 				delete(s.handles, h.id)
@@ -355,7 +355,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			// Open/Create).
 			s.stagePrivClearForDataWrite(ctx, writeState, writeState.path)
 			writeState.mu.Unlock()
-			writeState.opMu.Unlock()
+			unlockOpMu(&writeState.opMu)
 		}
 	}
 	// A read-only open never attaches to another writer's writeState:
@@ -489,7 +489,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		// and a read straddling that window would serve half-old,
 		// half-new bytes.
 		writeState.opMu.Lock()
-		defer writeState.opMu.Unlock()
+		defer unlockOpMu(&writeState.opMu)
 		writeState.mu.Lock()
 		defer writeState.mu.Unlock()
 		// Reading a poisoned overlay would serve zeros for ranges
@@ -704,7 +704,7 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		return syscall.EOPNOTSUPP
 	}
 	writeState.opMu.Lock()
-	defer writeState.opMu.Unlock()
+	defer unlockOpMu(&writeState.opMu)
 	writeState.mu.Lock()
 	defer writeState.mu.Unlock()
 	if writeState.poisoned {
@@ -739,13 +739,54 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 // drain after a successful commit waits for remote durability; a drain
 // failure returns EIO without quarantining (see drainProject).
 func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
-	return h.commitAndDrain(ctx)
+	return h.commitFlushDrain(ctx)
 }
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
 	h.fs.debugf("fsync path=%s inode=%d", h.handlePath(), h.inode)
-	return h.commitAndDrain(ctx)
+	return h.commitFlushDrain(ctx)
+}
+
+// journalFlusher is the optional hub capability behind the F5 explicit
+// flush: a hub that journals acknowledged mutations exposes
+// FlushJournals so the sync path fsyncs the journal between commit and
+// drain instead of waiting out the group-commit window. Hubs without it
+// (test doubles) skip the flush; StorHub durability on those paths still
+// flows through DrainProjectContext, which flushes internally.
+type journalFlusher interface {
+	FlushJournals()
+}
+
+// flushHubJournals fsyncs the hub's op journals when the hub exposes
+// them (see journalFlusher). Ordering point, never an error path: the
+// drain right after re-asserts remote durability.
+func (h *storhubHandle) flushHubJournals() {
+	if fj, ok := h.fs.hub.(journalFlusher); ok {
+		fj.FlushJournals()
+	}
+}
+
+// flushAndDrain fsyncs the op journal, then waits for remote durability
+// (see drainProject). The flush sits between commit and drain on every
+// durability path: a crash after the journal fsync but before the remote
+// push replays from the journal, so the sync path never waits out the
+// group-commit timer.
+func (h *storhubHandle) flushAndDrain(ctx context.Context) syscall.Errno {
+	h.flushHubJournals()
+	return h.drainProject(ctx)
+}
+
+// commitFlushDrain is commitAndDrain with the F5 explicit flush in the
+// middle (commit, journal fsync, drain). Same contract: a commit failure
+// leaves the overlay dirty for the caller's quarantine decision; a drain
+// failure is EIO with the overlay already published, so the caller must
+// not quarantine.
+func (h *storhubHandle) commitFlushDrain(ctx context.Context) syscall.Errno {
+	if errno := h.commit(ctx); errno != 0 {
+		return errno
+	}
+	return h.flushAndDrain(ctx)
 }
 
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
@@ -765,7 +806,7 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		if writeState := h.snapshotWriteState(); writeState != nil && h.fs.soleWriteStateRef(writeState) {
 			writeState.quarantineTemps()
 		}
-	} else if drainErrno := h.drainProject(ctx); drainErrno != 0 {
+	} else if drainErrno := h.flushAndDrain(ctx); drainErrno != 0 {
 		// The commit published but the drain did not confirm remote
 		// durability: return EIO WITHOUT quarantining the overlay. The
 		// bytes are uploaded and published and the journal retains the

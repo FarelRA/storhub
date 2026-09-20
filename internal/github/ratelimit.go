@@ -121,6 +121,13 @@ type rateGovernor struct {
 	warnedHigh      bool
 	warnedLow       bool
 	contentInflight int64
+	// slotWake is the slot-release broadcast channel (swap-on-close):
+	// waiters capture the current channel under mu while slots are
+	// full; every contentInflight decrement closes it and swaps in a
+	// fresh one. slotWaits counts parks in the slot wait (diagnostic,
+	// same discipline as readWaits/contentWaits).
+	slotWake  chan struct{}
+	slotWaits uint64
 	// readWaits counts interactive-read admissions delayed by the point
 	// window; contentWaits counts content-class delays. Operators use
 	// the pair to see inversion happening.
@@ -143,6 +150,7 @@ func newRateGovernor(cfg storcfg.Config, logger *slog.Logger, sleep func(context
 		g.now = cfg.Now
 	}
 	g.inflight = make(chan struct{}, g.cfg.concurrency)
+	g.slotWake = make(chan struct{})
 	return g
 }
 
@@ -320,6 +328,19 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 				g.mu.Unlock()
 				break
 			}
+			// Slots full: park on the slot-release broadcast instead
+			// of polling on a 10ms tick. The channel is captured
+			// under mu while the condition is false and closed under
+			// the same lock at every decrement, so the signal cannot
+			// be missed: either the waiter sees the freed slot on
+			// re-check or its captured channel is closed. A missed
+			// signal would fall back to ctx cancel below (loud),
+			// never a silent stall. Pure broadcast, no tick.
+			g.slotWaits++
+			if g.slotWake == nil {
+				g.slotWake = make(chan struct{})
+			}
+			wake := g.slotWake
 			g.mu.Unlock()
 			if g.cfg.maxWait < 0 {
 				g.rollback(cost, class)
@@ -329,11 +350,7 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 			case <-ctx.Done():
 				g.rollback(cost, class)
 				return nil, ctx.Err()
-			default:
-			}
-			if err := g.sleep(ctx, 10*time.Millisecond); err != nil {
-				g.rollback(cost, class)
-				return nil, err
+			case <-wake:
 			}
 		}
 	}
@@ -347,6 +364,7 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 			g.mu.Lock()
 			if g.contentInflight > 0 {
 				g.contentInflight--
+				g.broadcastSlotReleaseLocked()
 			}
 			g.mu.Unlock()
 		}
@@ -359,11 +377,26 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 			g.mu.Lock()
 			if g.contentInflight > 0 {
 				g.contentInflight--
+				g.broadcastSlotReleaseLocked()
 			}
 			g.mu.Unlock()
 		}, nil
 	}
 	return func() { <-g.inflight }, nil
+}
+
+// broadcastSlotReleaseLocked wakes parked content-slot waiters by
+// closing the current broadcast channel and swapping in a fresh one.
+// Callers must hold g.mu and must call it on every contentInflight
+// decrement (both sites above do). Closing under the same lock that
+// guards the condition check and the waiter capture is what makes the
+// signal unmissable.
+func (g *rateGovernor) broadcastSlotReleaseLocked() {
+	if g.slotWake == nil {
+		g.slotWake = make(chan struct{})
+	}
+	close(g.slotWake)
+	g.slotWake = make(chan struct{})
 }
 
 // throttleJitter spreads client-side pacing waits to keep fleets of

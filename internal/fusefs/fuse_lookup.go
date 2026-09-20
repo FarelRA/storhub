@@ -526,7 +526,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		err := state.setSizeLocked(int64(size))
@@ -536,7 +536,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			n.fs.stagePrivClearForDataWrite(ctx, state, state.path)
 		}
 		state.mu.Unlock()
-		state.opMu.Unlock()
+		unlockOpMu(&state.opMu)
 		if err != nil {
 			return errnoFromError(err)
 		}
@@ -553,13 +553,13 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				state.opMu.Unlock()
+				unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			state.pending.HasMode = true
 			state.pending.Mode = mode & 0o7777
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 		}
 	}
 	uid, uidOK := in.GetUID()
@@ -576,7 +576,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				state.opMu.Unlock()
+				unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			overlayBase := base
@@ -596,7 +596,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			// already carries the effective overlay mode.
 			stagePrivClearLocked(ctx, state, overlayBase.Mode)
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 		}
 	}
 	atime, atimeOK := in.GetATime()
@@ -613,7 +613,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				state.opMu.Unlock()
+				unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			overlayBase := base
@@ -628,7 +628,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.pending.ATime = atime
 			state.pending.MTime = mtime
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 		}
 	}
 	n.detachedReply(base, state, out)
@@ -676,7 +676,7 @@ func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fu
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 			return false, 0, syscall.EIO
 		}
 		err := state.setSizeLocked(int64(size))
@@ -690,7 +690,7 @@ func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fu
 			n.fs.stagePrivClearForDataWrite(ctx, state, targetPath)
 		}
 		state.mu.Unlock()
-		state.opMu.Unlock()
+		unlockOpMu(&state.opMu)
 		if err != nil {
 			return false, 0, errnoFromError(err)
 		}
@@ -725,13 +725,13 @@ func (n *storhubNode) setattrMode(ctx context.Context, targetPath string, in *fu
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.pending.HasMode = true
 		state.pending.Mode = mode & 0o7777
 		state.mu.Unlock()
-		state.opMu.Unlock()
+		unlockOpMu(&state.opMu)
 		return 0
 	}
 	if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
@@ -766,7 +766,7 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.overlayEntryLocked(entry)
@@ -786,7 +786,7 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 		// effective overlay mode via the overlay above.
 		stagePrivClearLocked(ctx, state, entry.Mode)
 		state.mu.Unlock()
-		state.opMu.Unlock()
+		unlockOpMu(&state.opMu)
 		return 0
 	}
 	if !uidOK {
@@ -832,7 +832,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			state.opMu.Unlock()
+			unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.overlayEntryLocked(entry)
@@ -846,7 +846,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		state.pending.ATime = atime
 		state.pending.MTime = mtime
 		state.mu.Unlock()
-		state.opMu.Unlock()
+		unlockOpMu(&state.opMu)
 		return 0
 	}
 	var atimePtr, mtimePtr *time.Time

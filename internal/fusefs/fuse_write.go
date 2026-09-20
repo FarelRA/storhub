@@ -1167,7 +1167,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// temp and commit zeros over remote data.
 	if writeState.poisoned {
 		writeState.mu.Unlock()
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 		return 0, syscall.EIO
 	}
 	if h.flags&syscall.O_APPEND != 0 && off >= writeState.logicalSize {
@@ -1184,7 +1184,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		if err := writeState.ensureTempLocked(); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			writeState.opMu.Unlock()
+			unlockOpMu(&writeState.opMu)
 			return 0, errno
 		}
 	}
@@ -1193,7 +1193,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		if err := writeState.temp.Truncate(off); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			writeState.opMu.Unlock()
+			unlockOpMu(&writeState.opMu)
 			return 0, errno
 		}
 		writeState.logicalSize = off
@@ -1202,7 +1202,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err != nil {
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 		return uint32(n), errno
 	}
 	end := off + int64(n)
@@ -1211,7 +1211,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		if err := writeState.temp.Truncate(end); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			writeState.opMu.Unlock()
+			unlockOpMu(&writeState.opMu)
 			return uint32(n), errno
 		}
 	}
@@ -1222,7 +1222,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err := writeState.ensureDirtyBounded(ctx); err != nil {
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 		return uint32(n), errno
 	}
 	// POSIX privilege clearing is overlay-immediate, not commit-deferred:
@@ -1234,7 +1234,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	syncWrite := h.flags&syncWriteFlags != 0
 	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", writeState.path, h.inode, off, n)
 	writeState.mu.Unlock()
-	writeState.opMu.Unlock()
+	unlockOpMu(&writeState.opMu)
 	if !syncWrite {
 		// Buffered path: durability waits for Flush/Fsync/Release, so
 		// this write pays zero added latency (no drain here).
@@ -1276,18 +1276,18 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	ws.mu.Lock()
 	if ws.poisoned {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		// The overlay was quarantined; committing would upload zeros.
 		return syscall.EIO
 	}
 	if len(ws.dirtyRanges) == 0 && ws.logicalSize == ws.baseSize && !ws.hasPendingMetadataLocked() {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		return 0
 	}
 	if ws.deleted || handlePath == "" {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		// POSIX unlinked-open-handle semantics: writes via an open fd
 		// succeed and reads are served from the temp overlay; the data
 		// is discarded at Release (link count zero). Pinned by
@@ -1307,13 +1307,13 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	ws.mu.Lock()
 	if errno != 0 {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		return errno
 	}
 	// Re-validate under the lock: the DAC check released it.
 	if ws.deleted || ws.poisoned {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		if ws.poisoned {
 			return syscall.EIO
 		}
@@ -1333,12 +1333,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	curStateDetached := ws.deleted || curStatePath == ""
 	if curHandleDetached || curStateDetached {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		return 0
 	}
 	if curHandlePath != handlePath || curStatePath != handlePath {
 		ws.mu.Unlock()
-		ws.opMu.Unlock()
+		unlockOpMu(&ws.opMu)
 		return syscall.ENOENT
 	}
 	targetPath := handlePath
@@ -1351,7 +1351,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	// failure returns record nothing and emit nothing.
 	var notifies commitNotifies
 	errno = h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending, &notifies)
-	ws.opMu.Unlock()
+	unlockOpMu(&ws.opMu)
 	if errno == 0 {
 		notifies.emit(h.fs)
 	}

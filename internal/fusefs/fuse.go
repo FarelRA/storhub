@@ -520,7 +520,7 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
 	fsys.lockCond = sync.NewCond(&fsys.mu)
-	fsys.stopInvalPoll = fsys.startInvalidationPoll()
+	fsys.stopInvalPoll = fsys.startFanoutPush()
 	return fsys
 }
 
@@ -596,24 +596,120 @@ func (s *Filesystem) Unmount() error {
 	return nil
 }
 
+// opReleaseMu guards opReleaseGen/opReleaseCh: the commit-release
+// broadcast (Phase E3, F4). The mutex is held only for the integer bump
+// plus channel swap, never across network I/O, so signaling can never
+// wedge a committer.
+var (
+	opReleaseMu  sync.Mutex
+	opReleaseGen uint64
+	opReleaseCh  = make(chan struct{})
+	// opReleaseWaiters counts Close waiters parked (or about to park)
+	// in waitOpMuBounded. Releases skip the channel swap when no
+	// waiter exists, so uncontended commit-path unlocks cost one
+	// integer bump and zero allocations (allocation parity on the
+	// FUSE hot path is budget-gated). Registration happens before
+	// the first snapshot: any release after a failed TryLock observes
+	// the waiter, so no park can miss its wake; a wedged committer
+	// still falls back to the loud timeout.
+	opReleaseWaiters atomic.Int64
+)
+
+// signalOpRelease publishes one commit-state generation. Every opMu
+// release on the inode commit path calls it right after unlocking
+// (see unlockOpMu). Channel-swap broadcast: waiters hold the previous
+// channel, which closes exactly once here, so no waiter can miss a
+// release that happened after its snapshot. A release with no waiter
+// only bumps the counter; a waiter that somehow misses a signal falls
+// back to the closeOpMuTimeout expiry in waitOpMuBounded, which is loud
+// (quarantine plus error log), never silent.
+func signalOpRelease() {
+	opReleaseMu.Lock()
+	opReleaseGen++
+	if opReleaseWaiters.Load() == 0 {
+		opReleaseMu.Unlock()
+		return
+	}
+	prev := opReleaseCh
+	opReleaseCh = make(chan struct{})
+	opReleaseMu.Unlock()
+	close(prev)
+}
+
+// opReleaseWait snapshots the current broadcast generation and channel.
+// The caller re-checks its lock after snapshotting, then parks on the
+// channel: any release after the snapshot closes it.
+func opReleaseWait() (<-chan struct{}, uint64) {
+	opReleaseMu.Lock()
+	defer opReleaseMu.Unlock()
+	return opReleaseCh, opReleaseGen
+}
+
+// unlockOpMu releases an inode write-state opMu and publishes the
+// commit-release broadcast. Use at every opMu release site (including
+// short holders outside the commit network window) so a Close waiter
+// parked in waitOpMuBounded never sleeps past a release: a spurious
+// wakeup costs one TryLock, a missed one costs up to the loud timeout.
+func unlockOpMu(mu *sync.Mutex) {
+	mu.Unlock()
+	signalOpRelease()
+}
+
+// waitOpMuParkedHook, when non-nil, runs each time waitOpMuBounded is
+// about to park on the broadcast. Test-only observation point: it lets
+// the Close-during-commit test prove the waiter was actually parked
+// before the fake committer releases, so the test cannot pass by
+// release-before-park luck. Nil in production; stored atomically so
+// parallel suites never race on it.
+var waitOpMuParkedHook atomic.Pointer[func()]
+
 // closeOpMuTimeout bounds how long Close waits for one writeState's opMu
 // before quarantining-and-returning. Documented bound: 5 seconds per
 // state, so Close latency tracks state count, never the slowest commit.
+// It stays as the loud backstop behind the commit-release broadcast:
+// timeout expiry means the committer is wedged, which must stay
+// fail-loud (quarantine plus error log in Close).
 const closeOpMuTimeout = 5 * time.Second
 
-// waitOpMuBounded TryLocks mu until timeout, polling without holding any
-// filesystem lock. Reports whether the lock was acquired (caller must
-// Unlock on true). The poll interval keeps Close responsive while an
-// in-flight commit holds opMu across its network window.
+// waitOpMuBounded acquires mu before timeout, polling nothing. It waits
+// on the commit-release broadcast (signalOpRelease at every opMu release) and
+// retries the TryLock on each wake, so Close latency tracks the actual
+// commit end instead of a tick. Reports whether the lock was acquired
+// (caller must Unlock on true). The timeout is only the wedged-committer
+// backstop: expiry returns false and Close quarantines loudly.
 func waitOpMuBounded(mu *sync.Mutex, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	if mu.TryLock() {
+		return true
+	}
+	// Register before the first snapshot so every release after the
+	// failed TryLock above observes this waiter and swaps the
+	// channel (see opReleaseWaiters). Unregistered on every return.
+	opReleaseWaiters.Add(1)
+	defer opReleaseWaiters.Add(-1)
+	for {
+		ch, _ := opReleaseWait()
+		// Re-check after the snapshot: a release racing the snapshot
+		// already closed the previous channel, and the lock may be
+		// free now. Without this a release in the window parks us
+		// until the next signal.
 		if mu.TryLock() {
 			return true
 		}
-		time.Sleep(10 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return mu.TryLock()
+		}
+		if hook := waitOpMuParkedHook.Load(); hook != nil {
+			(*hook)()
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ch:
+			timer.Stop()
+		case <-timer.C:
+		}
 	}
-	return mu.TryLock()
 }
 
 // pathForLog snapshots the writeState path for error logs without racing
@@ -633,8 +729,9 @@ func (s *Filesystem) Close() error {
 	}
 	s.closing = true
 	s.mu.Unlock()
-	// Stop fan-out first: no invalidation may fire into teardown (its
-	// entry/content notifies would race unmounting).
+	// Stop fan-out first (unsubscribe the push subscription): no
+	// invalidation may fire into teardown (its entry/content notifies
+	// would race unmounting).
 	if s.stopInvalPoll != nil {
 		s.stopInvalPoll()
 	}
@@ -671,7 +768,7 @@ func (s *Filesystem) Close() error {
 		if writeState.hasUncommittedChanges() {
 			writeState.quarantineTempsReason(quarantineReasonClose)
 		}
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 	}
 	for _, handle := range handles {
 		handle.closeTemp()
@@ -1287,7 +1384,7 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 			}
 		}
 		writeState.mu.Unlock()
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 	}
 }
 
@@ -1331,7 +1428,7 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 			writeState.path = shfs.RemapPath(oldPath, newPath, writeState.path)
 		}
 		writeState.mu.Unlock()
-		writeState.opMu.Unlock()
+		unlockOpMu(&writeState.opMu)
 	}
 }
 

@@ -1494,8 +1494,15 @@ func joinWithin(done <-chan struct{}, timeout time.Duration) bool {
 // unmountWithRetry retries the unmount until it succeeds or its retry budget
 // runs out. An unmount fails with EBUSY while any file on the mount is still
 // open, so holders get a grace period instead of either hanging forever or
-// silently leaking the mount.
+// silently leaking the mount. Only the first failure prints the advisory;
+// later attempts are silent (the outcome line always prints), so teardown
+// of a busy mount does not spam. A Ctrl+C during the backoff sleep aborts
+// the wait early via a signal-scoped context: the callers already consumed
+// their signal context to reach teardown, so the loop arms its own SIGINT
+// watch (SIGTERM keeps the default kill disposition).
 func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
+	sigCtx, sigStop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer sigStop()
 	delay := unmountRetryBaseDelay
 	deadline := time.Now().Add(unmountRetryBudget)
 	for attempt := 1; ; attempt++ {
@@ -1506,12 +1513,17 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 			}
 			return
 		}
-		_, _ = fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
+		if attempt == 1 {
+			_, _ = fmt.Fprintf(report, "unmount failed (%v); close programs using %s and wait, or press Ctrl+C again to quit\n", err, target)
+		}
 		if time.Now().After(deadline) {
 			_, _ = fmt.Fprintf(report, "giving up on unmount after %d attempts; %s\n", attempt, mayStillBeMounted(target))
 			return
 		}
-		time.Sleep(delay)
+		if err := storcfg.SleepWithContext(sigCtx, delay); err != nil {
+			_, _ = fmt.Fprintf(report, "unmount interrupted; %s\n", mayStillBeMounted(target))
+			return
+		}
 		if delay < unmountBackoffCap {
 			delay *= 2
 		}

@@ -35,7 +35,7 @@ type projectMetadata struct {
 	dirty      bool
 	version    uint64
 	lastCommit time.Time
-	// lastAccess is the sweeper's idle clock. It is an atomic UnixNano
+	// lastAccess is the idle-evict clock. It is an atomic UnixNano
 	// so every cache hit can bump it without taking pm.mu exclusive:
 	// the old per-op pm.mu.Lock just to touch a timestamp serialized
 	// all same-project readers behind writers. Loads/stores use
@@ -109,7 +109,7 @@ const releaseCacheTTL = 60 * time.Second
 
 type releaseCacheEntry struct {
 	releases []ghapi.Release
-	// fetchedAt anchors the TTL; the sweeper and readers treat an entry
+	// fetchedAt anchors the TTL; readers treat an entry
 	// older than releaseCacheTTL as a miss. Guarded by releaseMu.
 	fetchedAt time.Time
 }
@@ -138,7 +138,8 @@ func (h *StorHub) getCachedReleases(project string) ([]ghapi.Release, bool) {
 // cachedReleasesView returns the cached list under a read lock. The slice is
 // the cache's own: callers must treat it and its asset arrays as read-only
 // (the picker only reads TagName/UploadURL/ID and asset IDs). A TTL-stale
-// entry reports a miss so the caller refetches; the sweeper drops it.
+// entry reports a miss so the caller refetches; stale entries for
+// untouched projects simply sit until refetch overwrites them.
 func (h *StorHub) cachedReleasesView(project string) ([]ghapi.Release, bool) {
 	h.releaseMu.RLock()
 	defer h.releaseMu.RUnlock()
@@ -362,10 +363,10 @@ func (h *StorHub) ensureMutableLocked(ctx context.Context, project string, pm *p
 
 // maxPendingOpsPerProject bounds one project's pending op stack. The stack
 // coalesces per path, so exceeding this means a project accumulated thousands
-// of distinct changed paths while commits kept failing: the sweeper then
-// force-retries the commit (ops can never be dropped - they are the
-// acknowledged mutations), and the residency cap's backpressure stops new
-// projects from piling on.
+// of distinct changed paths while commits kept failing: the crossing
+// mutation force-retries the commit via the live trigger (ops can never be
+// dropped - they are the acknowledged mutations), and the residency cap's
+// backpressure stops new projects from piling on.
 const maxPendingOpsPerProject = 4096
 
 func (h *StorHub) getGitRepo(project string) *gitRepo {
@@ -394,7 +395,7 @@ func (h *StorHub) getGitRepo(project string) *gitRepo {
 	return r
 }
 
-// touchLastAccess bumps the sweeper idle clock without taking pm.mu.
+// touchLastAccess bumps the idle-evict clock without taking pm.mu.
 // The atomic keeps per-op hits off the exclusive lock (audit 33).
 func touchLastAccess(pm *projectMetadata, now time.Time) {
 	if pm == nil || now.IsZero() {
@@ -422,19 +423,49 @@ func lastAccessTime(pm *projectMetadata) time.Time {
 // entries are clean, hence evictable, so growth self-limits);
 // admit=true refuses a brand-new project when the residency cap cannot
 // admit it.
+//
+// Idle expiry (Phase E2, replacing the sweeper tick): a hit whose idle
+// clock passed metaCacheIdleTTL falls through to the slow path, which
+// evicts the entry while it is still clean and idle and inserts a fresh
+// one. Touched, dirty, reviving, or concurrently replaced entries are
+// served live; eviction never drops unpushed work.
 func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, error) {
 	h.metaMu.RLock()
 	pm, exists := h.metaCache[project]
 	h.metaMu.RUnlock()
 	if exists {
-		touchLastAccess(pm, h.config.Now())
-		return pm, nil
+		now := h.config.Now()
+		if !h.idleExpired(pm, now) {
+			touchLastAccess(pm, now)
+			return pm, nil
+		}
+		// Possibly idle-expired: the slow path revalidates under the
+		// write lock and evicts only while the entry is still clean.
 	}
 	h.metaMu.Lock()
+	var evicted []string
 	if pm, exists = h.metaCache[project]; exists {
+		if h.idleExpired(pm, h.config.Now()) {
+			if name, ok := h.evictIdleEntryLocked(project); ok {
+				evicted = append(evicted, name)
+				exists = false
+			}
+		}
+		if exists {
+			h.metaMu.Unlock()
+			touchLastAccess(pm, h.config.Now())
+			return pm, nil
+		}
 		h.metaMu.Unlock()
-		touchLastAccess(pm, h.config.Now())
-		return pm, nil
+		h.releaseEvicted(evicted)
+		h.metaMu.Lock()
+		// Re-check: the residue release above ran without the lock, so
+		// a concurrent insert may have recreated the entry meanwhile.
+		if pm, exists = h.metaCache[project]; exists {
+			h.metaMu.Unlock()
+			touchLastAccess(pm, h.config.Now())
+			return pm, nil
+		}
 	}
 	now := h.config.Now()
 	// Enforce the residency cap before adding another entry: growth is an
@@ -445,7 +476,8 @@ func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, 
 	// inserts unbounded on the read path; hard-capping reads too was
 	// EXCLUDED — change nothing here without revisiting
 	// eventdriven_test.go:347.
-	admitted, evicted := h.evictForCapacityLocked()
+	admitted, capEvicted := h.evictForCapacityLocked()
+	evicted = append(evicted, capEvicted...)
 	if admit && !admitted {
 		h.metaMu.Unlock()
 		h.releaseEvicted(evicted)
@@ -456,6 +488,39 @@ func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, 
 	h.metaMu.Unlock()
 	h.releaseEvicted(evicted)
 	return pm, nil
+}
+
+// idleExpired reports whether pm's idle clock passed metaCacheIdleTTL: a
+// clean entry nobody touched for the TTL is evictable on the get path
+// (Phase E2 replaces the sweeper tick). A zero stamp means never accessed
+// and never expires. now is the caller's clock read, reused for the touch
+// so the fast path pays a single Now per hit.
+func (h *StorHub) idleExpired(pm *projectMetadata, now time.Time) bool {
+	last := lastAccessTime(pm)
+	if last.IsZero() {
+		return false
+	}
+	return now.Sub(last) > metaCacheIdleTTL
+}
+
+// evictIdleEntryLocked drops the resident entry for project while it is
+// still clean and idle-past-the-TTL. Caller holds metaMu for writing.
+// The TTL is re-read under the write lock and evictEntryLocked rechecks
+// clean under pm.mu, so a use that raced the fast-path stamp read is
+// served live instead. Returns the evicted name for cascade via
+// releaseEvicted after metaMu is dropped.
+func (h *StorHub) evictIdleEntryLocked(project string) (string, bool) {
+	pm, ok := h.metaCache[project]
+	if !ok {
+		return "", false
+	}
+	if !h.idleExpired(pm, h.config.Now()) {
+		return "", false
+	}
+	if !evictEntryLocked(h, project, pm) {
+		return "", false
+	}
+	return project, true
 }
 
 // getOrCreateProjectMeta returns the projectMetadata for a project, creating it if needed
@@ -571,40 +636,28 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 	return false, nil
 }
 
-// Cache residency policy: a clean project's metadata is dropped after
-// metaCacheIdleTTL without access (the lastAccess stamp was already
-// recorded; nothing read it until now), a cached release list after
-// releaseCacheTTL (enforced lazily on read and here for untouched
-// projects), and a dirty project whose pending stack passed the op cap gets
-// its commit force-retried. The sweeper is the missing periodic bound: the
-// insert-time eviction alone never ran on idle timeout.
-const (
-	metaCacheIdleTTL = 30 * time.Minute
-	sweeperInterval  = 30 * time.Second
-)
+// Cache residency policy (Phase E2: no periodic goroutine; every leg is
+// event-driven): a clean project's metadata is dropped after
+// metaCacheIdleTTL without access, enforced on the lookupOrInsert get
+// path (the lastAccess stamp was already recorded; the get path reads it
+// instead of a tick). A cached release list older than releaseCacheTTL
+// reports a miss on read (cachedReleasesView); projects nobody touches
+// need no eviction, so no drop pass exists. A dirty project whose pending
+// stack crosses a residency bound gets its commit force-retried by the
+// crossing mutation itself (appendOpLocked pokes the live triggerCh under
+// the pm.mu hold every caller already takes). Memory stays capped by
+// MaxTrackedProjects either way, so worst case without any timer is
+// bounded residency, not growth.
+const metaCacheIdleTTL = 30 * time.Minute
 
-// sweeperLoop is the low-frequency in-memory cache janitor. It is bound to
-// the hub context (canceled by Shutdown) and joined on shutdownWg, so it
-// never outlives the hub.
-func (h *StorHub) sweeperLoop() {
-	defer h.shutdownWg.Done()
-	ticker := time.NewTicker(sweeperInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.shutdownCh:
-			return
-		case <-h.baseCtx.Done():
-			return
-		case <-ticker.C:
-			h.sweepCachesOnce()
-		}
-	}
-}
-
-// sweepCachesOnce TTL-evicts idle clean metadata entries (cascading their
-// residue), drops stale release lists, and pokes a commit retry for dirty
-// projects whose op stack outgrew the residency cap.
+// sweepCachesOnce is the manual cache-drain backstop, kept as a callable
+// for tests and shutdown paths: it TTL-evicts idle clean metadata entries
+// (cascading their residue) and pokes a commit retry for dirty projects
+// whose op stack outgrew the residency cap. No timer calls it; the live
+// legs moved to lookupOrInsert (idle evict) and appendOpLocked
+// (cap-cross poke). The release-list drop leg is deleted outright: the
+// read path already treats older-than-TTL as a miss, and projects nobody
+// touches need no eviction.
 //
 // Lock discipline (audit 33): the candidate snapshot is taken under
 // metaMu.RLock; per-project decisions run after the global lock is
@@ -613,8 +666,7 @@ func (h *StorHub) sweeperLoop() {
 // Force-flush pokes re-read the CURRENT triggerCh under pm.mu: the
 // channel captured before unlock may be stale after a
 // markProjectDirtyLiveLocked revival swap (caches.go vs commit.go), and
-// a stale send wakes nobody, losing the maxPendingOps retry until the
-// next 30s tick.
+// a stale send wakes nobody.
 func (h *StorHub) sweepCachesOnce() {
 	now := h.config.Now()
 
@@ -670,14 +722,6 @@ func (h *StorHub) sweepCachesOnce() {
 		}
 	}
 	h.releaseEvicted(evicted)
-
-	h.releaseMu.Lock()
-	for name, entry := range h.releaseCache {
-		if now.Sub(entry.fetchedAt) > releaseCacheTTL {
-			delete(h.releaseCache, name)
-		}
-	}
-	h.releaseMu.Unlock()
 }
 
 // treeCacheMaxEntries bounds the per-project Merkle build cache by entry
