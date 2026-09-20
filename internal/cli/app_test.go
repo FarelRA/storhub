@@ -47,9 +47,8 @@ func TestAppRunHelpUnknownAndUsageErrors(t *testing.T) {
 }
 
 func TestHelpersAndRendering(t *testing.T) {
-	oldWarn := warnOutput
-	warnOutput = io.Discard
-	t.Cleanup(func() { warnOutput = oldWarn })
+	restore := setWarnOutput(io.Discard)
+	t.Cleanup(restore)
 	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
@@ -396,10 +395,9 @@ func TestNormalizeCLIChunkSizeCeilingClamp(t *testing.T) {
 // TestHubConfigClampWarnsThroughSeam pins that the clamp warning goes
 // through the warnOutput seam (capturable), not straight to os.Stderr.
 func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
-	oldWarn := warnOutput
 	var buf bytes.Buffer
-	warnOutput = &buf
-	t.Cleanup(func() { warnOutput = oldWarn })
+	restore := setWarnOutput(&buf)
+	t.Cleanup(restore)
 	cfg := newHubConfig("", 1024, false, logSettings{}, false)
 	if cfg.ChunkSize != minCLIChunkSize {
 		t.Fatalf("expected floor clamp, got %d", cfg.ChunkSize)
@@ -914,9 +912,8 @@ func newTestApp(t *testing.T) (*App, func() string, func() string) {
 	app.stderr = stderrFile
 	// Route package-level configuration warnings through the same capture
 	// seam so tests can assert on them instead of polluting real stderr.
-	oldWarn := warnOutput
-	warnOutput = stderrFile
-	t.Cleanup(func() { warnOutput = oldWarn })
+	restore := setWarnOutput(stderrFile)
+	t.Cleanup(restore)
 	return app, stdout, stderr
 }
 

@@ -62,6 +62,11 @@ func (h *StorHub) FlushProjectContext(ctx context.Context, project string) error
 	return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
 }
 
+// Compat shims: the non-Context verbs below are thin wrappers for
+// single-call scripts and embedders without a request scope. They inject
+// context.Background, so they cannot be cancelled: long-running callers
+// must prefer the FooContext variants. New methods are Context-first;
+// no new non-Context wrapper is added.
 func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, error) {
 	return h.UploadFileContext(context.Background(), project, fileName, inputPath)
 }

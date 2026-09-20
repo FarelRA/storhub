@@ -11,6 +11,7 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/sessiontest"
 	storage "github.com/FarelRA/storhub/internal/storage"
 )
 
@@ -269,12 +270,10 @@ func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode 
 	if h.sessions == nil {
 		h.sessions = map[string]*pcSession{}
 	}
-	// Honor requested TTLs like the product (default when unset); every
-	// operation past expiry fails stale, checked in livePCSessionLocked.
-	ttl := storage.RequestedTTL(opts)
-	if ttl <= 0 {
-		ttl = 10 * time.Minute
-	}
+	// Honor requested TTLs through the shared clamp (default when
+	// unset); every operation past expiry fails stale, checked in
+	// livePCSessionLocked.
+	ttl := sessiontest.ClampTTL(storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
 	expires := time.Now().Add(ttl)
 	var data []byte
 	var ino uint64
@@ -314,7 +313,7 @@ func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
 		// instead of degrading to NotFound.
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
 	}
-	if !time.Now().Before(s.expires) {
+	if sessiontest.Expired(s.expires, time.Now()) {
 		delete(h.sessions, id)
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
 	}

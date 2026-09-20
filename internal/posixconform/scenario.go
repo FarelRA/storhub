@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	storcfg "github.com/FarelRA/storhub/internal/config"
 )
 
 // Surface selector bitmask for Scenario.Surfaces.
@@ -1094,11 +1096,25 @@ var Table = []Scenario{
 			if _, err := h.Write([]byte("data")); err != nil {
 				return fmt.Errorf("write scratch: %v", err)
 			}
-			// Idle past the TTL lapses the description lease. The
-			// margin (10x TTL) keeps loaded CI hosts deterministic:
-			// expiry is checked lazily on use, so any sleep past the
-			// deadline converges.
-			time.Sleep(1 * time.Second)
+			// Idle past the TTL lapses the description lease. Poll until
+			// the first op reports stale (deadline 1 PatienceUnit,
+			// step 1 TickUnit): expiry is checked lazily on use, so
+			// fast hosts converge early and slow hosts still meet
+			// the deadline without a fixed 1s wall sleep.
+			deadline := time.Now().Add(storcfg.PatienceUnit)
+			for {
+				_, err := h.PRead(0, 4)
+				if errors.Is(err, ErrStale) {
+					break
+				}
+				if err != nil {
+					return fmt.Errorf("pread while awaiting expiry: want ErrStale or nil, got %v", err)
+				}
+				if !time.Now().Before(deadline) {
+					return fmt.Errorf("pread after expiry: want ErrStale, handle never lapsed")
+				}
+				time.Sleep(storcfg.TickUnit)
+			}
 			if _, err := h.PRead(0, 4); !errors.Is(err, ErrStale) {
 				return fmt.Errorf("pread after expiry: want ErrStale, got %v", err)
 			}

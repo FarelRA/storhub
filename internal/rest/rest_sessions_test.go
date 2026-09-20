@@ -13,6 +13,7 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/sessiontest"
 	storage "github.com/FarelRA/storhub/internal/storage"
 )
 
@@ -93,7 +94,7 @@ func (c *fakeRESTClient) liveFakeSessionLocked(id string) (*fakeSession, error) 
 	if !ok {
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
 	}
-	if !time.Now().Before(s.expires) {
+	if sessiontest.Expired(s.expires, time.Now()) {
 		delete(c.sessions, id)
 		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
 	}
@@ -119,7 +120,7 @@ func (c *fakeRESTClient) authorizeFakeSessionLocked(ctx context.Context, id stri
 // sweepFakeSessionsLocked reaps expired handles. Caller holds c.mu.
 func (c *fakeRESTClient) sweepFakeSessionsLocked(now time.Time) {
 	for id, s := range c.sessions {
-		if !now.Before(s.expires) {
+		if sessiontest.Expired(s.expires, now) {
 			delete(c.sessions, id)
 		}
 	}
@@ -172,12 +173,10 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 	}
 	now := time.Now()
 	c.sweepFakeSessionsLocked(now)
-	// Honor requested TTLs like the product (default knob when unset);
-	// every operation past expiry fails stale in liveFakeSessionLocked.
-	ttl := storage.RequestedTTL(opts)
-	if ttl <= 0 {
-		ttl = c.fakeSessionTTL()
-	}
+	// Honor requested TTLs through the shared clamp (default knob when
+	// unset); every operation past expiry fails stale in
+	// liveFakeSessionLocked.
+	ttl := sessiontest.ClampTTL(storage.RequestedTTL(opts), c.fakeSessionTTL(), time.Hour)
 	ownerUID := shfs.IdentityFromContext(ctx).UID
 	maxProject, maxUser := c.fakeSessionCaps()
 	projectCount, userCount := 0, 0

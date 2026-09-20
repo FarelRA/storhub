@@ -2,8 +2,12 @@ version: "2"
 
 linters:
   enable:
+    - govet
+    - ineffassign
     - misspell
+    - staticcheck
     - unconvert
+    - unused
 
 formatters:
   enable:

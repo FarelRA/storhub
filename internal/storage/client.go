@@ -203,8 +203,10 @@ func isReleaseFull(err error) bool {
 }
 
 func (h *StorHub) debugf(format string, args ...any) {
-	// Guard the level before Sprintf: at Info level the format work was
-	// pure discarded allocation on every call.
+	// Background is correct here, not a dropped cancel: slog-level
+	// gating is context-independent for our handlers (no contextual
+	// verbosity values), and debugf has no request scope by design.
+	// Callers with a scope log through projectLogger + logOpStart.
 	if !h.logger.Enabled(context.Background(), slog.LevelDebug) {
 		return
 	}

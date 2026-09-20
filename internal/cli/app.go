@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -180,12 +181,35 @@ type storhubClient struct {
 // package-level constructors that run before any App exists (flag parsing,
 // env layering). Once an App exists, warnings go to a.stderr (see App.warnf);
 // warnf below prefers the App sink and falls back here only for pre-App
-// callers. Tests swap it to capture warnings.
-var warnOutput io.Writer = os.Stderr
+// callers. Atomic so parallel tests swapping the seam never race; tests
+// must use setWarnOutput, never assign the variable directly.
+var warnOutput atomic.Pointer[io.Writer]
+
+// setWarnOutput swaps the pre-App warning sink, returning a restore func.
+// Test-only seam: prod never calls it.
+func setWarnOutput(w io.Writer) func() {
+	old, ok := warnOutput.Load(), true
+	if w == nil {
+		v := io.Writer(os.Stderr)
+		w = v
+	}
+	warnOutput.Store(&w)
+	if !ok {
+		return func() {}
+	}
+	return func() { warnOutput.Store(old) }
+}
+
+func warnSink() io.Writer {
+	if p := warnOutput.Load(); p != nil && *p != nil {
+		return *p
+	}
+	return os.Stderr
+}
 
 // warnf prints a storhub-prefixed warning to warnOutput (pre-App fallback).
 func warnf(format string, args ...any) {
-	_, _ = fmt.Fprintf(warnOutput, "%s storhub: warning: "+format+"\n",
+	_, _ = fmt.Fprintf(warnSink(), "%s storhub: warning: "+format+"\n",
 		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 }
 
@@ -194,7 +218,7 @@ func warnf(format string, args ...any) {
 func (a *App) warnf(format string, args ...any) {
 	out := a.stderr
 	if out == nil {
-		out = warnOutput
+		out = warnSink()
 	}
 	_, _ = fmt.Fprintf(out, "%s storhub: warning: "+format+"\n",
 		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
