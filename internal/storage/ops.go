@@ -22,7 +22,7 @@ const (
 	OpPatch      OpType = "patch"
 	OpXattr      OpType = "xattr"
 	OpRelease    OpType = "release"
-	OpChunkPrune OpType = "chunk-prune"
+	OpChunkPrune OpType = "chunkprune"
 )
 
 // Op is one discrete, self-contained metadata operation. Every op carries
@@ -49,7 +49,7 @@ type Op struct {
 	FreedChunks   int         `json:"freed_chunks,omitempty"`   // del: chunk records the removed entry referenced
 	Tag           string      `json:"tag,omitempty"`            // release op
 	Release       *ReleaseRef `json:"release,omitempty"`        // release op: nil = delete the tag
-	RemovedChunks []int64     `json:"removed_chunks,omitempty"` // chunk-prune op
+	RemovedChunks []int64     `json:"removed_chunks,omitempty"` // chunkprune op
 	XAttr         string      `json:"xattr,omitempty"`          // xattr op
 
 	// Members carries the explicit subtree member from-paths for a
@@ -115,7 +115,7 @@ type opStack struct {
 	seq      uint64
 	byPath   map[string]int // stackPathKey(op) -> index (kind-prefixed, never raw)
 	byTarget map[string]int // Paths[1] of rename ops -> index
-	pruneIdx int            // index of the merged chunk-prune op, -1 when none
+	pruneIdx int            // index of the merged chunkprune op, -1 when none
 	// bytes is the running approxOpBytes total over ops, maintained
 	// incrementally by every mutation below (append/removeAt/clear/clearUpTo/
 	// reindex) so the byte cap needs no O(stack) recount.
@@ -186,7 +186,7 @@ func (s *opStack) needsForceFlush() bool {
 // string space can never collide: file paths ("f:"), directory paths ("d:",
 // including the root path ""), and release tags ("r:") — a file put of "v1"
 // and a release tag "v1" previously overwrote each other's index entry and
-// missed coalescing. Rename, chunk-prune and unknown ops are not
+// missed coalescing. Rename, chunkprune and unknown ops are not
 // byPath-indexed (ok=false); renames live in byTarget, prunes in pruneIdx.
 func stackPathKey(op Op) (key string, ok bool) {
 	switch op.Type {
