@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"testing"
 )
 
@@ -130,5 +131,43 @@ func TestPublishedPathsSinceSwapIsUnknown(t *testing.T) {
 
 	if _, unknown, _ := hub.PublishedPathsSince(project, cur); !unknown {
 		t.Fatal("remote-truth swap must report unknown scope")
+	}
+}
+
+// TestPublishedPathsSinceAdoptSwapStaysExact pins the S1 residual as a
+// contract: a version-match commit (no mid-commit mutation) adopts the
+// normalized working tree and bumps the version WITHOUT a ring entry.
+// The swap carries no new namespace content beyond the mutation's own
+// publish (already rung exact), so the window after it must stay exact:
+// no unknown scope (a nil entry would force it) and no double-recorded
+// paths. A subscriber polling the fan-out cursor therefore misses
+// nothing observable, by construction rather than by luck.
+func TestPublishedPathsSinceAdoptSwapStaysExact(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, smallTransferTestConfig())
+	project := "fanout-adopt"
+
+	seedMeta(t, hub, project, "docs", "a.txt", 1)
+	_, _, cur := hub.PublishedPathsSince(project, 0)
+	seedMeta(t, hub, project, "docs", "b.txt", 2)
+	if err := hub.FlushProjectContext(ctx, project); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	paths, unknown, cur2 := hub.PublishedPathsSince(project, cur)
+	if unknown {
+		t.Fatal("adopt swap must not force unknown scope")
+	}
+	seen := map[string]int{}
+	for _, p := range paths {
+		seen[p]++
+	}
+	if seen["docs/b.txt"] != 1 {
+		t.Fatalf("mutation paths must appear exactly once, got %q", paths)
+	}
+	again, unknown, _ := hub.PublishedPathsSince(project, cur2)
+	if unknown || len(again) != 0 {
+		t.Fatalf("window must drain clean, got %q unknown=%v", again, unknown)
 	}
 }
