@@ -18,10 +18,11 @@ type MemSurface struct {
 
 // Compile-time conformance checks.
 var (
-	_ Surface    = (*MemSurface)(nil)
-	_ PunchHoler = (*MemSurface)(nil)
-	_ Handle     = (*memHandle)(nil)
-	_ SeekHandle = (*memHandle)(nil)
+	_ Surface        = (*MemSurface)(nil)
+	_ PunchHoler     = (*MemSurface)(nil)
+	_ SessionSurface = (*MemSurface)(nil)
+	_ Handle         = (*memHandle)(nil)
+	_ SeekHandle     = (*memHandle)(nil)
 )
 
 type memFile struct {

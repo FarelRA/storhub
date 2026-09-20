@@ -2,13 +2,13 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -193,10 +193,6 @@ func (h *fakeHub) CloseSession(ctx context.Context, handleID string) error {
 	return nil
 }
 
-// pcFakeHub never speaks sessions; stubs keep the extended contract
-// compiling while conformance keeps failing loudly on use.
-func errPCSession() error { return errors.New("pcFakeHub: sessions not supported") }
-
 // pcSession is one emulated open handle: a pinned byte snapshot plus
 // staged writes, committed on sync/close. Commits resolve the publish
 // target by open-time inode identity, so a rename is followed and an
@@ -207,6 +203,13 @@ type pcSession struct {
 	data  []byte
 	dirty bool
 	ino   uint64
+	// linked marks handles named by LinkSession (vs opened with a
+	// path): their commit creates, so a taken target fails like
+	// UploadFileContext instead of silently overwriting. expires
+	// bounds the description like the product idle TTL; every
+	// operation past it fails stale.
+	linked  bool
+	expires time.Time
 }
 
 func pcSessionReadable(mode storage.OpenMode) bool {
@@ -260,13 +263,19 @@ func (h *pcFakeHub) commitPCSessionLocked(s *pcSession, target string) {
 
 func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
 	_ = ctx
-	_ = opts
 	_ = project
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.sessions == nil {
 		h.sessions = map[string]*pcSession{}
 	}
+	// Honor requested TTLs like the product (default when unset); every
+	// operation past expiry fails stale, checked in livePCSessionLocked.
+	ttl := storage.RequestedTTL(opts)
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	expires := time.Now().Add(ttl)
 	var data []byte
 	var ino uint64
 	if path != "" {
@@ -291,14 +300,23 @@ func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode 
 	}
 	h.nextSession++
 	id := fmt.Sprintf("pcsess-%d", h.nextSession)
-	h.sessions[id] = &pcSession{path: path, mode: mode, data: data, ino: ino}
+	h.sessions[id] = &pcSession{path: path, mode: mode, data: data, ino: ino, expires: expires}
 	return id, nil
 }
 
 func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
 	s, ok := h.sessions[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, id)
+		// Unknown ids answer stale like expired ones, mirroring the
+		// product (and the sibling fakes): an id that was never
+		// issued and one that lapsed are indistinguishable, so every
+		// operation past the first expiry keeps reporting stale
+		// instead of degrading to NotFound.
+		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
+	}
+	if !time.Now().Before(s.expires) {
+		delete(h.sessions, id)
+		return nil, &storage.StaleSessionError{HandleID: id, Reason: "expired"}
 	}
 	return s, nil
 }
@@ -405,6 +423,19 @@ func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
 	if !s.dirty {
 		return nil
 	}
+	// Linked scratch commits with create semantics: a taken target
+	// fails instead of overwriting, like CloseSession.
+	if s.linked {
+		if _, ok := h.files[s.path]; ok {
+			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		}
+		if h.dirs[s.path] {
+			return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, s.path)
+		}
+		if _, ok := h.links[s.path]; ok {
+			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		}
+	}
 	// An inode unlinked after open has nowhere to publish: retain the
 	// staged bytes (fsync equivalent) without publishing.
 	if target := h.resolvePCCommitLocked(s); target == "" {
@@ -417,11 +448,70 @@ func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
 }
 
 func (h *pcFakeHub) LinkSession(ctx context.Context, handleID, path string) error {
-	return errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	if s.path != "" {
+		return fmt.Errorf("link session %s to %s: %w", handleID, path, storage.ErrSessionLinked)
+	}
+	p := strings.TrimPrefix(path, "/")
+	if p == "" {
+		return fmt.Errorf("link session: %w: empty path", syscall.EINVAL)
+	}
+	if _, ok := h.files[p]; ok {
+		return fmt.Errorf("%w: %s", shfs.AlreadyExists(path), p)
+	}
+	if h.dirs[p] {
+		return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
+	}
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("%w: %s", shfs.AlreadyExists(path), p)
+	}
+	if parent := pcParentOf(p); parent != "" {
+		if !h.dirs[parent] {
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+		}
+	}
+	s.path = p
+	s.linked = true
+	s.dirty = true
+	return nil
 }
 
 func (h *pcFakeHub) RelinkSession(ctx context.Context, handleID, path string) error {
-	return errPCSession()
+	_ = ctx
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, err := h.livePCSessionLocked(handleID)
+	if err != nil {
+		return err
+	}
+	p := strings.TrimPrefix(path, "/")
+	if p == "" {
+		return fmt.Errorf("relink session: %w: empty path", syscall.EINVAL)
+	}
+	if _, ok := h.files[p]; ok {
+		return fmt.Errorf("%w: %s", shfs.AlreadyExists(path), p)
+	}
+	if h.dirs[p] {
+		return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
+	}
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("%w: %s", shfs.AlreadyExists(path), p)
+	}
+	if parent := pcParentOf(p); parent != "" {
+		if !h.dirs[parent] {
+			return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
+		}
+	}
+	s.path = p
+	s.linked = true
+	s.dirty = true
+	return nil
 }
 
 func (h *pcFakeHub) CloseSession(ctx context.Context, handleID string) error {
@@ -433,6 +523,25 @@ func (h *pcFakeHub) CloseSession(ctx context.Context, handleID string) error {
 		return err
 	}
 	if s.path == "" {
+		delete(h.sessions, handleID)
+		return nil
+	}
+	if s.linked {
+		// Linked scratch commits with create semantics (like
+		// UploadFileContext): a target taken since link fails instead
+		// of overwriting, leaving the description open for Relink.
+		if _, ok := h.files[s.path]; ok {
+			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		}
+		if h.dirs[s.path] {
+			return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, s.path)
+		}
+		if _, ok := h.links[s.path]; ok {
+			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		}
+		if s.dirty {
+			h.commitPCSessionLocked(s, s.path)
+		}
 		delete(h.sessions, handleID)
 		return nil
 	}

@@ -172,7 +172,12 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 	}
 	now := time.Now()
 	c.sweepFakeSessionsLocked(now)
-	_ = opts // TTL requests clamp inside the real manager; the fake honors its sessionTTL knob.
+	// Honor requested TTLs like the product (default knob when unset);
+	// every operation past expiry fails stale in liveFakeSessionLocked.
+	ttl := storage.RequestedTTL(opts)
+	if ttl <= 0 {
+		ttl = c.fakeSessionTTL()
+	}
 	ownerUID := shfs.IdentityFromContext(ctx).UID
 	maxProject, maxUser := c.fakeSessionCaps()
 	projectCount, userCount := 0, 0
@@ -222,7 +227,7 @@ func (c *fakeRESTClient) OpenSession(ctx context.Context, project, path string, 
 		data:     data,
 		ownerUID: ownerUID,
 		hasOwner: shfs.IdentityPresent(ctx),
-		expires:  now.Add(c.fakeSessionTTL()),
+		expires:  now.Add(ttl),
 	}
 	if path != "" {
 		if node, ok := c.project(project).files[path]; ok {
@@ -350,6 +355,14 @@ func (c *fakeRESTClient) SyncSession(ctx context.Context, handleID string) error
 	}
 	if !s.dirty {
 		return nil
+	}
+	// Linked scratch commits with create semantics: a taken target
+	// fails instead of overwriting, like CloseSession.
+	if s.linked {
+		p := c.project(s.project)
+		if _, ok := p.files[s.path]; ok {
+			return shfs.AlreadyExists(s.path)
+		}
 	}
 	// An inode unlinked after open has nowhere to publish: sync keeps
 	// the staged bytes readable (fsync equivalent) without publishing.

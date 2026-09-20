@@ -227,6 +227,17 @@ func WithSessionTTL(d time.Duration) SessionOption {
 	return func(o *sessionOpenOptions) { o.ttl = d }
 }
 
+// RequestedTTL folds SessionOptions and reports the requested idle TTL:
+// <=0 means "hub default". Test doubles honor it so conformance can
+// drive handle expiry; production clamps it to [default, max] at open.
+func RequestedTTL(opts []SessionOption) time.Duration {
+	var o sessionOpenOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o.ttl
+}
+
 // SessionHubOption tunes one hub's session policy.
 type SessionHubOption func(*sessionHubPolicy)
 

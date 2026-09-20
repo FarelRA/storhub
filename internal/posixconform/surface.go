@@ -1,6 +1,9 @@
 package posixconform
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // OpenMode selects the access mode of a Handle returned by Open.
 type OpenMode int
@@ -77,6 +80,11 @@ var (
 	ErrUnsatisfiableRange = errors.New("posixconform: range not satisfiable")
 	// ErrClosed reports use of a closed handle, like EBADF.
 	ErrClosed = errors.New("posixconform: handle is closed")
+	// ErrStale reports a handle whose server-side description expired
+	// or vanished: idle past its TTL, like a stateful-open lease
+	// lapsing. Stateless fds never produce it; only session-backed
+	// descriptions do.
+	ErrStale = errors.New("posixconform: stale handle")
 	// ErrAccess reports an operation denied by the handle open mode, like EBADF.
 	ErrAccess = errors.New("posixconform: operation not permitted by open mode")
 	// ErrInvalid reports a bad argument such as a negative offset, like EINVAL.
@@ -115,6 +123,36 @@ type PunchHoler interface {
 	// fallocate(PUNCH_HOLE|KEEP_SIZE), or zero-fills it on dense-byte
 	// surfaces, or fails with ErrUnsupported.
 	PunchHole(path string, off, length int64) error
+}
+
+// ScratchSession is an open file description bound to no path, like
+// O_TMPFILE: reads, writes, truncate, and sync all work on staged
+// bytes, Link names the staged image (staging the creation, so the
+// name appears only at Close), and Close without a link discards.
+// Linking an occupied path fails with ErrExists; linking twice fails
+// the same way, since the second link is also onto an occupied name.
+// Relink retargets a linked-but-uncommitted handle, the rescue for a
+// close that failed because a concurrent writer took the linked name.
+type ScratchSession interface {
+	Handle
+	// Link names the staged image like linkat on an O_TMPFILE fd.
+	Link(path string) error
+	// Relink retargets a linked handle like a second linkat after
+	// the first name was taken.
+	Relink(path string) error
+}
+
+// SessionSurface is an optional Surface capability for opening pathless
+// scratch descriptions with an idle TTL. It stays optional (rather than
+// growing Surface) so existing adapters keep compiling untouched:
+// kernel-fd surfaces cannot name a description after open without
+// O_TMPFILE support, so they simply do not implement it and scratch
+// scenarios never run there (see Filter). A non-positive ttl takes the
+// surface default; idle past the TTL, every operation on the session
+// fails with ErrStale, like a lapsed lease.
+type SessionSurface interface {
+	// OpenScratch opens a pathless read-write description.
+	OpenScratch(ttl time.Duration) (ScratchSession, error)
 }
 
 // ErrPrecondition reports a stale CAS token from CompareAndWrite; match it with errors.As.
