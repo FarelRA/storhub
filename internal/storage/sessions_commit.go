@@ -1,0 +1,331 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sort"
+
+	shfs "github.com/FarelRA/storhub/internal/fs"
+)
+
+// sessions_commit.go: session commit path: resolve, commit, recheck, sync, close.
+
+// commitSessionLocked commits one handle's staged state through the standard
+// hub verbs, chosen per staged shape, then drains the commit it made:
+//
+//   - staged creation (missing at open, or linked scratch): full upload of
+//     the staged image via UploadFileContext;
+//   - full-image stages (truncate, holes): full replace via
+//     ReplaceFileFromReaderContext with the staged image;
+//   - pure appends: the appended tail via AppendFileContext;
+//   - range overwrites: one batched range patch via PatchFileRangesContext.
+//
+// The verb phase runs exactly once per staged generation: it mutates local
+// metadata immediately, so a retry after a failed drain must NOT re-run the
+// verbs (that would apply the same bytes twice) and only re-drains. Any new
+// staged write clears the applied marker. The per-hub commit mutex makes
+// the verb sequence plus drain exclusive across sessions. DAC is
+// re-validated against live state and fails loud.
+// Caller holds s.mu (per-session); the table lock is never held across the
+// verb plus drain network window, so one slow commit never stalls other
+// sessions. Same-handle exclusion comes from s.mu, cross-session commit
+// exclusion from commitMu (order s.mu then commitMu; hub verbs underneath
+// take pm.mu, never session locks, so no cycle).
+// resolveCommitPathLocked maps a dirty handle to the path its staged state
+// must publish to. The open path wins while it still names the pinned
+// inode; after a rename the first surviving name (sorted, deterministic)
+// wins, so close follows the rename instead of resurrecting the old name;
+// when the inode lost its last name after open it returns "" and the
+// caller maps that to discard (close) or retain (sync). Created handles
+// keep the open path: a concurrent creator wins or loses through the
+// normal create verb, exactly as before. Callers must hold s.mu; the live
+// tree read is the same snapshot the verbs will contend with.
+func (h *StorHub) resolveCommitPathLocked(ctx context.Context, s *openSession) (string, error) {
+	if s.created {
+		return s.path, nil
+	}
+	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	if err != nil {
+		return "", err
+	}
+	paths := live.FindFilesByInode(s.pinned.Inode)
+	for _, p := range paths {
+		if p == s.path {
+			return s.path, nil
+		}
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	sort.Strings(paths)
+	return paths[0], nil
+}
+
+func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, s *openSession) error {
+	if !s.dirty {
+		return nil
+	}
+	if s.path == "" {
+		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionUnlinked)
+	}
+	// Map the handle to the path its staged state must publish to: the
+	// open path while it still names the pinned inode, a surviving name
+	// after a rename, or gone when the inode was unlinked after open.
+	commitPath, err := h.resolveCommitPathLocked(ctx, s)
+	if err != nil {
+		return err
+	}
+	if commitPath == "" {
+		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionPathGone)
+	}
+	// Commit as the opener (see the opener field): ownership and
+	// privilege decisions follow whoever staged the bytes. The closer's
+	// identity mattered only at authorize time (opener or admin may
+	// trigger). DAC is rechecked below against live state, so a revoked
+	// opener still fails loud instead of publishing.
+	commitCtx := ctx
+	if s.hasOpener {
+		commitCtx = shfs.WithIdentity(ctx, s.opener)
+	}
+	if !s.staged && s.baseSize > 0 {
+		if err := h.hydrateSessionLocked(commitCtx, s); err != nil {
+			return err
+		}
+	}
+
+	sh.commitMu.Lock()
+	defer sh.commitMu.Unlock()
+
+	if err := h.recheckSessionDAC(commitCtx, s, commitPath); err != nil {
+		return err
+	}
+
+	if !s.applied {
+		var err error
+		switch {
+		case s.created:
+			_, err = h.UploadFileContext(commitCtx, s.project, commitPath, s.tmpName)
+		case s.fullImage:
+			var staged *os.File
+			staged, err = os.Open(s.tmpName)
+			if err == nil {
+				defer func() { _ = staged.Close() }()
+				_, err = h.ReplaceFileFromReaderContext(commitCtx, s.project, commitPath, staged, shfs.WithSize(s.curSize))
+			}
+			if err != nil {
+				err = fmt.Errorf("commit session %s: %w", shortSHA(s.id), err)
+			}
+		case s.appendOnly && s.curSize > s.baseSize:
+			var tail []byte
+			tail, err = s.readStagedRange(s.baseSize, s.curSize)
+			if err == nil {
+				_, err = h.AppendFileContext(commitCtx, s.project, commitPath, tail)
+			}
+		default:
+			var edits []shfs.RangeEdit
+			edits, err = h.sessionRangeEdits(s)
+			if err == nil {
+				if len(edits) == 0 {
+					return fmt.Errorf("commit session %s: staged state with no dirty ranges", shortSHA(s.id))
+				}
+				_, err = h.PatchFileRangesContext(commitCtx, s.project, commitPath, edits)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		s.applied = true
+	}
+	if err := h.DrainProjectContext(commitCtx, s.project); err != nil {
+		return err
+	}
+	return nil
+}
+
+// recheckSessionDAC re-validates write permission against live state before
+// committing: the open-time check cannot see permission changes that landed
+// while the handle was open. commitPath is the resolved publish target
+// (open path, or a surviving name after a rename), so the check follows
+// renames instead of authorizing against a stale name. Failures fail loud
+// and retain staged state.
+func (h *StorHub) recheckSessionDAC(ctx context.Context, s *openSession, commitPath string) error {
+	live, _, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	if err != nil {
+		return err
+	}
+	cleanName, traversed, err := h.resolveAuthedPath(ctx, live, commitPath, true)
+	if err != nil {
+		return err
+	}
+	if live.FindFile(cleanName) != nil {
+		if err := shfs.CheckWriteAccessResolved(ctx, live, cleanName, traversed); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
+		return err
+	}
+	return shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed)
+}
+
+// sessionRangeEdits renders merged dirty ranges as one ascending batch of
+// range edits against pinned coordinates: the overlapped prefix replaces
+// old bytes, the extended suffix is pure insert.
+func (h *StorHub) sessionRangeEdits(s *openSession) ([]shfs.RangeEdit, error) {
+	edits := make([]shfs.RangeEdit, 0, len(s.ranges))
+	for _, r := range s.ranges {
+		data, err := s.readStagedRange(r.start, r.end)
+		if err != nil {
+			return nil, err
+		}
+		deleteSize := int64(0)
+		if r.start < s.baseSize {
+			deleteSize = r.end - r.start
+			if r.end > s.baseSize {
+				deleteSize = s.baseSize - r.start
+			}
+		}
+		edits = append(edits, shfs.RangeEdit{Start: r.start, DeleteSize: deleteSize, Data: data})
+	}
+	return edits, nil
+}
+
+// repinSessionLocked refreshes the pin to the just-committed live state and
+// clears staging. Caller holds s.mu; the metadata load runs outside the
+// table lock.
+func (h *StorHub) repinSessionLocked(ctx context.Context, s *openSession) error {
+	live, sha, err := h.loadRepoMetadataReadonly(ctx, s.project)
+	if err != nil {
+		return err
+	}
+	entry := live.FindFile(s.path)
+	if entry == nil {
+		return fmt.Errorf("repin session %s: %w: %s", shortSHA(s.id), shfs.ErrNotFound, s.path)
+	}
+	pinned := entry.Clone()
+	chunks := make(map[int64]ChunkInfo, len(pinned.Chunks))
+	for _, chunkID := range pinned.Chunks {
+		if chunk, ok := live.Chunks()[chunkID]; ok {
+			chunks[chunkID] = chunk
+		}
+	}
+	s.pinned = pinned
+	s.pinnedChunks = chunks
+	s.revision = sha
+	s.baseSize = pinned.Size
+	s.curSize = pinned.Size
+	s.staged = false
+	s.dirty = false
+	s.applied = false
+	s.created = false
+	s.fullImage = false
+	s.appendOnly = true
+	s.ranges = nil
+	if s.tmp != nil {
+		if err := s.tmp.Truncate(0); err != nil {
+			return fmt.Errorf("repin session %s: %w", shortSHA(s.id), err)
+		}
+	}
+	return nil
+}
+
+// SyncSession commits staged state without closing, then re-pins to the
+// committed state. It drains the commit it makes and fails loud, retaining
+// staged state for retry. Sync with no staged state is a no-op success.
+// Table lock covers lookup only; commit plus repin run under the
+// per-session lock.
+func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
+	sh := h.sessionHub()
+	sh.mu.Lock()
+	s, err := sh.getLiveLocked(handleID, sh.now())
+	if err != nil {
+		sh.mu.Unlock()
+		return err
+	}
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.authorize(ctx); err != nil {
+		return err
+	}
+	if !s.dirty {
+		s.lastUse = sh.now()
+		return nil
+	}
+	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
+		if errors.Is(err, ErrSessionPathGone) {
+			// Pinned inode unlinked after open: the fsync
+			// equivalent succeeds with nothing to publish, and
+			// the staged bytes stay readable until close. There
+			// is no live entry to repin to, so keep the pin.
+			s.lastUse = sh.now()
+			return nil
+		}
+		return err
+	}
+	if err := h.repinSessionLocked(ctx, s); err != nil {
+		return err
+	}
+	s.lastUse = sh.now()
+	return nil
+}
+
+// CloseSession commits staged state through the standard hub verbs inside
+// one exclusive transaction, then publishes once (the commit drains before
+// the handle is destroyed, so close means durable). Close with no staged
+// state is a no-op success. Close on unlinked scratch without a prior link
+// discards the temp with no commit. A failed commit retains the handle and
+// its staged state for retry. Table lock covers lookup and final destroy
+// only; the commit runs under the per-session lock.
+func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
+	sh := h.sessionHub()
+	sh.mu.Lock()
+	s, err := sh.getLiveLocked(handleID, sh.now())
+	if err != nil {
+		sh.mu.Unlock()
+		return err
+	}
+	sh.mu.Unlock()
+	// getLiveLocked returns with the per-session lock held across the
+	// commit so two closes of the same ID still serialize; distinct
+	// handles hold different locks.
+	if err := s.authorize(ctx); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.destroyed {
+		s.mu.Unlock()
+		return newStaleSessionError(handleID, "unknown handle")
+	}
+	// Destroy needs the table lock in sh-then-s order: release s.mu
+	// first, then re-acquire both and re-validate.
+	destroy := func() error {
+		s.mu.Unlock()
+		sh.mu.Lock()
+		victim, verr := sh.getLiveLocked(handleID, sh.now())
+		if verr != nil {
+			sh.mu.Unlock()
+			return verr
+		}
+		// getLiveLocked holds s.mu and sh.mu; destroy then release both.
+		sh.destroyLocked(victim, false)
+		victim.mu.Unlock()
+		sh.mu.Unlock()
+		return nil
+	}
+	if s.path == "" || !s.dirty {
+		return destroy()
+	}
+	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
+		if errors.Is(err, ErrSessionPathGone) {
+			// Pinned inode unlinked after open: POSIX close
+			// discards the staged state with success.
+			return destroy()
+		}
+		s.mu.Unlock()
+		return err
+	}
+	return destroy()
+}
