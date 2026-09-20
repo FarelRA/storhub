@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 )
 
@@ -37,7 +38,7 @@ func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration 
 		if attempt > 10 {
 			attempt = 10 // keep the shift below from overflowing on wild input
 		}
-		return addJitter(minDuration(60*time.Second<<attempt, 15*time.Minute))
+		return addJitter(minDuration((12*storcfg.PatienceUnit)<<attempt, 180*storcfg.PatienceUnit))
 	}
 	if apiErr != nil && apiErr.RetryAfter > 0 {
 		return h.boundedWait(apiErr.RetryAfter)

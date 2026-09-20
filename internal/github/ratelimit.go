@@ -23,7 +23,7 @@ import (
 // the enforcement side.
 const (
 	defaultRateReserve       = 25
-	defaultRateMaxWait       = 15 * time.Minute
+	defaultRateMaxWait       = 180 * storcfg.PatienceUnit
 	defaultRatePointsPerMin  = 720
 	defaultRateContentPerMin = 60
 	defaultRateConcurrency   = 16

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -105,7 +106,7 @@ type projectMetadata struct {
 // releaseCacheTTL bounds how stale a cached release list may be before the
 // upload picker refetches. CAS/rebase safety makes brief staleness harmless;
 // the cache exists to dodge per-upload ListReleases secondary rate limits.
-const releaseCacheTTL = 60 * time.Second
+const releaseCacheTTL = 12 * storcfg.PatienceUnit
 
 type releaseCacheEntry struct {
 	releases []ghapi.Release
@@ -648,7 +649,7 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 // the pm.mu hold every caller already takes). Memory stays capped by
 // MaxTrackedProjects either way, so worst case without any timer is
 // bounded residency, not growth.
-const metaCacheIdleTTL = 30 * time.Minute
+const metaCacheIdleTTL = 360 * storcfg.PatienceUnit
 
 // sweepCachesOnce is the manual cache-drain backstop, kept as a callable
 // for tests and shutdown paths: it TTL-evicts idle clean metadata entries

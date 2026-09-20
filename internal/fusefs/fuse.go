@@ -453,7 +453,7 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	// request timeout, but a large backlog must not stall the mount
 	// indefinitely); expiry keeps every remaining entry quarantined for
 	// the next mount.
-	redriveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	redriveCtx, cancel := context.WithTimeout(context.Background(), 120*storcfg.PatienceUnit)
 	defer cancel()
 	redriveRecoveryInventory(redriveCtx, hub, project, path.Join(cacheDir, "recovery"), opts.Logger)
 	return newBareFilesystem(hub, project, opts, cacheDir, lockFile), nil
@@ -669,7 +669,7 @@ var waitOpMuParkedHook atomic.Pointer[func()]
 // It stays as the loud backstop behind the commit-release broadcast:
 // timeout expiry means the committer is wedged, which must stay
 // fail-loud (quarantine plus error log in Close).
-const closeOpMuTimeout = 5 * time.Second
+const closeOpMuTimeout = 1 * storcfg.PatienceUnit
 
 // waitOpMuBounded acquires mu before timeout, polling nothing. It waits
 // on the commit-release broadcast (signalOpRelease at every opMu release) and

@@ -30,9 +30,9 @@ const (
 	pageSize             = 100
 	// defaultRequestTimeout bounds small API exchanges; sized transfers
 	// use transferDeadline instead, which scales with bytes.
-	defaultRequestTimeout = 5 * time.Minute
-	defaultBaseRetryDelay = 500 * time.Millisecond
-	defaultMaxRetryDelay  = 8 * time.Second
+	defaultRequestTimeout = 60 * storcfg.PatienceUnit
+	defaultBaseRetryDelay = 10 * storcfg.TickUnit
+	defaultMaxRetryDelay  = 160 * storcfg.TickUnit
 	// Conservative upstream/downstream throughput assumption for sizing
 	// transfer deadlines; capped links are the target environment.
 	defaultTransferThroughput = int64(1 << 20) // 1 MiB/s
@@ -51,7 +51,7 @@ func (c *Client) transferDeadline(size int64) time.Duration {
 	if size <= 0 {
 		return defaultRequestTimeout
 	}
-	deadline := time.Duration(size/tp)*time.Second + 2*time.Second
+	deadline := time.Duration(size/tp)*time.Second + 40*storcfg.TickUnit
 	if deadline < defaultRequestTimeout {
 		deadline = defaultRequestTimeout
 	}
@@ -1156,8 +1156,8 @@ func containsAny(haystack string, needles []string) bool {
 // Every branch is jittered (see addJitter) so a synchronized fleet does
 // not thunder-herd. Values preserved from the pre-split retryDelay.
 const (
-	secondaryBackoffBase     = 60 * time.Second
-	secondaryBackoffCap      = 15 * time.Minute
+	secondaryBackoffBase     = 12 * storcfg.PatienceUnit
+	secondaryBackoffCap      = 180 * storcfg.PatienceUnit
 	secondaryBackoffMaxShift = 10
 )
 

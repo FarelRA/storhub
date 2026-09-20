@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	storcfg "github.com/FarelRA/storhub/internal/config"
 )
 
 // Supplementary group resolution for multi-user surfaces.
@@ -28,7 +30,7 @@ const (
 	// groupCacheTTL bounds how long a resolved membership stays valid.
 	// Group changes propagate on this horizon; shorter would re-hit NSS
 	// per FUSE op storm, longer would strand removed members.
-	groupCacheTTL = 5 * time.Minute
+	groupCacheTTL = 60 * storcfg.PatienceUnit
 	// groupCacheMaxEntries bounds resident cache size. Eviction is
 	// opportunistic (expired first, then arbitrary) at insert time.
 	groupCacheMaxEntries = 1024

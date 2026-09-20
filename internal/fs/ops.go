@@ -85,7 +85,7 @@ type projectState struct {
 // when neither the commit SHA nor the local mutation counter moved: verbs
 // that mutate metadata outside this Service (xattr/symlink/chmod on the
 // hub) bump neither key, so staleness is capped by time as well.
-const statfsCacheTTL = 2 * time.Second
+const statfsCacheTTL = 40 * storcfg.TickUnit
 
 func (s *Service) state(project string) *projectState {
 	if v, ok := s.states.Load(project); ok {

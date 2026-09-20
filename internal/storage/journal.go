@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -58,7 +59,7 @@ const (
 	// (journalRewrite fsyncs before its rename), and Shutdown flushes, so
 	// the exposure is only acknowledged-but-not-yet-committed ops lost to a
 	// hard crash within the window - the standard group-commit contract.
-	journalGroupCommitWindow = 100 * time.Millisecond
+	journalGroupCommitWindow = 2 * storcfg.TickUnit
 )
 
 func (h *StorHub) journalPath(project string) string {

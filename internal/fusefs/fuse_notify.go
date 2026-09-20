@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -278,7 +279,7 @@ func safeNotifyContentAsync(node *storhubNode) {
 // fires (operator action: remount). No timeout or drop: dropped
 // invalidations would turn into up to 60s of stale reads via entry and
 // attr timeouts, so the block stays by design and only gains visibility.
-const notifySlotWarnThreshold = 5 * time.Second
+const notifySlotWarnThreshold = 1 * storcfg.PatienceUnit
 
 // NotifyStats reports parked-notify observability: currently parked,
 // total slot waits observed, and coalesced duplicates folded.

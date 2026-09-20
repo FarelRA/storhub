@@ -138,6 +138,25 @@ type Config struct {
 	Sleep              func(context.Context, time.Duration) error
 }
 
+// Time units: every timeout, patience, wait, and TTL in the system
+// derives from these two bases — no independent magic durations.
+//
+//   - TickUnit (50ms) is the micro scale: hot-path latencies where the
+//     event already fired and only coalescing remains.
+//   - PatienceUnit (5s) is the macro scale: teardowns, backstops, and
+//     staleness, budgeted in whole units by the autonomy of the waited
+//     party (kernel < local drain < human/network).
+//
+// A value that cannot be expressed exactly in its tier is a design
+// smell: either the tier is wrong or the value is. Server-dictated
+// waits (Retry-After, token buckets) are expressed here too — the
+// server owns the resume instant, but our spelling of it stays
+// symmetrical.
+const (
+	TickUnit     = 50 * time.Millisecond
+	PatienceUnit = 5 * time.Second
+)
+
 func Default() Config {
 	return Config{
 		APIBaseURL:            defaultAPIBaseURL,
@@ -148,11 +167,11 @@ func Default() Config {
 		RepoDescription:       defaultRepoDescription,
 		CreatePublicRepo:      false,
 		MaxRetries:            4,
-		BaseRetryDelay:        500 * time.Millisecond,
-		MaxRetryDelay:         8 * time.Second,
-		RevivalTimeout:        5 * time.Second,
+		BaseRetryDelay:        10 * TickUnit,
+		MaxRetryDelay:         160 * TickUnit,
+		RevivalTimeout:        1 * PatienceUnit,
 		RateReserve:           25,
-		RateMaxWait:           15 * time.Minute,
+		RateMaxWait:           180 * PatienceUnit,
 		RatePointsPerMin:      720,
 		RateContentPerMin:     60,
 		MaxConcurrentRequests: 16,

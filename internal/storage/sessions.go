@@ -61,6 +61,7 @@ import (
 	"syscall"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
@@ -70,10 +71,10 @@ import (
 const (
 	// DefaultSessionIdleTTL is the idle expiry for a handle: no successful
 	// use within this window makes the next use (or the next open) reap it.
-	DefaultSessionIdleTTL = 10 * time.Minute
+	DefaultSessionIdleTTL = 120 * storcfg.PatienceUnit
 	// DefaultSessionMaxTTL caps how large any handle TTL may grow. A larger
 	// per-open request is clamped, not rejected.
-	DefaultSessionMaxTTL = time.Hour
+	DefaultSessionMaxTTL = 720 * storcfg.PatienceUnit
 	// MaxSessionsPerProject bounds open handles naming one project.
 	MaxSessionsPerProject = 64
 	// MaxSessionsPerUser bounds open handles owned by one UID across projects.

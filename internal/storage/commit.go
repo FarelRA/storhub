@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
@@ -159,7 +160,7 @@ func (h *StorHub) revivalTimeout() time.Duration {
 	if d := h.config.RevivalTimeout; d > 0 {
 		return d
 	}
-	return 5 * time.Second
+	return 1 * storcfg.PatienceUnit
 }
 
 func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) chan struct{} {
@@ -191,10 +192,13 @@ func markDirtyFastPath(pm *projectMetadata) (chan struct{}, bool) {
 // false return means the revival timeout fired; the caller then revives
 // without the channel swap.
 func (h *StorHub) waitCommitLoopExit(project string, stoppedCh <-chan struct{}) bool {
+	// Stopped timer, not time.After: After would leak until it fires.
+	timer := time.NewTimer(h.revivalTimeout())
+	defer timer.Stop()
 	select {
 	case <-stoppedCh:
 		return true
-	case <-time.After(h.revivalTimeout()):
+	case <-timer.C:
 		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
 		return false
 	}

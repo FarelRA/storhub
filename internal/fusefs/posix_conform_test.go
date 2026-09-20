@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 	"github.com/FarelRA/storhub/internal/posixconform"
@@ -1681,8 +1682,11 @@ const pcScenarioBudget = 45 * time.Second
 // pcTeardownBudget bounds unmount plus server close after one scenario. A
 // wedged mount can stall teardown behind the same stuck requests, so this
 // (not the scenario budget) is what keeps the suite total predictable:
-// worst case per scenario is budget plus lazy-detach plus this.
-const pcTeardownBudget = 60 * time.Second
+// worst case per scenario is budget plus lazy-detach plus this. Derived
+// from the teardown ladder: worst-case sequential teardown is 17 patience
+// units (rest shutdown 2 + unmount 6 + mount join 2 + rest join 1 + hub
+// drain 6), so the harness budgets 24 units of margin above it.
+const pcTeardownBudget = 24 * storcfg.PatienceUnit
 
 // pcLazyUnmount detaches a mountpoint even when files are still open.
 // Teardown is best effort everywhere: a wedged scenario may keep its

@@ -32,6 +32,18 @@ jobs:
             exit 1
           fi
       - run: go vet ./...
+      - name: timer-shape guardrail
+        run: |
+          # Event-purity gate: no polling timers or raw sleeps in prod.
+          # Bounds use context/SleepWithContext, waits use injected sleep,
+          # coalescing uses AfterFunc with a paired flush/stop. Any hit
+          # below is a regression: justify it in 22-event-purity-plan.md
+          # or route it through the approved shape.
+          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            exit 1
+          fi
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           # Pinned so an action-default bump cannot silently change the

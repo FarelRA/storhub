@@ -1531,8 +1531,8 @@ func unmountWithRetry(fsys fuseMount, target string, report io.Writer) {
 }
 
 var (
-	unmountRetryBaseDelay = time.Second
-	unmountRetryBudget    = 30 * time.Second
+	unmountRetryBaseDelay = storcfg.PatienceUnit / 5
+	unmountRetryBudget    = 6 * storcfg.PatienceUnit
 )
 
 // Teardown join bounds. After unmountWithRetry returns (success or giving
@@ -1540,8 +1540,8 @@ var (
 // mount/listener is wedged and the process must exit non-zero instead of
 // hanging on an unbounded channel receive.
 const (
-	unmountJoinTimeout = 10 * time.Second
-	restJoinTimeout    = 5 * time.Second
+	unmountJoinTimeout = 2 * storcfg.PatienceUnit
+	restJoinTimeout    = 1 * storcfg.PatienceUnit
 )
 
 func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
@@ -2101,11 +2101,11 @@ func cmdAuth(cmd *cobra.Command) (token, apiBase string) {
 
 // Named timeouts/budgets so call sites read as policy, not literals.
 const (
-	hubShutdownTimeout   = 30 * time.Second
-	restShutdownTimeout  = 10 * time.Second
-	restReadHeaderBudget = 5 * time.Second
-	restIdleBudget       = 2 * time.Minute
-	unmountBackoffCap    = 8 * time.Second
+	hubShutdownTimeout   = 6 * storcfg.PatienceUnit
+	restShutdownTimeout  = 2 * storcfg.PatienceUnit
+	restReadHeaderBudget = 1 * storcfg.PatienceUnit
+	restIdleBudget       = 24 * storcfg.PatienceUnit
+	unmountBackoffCap    = 2 * storcfg.PatienceUnit
 	mountDirPerm         = 0o755
 )
 
