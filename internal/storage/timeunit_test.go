@@ -19,7 +19,6 @@ func TestStorageTimeoutsSymmetric(t *testing.T) {
 		want time.Duration
 		base time.Duration
 	}{
-		{"journal group-commit", journalGroupCommitWindow, 100 * time.Millisecond, storcfg.TickUnit},
 		{"release cache TTL", releaseCacheTTL, 60 * time.Second, storcfg.PatienceUnit},
 		{"metadata idle TTL", metaCacheIdleTTL, 30 * time.Minute, storcfg.PatienceUnit},
 		{"session idle TTL", DefaultSessionIdleTTL, 10 * time.Minute, storcfg.PatienceUnit},

@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"time"
 
-	storcfg "github.com/FarelRA/storhub/internal/config"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -50,16 +48,14 @@ const (
 	// file only when the stack itself crossed its byte cap or every Nth
 	// append (opStack.seq is the monotonic append counter).
 	journalRewriteSampleEvery = 128
-	// journalGroupCommitWindow bounds how long an appended op may sit
-	// un-fsynced. A per-op fsync was one syscall per appended op (a bulk
-	// import = one fsync per file); appends now write immediately and a
-	// short timer coalesces the fsync across the window. The tradeoff is
-	// honest: a power loss inside the window can drop the last
-	// journalGroupCommitWindow of appends. Committed state is unaffected
-	// (journalRewrite fsyncs before its rename), and Shutdown flushes, so
-	// the exposure is only acknowledged-but-not-yet-committed ops lost to a
-	// hard crash within the window - the standard group-commit contract.
-	journalGroupCommitWindow = 2 * storcfg.TickUnit
+	// No group-commit window: durability rides the commit loop
+	// (ext4-ordered shape). Appends write immediately; every commit
+	// attempt fsyncs the journal after snapshotting and before
+	// publishing, so a closed batch is disk-durable before its manifest
+	// CAS. A power loss can only drop ops estate never reached a commit
+	// attempt — the same exposure as before minus the timer tail.
+	// Committed state is unaffected (journalRewrite fsyncs before its
+	// rename), and Shutdown flushes.
 )
 
 func (h *StorHub) journalPath(project string) string {
@@ -78,8 +74,8 @@ func (h *StorHub) journalPath(project string) string {
 // Best-effort: a journal write failure is logged and never fails the
 // mutation - the journal upgrades durability for acknowledged mutations, it
 // must not downgrade availability. The write is durable to same-machine
-// readers immediately (page cache); the fsync is coalesced by the
-// group-commit timer.
+// readers immediately (page cache); the fsync rides the next commit
+// attempt, which always runs before anything publishes.
 func (h *StorHub) journalAppend(project string, op Op) {
 	op.Times = 1
 	path := h.journalPath(project)
@@ -113,18 +109,22 @@ func (h *StorHub) journalAppend(project string, op Op) {
 		return
 	}
 	h.journalDirty[project] = true
-	if h.journalTimer == nil {
-		h.journalTimer = time.AfterFunc(journalGroupCommitWindow, h.flushJournals)
-	}
+	// No timer: durability rides the commit loop (ext4-ordered shape).
+	// Every commit attempt fsyncs the journal after snapshotting and
+	// before publishing, so a closed batch is disk-durable before its
+	// manifest CAS; explicit flush points (fsync path, DrainProject,
+	// Shutdown) cover the rest. An armed timer would only re-fsync
+	// what the next commit already syncs.
 	h.journalMu.Unlock()
 }
 
-// flushJournals fsyncs every journal with pending appends (the group-commit
-// point). It snapshots the dirty handles under the lock and syncs outside it
-// so a slow fsync never blocks concurrent appends.
+// flushJournals fsyncs every journal with pending appends. It snapshots
+// the dirty handles under the lock and syncs outside it so a slow fsync
+// never blocks concurrent appends. Called on every commit attempt after
+// snapshotting (the ordered-commit data-first step) and at explicit
+// durability points; never on a timer.
 func (h *StorHub) flushJournals() {
 	h.journalMu.Lock()
-	h.journalTimer = nil
 	if len(h.journalDirty) == 0 {
 		h.journalMu.Unlock()
 		return
@@ -139,23 +139,14 @@ func (h *StorHub) flushJournals() {
 	h.journalMu.Unlock()
 	for _, f := range handles {
 		if err := f.Sync(); err != nil {
-			logging.Warn(h.logger, "op journal group-commit sync failed", "err", err)
+			logging.Warn(h.logger, "op journal sync failed", "err", err)
 		}
 	}
 }
 
 // closeJournals flushes and releases every open journal handle. Called once
-// at Shutdown after the commit loops have exited. The group-commit timer is
-// stopped first (under journalMu): otherwise one firing can land ~100ms
-// post-Shutdown, pinning the hub and racing Sync against the closes below
-// (error noise only, but pointless).
+// at Shutdown after the commit loops have exited.
 func (h *StorHub) closeJournals() {
-	h.journalMu.Lock()
-	if h.journalTimer != nil {
-		h.journalTimer.Stop()
-		h.journalTimer = nil
-	}
-	h.journalMu.Unlock()
 	h.flushJournals()
 	h.journalMu.Lock()
 	defer h.journalMu.Unlock()

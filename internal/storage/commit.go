@@ -761,6 +761,13 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		return nil
 	}
 
+	// Ordered-commit data-first step: the journal is fsynced after the
+	// snapshot closes the batch and before anything publishes, so a
+	// closed batch is disk-durable before its manifest CAS. This is what
+	// the old group-commit timer did on a clock; the commit trigger does
+	// it now on the event that actually closes the batch.
+	h.flushJournals()
+
 	commitSHA, contentSHA, newObjectCount, didRebase, err := h.publishWithRebase(ctx, project, pm, snap, started)
 	if err != nil {
 		// The snapshot published nothing: roll its mark back so later
@@ -825,12 +832,11 @@ func (h *StorHub) DrainProjectContext(ctx context.Context, project string) error
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	// Phase E3 (F5) explicit durability point: fsync every journal with
-	// pending appends before attempting the remote push, so the sync
-	// path (FUSE fsync/Flush/Release drain, O_SYNC, REST/CLI sync) never
-	// waits out the 100ms group-commit window, and a failed push still
-	// leaves the journal durable for retry. The AfterFunc timer itself
-	// stays as the async-burst latency bound.
+	// Ordered-commit durability point: fsync every journal with pending
+	// appends before attempting the remote push, so the sync path (FUSE
+	// fsync/Flush/Release drain, O_SYNC, REST/CLI sync) is durable by
+	// construction, and a failed push still leaves the journal durable
+	// for retry.
 	h.flushJournals()
 	pm := h.getOrCreateProjectMeta(project)
 	// Snapshot the frontier under mu: every op at or below target was

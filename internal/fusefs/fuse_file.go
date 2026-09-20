@@ -748,12 +748,12 @@ func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	return h.commitFlushDrain(ctx)
 }
 
-// journalFlusher is the optional hub capability behind the F5 explicit
+// journalFlusher is the optional hub capability behind the explicit
 // flush: a hub that journals acknowledged mutations exposes
 // FlushJournals so the sync path fsyncs the journal between commit and
-// drain instead of waiting out the group-commit window. Hubs without it
-// (test doubles) skip the flush; StorHub durability on those paths still
-// flows through DrainProjectContext, which flushes internally.
+// drain. Hubs without it (test doubles) skip the flush; StorHub
+// durability on those paths still flows through DrainProjectContext,
+// which flushes internally.
 type journalFlusher interface {
 	FlushJournals()
 }
@@ -770,8 +770,7 @@ func (h *storhubHandle) flushHubJournals() {
 // flushAndDrain fsyncs the op journal, then waits for remote durability
 // (see drainProject). The flush sits between commit and drain on every
 // durability path: a crash after the journal fsync but before the remote
-// push replays from the journal, so the sync path never waits out the
-// group-commit timer.
+// push replays from the journal.
 func (h *storhubHandle) flushAndDrain(ctx context.Context) syscall.Errno {
 	h.flushHubJournals()
 	return h.drainProject(ctx)

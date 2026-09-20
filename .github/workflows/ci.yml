@@ -36,10 +36,11 @@ jobs:
         run: |
           # Event-purity gate: no polling timers or raw sleeps in prod.
           # Bounds use context/SleepWithContext, waits use injected sleep,
-          # coalescing uses AfterFunc with a paired flush/stop. Any hit
-          # below is a regression: justify it in 22-event-purity-plan.md
-          # or route it through the approved shape.
-          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test || true)
+          # and the only AfterFunc is cancellation-to-event (fuse_lock):
+          # journal durability rides the commit trigger, not a clock.
+          # Any hit below is a regression: justify it in
+          # 22-event-purity-plan.md or route it through the approved shape.
+          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             exit 1

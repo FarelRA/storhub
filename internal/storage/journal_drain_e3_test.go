@@ -26,12 +26,8 @@ func TestDrainProjectFlushesJournalsSynchronously(t *testing.T) {
 	}
 	hub.journalMu.Lock()
 	dirty := len(hub.journalDirty)
-	timerArmed := hub.journalTimer != nil
 	hub.journalMu.Unlock()
 	if dirty != 0 {
-		t.Fatalf("drain left %d journals dirty; the flush is still timer-deferred", dirty)
-	}
-	if timerArmed {
-		t.Fatal("drain left the group-commit timer armed; the sync path still has a 100ms tail")
+		t.Fatalf("drain left %d journals dirty; the flush must be synchronous in the drain", dirty)
 	}
 }

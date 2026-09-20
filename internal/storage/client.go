@@ -121,12 +121,13 @@ type StorHub struct {
 	fsSvc    *shfs.Service
 	posixSvc *implposix.Service
 
-	// Op-journal group-commit state (journal.go): append handles stay open,
-	// fsyncs coalesce behind a short window instead of one per appended op.
+	// Op-journal state (journal.go): append handles stay open across
+	// appends; every commit attempt fsyncs dirty journals after
+	// snapshotting and before publishing (ordered-commit data-first),
+	// so no timer is involved.
 	journalMu    sync.Mutex
 	journalFiles map[string]*os.File
 	journalDirty map[string]bool
-	journalTimer *time.Timer
 
 	// Shutdown coordination
 	shutdownOnce sync.Once
@@ -377,8 +378,7 @@ func (h *StorHub) Shutdown(ctx context.Context) error {
 	}
 
 	// Every loop has exited; flush and release any journal append handles
-	// still buffered behind the group-commit window before the drain
-	// rewrites journals.
+	// before the drain rewrites journals.
 	h.closeJournals()
 
 	// Contract: the per-project git cache is a pure mirror of
