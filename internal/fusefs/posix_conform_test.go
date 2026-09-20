@@ -1683,8 +1683,8 @@ const pcScenarioBudget = 45 * time.Second
 // wedged mount can stall teardown behind the same stuck requests, so this
 // (not the scenario budget) is what keeps the suite total predictable:
 // worst case per scenario is budget plus lazy-detach plus this. Derived
-// from the teardown ladder: worst-case sequential teardown is 17 patience
-// units (rest shutdown 2 + unmount 6 + mount join 2 + rest join 1 + hub
+// from the teardown ladder: worst-case sequential teardown is 18 patience
+// units (rest shutdown 2 + unmount 6 + mount join 2 + rest join 2 + hub
 // drain 6), so the harness budgets 24 units of margin above it.
 const pcTeardownBudget = 24 * storcfg.PatienceUnit
 

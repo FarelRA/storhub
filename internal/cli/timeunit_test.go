@@ -21,7 +21,7 @@ func TestTeardownLadderSymmetric(t *testing.T) {
 		got  time.Duration
 		want time.Duration
 	}{
-		{"rest join", restJoinTimeout, 1 * u},
+		{"rest join", restJoinTimeout, 2 * u},
 		{"mount join", unmountJoinTimeout, 2 * u},
 		{"rest shutdown", restShutdownTimeout, 2 * u},
 		{"hub shutdown", hubShutdownTimeout, 6 * u},
@@ -38,7 +38,7 @@ func TestTeardownLadderSymmetric(t *testing.T) {
 	for _, c := range []time.Duration{restShutdownTimeout, unmountRetryBudget, unmountJoinTimeout, restJoinTimeout, hubShutdownTimeout} {
 		total += c
 	}
-	if total != 17*u {
-		t.Fatalf("sequential teardown must total 17 units, got %v", total)
+	if total != 18*u {
+		t.Fatalf("sequential teardown must total 18 units, got %v", total)
 	}
 }

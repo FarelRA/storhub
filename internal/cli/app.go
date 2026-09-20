@@ -1541,7 +1541,7 @@ var (
 // hanging on an unbounded channel receive.
 const (
 	unmountJoinTimeout = 2 * storcfg.PatienceUnit
-	restJoinTimeout    = 1 * storcfg.PatienceUnit
+	restJoinTimeout    = 2 * storcfg.PatienceUnit
 )
 
 func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
