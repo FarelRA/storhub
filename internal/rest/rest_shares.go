@@ -115,6 +115,30 @@ func (readOnlyShare) PurgeContext(ctx context.Context, project, scope string, ke
 	return nil, errReadOnly()
 }
 
+func (readOnlyShare) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) DegradedProjects() ([]string, error) {
+	return nil, errReadOnly()
+}
+
+func (readOnlyShare) ReEnableProject(project string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) PressureSnapshot() (storage.PressureSnapshot, error) {
+	return storage.PressureSnapshot{}, errReadOnly()
+}
+
+func (readOnlyShare) PressureFailureStreak(project string) (uint64, error) { return 0, errReadOnly() }
+
+func (readOnlyShare) PressurePendingDepth(project string) (int, error) { return 0, errReadOnly() }
+
 func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) error {
 	return errReadOnly()
 }

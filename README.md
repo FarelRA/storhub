@@ -134,7 +134,7 @@ Common commands:
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
 - inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
-- recovery and cleanup: `rollback` (whole index), `purge <project> [objects|assets|history|all]` (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dry-run` and `--keep`)
+- recovery and cleanup: `rollback` (whole index), `purge <project> [objects|assets|history|all]`, `gc` (orphaned chunk records, `--dry-run` preview), `status` (degraded latch, streaks, pressure), `re-enable` (clear the degraded latch) (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dry-run` and `--keep`)
 - admin: `delete-project` (removes the project repository outright; `--yes` is mandatory)
 - local cache: `cache purge` (reclaims cache directories left by crashed processes; offline, no token needed)
 - web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
@@ -400,7 +400,7 @@ REST endpoint groups:
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...`: streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
 - `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap: storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...`: extended attribute inspection and mutation
-- `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge
+- `POST /api/v1/projects/{project}/ops/...`: mkdir, rmdir, create-file, unlink, rename, copy, link, symlink, chmod, chown, utimes, rollback, revert-path, purge, gc, re-enable; `GET .../ops/status` (health)
 - `?sync=1` on any mutating endpoint drains the project's journal before responding (fsync-class: pre-call data is remote-durable on success). Drain failure answers `500` naming the project; the mutation is already published and journaled, so retry-or-verify, never silent loss
 - journal group-commit window: acknowledged mutations are journal-persistent for same-machine recovery before acknowledgment, but the journal fsync itself is coalesced on a short window (100ms), so a hard crash inside the window can drop acknowledged-but-uncommitted ops. Anything that survived the window redrives from the journal; only `?sync=1` (or CLI `--sync`, or session sync/close with sync) makes a call remote-durable before it returns
 - `GET|POST /api/v1/projects/{project}/shares` and `GET|DELETE /api/v1/projects/{project}/shares/{id}`: share management for the project (creator or admin)

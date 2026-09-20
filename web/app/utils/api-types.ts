@@ -87,6 +87,18 @@ export interface Revision {
   committed_at?: number
 }
 
+export interface GCResult {
+  project: string
+  status: string
+  dry_run: boolean
+  scanned_chunks: number
+  orphan_chunks: number
+  orphan_bytes: number
+  collected_chunks: number
+  collected_bytes: number
+  refused_by_session?: boolean
+}
+
 export interface PurgeResult {
   project: string
   status: string

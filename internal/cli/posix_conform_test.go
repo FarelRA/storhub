@@ -651,6 +651,23 @@ func (h *pcFakeHub) RollbackMetadataContext(ctx context.Context, project, commit
 func (h *pcFakeHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
 	return &storhub.PurgeResult{Scope: storhub.PurgeScope(scope), DryRun: dryRun}, nil
 }
+func (h *pcFakeHub) ScanChunkGC(ctx context.Context, project string) (*storhub.ChunkGCResult, error) {
+	return &storhub.ChunkGCResult{}, nil
+}
+func (h *pcFakeHub) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storhub.ChunkGCResult, error) {
+	return &storhub.ChunkGCResult{DryRun: dryRun}, nil
+}
+func (h *pcFakeHub) DegradedProjects() []string {
+	return nil
+}
+func (h *pcFakeHub) ReEnableProject(project string) error {
+	return nil
+}
+func (h *pcFakeHub) PressureSnapshot() storhub.PressureSnapshot {
+	return storhub.PressureSnapshot{}
+}
+func (h *pcFakeHub) PressureFailureStreak(project string) uint64 { return 0 }
+func (h *pcFakeHub) PressurePendingDepth(project string) int     { return 0 }
 
 func (h *pcFakeHub) DeleteProject(project string) error { return nil }
 

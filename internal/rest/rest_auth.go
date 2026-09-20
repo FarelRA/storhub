@@ -572,6 +572,49 @@ func (c *authorizedClient) PurgeContext(ctx context.Context, project, scope stri
 	}
 	return c.base.PurgeContext(ctx, project, scope, keep, dryRun)
 }
+
+func (c *authorizedClient) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
+	if !c.principal.Admin {
+		return nil, errForbidden("permission denied")
+	}
+	return c.base.ScanChunkGC(ctx, project)
+}
+
+func (c *authorizedClient) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
+	if !c.principal.Admin {
+		return nil, errForbidden("permission denied")
+	}
+	return c.base.CompactOrphanChunks(ctx, project, dryRun)
+}
+
+func (c *authorizedClient) DegradedProjects() ([]string, error) {
+	if !c.principal.Admin {
+		return nil, errForbidden("permission denied")
+	}
+	return c.base.DegradedProjects()
+}
+
+func (c *authorizedClient) ReEnableProject(project string) error {
+	if !c.principal.Admin {
+		return errForbidden("permission denied")
+	}
+	return c.base.ReEnableProject(project)
+}
+
+func (c *authorizedClient) PressureSnapshot() (storage.PressureSnapshot, error) {
+	if !c.principal.Admin {
+		return storage.PressureSnapshot{}, errForbidden("permission denied")
+	}
+	return c.base.PressureSnapshot()
+}
+
+func (c *authorizedClient) PressureFailureStreak(project string) (uint64, error) {
+	return c.base.PressureFailureStreak(project)
+}
+
+func (c *authorizedClient) PressurePendingDepth(project string) (int, error) {
+	return c.base.PressurePendingDepth(project)
+}
 func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project string) error {
 	if !c.principal.Admin {
 		return errForbidden("permission denied")

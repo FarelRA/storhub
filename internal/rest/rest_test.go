@@ -1284,6 +1284,40 @@ func (c *fakeRESTClient) PurgeContext(ctx context.Context, project, scope string
 	return &storage.PurgeResult{Scope: storage.PurgeScope(scope), DryRun: dryRun}, nil
 }
 
+func (c *fakeRESTClient) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.getExistingProject(project); err != nil {
+		return nil, err
+	}
+	return &storage.ChunkGCResult{DryRun: true}, nil
+}
+
+func (c *fakeRESTClient) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.getExistingProject(project); err != nil {
+		return nil, err
+	}
+	return &storage.ChunkGCResult{DryRun: dryRun}, nil
+}
+
+func (c *fakeRESTClient) DegradedProjects() ([]string, error) {
+	return nil, nil
+}
+
+func (c *fakeRESTClient) ReEnableProject(project string) error {
+	return nil
+}
+
+func (c *fakeRESTClient) PressureSnapshot() (storage.PressureSnapshot, error) {
+	return storage.PressureSnapshot{}, nil
+}
+
+func (c *fakeRESTClient) PressureFailureStreak(project string) (uint64, error) { return 0, nil }
+
+func (c *fakeRESTClient) PressurePendingDepth(project string) (int, error) { return 0, nil }
+
 func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

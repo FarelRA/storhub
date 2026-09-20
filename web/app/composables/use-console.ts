@@ -6,6 +6,7 @@ import type {
   Principal,
   ProjectStats,
   PurgeResult,
+  GCResult,
   Revision,
   Share,
 } from '~/utils/api-types'
@@ -501,6 +502,18 @@ export function useConsole() {
     })
   }
 
+  // Collect orphaned chunk records. Dry run previews (scan only); a live
+  // run refuses while any session holds the project open.
+  async function gc(dryRun = true): Promise<GCResult | null> {
+    return run(`Chunk GC${dryRun ? ' preview' : ''}`, async () => {
+      const payload = await postJSON<GCResult>(projectURL('/ops/gc'), {
+        dry_run: dryRun,
+      })
+      if (!dryRun) await refreshAll()
+      return payload
+    })
+  }
+
   // Revert a single path (file or directory subtree) to a historical revision,
   // leaving the rest of the tree untouched. A revert is a new commit.
   async function revertPath(path: string, sha: string): Promise<boolean> {
@@ -714,6 +727,7 @@ export function useConsole() {
     rollbackRevision,
     revertPath,
     purge,
+    gc,
     downloadEntry,
     copyDirectLink,
     focusEntry,

@@ -97,6 +97,25 @@ async function runPurge() {
   for (const note of result.notes ?? []) toasts.info(note)
 }
 
+async function runGC(dry: boolean) {
+  if (!dry) {
+    const ok = await ask({
+      title: 'Collect chunk orphans',
+      body: 'Delete chunk records no file and no pending edit references? Refuses while any session holds the project. This cannot be undone.',
+      confirmLabel: 'Collect',
+      danger: true,
+    })
+    if (!ok) return
+  }
+  const result = await consoleStore.gc(dry)
+  if (!result) return
+  if (result.refused_by_session) {
+    toasts.info('Chunk GC refused: a live session pins chunks; close sessions and retry')
+    return
+  }
+  toasts.info(`${dry ? 'Would collect' : 'Collected'} ${result.orphan_chunks} orphan chunks (${result.collected_bytes ?? result.orphan_bytes} bytes) of ${result.scanned_chunks} scanned`)
+}
+
 const { panels } = usePanelWidths()
 const { uploadProgress } = consoleStore
 
@@ -248,6 +267,24 @@ async function onDrop(event: DragEvent) {
             >
               {{ purgeDryRun ? 'Preview purge' : 'Purge now…' }}
             </button>
+            <div class="flex items-center gap-2">
+              <button
+                class="btn btn-sm flex-1"
+                :disabled="busy || !project"
+                title="Admin only: preview orphaned chunk records without collecting"
+                @click="runGC(true)"
+              >
+                Preview chunk GC
+              </button>
+              <button
+                class="btn btn-sm flex-1"
+                :disabled="busy || !project"
+                title="Admin only: collect orphaned chunk records (refuses while sessions are open)"
+                @click="runGC(false)"
+              >
+                Collect now…
+              </button>
+            </div>
           </div>
           <ConfirmDeleteProject v-if="project" @deleted="projectInput = ''" />
         </section>

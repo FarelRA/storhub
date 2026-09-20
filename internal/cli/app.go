@@ -136,6 +136,19 @@ type hubClient interface {
 	// process mid-delete-loop.
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
 	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error)
+	// GC scans the live chunk catalog for orphans (ScanChunkGC, read-only)
+	// and collects them (CompactOrphanChunks; dryRun previews). Refuses
+	// while any session is live on the project.
+	ScanChunkGC(ctx context.Context, project string) (*storhub.ChunkGCResult, error)
+	CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storhub.ChunkGCResult, error)
+	// Degraded-mode operations: DegradedProjects lists latched projects,
+	// ReEnableProject clears one latch (the only path back to healthy),
+	// PressureSnapshot exposes the operator pressure ledger.
+	DegradedProjects() []string
+	ReEnableProject(project string) error
+	PressureSnapshot() storhub.PressureSnapshot
+	PressureFailureStreak(project string) uint64
+	PressurePendingDepth(project string) int
 	DeleteProject(project string) error
 	NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error)
 
@@ -344,6 +357,9 @@ Examples:
 	rootCmd.AddCommand(a.newRevisionsCmd())
 	rootCmd.AddCommand(a.newRollbackCmd())
 	rootCmd.AddCommand(a.newPurgeCmd())
+	rootCmd.AddCommand(a.newGCCmd())
+	rootCmd.AddCommand(a.newStatusCmd())
+	rootCmd.AddCommand(a.newReEnableCmd())
 	rootCmd.AddCommand(a.newDeleteProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newSessionCmd())
@@ -638,6 +654,123 @@ command runs with local-process trust and performs no admin check
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
 	addSyncFlag(cmd)
 	return cmd
+}
+
+func (a *App) newGCCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "gc [flags] <project>",
+		Short: "Collect orphaned chunk records",
+		Long: `GC scans the live chunk catalog for records no file and no
+pending edit references, then collects them. A project with a live
+session refuses outright (sessions pin chunks); use --dry-run to
+preview. Nothing runs automatically: every collection is an explicit
+operator act, logged per object.
+
+Examples:
+  storhub gc docs-project --dry-run
+  storhub gc docs-project`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runGC,
+	}
+	cmd.Flags().Bool("dry-run", false, "Report orphans without collecting")
+	addSyncFlag(cmd)
+	return cmd
+}
+
+func (a *App) runGC(cmd *cobra.Command, args []string) error {
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	if dryRun {
+		res, err := hub.ScanChunkGC(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(a.stderr, "would collect %s (%d chunks, %d bytes) of %d scanned\n",
+			args[0], res.OrphanChunks, res.OrphanBytes, res.ScannedChunks)
+		return nil
+	}
+	res, err := hub.CompactOrphanChunks(ctx, args[0], false)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.stderr, "collected %s: %d chunks, %d bytes\n",
+		args[0], res.CollectedChunks, res.CollectedBytes)
+	return nil
+}
+
+func (a *App) newStatusCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status [flags] <project>",
+		Short: "Show project health: degraded latch, streaks, pressure",
+		Long: `Status reports operability in one place: whether the project
+is latched degraded (and its consecutive-failure streak), the pending
+op depth, and the hub pressure totals. A degraded project refuses new
+mutations until re-enable clears the latch.
+
+Examples:
+  storhub status docs-project`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runStatus,
+	}
+	return cmd
+}
+
+func (a *App) runStatus(cmd *cobra.Command, args []string) error {
+	hub, err := a.mustCmdHub(cmd, 0, false)
+	if err != nil {
+		return err
+	}
+	degraded := hub.DegradedProjects()
+	streak := hub.PressureFailureStreak(args[0])
+	depth := hub.PressurePendingDepth(args[0])
+	snap := hub.PressureSnapshot()
+	latched := false
+	for _, name := range degraded {
+		if name == args[0] {
+			latched = true
+			break
+		}
+	}
+	state := "healthy"
+	if latched {
+		state = fmt.Sprintf("degraded (streak %d; re-enable with: storhub re-enable %s)", streak, args[0])
+	}
+	_, _ = fmt.Fprintf(a.stderr, "%s: %s, pending ops %d, commits %d ok / %d failed / %d rebased, cap-crosses %d\n",
+		args[0], state, depth, snap.CommitSuccesses, snap.CommitFailures, snap.Rebases, snap.CapCrosses)
+	return nil
+}
+
+func (a *App) newReEnableCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "re-enable [flags] <project>",
+		Short: "Clear a project's degraded latch",
+		Long: `Re-enable clears the degraded latch and admits mutations
+again. It is the ONLY path back to healthy: commit successes never
+clear the latch, so a sick backend cannot silently recover. Re-enabling
+a healthy project succeeds as a no-op.
+
+Examples:
+  storhub re-enable docs-project`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runReEnable,
+	}
+	return cmd
+}
+
+func (a *App) runReEnable(cmd *cobra.Command, args []string) error {
+	hub, err := a.mustCmdHub(cmd, 0, false)
+	if err != nil {
+		return err
+	}
+	if err := hub.ReEnableProject(args[0]); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.stderr, "re-enabled %s\n", args[0])
+	return nil
 }
 
 func (a *App) newDeleteProjectCmd() *cobra.Command {
@@ -1964,9 +2097,9 @@ func newMountHubFromFlags(token, apiBase string, log logSettings) (*storhub.Stor
 // cannot help a script), while long-running commands - rest, mount, serve
 // - may pause up to the documented reset before giving up.
 func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
-	defaultMaxWait := -1 * time.Second
+	defaultMaxWait := -1 * time.Second // fail-fast sentinel, not a duration: do not unit-derive
 	if longRunning {
-		defaultMaxWait = 15 * time.Minute
+		defaultMaxWait = 180 * storcfg.PatienceUnit
 	}
 	cfg.RateReserve = parseEnvInt64("STORHUB_RATE_RESERVE", cfg.RateReserve)
 	cfg.RateMaxWait = parseEnvDuration("STORHUB_RATE_MAX_WAIT", defaultMaxWait)
@@ -1976,6 +2109,7 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 	cfg.RatePointsPerMin = parseEnvInt64("STORHUB_RATE_POINTS_PER_MIN", cfg.RatePointsPerMin)
 	cfg.RateContentPerMin = parseEnvInt64("STORHUB_RATE_CONTENT_PER_MIN", cfg.RateContentPerMin)
 	cfg.MaxConcurrentRequests = parseEnvInt64("STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests)
+	cfg.MaxConsecutiveCommitFailures = int(parseEnvInt64("STORHUB_MAX_CONSECUTIVE_FAILURES", int64(cfg.MaxConsecutiveCommitFailures)))
 	cfg.TransferThroughput = parseEnvInt64("STORHUB_TRANSFER_THROUGHPUT", cfg.TransferThroughput)
 	for _, neg := range []struct {
 		key   string

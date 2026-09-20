@@ -115,6 +115,19 @@ type Client interface {
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
 	RevertPathContext(ctx context.Context, project, path, commitSHA string) error
 	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error)
+	// GC scans the live chunk catalog (ScanChunkGC, read-only) and
+	// collects orphans (CompactOrphanChunks). Refuses while any session
+	// is live on the project.
+	ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error)
+	CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error)
+	// Degraded-mode operations: DegradedProjects lists latched projects,
+	// ReEnableProject clears one latch (the only path back to healthy),
+	// PressureSnapshot exposes the operator pressure ledger.
+	DegradedProjects() ([]string, error)
+	ReEnableProject(project string) error
+	PressureSnapshot() (storage.PressureSnapshot, error)
+	PressureFailureStreak(project string) (uint64, error)
+	PressurePendingDepth(project string) (int, error)
 	DeleteProjectContext(ctx context.Context, project string) error
 	ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error)
 	// DrainProjectContext blocks until everything published before the call
@@ -253,7 +266,31 @@ func NewHandler(hub *storage.StorHub, opts Options) (http.Handler, error) {
 	if hub == nil {
 		return nil, errors.New("storhub: REST handler requires a non-nil hub")
 	}
-	return newHandlerForClient(hub, opts)
+	return newHandlerForClient(directClient{hub}, opts)
+}
+
+// directClient adapts *storage.StorHub to Client where the storage
+// method is bare but the surface contract is fallible: admin gating
+// needs an error channel, so these wrappers lift success into it.
+// Everything else promotes from the embedded hub with no adapter.
+type directClient struct {
+	*storage.StorHub
+}
+
+func (d directClient) DegradedProjects() ([]string, error) {
+	return d.StorHub.DegradedProjects(), nil
+}
+
+func (d directClient) PressureSnapshot() (storage.PressureSnapshot, error) {
+	return d.StorHub.PressureSnapshot(), nil
+}
+
+func (d directClient) PressureFailureStreak(project string) (uint64, error) {
+	return d.StorHub.PressureFailureStreak(project), nil
+}
+
+func (d directClient) PressurePendingDepth(project string) (int, error) {
+	return d.StorHub.PressurePendingDepth(project), nil
 }
 
 func newHandlerForClient(client Client, opts Options) (http.Handler, error) {
@@ -436,6 +473,9 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/rollback", h.handleRollback)
 	r.Post("/ops/revert-path", h.handleRevertPath)
 	r.Post("/ops/purge", h.handlePurge)
+	r.Post("/ops/gc", h.handleGC)
+	r.Post("/ops/re-enable", h.handleReEnable)
+	r.Get("/ops/status", h.handleStatus)
 	r.Get("/shares", h.handleProjectSharesGet)
 	r.Post("/shares", h.handleProjectSharesPost)
 	r.Get("/shares/{shareID}", h.handleProjectShareGet)

@@ -59,6 +59,15 @@ type (
 	NodeKind = meta.NodeKind
 	// PurgeResult reports what a granular purge reclaimed.
 	PurgeResult = impl.PurgeResult
+	// ChunkGCResult reports what a chunk-GC scan found and a compaction
+	// collected (or would collect under dry-run).
+	ChunkGCResult = impl.ChunkGCResult
+	// PressureSnapshot is the operator-visible pressure ledger: monotonic
+	// totals plus per-project consecutive-failure streaks.
+	PressureSnapshot = impl.PressureSnapshot
+	// DegradedProjectError is the fail-fast refusal a degraded project
+	// answers to new mutations. Match with errors.As.
+	DegradedProjectError = impl.DegradedProjectError
 	// PurgeScope selects what a purge run reclaims (objects|assets|history|all).
 	PurgeScope = impl.PurgeScope
 	// APIError is an error returned by the GitHub API layer, carrying the

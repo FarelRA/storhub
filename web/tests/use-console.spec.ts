@@ -127,6 +127,20 @@ describe('rollbackRevision payload', () => {
   })
 })
 
+describe('gc payload', () => {
+  it('POSTs {dry_run:true} for a preview', async () => {
+    const c = useConsole()
+    await c.gc(true)
+    expect(bodyOf('/ops/gc')).toEqual({ dry_run: true })
+  })
+
+  it('POSTs {dry_run:false} for a collection', async () => {
+    const c = useConsole()
+    await c.gc(false)
+    expect(bodyOf('/ops/gc')).toEqual({ dry_run: false })
+  })
+})
+
 describe('purge payload', () => {
   it('POSTs {scope, keep, dry_run:true} and skips the refresh for dry runs', async () => {
     const c = useConsole()
