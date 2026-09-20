@@ -416,7 +416,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 	if err := hub.DeleteFile(repoName, "live-2gb.bin"); err != nil {
 		t.Fatalf("delete metadata entry: %v", err)
 	}
-	purge, err := hub.PurgeProject(repoName, "assets", 0, false)
+	purge, err := hub.PruneProject(repoName, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked 2GB file: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 	if err := hub.DeleteFile(project, "two-gb.bin"); err != nil {
 		t.Fatalf("hide two-gb.bin: %v", err)
 	}
-	purge, err := hub.PurgeProject(project, "assets", 0, false)
+	purge, err := hub.PruneProject(project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}

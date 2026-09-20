@@ -127,9 +127,9 @@ func TestAppSmokeForTokenValidationAcrossCommands(t *testing.T) {
 		{name: "symlink", args: []string{"symlink", "project", "target", "link"}, want: "missing GitHub token"},
 		{name: "readlink", args: []string{"readlink", "project", "path"}, want: "missing GitHub token"},
 		{name: "link", args: []string{"link", "project", "old", "new"}, want: "missing GitHub token"},
-		{name: "sync", args: []string{"sync", "project"}, want: "missing GitHub token"},
-		{name: "revisions", args: []string{"revisions", "project"}, want: "missing GitHub token"},
-		{name: "rollback", args: []string{"rollback", "project", "sha"}, want: "invalid commit SHA"},
+		{name: "sync", args: []string{"project", "sync", "project"}, want: "missing GitHub token"},
+		{name: "revisions", args: []string{"project", "revisions", "project"}, want: "missing GitHub token"},
+		{name: "rollback", args: []string{"project", "rollback", "project", "sha"}, want: "invalid commit SHA"},
 		{name: "rest", args: []string{"rest"}, want: "missing GitHub token"},
 		{name: "serve", args: []string{"serve", "project", t.TempDir()}, want: "missing GitHub token"},
 		{name: "mount", args: []string{"mount", "project", t.TempDir()}, want: "missing GitHub token"},
@@ -208,10 +208,10 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"symlink", "--token", "x", "demo", "docs/readme.txt", "docs/alias.txt"},
 		{"readlink", "--token", "x", "demo", "docs/alias.txt"},
 		{"link", "--token", "x", "demo", "docs/readme.txt", "docs/hard.txt"},
-		{"sync", "--token", "x", "demo"},
-		{"revisions", "--token", "x", "demo"},
-		{"rollback", "--token", "x", "demo", "deadbeef"},
-		{"purge", "--token", "x", "demo", "objects", "--dry-run"},
+		{"project", "sync", "--token", "x", "demo"},
+		{"project", "revisions", "--token", "x", "demo"},
+		{"project", "rollback", "--token", "x", "demo", "deadbeef"},
+		{"project", "prune", "--token", "x", "demo", "objects", "--dry-run"},
 		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
 		{"serve", "--token", "x", "demo", mountDir, "--allow-anonymous"},
@@ -223,7 +223,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	// Status chatter belongs on stderr; stdout carries only data.
 	chatter := stderr()
-	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "truncated", "changed mode of docs/readme.txt to 0640", "changed ownership of docs/readme.txt to 1:2", "touched docs/readme.txt", "symlinked", "linked", "synced demo", "rolled back demo to deadbeef", "would purge demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
+	for _, want := range []string{"uploaded", "replaced", "downloaded docs/readme.txt", "created directory docs", "removed docs/readme.txt", "moved docs/readme.txt -> docs/final.txt", "appended", "written", "patched", "truncated", "changed mode of docs/readme.txt to 0640", "changed ownership of docs/readme.txt to 1:2", "touched docs/readme.txt", "symlinked", "linked", "synced demo", "rolled back demo to deadbeef", "would prune demo (objects)", "serving REST API on 127.0.0.1:0/api/v1 without auth", "mounted demo at ", "mounted demo at ", "serving REST API on :8080/api/v1 without auth"} {
 		if !strings.Contains(chatter, want) {
 			t.Fatalf("expected %q on stderr %q", want, chatter)
 		}
@@ -297,14 +297,14 @@ func TestDeleteProjectRequiresYes(t *testing.T) {
 	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	err := app.Run([]string{"delete-project", "demo"})
+	err := app.Run([]string{"project", "delete", "demo"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("refusal must be a usage error naming --yes, got %v", err)
 	}
 	if fake.shutdowns != 0 {
 		t.Fatalf("refusal must not create or drain a hub, shutdowns=%d", fake.shutdowns)
 	}
-	if err := app.Run([]string{"delete-project", "--yes", "demo"}); err != nil {
+	if err := app.Run([]string{"project", "delete", "--yes", "demo"}); err != nil {
 		t.Fatalf("confirmed delete: %v", err)
 	}
 	if !strings.Contains(stderr(), "deleted project demo") {
@@ -494,9 +494,9 @@ func TestNegativeChunkSizeIsUsageError(t *testing.T) {
 	}
 }
 
-// TestPurgeScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
+// TestPruneScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
 // be rejected by the CLI as usage errors (exit 2) before any hub exists.
-func TestPurgeScopeAndKeepAreUsageErrors(t *testing.T) {
+func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	var created int
@@ -505,22 +505,22 @@ func TestPurgeScopeAndKeepAreUsageErrors(t *testing.T) {
 		return &fakeHub{t: t}, nil
 	}
 	app, _, _ := newTestApp(t)
-	err := app.Run([]string{"purge", "--token", "x", "demo", "bogus"})
-	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "purge scope") {
+	err := app.Run([]string{"project", "prune", "--token", "x", "demo", "bogus"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "prune scope") {
 		t.Fatalf("bad scope must be a usage error, got %v", err)
 	}
-	err = app.Run([]string{"purge", "--token", "x", "demo", "objects", "--keep", "0"})
+	err = app.Run([]string{"project", "prune", "--token", "x", "demo", "objects", "--keep", "0"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
 		t.Fatalf("--keep 0 must be a usage error, got %v", err)
 	}
-	err = app.Run([]string{"purge", "--token", "x", "demo", "all", "--keep", "-3"})
+	err = app.Run([]string{"project", "prune", "--token", "x", "demo", "all", "--keep", "-3"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--keep") {
 		t.Fatalf("negative --keep must be a usage error, got %v", err)
 	}
 	if created != 0 {
 		t.Fatalf("usage errors must not build a hub, created=%d", created)
 	}
-	if err := app.Run([]string{"purge", "--token", "x", "demo", "history", "--keep", "2"}); err != nil {
+	if err := app.Run([]string{"project", "prune", "--token", "x", "demo", "history", "--keep", "2"}); err != nil {
 		t.Fatalf("valid prune must still run: %v", err)
 	}
 }
@@ -882,14 +882,8 @@ func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevis
 func (h *fakeHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
 	return nil
 }
-func (h *fakeHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
-	return &storhub.PurgeResult{Scope: storhub.PurgeScope(scope), DryRun: dryRun}, nil
-}
-func (h *fakeHub) ScanChunkGC(ctx context.Context, project string) (*storhub.ChunkGCResult, error) {
-	return &storhub.ChunkGCResult{}, nil
-}
-func (h *fakeHub) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storhub.ChunkGCResult, error) {
-	return &storhub.ChunkGCResult{DryRun: dryRun}, nil
+func (h *fakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *fakeHub) DegradedProjects() []string {
 	return nil

@@ -48,7 +48,7 @@ type showcaseHub interface {
 	LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error)
 	DeleteFileContext(ctx context.Context, project, filePath string, opts ...storhub.MutateOption) error
 	RmdirContext(ctx context.Context, project, dirPath string, opts ...storhub.MutateOption) error
-	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error)
+	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
 	CleanupProjectContext(ctx context.Context, project string) error
 	DeleteReleaseContext(ctx context.Context, project, tag string) error
 	DeleteProjectContext(ctx context.Context, project string) error
@@ -377,7 +377,7 @@ func previewFUSE(hub *storhub.StorHub, project string) error {
 
 func runMaintenance(ctx context.Context, hub showcaseHub, project string) error {
 	printSection("Maintenance")
-	purge, err := hub.PurgeContext(ctx, project, "assets", 0, false)
+	purge, err := hub.PruneContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		return fmt.Errorf("purge untracked: %w", err)
 	}

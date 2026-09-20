@@ -135,12 +135,7 @@ type hubClient interface {
 	// Ctrl+C cancels them between units of work instead of killing the
 	// process mid-delete-loop.
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
-	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error)
-	// GC scans the live chunk catalog for orphans (ScanChunkGC, read-only)
-	// and collects them (CompactOrphanChunks; dryRun previews). Refuses
-	// while any session is live on the project.
-	ScanChunkGC(ctx context.Context, project string) (*storhub.ChunkGCResult, error)
-	CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storhub.ChunkGCResult, error)
+	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error)
 	// Degraded-mode operations: DegradedProjects lists latched projects,
 	// ReEnableProject clears one latch (the only path back to healthy),
 	// PressureSnapshot exposes the operator pressure ledger.
@@ -353,14 +348,7 @@ Examples:
 	rootCmd.AddCommand(a.newSymlinkCmd())
 	rootCmd.AddCommand(a.newReadlinkCmd())
 	rootCmd.AddCommand(a.newLinkCmd())
-	rootCmd.AddCommand(a.newSyncCmd())
-	rootCmd.AddCommand(a.newRevisionsCmd())
-	rootCmd.AddCommand(a.newRollbackCmd())
-	rootCmd.AddCommand(a.newPurgeCmd())
-	rootCmd.AddCommand(a.newGCCmd())
-	rootCmd.AddCommand(a.newStatusCmd())
-	rootCmd.AddCommand(a.newReEnableCmd())
-	rootCmd.AddCommand(a.newDeleteProjectCmd())
+	rootCmd.AddCommand(a.newProjectCmd())
 	rootCmd.AddCommand(a.newCacheCmd())
 	rootCmd.AddCommand(a.newSessionCmd())
 	rootCmd.AddCommand(a.newMountCmd())
@@ -590,25 +578,48 @@ Examples:
 	return cmd
 }
 
-func (a *App) newRevisionsCmd() *cobra.Command {
+// newProjectCmd groups every project-level operation: health, history,
+// reclamation, and lifecycle. Per-path file verbs stay top-level; the
+// project group owns the project itself.
+func (a *App) newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "revisions [flags] <project>",
+		Use:   "project",
+		Short: "Operate on a project: status, sync, revisions, prune, and lifecycle",
+		Long: `Project groups the operations that act on a whole project
+rather than a path inside it: status (health), sync (drain), revisions
+(history), rollback, prune (reclaim, including chunk orphans), enable
+(clear the degraded latch), and delete (destroy the project).`,
+		Args: usageArgs(cobra.NoArgs),
+	}
+	cmd.AddCommand(a.newProjectStatusCmd())
+	cmd.AddCommand(a.newProjectSyncCmd())
+	cmd.AddCommand(a.newProjectRevisionsCmd())
+	cmd.AddCommand(a.newProjectRollbackCmd())
+	cmd.AddCommand(a.newProjectPruneCmd())
+	cmd.AddCommand(a.newProjectEnableCmd())
+	cmd.AddCommand(a.newProjectDeleteCmd())
+	return cmd
+}
+
+func (a *App) newProjectRevisionsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "revisions <project>",
 		Short: "List metadata revision history",
 		Long: `Revisions lists the project's metadata commits, newest last.
 An empty history prints nothing, like ls(1).
 
 Examples:
-  storhub revisions docs-project`,
+  storhub project revisions docs-project`,
 		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runRevisions,
+		RunE: a.runProjectRevisions,
 	}
 	cmd.Flags().Bool("json", false, "Emit machine-readable JSON (array of revisions)")
 	return cmd
 }
 
-func (a *App) newRollbackCmd() *cobra.Command {
+func (a *App) newProjectRollbackCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "rollback [flags] <project> <commit-sha>",
+		Use:   "rollback <project> <commit-sha>",
 		Short: "Rollback metadata to a commit",
 		Long: `Rollback restores the project's metadata to a past commit SHA
 (7-64 lowercase hex). A malformed SHA is a usage error (exit 2).
@@ -618,27 +629,31 @@ command runs with local-process trust and performs no admin check
 (the REST rollback endpoint is admin-gated).
 
 Examples:
-  storhub rollback docs-project abc1234`,
+  storhub project rollback docs-project abc1234`,
 		Args: usageArgs(cobra.ExactArgs(2)),
-		RunE: a.runRollback,
+		RunE: a.runProjectRollback,
 	}
 	addSyncFlag(cmd)
 	return cmd
 }
 
-func (a *App) newPurgeCmd() *cobra.Command {
+func (a *App) newProjectPruneCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "purge <project> [objects|assets|history|all]",
-		Short: "Reclaim objects, release assets, or git history",
-		Long: `Purge reclaims storage under the full-history retention policy.
+		Use:   "prune [flags] <project> [objects|assets|history|chunks|all]",
+		Short: "Reclaim objects, assets, history, or chunk orphans",
+		Long: `Prune reclaims storage under the full-history retention policy.
 
   objects   delete content-addressed index objects referenced by no retained
-            manifest (orphans from failed commits or after a history purge)
+            manifest (orphans from failed commits or after a history prune)
   assets    delete release assets tracked by no file (interrupted writes,
             manual interference)
   history   collapse old index manifests into a checkpoint (git backend only;
             on the REST backend GitHub owns history and the API cannot delete
             revisions, so this reports honestly instead of pretending)
+  chunks    collect orphaned chunk records from the live catalog (records
+            no file and no pending edit references; refuses while any
+            session holds the project). Works on live state: the only
+            scope that needs no flush first.
   all       history (where possible) + objects + assets (the default)
 
 Use --dry-run to see what would be reclaimed without deleting anything.
@@ -646,9 +661,9 @@ Use --dry-run to see what would be reclaimed without deleting anything.
 
 The serve-mode admin boundary covers the REST surface only: this
 command runs with local-process trust and performs no admin check
-(the REST purge endpoint is admin-gated).`,
+(the REST prune endpoint is admin-gated).`,
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
-		RunE: a.runPurge,
+		RunE: a.runProjectPrune,
 	}
 	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
@@ -656,70 +671,24 @@ command runs with local-process trust and performs no admin check
 	return cmd
 }
 
-func (a *App) newGCCmd() *cobra.Command {
+func (a *App) newProjectStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "gc [flags] <project>",
-		Short: "Collect orphaned chunk records",
-		Long: `GC scans the live chunk catalog for records no file and no
-pending edit references, then collects them. A project with a live
-session refuses outright (sessions pin chunks); use --dry-run to
-preview. Nothing runs automatically: every collection is an explicit
-operator act, logged per object.
-
-Examples:
-  storhub gc docs-project --dry-run
-  storhub gc docs-project`,
-		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runGC,
-	}
-	cmd.Flags().Bool("dry-run", false, "Report orphans without collecting")
-	addSyncFlag(cmd)
-	return cmd
-}
-
-func (a *App) runGC(cmd *cobra.Command, args []string) error {
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
-	if err != nil {
-		return err
-	}
-	defer stop()
-	if dryRun {
-		res, err := hub.ScanChunkGC(ctx, args[0])
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(a.stderr, "would collect %s (%d chunks, %d bytes) of %d scanned\n",
-			args[0], res.OrphanChunks, res.OrphanBytes, res.ScannedChunks)
-		return nil
-	}
-	res, err := hub.CompactOrphanChunks(ctx, args[0], false)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(a.stderr, "collected %s: %d chunks, %d bytes\n",
-		args[0], res.CollectedChunks, res.CollectedBytes)
-	return nil
-}
-
-func (a *App) newStatusCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "status [flags] <project>",
+		Use:   "status <project>",
 		Short: "Show project health: degraded latch, streaks, pressure",
 		Long: `Status reports operability in one place: whether the project
 is latched degraded (and its consecutive-failure streak), the pending
 op depth, and the hub pressure totals. A degraded project refuses new
-mutations until re-enable clears the latch.
+mutations until enable clears the latch.
 
 Examples:
-  storhub status docs-project`,
+  storhub project status docs-project`,
 		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runStatus,
+		RunE: a.runProjectStatus,
 	}
 	return cmd
 }
 
-func (a *App) runStatus(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectStatus(cmd *cobra.Command, args []string) error {
 	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
@@ -737,31 +706,31 @@ func (a *App) runStatus(cmd *cobra.Command, args []string) error {
 	}
 	state := "healthy"
 	if latched {
-		state = fmt.Sprintf("degraded (streak %d; re-enable with: storhub re-enable %s)", streak, args[0])
+		state = fmt.Sprintf("degraded (streak %d; re-enable with: storhub project enable %s)", streak, args[0])
 	}
 	_, _ = fmt.Fprintf(a.stderr, "%s: %s, pending ops %d, commits %d ok / %d failed / %d rebased, cap-crosses %d\n",
 		args[0], state, depth, snap.CommitSuccesses, snap.CommitFailures, snap.Rebases, snap.CapCrosses)
 	return nil
 }
 
-func (a *App) newReEnableCmd() *cobra.Command {
+func (a *App) newProjectEnableCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "re-enable [flags] <project>",
+		Use:   "enable <project>",
 		Short: "Clear a project's degraded latch",
-		Long: `Re-enable clears the degraded latch and admits mutations
+		Long: `Enable clears the degraded latch and admits mutations
 again. It is the ONLY path back to healthy: commit successes never
-clear the latch, so a sick backend cannot silently recover. Re-enabling
+clear the latch, so a sick backend cannot silently recover. Enabling
 a healthy project succeeds as a no-op.
 
 Examples:
-  storhub re-enable docs-project`,
+  storhub project enable docs-project`,
 		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runReEnable,
+		RunE: a.runProjectEnable,
 	}
 	return cmd
 }
 
-func (a *App) runReEnable(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectEnable(cmd *cobra.Command, args []string) error {
 	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
@@ -769,13 +738,13 @@ func (a *App) runReEnable(cmd *cobra.Command, args []string) error {
 	if err := hub.ReEnableProject(args[0]); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(a.stderr, "re-enabled %s\n", args[0])
+	_, _ = fmt.Fprintf(a.stderr, "enabled %s\n", args[0])
 	return nil
 }
 
-func (a *App) newDeleteProjectCmd() *cobra.Command {
+func (a *App) newProjectDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete-project <project>",
+		Use:   "delete <project>",
 		Short: "Delete an entire project repository",
 		Long: `Delete-project removes the project's GitHub repository outright: every file,
 directory, release, asset, and metadata revision is gone. This cannot be undone.
@@ -1390,7 +1359,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectRevisions(cmd *cobra.Command, args []string) error {
 	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err
@@ -1415,7 +1384,7 @@ func (a *App) runRevisions(cmd *cobra.Command, args []string) error {
 // not a runtime failure (exit 1) deep inside storage.
 var commitSHAPattern = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
 
-func (a *App) runRollback(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectRollback(cmd *cobra.Command, args []string) error {
 	if !commitSHAPattern.MatchString(strings.TrimSpace(args[1])) {
 		return &usageError{fmt.Errorf("invalid commit SHA %q: must be 7-64 lowercase hex characters", args[1])}
 	}
@@ -1434,38 +1403,43 @@ func (a *App) runRollback(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (a *App) runPurge(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectPrune(cmd *cobra.Command, args []string) error {
 	scope := "all"
 	if len(args) >= 2 {
 		scope = args[1]
 	}
-	switch storhub.PurgeScope(scope) {
-	case storhub.PurgeObjects, storhub.PurgeAssets, storhub.PurgeHistory, storhub.PurgeAll:
+	switch storhub.PruneScope(scope) {
+	case storhub.PruneObjects, storhub.PruneAssets, storhub.PruneHistory, storhub.PruneChunks, storhub.PruneAll:
 	default:
-		return &usageError{fmt.Errorf("invalid purge scope %q (known: objects, assets, history, all)", scope)}
+		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, chunks, all)", scope)}
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	keep, _ := cmd.Flags().GetInt("keep")
 	if keep < 1 {
 		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}
 	}
-	// Purging can run for minutes; a Ctrl+C must cancel it between delete
+	// Pruning can run for minutes; a Ctrl+C must cancel it between delete
 	// units instead of killing the process mid-loop.
 	hub, ctx, stop, err := a.mustCmdHubCtx(cmd, 0, false)
 	if err != nil {
 		return err
 	}
 	defer stop()
-	result, err := hub.PurgeContext(ctx, args[0], scope, keep, dryRun)
+	result, err := hub.PruneContext(ctx, args[0], scope, keep, dryRun)
 	if err != nil {
 		return err
 	}
 	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
 		return err
 	}
-	verb := "purged"
+	verb := "pruned"
 	if dryRun {
-		verb = "would purge"
+		verb = "would prune"
+	}
+	if result.Scope == storhub.PruneChunks {
+		_, _ = fmt.Fprintf(a.stderr, "%s %s (chunks): %d orphan chunks, %d bytes of %d scanned\n",
+			verb, args[0], result.OrphanChunks, result.OrphanBytes, result.ScannedChunks)
+		return nil
 	}
 	_, _ = fmt.Fprintf(a.stderr, "%s %s (%s): %d objects, %d releases, %d assets",
 		verb, args[0], result.Scope, result.DeletedObjects, result.DeletedReleases, result.DeletedAssets)

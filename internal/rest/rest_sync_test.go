@@ -149,7 +149,7 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 		},
 		{
 			name: "create-file", method: http.MethodPost,
-			target: "/api/v1/projects/demo/ops/create-file", json: pathRequest{Path: "c.txt"},
+			target: "/api/v1/projects/demo/ops/create", json: pathRequest{Path: "c.txt"},
 			wantStatus: http.StatusCreated,
 		},
 		{
@@ -216,19 +216,19 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 		{
 			name: "revert-path", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
-			target: "/api/v1/projects/demo/ops/revert-path", json: revertPathRequest{Path: "a.txt", CommitSHA: "deadbeef"},
+			target: "/api/v1/projects/demo/ops/revert", json: revertPathRequest{Path: "a.txt", CommitSHA: "deadbeef"},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name: "purge", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
-			target: "/api/v1/projects/demo/ops/purge", json: map[string]any{},
+			target: "/api/v1/projects/demo/ops/prune", json: map[string]any{},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name: "purge-scoped", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
-			target: "/api/v1/projects/demo/ops/purge", json: map[string]any{"scope": "objects", "dry_run": true},
+			target: "/api/v1/projects/demo/ops/prune", json: map[string]any{"scope": "objects", "dry_run": true},
 			wantStatus: http.StatusOK,
 		},
 		{

@@ -202,7 +202,7 @@ func TestSymlinkReadlinkLinkCommands(t *testing.T) {
 
 func TestSyncCommand(t *testing.T) {
 	fake := &fakeHub{t: t}
-	out := runPosixCLI(t, fake, []string{"sync", "--token", "x", "demo"})
+	out := runPosixCLI(t, fake, []string{"project", "sync", "--token", "x", "demo"})
 	if !strings.Contains(out, "synced demo") {
 		t.Fatalf("sync must report the project, got %q", out)
 	}
@@ -219,7 +219,7 @@ func TestSyncCommandPropagatesDrainError(t *testing.T) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)
-	if err := app.Run([]string{"sync", "--token", "x", "demo"}); err == nil || !strings.Contains(err.Error(), "drain boom") {
+	if err := app.Run([]string{"project", "sync", "--token", "x", "demo"}); err == nil || !strings.Contains(err.Error(), "drain boom") {
 		t.Fatalf("drain failure must propagate, got %v", err)
 	}
 }

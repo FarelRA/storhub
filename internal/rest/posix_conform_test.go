@@ -287,14 +287,14 @@ func (a *restConformAdapter) resolve(pcPath string) (string, *EntryInfo, string,
 func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool) error {
 	_ = perm
 	rp := trimPCPath(path)
-	target := pcBase(a.project) + "/ops/create-file"
+	target := pcBase(a.project) + "/ops/create"
 	status, _, data := a.doJSON(http.MethodPost, target, pathRequest{Path: rp}, nil)
 	if status == http.StatusCreated || status == http.StatusOK {
 		return nil
 	}
 	if status == http.StatusConflict {
 		// Idempotence emulation lives HERE in the harness, not in the
-		// product: POST /ops/create-file is create-only by design (409
+		// product: POST /ops/create is create-only by design (409
 		// when the path exists), so a non-exclusive create re-stats and
 		// treats "already there" as success. The server never fakes it.
 		if !exclusive {
@@ -514,8 +514,8 @@ func (a *restConformAdapter) Sync(path string) error {
 	// No standalone flush endpoint exists; a dry-run prune with ?sync=1
 	// drains the project journal without mutating anything, which is
 	// exactly the durability the scenario pins.
-	target := pcBase(a.project) + "/ops/purge?sync=1"
-	status, _, data := a.doJSON(http.MethodPost, target, purgeRequest{Scope: "all", DryRun: true}, nil)
+	target := pcBase(a.project) + "/ops/prune?sync=1"
+	status, _, data := a.doJSON(http.MethodPost, target, pruneRequest{Scope: "all", DryRun: true}, nil)
 	if status != http.StatusOK {
 		return mapPCStatus(status, data, "sync "+path)
 	}

@@ -770,7 +770,7 @@ func TestZeroOwnerSurvivesNormalize(t *testing.T) {
 	}
 }
 
-func TestPurgeUnreferencedChunks(t *testing.T) {
+func TestPruneUnreferencedChunks(t *testing.T) {
 	t.Parallel()
 	m := NewRepoMetadata("demo")
 	m.UpsertFile("a.txt", FileMeta{Size: 4, Inode: 1, Chunks: []int64{10, 11}}, 100000000000)

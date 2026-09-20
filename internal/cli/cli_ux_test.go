@@ -101,7 +101,7 @@ func TestJSONOutputContracts(t *testing.T) {
 
 	// revisions --json: array shape.
 	app, stdout, _ = newTestApp(t)
-	if err := app.Run([]string{"revisions", "--json", "demo"}); err != nil {
+	if err := app.Run([]string{"project", "revisions", "--json", "demo"}); err != nil {
 		t.Fatalf("revisions --json: %v", err)
 	}
 	out := strings.TrimSpace(stdout())

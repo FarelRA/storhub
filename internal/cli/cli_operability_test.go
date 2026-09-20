@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// Operability surfaces (GC, status, re-enable) must be usable end to end
-// through the CLI: every storage capability gets a command, no Go-only
-// orphans.
+// Operability surfaces (prune incl. chunks scope, status, enable) must
+// be usable end to end through the CLI under the project group: every
+// storage capability gets a command, no Go-only orphans.
 func TestOperabilityCommandsSuccessPaths(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
@@ -15,10 +15,10 @@ func TestOperabilityCommandsSuccessPaths(t *testing.T) {
 		return &fakeHub{t: t}, nil
 	}
 	for _, args := range [][]string{
-		{"gc", "--token", "x", "demo", "--dry-run"},
-		{"gc", "--token", "x", "demo"},
-		{"status", "--token", "x", "demo"},
-		{"re-enable", "--token", "x", "demo"},
+		{"project", "prune", "--token", "x", "demo", "chunks", "--dry-run"},
+		{"project", "prune", "--token", "x", "demo", "chunks"},
+		{"project", "status", "--token", "x", "demo"},
+		{"project", "enable", "--token", "x", "demo"},
 	} {
 		app, _, _ := newTestApp(t)
 		if err := app.Run(args); err != nil {
@@ -26,22 +26,22 @@ func TestOperabilityCommandsSuccessPaths(t *testing.T) {
 		}
 	}
 	app, _, stderr := newTestApp(t)
-	if err := app.Run([]string{"gc", "--token", "x", "demo", "--dry-run"}); err != nil {
-		t.Fatalf("gc dry-run: %v", err)
+	if err := app.Run([]string{"project", "prune", "--token", "x", "demo", "chunks", "--dry-run"}); err != nil {
+		t.Fatalf("prune chunks dry-run: %v", err)
 	}
-	if out := stderr(); !strings.Contains(out, "would collect demo") {
-		t.Fatalf("gc dry-run must preview, got %q", out)
+	if out := stderr(); !strings.Contains(out, "would prune demo (chunks)") {
+		t.Fatalf("prune chunks dry-run must preview, got %q", out)
 	}
-	if err := app.Run([]string{"status", "--token", "x", "demo"}); err != nil {
+	if err := app.Run([]string{"project", "status", "--token", "x", "demo"}); err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if out := stderr(); !strings.Contains(out, "demo: healthy") {
 		t.Fatalf("status must report healthy, got %q", out)
 	}
-	if err := app.Run([]string{"re-enable", "--token", "x", "demo"}); err != nil {
-		t.Fatalf("re-enable: %v", err)
+	if err := app.Run([]string{"project", "enable", "--token", "x", "demo"}); err != nil {
+		t.Fatalf("enable: %v", err)
 	}
-	if out := stderr(); !strings.Contains(out, "re-enabled demo") {
-		t.Fatalf("re-enable must confirm, got %q", out)
+	if out := stderr(); !strings.Contains(out, "enabled demo") {
+		t.Fatalf("enable must confirm, got %q", out)
 	}
 }

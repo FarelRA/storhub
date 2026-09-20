@@ -68,24 +68,41 @@ function closeDrawer() {
   drawerOpen.value = false
 }
 
-const purgeScope = ref('all')
-const purgeDryRun = ref(true)
+const pruneScope = ref('all')
+const pruneDryRun = ref(true)
+const projectHealth = ref<null | { degraded: boolean, failure_streak: number, pending_depth: number }>(null)
 
-async function runPurge() {
-  const scope = purgeScope.value
-  const dry = purgeDryRun.value
+async function refreshHealth() {
+  const st = await consoleStore.projectStatus()
+  projectHealth.value = st ? { degraded: st.degraded, failure_streak: st.failure_streak, pending_depth: st.pending_depth } : null
+}
+
+async function runEnable() {
+  const ok = await ask({
+    title: 'Enable project',
+    body: 'Clear the degraded latch and admit mutations again? Only do this after the backend recovered.',
+    confirmLabel: 'Enable',
+    danger: true,
+  })
+  if (!ok) return
+  if (await consoleStore.enableProject()) await refreshHealth()
+}
+
+async function runPrune() {
+  const scope = pruneScope.value
+  const dry = pruneDryRun.value
   if (!dry) {
     const ok = await ask({
-      title: `Purge ${scope}`,
-      body: 'Reclaim storage now? Orphaned index objects and untracked assets are deleted. History compaction is git-backend only and collapses every older manifest into a single checkpoint revision (keep is fixed at 1; the server rejects larger values). This cannot be undone.',
-      confirmLabel: 'Purge',
+      title: `Prune ${scope}`,
+      body: 'Reclaim storage now? Orphaned index objects, untracked assets, and chunk orphans are deleted. History compaction is git-backend only and collapses every older manifest into a single checkpoint revision (keep is fixed at 1; the server rejects larger values). This cannot be undone.',
+      confirmLabel: 'Prune',
       danger: true,
     })
     if (!ok) return
   }
   // keep=1 is the only value the backend accepts: history compaction keeps
-  // exactly one checkpoint, and keep is ignored by the objects/assets scopes.
-  const result = await consoleStore.purge(scope, 1, dry)
+  // exactly one checkpoint, and keep is ignored by the objects/assets/chunks scopes.
+  const result = await consoleStore.prune(scope, 1, dry)
   if (!result) return
   const parts = [
     `${result.deleted_objects} objects`,
@@ -93,27 +110,9 @@ async function runPurge() {
     `${result.deleted_assets} assets`,
   ]
   if (result.history_compacted) parts.push('history compacted')
-  toasts.info(`${dry ? 'Would purge' : 'Purged'} ${result.scope}: ${parts.join(', ')}`)
+  if (scope === 'chunks') parts.push(`${result.orphan_chunks ?? 0} orphan chunks (${result.collected_bytes ?? result.orphan_bytes ?? 0} bytes) of ${result.scanned_chunks ?? 0} scanned`)
+  toasts.info(`${dry ? 'Would prune' : 'Pruned'} ${result.scope}: ${parts.join(', ')}`)
   for (const note of result.notes ?? []) toasts.info(note)
-}
-
-async function runGC(dry: boolean) {
-  if (!dry) {
-    const ok = await ask({
-      title: 'Collect chunk orphans',
-      body: 'Delete chunk records no file and no pending edit references? Refuses while any session holds the project. This cannot be undone.',
-      confirmLabel: 'Collect',
-      danger: true,
-    })
-    if (!ok) return
-  }
-  const result = await consoleStore.gc(dry)
-  if (!result) return
-  if (result.refused_by_session) {
-    toasts.info('Chunk GC refused: a live session pins chunks; close sessions and retry')
-    return
-  }
-  toasts.info(`${dry ? 'Would collect' : 'Collected'} ${result.orphan_chunks} orphan chunks (${result.collected_bytes ?? result.orphan_bytes} bytes) of ${result.scanned_chunks} scanned`)
 }
 
 const { panels } = usePanelWidths()
@@ -247,44 +246,49 @@ async function onDrop(event: DragEvent) {
         <section v-if="!isSharedView" class="space-y-2.5 border-b border-hair py-4">
           <StatsGrid :stats="consoleStore.stats.value" />
           <div v-if="isAdmin" class="space-y-1.5">
+            <div class="flex items-center gap-2 text-xs">
+              <span class="font-mono" :title="`streak ${projectHealth?.failure_streak ?? 0}, pending ${projectHealth?.pending_depth ?? 0}`">
+                health: {{ projectHealth === null ? 'unknown' : projectHealth.degraded ? 'degraded' : 'healthy' }}
+              </span>
+              <button
+                class="btn btn-xs ml-auto"
+                :disabled="busy || !project"
+                title="Refresh project health"
+                @click="refreshHealth"
+              >
+                Refresh
+              </button>
+              <button
+                v-if="projectHealth?.degraded"
+                class="btn btn-xs"
+                :disabled="busy || !project"
+                title="Clear the degraded latch"
+                @click="runEnable"
+              >
+                Enable…
+              </button>
+            </div>
             <div class="flex items-center gap-2">
-              <select v-model="purgeScope" class="input input-sm flex-1 font-mono" :disabled="busy || !project" aria-label="Purge scope">
+              <select v-model="pruneScope" class="input input-sm flex-1 font-mono" :disabled="busy || !project" aria-label="Prune scope">
                 <option value="all">all</option>
                 <option value="objects">objects</option>
                 <option value="assets">assets</option>
                 <option value="history">history</option>
+                <option value="chunks">chunks</option>
               </select>
               <label class="flex items-center gap-1 text-xs text-mist" title="Report what would be reclaimed without deleting">
-                <input v-model="purgeDryRun" type="checkbox" >
+                <input v-model="pruneDryRun" type="checkbox" >
                 dry run
               </label>
             </div>
             <button
               class="btn btn-sm w-full"
               :disabled="busy || !project"
-              title="Admin only: reclaim orphaned index objects, untracked assets, or collapsed history"
-              @click="runPurge"
+              title="Admin only: reclaim orphaned index objects, untracked assets, chunk orphans, or collapsed history"
+              @click="runPrune"
             >
-              {{ purgeDryRun ? 'Preview purge' : 'Purge now…' }}
+              {{ pruneDryRun ? 'Preview prune' : 'Prune now…' }}
             </button>
-            <div class="flex items-center gap-2">
-              <button
-                class="btn btn-sm flex-1"
-                :disabled="busy || !project"
-                title="Admin only: preview orphaned chunk records without collecting"
-                @click="runGC(true)"
-              >
-                Preview chunk GC
-              </button>
-              <button
-                class="btn btn-sm flex-1"
-                :disabled="busy || !project"
-                title="Admin only: collect orphaned chunk records (refuses while sessions are open)"
-                @click="runGC(false)"
-              >
-                Collect now…
-              </button>
-            </div>
           </div>
           <ConfirmDeleteProject v-if="project" @deleted="projectInput = ''" />
         </section>

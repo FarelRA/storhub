@@ -196,7 +196,7 @@ func validateCreate(ctx context.Context, repo *meta.RepoMetadata, cleanPath stri
 }
 
 func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "create-file", true, []any{"path", filePath}, func() error {
+	err = s.withOp(project, "create", true, []any{"path", filePath}, func() error {
 		// Create addresses the new node itself (O_CREAT|O_EXCL never follows a
 		// final symlink), so resolution is lstat-style; intermediate symlink
 		// components are still resolved physically.

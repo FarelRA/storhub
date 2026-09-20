@@ -648,14 +648,8 @@ func (h *pcFakeHub) RollbackMetadataContext(ctx context.Context, project, commit
 	return errors.New("pcFakeHub: rollback not implemented")
 }
 
-func (h *pcFakeHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
-	return &storhub.PurgeResult{Scope: storhub.PurgeScope(scope), DryRun: dryRun}, nil
-}
-func (h *pcFakeHub) ScanChunkGC(ctx context.Context, project string) (*storhub.ChunkGCResult, error) {
-	return &storhub.ChunkGCResult{}, nil
-}
-func (h *pcFakeHub) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storhub.ChunkGCResult, error) {
-	return &storhub.ChunkGCResult{DryRun: dryRun}, nil
+func (h *pcFakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *pcFakeHub) DegradedProjects() []string {
 	return nil
@@ -1076,7 +1070,7 @@ func (s *cliPOSIXSurface) Sync(path string) error {
 	}
 	// The standalone sync command drains the project (the --sync flag's
 	// standalone form), which is exactly fsync-class durability here.
-	if _, err := s.runCLI([]string{"sync", "--token", "x", s.project}); err != nil {
+	if _, err := s.runCLI([]string{"project", "sync", "--token", "x", s.project}); err != nil {
 		return pcTranslateErr(err)
 	}
 	return nil
@@ -1395,7 +1389,7 @@ func (h *cliHandle) Sync() error {
 	if err := h.sessionSync(); err != nil {
 		return err
 	}
-	if _, err := h.surface.runCLI([]string{"sync", "--token", "x", h.surface.project}); err != nil {
+	if _, err := h.surface.runCLI([]string{"project", "sync", "--token", "x", h.surface.project}); err != nil {
 		return pcTranslateErr(err)
 	}
 	return nil

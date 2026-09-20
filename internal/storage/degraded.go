@@ -42,7 +42,7 @@ type DegradedProjectError struct {
 }
 
 func (e *DegradedProjectError) Error() string {
-	return fmt.Sprintf("project %q is degraded after %d consecutive commit failures (threshold %d): refusing new mutations; recover with rollback, purge, or drain, or re-enable explicitly via ReEnableProject", e.Project, e.Streak, e.Threshold)
+	return fmt.Sprintf("project %q is degraded after %d consecutive commit failures (threshold %d): refusing new mutations; recover with rollback, prune, or drain, or enable explicitly via ReEnableProject", e.Project, e.Streak, e.Threshold)
 }
 
 // degradedLatch is one hub's set of latched-degraded projects.

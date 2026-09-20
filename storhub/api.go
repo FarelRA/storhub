@@ -57,8 +57,8 @@ type (
 	FSStats = shfs.FSStats
 	// NodeKind discriminates file system node types (file, symlink).
 	NodeKind = meta.NodeKind
-	// PurgeResult reports what a granular purge reclaimed.
-	PurgeResult = impl.PurgeResult
+	// PruneResult reports what a granular prune reclaimed.
+	PruneResult = impl.PruneResult
 	// ChunkGCResult reports what a chunk-GC scan found and a compaction
 	// collected (or would collect under dry-run).
 	ChunkGCResult = impl.ChunkGCResult
@@ -68,8 +68,8 @@ type (
 	// DegradedProjectError is the fail-fast refusal a degraded project
 	// answers to new mutations. Match with errors.As.
 	DegradedProjectError = impl.DegradedProjectError
-	// PurgeScope selects what a purge run reclaims (objects|assets|history|all).
-	PurgeScope = impl.PurgeScope
+	// PruneScope selects what a prune run reclaims (objects|assets|history|chunks|all).
+	PruneScope = impl.PruneScope
 	// APIError is an error returned by the GitHub API layer, carrying the
 	// HTTP status and parsed message.
 	APIError = ghapi.APIError
@@ -92,13 +92,14 @@ const (
 	NodeKindFile = meta.NodeKindFile
 	// NodeKindSymlink marks symlink entries in listings and stats.
 	NodeKindSymlink = meta.NodeKindSymlink
-	// Purge scope values accepted by PurgeProject (objects|assets|history|all).
+	// Prune scope values accepted by PruneProject (objects|assets|history|chunks|all).
 	// Aliased so callers (e.g. the CLI's argument validation) share one
 	// vocabulary with storage instead of duplicating string literals.
-	PurgeObjects = impl.PurgeObjects
-	PurgeAssets  = impl.PurgeAssets
-	PurgeHistory = impl.PurgeHistory
-	PurgeAll     = impl.PurgeAll
+	PruneObjects = impl.PruneObjects
+	PruneAssets  = impl.PruneAssets
+	PruneHistory = impl.PruneHistory
+	PruneChunks  = impl.PruneChunks
+	PruneAll     = impl.PruneAll
 )
 
 var (

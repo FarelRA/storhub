@@ -315,7 +315,7 @@ func TestDegradedRecoveryBypass(t *testing.T) {
 	}
 
 	// Purge and rollback likewise bypass: neither may answer degraded.
-	if _, err := hub.PurgeProject(project, "assets", 0, false); err != nil {
+	if _, err := hub.PruneProject(project, "assets", 0, false); err != nil {
 		var deg *DegradedProjectError
 		if errors.As(err, &deg) {
 			t.Fatalf("purge must bypass the degraded gate: %v", err)

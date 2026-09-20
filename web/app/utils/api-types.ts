@@ -87,19 +87,20 @@ export interface Revision {
   committed_at?: number
 }
 
-export interface GCResult {
+export interface StatusResult {
   project: string
-  status: string
-  dry_run: boolean
-  scanned_chunks: number
-  orphan_chunks: number
-  orphan_bytes: number
-  collected_chunks: number
-  collected_bytes: number
-  refused_by_session?: boolean
+  degraded: boolean
+  failure_streak: number
+  pending_depth: number
+  cap_crosses: number
+  force_retry_pokes: number
+  commit_successes: number
+  commit_failures: number
+  rebases: number
+  degraded_projects: string[]
 }
 
-export interface PurgeResult {
+export interface PruneResult {
   project: string
   status: string
   scope: string
@@ -109,6 +110,11 @@ export interface PurgeResult {
   deleted_assets: number
   history_compacted: boolean
   notes?: string[]
+  scanned_chunks?: number
+  orphan_chunks?: number
+  orphan_bytes?: number
+  collected_chunks?: number
+  collected_bytes?: number
 }
 
 export interface XattrEntry {

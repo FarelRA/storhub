@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// Operability endpoints (gc, re-enable, status) must answer through HTTP
-// like every other operator surface: no Go-only orphans.
+// Operability endpoints (prune incl. chunks scope, enable, status) must
+// answer through HTTP like every other operator surface: no Go-only
+// orphans.
 func TestOperabilityEndpoints(t *testing.T) {
 	t.Parallel()
 	client := newFakeRESTClient()
@@ -16,19 +17,19 @@ func TestOperabilityEndpoints(t *testing.T) {
 	}
 	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 
-	gcResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/gc",
-		gcRequest{DryRun: true}, http.StatusOK)
-	var gc gcResponse
-	decodeJSONBody(t, gcResp, &gc)
-	if gc.Status != "collected" || !gc.DryRun {
-		t.Fatalf("unexpected gc response: %+v", gc)
+	chunkResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune",
+		pruneRequest{Scope: "chunks", DryRun: true}, http.StatusOK)
+	var chunk pruneResponse
+	decodeJSONBody(t, chunkResp, &chunk)
+	if chunk.Status != "pruned" || chunk.Scope != "chunks" || !chunk.DryRun {
+		t.Fatalf("unexpected chunks prune response: %+v", chunk)
 	}
 
-	reResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/re-enable", nil, nil, http.StatusOK)
+	reResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/enable", nil, nil, http.StatusOK)
 	var re ackResponse
 	decodeJSONBody(t, reResp, &re)
-	if re.Status != "re-enabled" {
-		t.Fatalf("unexpected re-enable response: %+v", re)
+	if re.Status != "enabled" {
+		t.Fatalf("unexpected enable response: %+v", re)
 	}
 
 	stResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/ops/status", nil, nil, http.StatusOK)

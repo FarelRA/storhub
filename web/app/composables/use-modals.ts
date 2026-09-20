@@ -102,7 +102,7 @@ export function useModals(deps: ModalDeps) {
           await deps.postOp('mkdir', 'mkdir', { path: f.path })
           break
         case 'create-file':
-          await deps.postOp('create file', 'create-file', { path: f.path })
+          await deps.postOp('create file', 'create', { path: f.path })
           break
         case 'rename': {
           const oldPath = (f.path || selectedPath.value || '').trim()

@@ -28,7 +28,7 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 		{name: "patch-write", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=write&offset=0", body: "!"},
 		{name: "patch-patch", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=patch&offset=0&delete_size=0", body: "!"},
 		{name: "patch-truncate", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=truncate&size=1"},
-		{name: "create-file", method: http.MethodPost, target: "/api/v1/projects/demo/ops/create-file", body: pathRequest{Path: "docs/fresh.txt"}},
+		{name: "create", method: http.MethodPost, target: "/api/v1/projects/demo/ops/create", body: pathRequest{Path: "docs/fresh.txt"}},
 		{name: "mkdir", method: http.MethodPost, target: "/api/v1/projects/demo/ops/mkdir", body: pathRequest{Path: "docs/sub"}},
 		{
 			name: "rmdir", method: http.MethodPost, target: "/api/v1/projects/demo/ops/rmdir", body: pathRequest{Path: "docs/empty"},
@@ -47,8 +47,8 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 			name: "utimes", method: http.MethodPost, target: "/api/v1/projects/demo/ops/utimes",
 			body: utimesRequest{Path: "docs/f.txt", Atime: time.Unix(0, 1700000000123456789).UTC(), Mtime: time.Unix(0, 1700000000123456789).UTC()},
 		},
-		{name: "purge", method: http.MethodPost, target: "/api/v1/projects/demo/ops/purge"},
-		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/purge", body: purgeRequest{Scope: "all"}},
+		{name: "purge", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune"},
+		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune", body: pruneRequest{Scope: "all"}},
 		{
 			name: "xattr-put", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
 			body: "value",
@@ -115,7 +115,7 @@ func TestPreconditionFunnelRollback(t *testing.T) {
 		body   any
 	}{
 		{name: "rollback", target: "/api/v1/projects/demo/ops/rollback", body: rollbackRequest{CommitSHA: sha}},
-		{name: "revert-path", target: "/api/v1/projects/demo/ops/revert-path", body: revertPathRequest{Path: "docs", CommitSHA: sha}},
+		{name: "revert", target: "/api/v1/projects/demo/ops/revert", body: revertPathRequest{Path: "docs", CommitSHA: sha}},
 	} {
 		resp := mustJSONRequestWithHeaders(t, handler, http.MethodPost, tc.target, tc.body, stale, http.StatusPreconditionFailed)
 		assertErrorCode(t, resp, "precondition_failed")

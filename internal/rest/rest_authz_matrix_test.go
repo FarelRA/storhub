@@ -107,7 +107,7 @@ func TestAuthorizationMatrix(t *testing.T) {
 		return err
 	}
 	purge := func(c *authorizedClient) error {
-		_, err := c.PurgeContext(context.Background(), "demo", "assets", 0, false)
+		_, err := c.PruneContext(context.Background(), "demo", "assets", 0, false)
 		return err
 	}
 	revertPath := func(c *authorizedClient) error {
@@ -123,7 +123,7 @@ func TestAuthorizationMatrix(t *testing.T) {
 		return c.RollbackMetadataContext(context.Background(), "demo", revs[0].CommitSHA)
 	}
 	prune := func(c *authorizedClient) error {
-		_, err := c.PurgeContext(context.Background(), "demo", "objects", 1, true)
+		_, err := c.PruneContext(context.Background(), "demo", "objects", 1, true)
 		return err
 	}
 	deleteProject := func(c *authorizedClient) error {

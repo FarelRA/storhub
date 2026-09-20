@@ -114,12 +114,7 @@ type Client interface {
 	ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error)
 	RollbackMetadataContext(ctx context.Context, project, commitSHA string) error
 	RevertPathContext(ctx context.Context, project, path, commitSHA string) error
-	PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error)
-	// GC scans the live chunk catalog (ScanChunkGC, read-only) and
-	// collects orphans (CompactOrphanChunks). Refuses while any session
-	// is live on the project.
-	ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error)
-	CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error)
+	PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error)
 	// Degraded-mode operations: DegradedProjects lists latched projects,
 	// ReEnableProject clears one latch (the only path back to healthy),
 	// PressureSnapshot exposes the operator pressure ledger.
@@ -459,7 +454,7 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Put("/xattrs/value", h.handleXAttrPut)
 	r.Delete("/xattrs/value", h.handleXAttrDelete)
 	r.Get("/revisions", h.handleRevisions)
-	r.Post("/ops/create-file", h.handleCreateFile)
+	r.Post("/ops/create", h.handleCreateFile)
 	r.Post("/ops/mkdir", h.handleMkdir)
 	r.Post("/ops/rmdir", h.handleRmdir)
 	r.Post("/ops/unlink", h.handleUnlink)
@@ -471,10 +466,9 @@ func (h *restHandler) registerProjectRoutes(r chi.Router) {
 	r.Post("/ops/chown", h.handleChown)
 	r.Post("/ops/utimes", h.handleUtimes)
 	r.Post("/ops/rollback", h.handleRollback)
-	r.Post("/ops/revert-path", h.handleRevertPath)
-	r.Post("/ops/purge", h.handlePurge)
-	r.Post("/ops/gc", h.handleGC)
-	r.Post("/ops/re-enable", h.handleReEnable)
+	r.Post("/ops/revert", h.handleRevertPath)
+	r.Post("/ops/prune", h.handlePrune)
+	r.Post("/ops/enable", h.handleEnable)
 	r.Get("/ops/status", h.handleStatus)
 	r.Get("/shares", h.handleProjectSharesGet)
 	r.Post("/shares", h.handleProjectSharesPost)
@@ -878,7 +872,7 @@ func mappedCode(status int) string {
 // would surface as 500s echoing internal wording.
 //
 // Canonical query/body parsers: exactly three — parseNonNegativeInt,
-// parseBoolStrict, parsePurgeScope. Do not add a fourth idiom; CLI-side
+// parseBoolStrict, parsePruneScope. Do not add a fourth idiom; CLI-side
 // parsing mirrors parseNonNegativeInt via parseNonNegativeArg (usageError).
 
 func requireNonEmptyPath(field, value string) error {
@@ -919,19 +913,19 @@ func parseBoolStrict(raw, field string) (bool, error) {
 	}
 }
 
-// parsePurgeScope validates a purge scope against the storage constants
+// parsePruneScope validates a purge scope against the storage constants
 // (the single source of the objects|assets|history|all set). Empty means
 // "all". Unknown scopes answer 400 with the known set as guidance.
-func parsePurgeScope(raw string) (storage.PurgeScope, error) {
+func parsePruneScope(raw string) (storage.PruneScope, error) {
 	scope := strings.TrimSpace(raw)
 	if scope == "" {
-		return storage.PurgeAll, nil
+		return storage.PruneAll, nil
 	}
-	switch storage.PurgeScope(scope) {
-	case storage.PurgeObjects, storage.PurgeAssets, storage.PurgeHistory, storage.PurgeAll:
-		return storage.PurgeScope(scope), nil
+	switch storage.PruneScope(scope) {
+	case storage.PruneObjects, storage.PruneAssets, storage.PruneHistory, storage.PruneChunks, storage.PruneAll:
+		return storage.PruneScope(scope), nil
 	default:
-		return "", errBadRequest(`purge scope must be one of "objects", "assets", "history", "all"`)
+		return "", errBadRequest(`prune scope must be one of "objects", "assets", "history", "chunks", "all"`)
 	}
 }
 

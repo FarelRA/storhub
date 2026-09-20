@@ -108,13 +108,13 @@ beforeEach(() => {
 })
 
 describe('revertPath payload', () => {
-  it('POSTs exactly {path, commit_sha} to /ops/revert-path', async () => {
+  it('POSTs exactly {path, commit_sha} to /ops/revert', async () => {
     const c = useConsole()
     const ok = await c.revertPath('docs/readme.md', 'abc123def456')
     expect(ok).toBe(true)
-    const call = calls.find((x) => x.url.includes('/projects/demo/ops/revert-path'))
+    const call = calls.find((x) => x.url.includes('/projects/demo/ops/revert'))
     expect(call, 'revert-path route').toBeDefined()
-    expect(bodyOf('/ops/revert-path')).toEqual({ path: 'docs/readme.md', commit_sha: 'abc123def456' })
+    expect(bodyOf('/ops/revert')).toEqual({ path: 'docs/readme.md', commit_sha: 'abc123def456' })
   })
 })
 
@@ -127,32 +127,32 @@ describe('rollbackRevision payload', () => {
   })
 })
 
-describe('gc payload', () => {
-  it('POSTs {dry_run:true} for a preview', async () => {
+describe('project health payload', () => {
+  it('GETs /ops/status for health', async () => {
     const c = useConsole()
-    await c.gc(true)
-    expect(bodyOf('/ops/gc')).toEqual({ dry_run: true })
+    await c.projectStatus()
+    expect(calls.some((x) => x.url.includes('/ops/status') && x.method === 'GET')).toBe(true)
   })
 
-  it('POSTs {dry_run:false} for a collection', async () => {
+  it('POSTs {} to /ops/enable to clear the latch', async () => {
     const c = useConsole()
-    await c.gc(false)
-    expect(bodyOf('/ops/gc')).toEqual({ dry_run: false })
+    await c.enableProject()
+    expect(bodyOf('/ops/enable')).toEqual({})
   })
 })
 
-describe('purge payload', () => {
+describe('prune payload', () => {
   it('POSTs {scope, keep, dry_run:true} and skips the refresh for dry runs', async () => {
     const c = useConsole()
-    await c.purge('history', 1, true)
-    expect(bodyOf('/ops/purge')).toEqual({ scope: 'history', keep: 1, dry_run: true })
+    await c.prune('history', 1, true)
+    expect(bodyOf('/ops/prune')).toEqual({ scope: 'history', keep: 1, dry_run: true })
     expect(calls.some((x) => x.url.includes('/children'))).toBe(false)
   })
 
   it('POSTs {scope, keep, dry_run:false} and refreshes after a real purge', async () => {
     const c = useConsole()
-    await c.purge('objects', 1, false)
-    expect(bodyOf('/ops/purge')).toEqual({ scope: 'objects', keep: 1, dry_run: false })
+    await c.prune('objects', 1, false)
+    expect(bodyOf('/ops/prune')).toEqual({ scope: 'objects', keep: 1, dry_run: false })
     expect(calls.some((x) => x.url.includes('/projects/demo/children'))).toBe(true)
   })
 })

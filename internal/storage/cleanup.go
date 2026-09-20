@@ -245,7 +245,7 @@ func purgeIsRetryable(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.IsRetryable()
 }
 
-func purgeAssetsLive(h *StorHub, ctx context.Context, project string, res *PurgeResult) error {
+func pruneAssetsLive(h *StorHub, ctx context.Context, project string, res *PruneResult) error {
 	if err := validateProject(project); err != nil {
 		return err
 	}
@@ -407,7 +407,7 @@ func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, release
 // deletePurgePlan executes the classified deletes and records the counts.
 // A delete failure aborts with the original task context (no partial
 // counts reported on error, matching the old behavior).
-func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask, result *PurgeResult) error {
+func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask, result *PruneResult) error {
 	for _, task := range releaseTasks {
 		if err := h.withRetry(ctx, "purge-delete_release", 5, purgeIsRetryable, func() error {
 			return h.deleteReleaseByID(ctx, project, task.id)

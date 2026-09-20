@@ -100,7 +100,7 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 	forbiddenProject := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo", nil, map[string]string{"Authorization": "Bearer " + share.Token}, http.StatusForbidden)
 	assertErrorCode(t, forbiddenProject, "forbidden")
 
-	forbiddenCreate := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/create-file", bytes.NewBuffer(mustJSONMarshal(t, pathRequest{Path: "new.txt"})), map[string]string{"Authorization": "Bearer " + share.Token, "Content-Type": "application/json"}, http.StatusForbidden)
+	forbiddenCreate := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/create", bytes.NewBuffer(mustJSONMarshal(t, pathRequest{Path: "new.txt"})), map[string]string{"Authorization": "Bearer " + share.Token, "Content-Type": "application/json"}, http.StatusForbidden)
 	assertErrorCode(t, forbiddenCreate, "forbidden")
 }
 

@@ -566,25 +566,11 @@ func (c *authorizedClient) RevertPathContext(ctx context.Context, project, path,
 	}
 	return c.base.RevertPathContext(ctx, project, path, commitSHA)
 }
-func (c *authorizedClient) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
+func (c *authorizedClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
 	if !c.principal.Admin {
 		return nil, errForbidden("permission denied")
 	}
-	return c.base.PurgeContext(ctx, project, scope, keep, dryRun)
-}
-
-func (c *authorizedClient) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
-	if !c.principal.Admin {
-		return nil, errForbidden("permission denied")
-	}
-	return c.base.ScanChunkGC(ctx, project)
-}
-
-func (c *authorizedClient) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
-	if !c.principal.Admin {
-		return nil, errForbidden("permission denied")
-	}
-	return c.base.CompactOrphanChunks(ctx, project, dryRun)
+	return c.base.PruneContext(ctx, project, scope, keep, dryRun)
 }
 
 func (c *authorizedClient) DegradedProjects() ([]string, error) {

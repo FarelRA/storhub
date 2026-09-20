@@ -34,7 +34,7 @@ func TestRESTRevertPathAndPrune(t *testing.T) {
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/readme.txt", strings.NewReader("hello"), nil, http.StatusCreated)
 
 	// Per-path revert records the path + revision on the client.
-	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/revert-path",
+	mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/revert",
 		revertPathRequest{Path: "docs/readme.txt", CommitSHA: "deadbeef"}, http.StatusOK)
 	client.mu.Lock()
 	rec := append([]string(nil), client.revertPaths...)
@@ -44,11 +44,11 @@ func TestRESTRevertPathAndPrune(t *testing.T) {
 	}
 
 	// Prune returns a typed result echoing scope + dry_run.
-	pruneResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/purge",
-		purgeRequest{Scope: "objects", DryRun: true}, http.StatusOK)
-	var pr purgeResponse
+	pruneResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/prune",
+		pruneRequest{Scope: "objects", DryRun: true}, http.StatusOK)
+	var pr pruneResponse
 	decodeJSONBody(t, pruneResp, &pr)
-	if pr.Scope != "objects" || !pr.DryRun || pr.Status != "purged" {
+	if pr.Scope != "objects" || !pr.DryRun || pr.Status != "pruned" {
 		t.Fatalf("unexpected prune response: %+v", pr)
 	}
 }
@@ -1268,7 +1268,7 @@ func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, c
 	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
 }
 
-func (c *fakeRESTClient) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
+func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := c.getExistingProject(project); err != nil {
@@ -1277,29 +1277,11 @@ func (c *fakeRESTClient) PurgeContext(ctx context.Context, project, scope string
 	// Mirror the storage layer's scope contract so tests cannot mask a
 	// missing REST-layer validation with an over-permissive fake.
 	switch scope {
-	case "objects", "assets", "history", "all":
+	case "objects", "assets", "history", "chunks", "all":
 	default:
-		return nil, fmt.Errorf("unknown purge scope %q (want objects|assets|history|all)", scope)
+		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|chunks|all)", scope)
 	}
-	return &storage.PurgeResult{Scope: storage.PurgeScope(scope), DryRun: dryRun}, nil
-}
-
-func (c *fakeRESTClient) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.getExistingProject(project); err != nil {
-		return nil, err
-	}
-	return &storage.ChunkGCResult{DryRun: true}, nil
-}
-
-func (c *fakeRESTClient) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.getExistingProject(project); err != nil {
-		return nil, err
-	}
-	return &storage.ChunkGCResult{DryRun: dryRun}, nil
+	return &storage.PruneResult{Scope: storage.PruneScope(scope), DryRun: dryRun}, nil
 }
 
 func (c *fakeRESTClient) DegradedProjects() ([]string, error) {

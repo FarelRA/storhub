@@ -5,8 +5,8 @@ import type {
   EntryInfo,
   Principal,
   ProjectStats,
-  PurgeResult,
-  GCResult,
+  PruneResult,
+  StatusResult,
   Revision,
   Share,
 } from '~/utils/api-types'
@@ -487,12 +487,12 @@ export function useConsole() {
     return postOp(`Rollback to ${sha.slice(0, 10)}`, 'rollback', { commit_sha: sha })
   }
 
-  // Granular purge: reclaim orphaned index objects, untracked assets, or
-  // (git backend) collapsed history. Returns the typed result for display.
-  // A bare call (no scope) purges untracked assets, the classic reclaim.
-  async function purge(scope = 'assets', keep = 0, dryRun = false): Promise<PurgeResult | null> {
-    return run(`Purge ${scope}`, async () => {
-      const payload = await postJSON<PurgeResult>(projectURL('/ops/purge'), {
+  // Granular prune: reclaim orphaned index objects, untracked assets,
+  // (git backend) collapsed history, or live-catalog chunk orphans.
+  // Returns the typed result for display.
+  async function prune(scope = 'assets', keep = 0, dryRun = false): Promise<PruneResult | null> {
+    return run(`Prune ${scope}`, async () => {
+      const payload = await postJSON<PruneResult>(projectURL('/ops/prune'), {
         scope,
         keep,
         dry_run: dryRun,
@@ -502,22 +502,28 @@ export function useConsole() {
     })
   }
 
-  // Collect orphaned chunk records. Dry run previews (scan only); a live
-  // run refuses while any session holds the project open.
-  async function gc(dryRun = true): Promise<GCResult | null> {
-    return run(`Chunk GC${dryRun ? ' preview' : ''}`, async () => {
-      const payload = await postJSON<GCResult>(projectURL('/ops/gc'), {
-        dry_run: dryRun,
-      })
-      if (!dryRun) await refreshAll()
+  // Project health: degraded latch, streaks, and pressure totals.
+  async function projectStatus(): Promise<StatusResult | null> {
+    return run('Project status', async () => {
+      const payload = await getJSON<StatusResult>(projectURL('/ops/status'))
       return payload
     })
+  }
+
+  // Clear the degraded latch. The only path back to healthy.
+  async function enableProject(): Promise<boolean> {
+    const result = await run('Enable project', async () => {
+      const payload = await postJSON<{ status: string }>(projectURL('/ops/enable'), {})
+      await refreshAll()
+      return payload
+    })
+    return result !== null
   }
 
   // Revert a single path (file or directory subtree) to a historical revision,
   // leaving the rest of the tree untouched. A revert is a new commit.
   async function revertPath(path: string, sha: string): Promise<boolean> {
-    return postOp(`Revert ${path}`, 'revert-path', { path, commit_sha: sha })
+    return postOp(`Revert ${path}`, 'revert', { path, commit_sha: sha })
   }
 
   async function createShare(path: string, expiresInSeconds?: number): Promise<Share | null> {
@@ -726,8 +732,9 @@ export function useConsole() {
     deleteProject,
     rollbackRevision,
     revertPath,
-    purge,
-    gc,
+    prune,
+    projectStatus,
+    enableProject,
     downloadEntry,
     copyDirectLink,
     focusEntry,

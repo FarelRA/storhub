@@ -13,7 +13,7 @@ import (
 // Purge must classify against a fresh metadata read, not the cached
 // snapshot: a file committed after the local cache was populated must be
 // visible, or purge deletes live releases.
-func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
+func TestPruneSeesFreshlyCommittedFiles(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
@@ -46,7 +46,7 @@ func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 	fresh.Files()["fresh.txt"] = metadata.FileMeta{Chunks: []int64{chunkID}, Size: 1, Inode: inode}
 	backend.setMetadata(t, project, fresh)
 
-	_, _ = hub.PurgeProject(project, "assets", 0, false)
+	_, _ = hub.PruneProject(project, "assets", 0, false)
 	if backend.repo(project).releasesByTag["v-orphan"] == nil {
 		t.Fatal("purge deleted a release committed after the cached snapshot (stale read)")
 	}
@@ -54,7 +54,7 @@ func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 
 // A release whose asset count cannot be determined must be skipped
 // (fail-closed), never deleted: the picker fail-closes the same way.
-func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
+func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
@@ -82,7 +82,7 @@ func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 		return false
 	})
 
-	result, err := hub.PurgeProject(project, "assets", 0, false)
+	result, err := hub.PruneProject(project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 // Purge must refuse when the project has uncommitted in-flight state:
 // classifying against a dirty tree (or overwriting it on prune-commit)
 // risks deleting releases a pending commit is about to reference.
-func TestPurgeAssetsRefusesDirtyProject(t *testing.T) {
+func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -119,16 +119,16 @@ func TestPurgeAssetsRefusesDirtyProject(t *testing.T) {
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
 
-	if _, err := hub.PurgeProject(project, "assets", 0, false); err == nil {
+	if _, err := hub.PruneProject(project, "assets", 0, false); err == nil {
 		t.Fatal("purge must refuse a project with uncommitted dirty state")
 	}
 }
 
-// TestPurgeReverifyDropsNewlyTrackedTasks pins the check-then-act fence: a
+// TestPruneReverifyDropsNewlyTrackedTasks pins the check-then-act fence: a
 // commit landing between classification and deletion that references a
 // task's asset must spare it. Without reverifyPurgePlan, the delete phase
 // destroys bytes a live file needs.
-func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
+func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
@@ -202,7 +202,7 @@ func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	}
 	// End to end over the STALE task list (the exact race window: classify
 	// ran before the rescue commit). The fenced tail deletes nothing...
-	result := &PurgeResult{}
+	result := &PruneResult{}
 	if err := hub.deletePurgePlan(ctx, project, keptR, keptA, result); err != nil {
 		t.Fatalf("fenced delete: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	// ...while the unfenced tail destroys the rescued bytes. This control
 	// proves the fence is load-bearing, not the setup: same stale tasks,
 	// no re-verify, live data gone.
-	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, &PurgeResult{}); err != nil {
+	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, &PruneResult{}); err != nil {
 		t.Fatalf("unfenced delete: %v", err)
 	}
 	if err := hub.DownloadFile(project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err == nil {
@@ -220,7 +220,7 @@ func TestPurgeReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	}
 	// And a full purge afterwards still deletes nothing (assets reaped
 	// above are gone; the fence plus fresh classification agree).
-	res, err := hub.PurgeContext(ctx, project, "assets", 0, false)
+	res, err := hub.PruneContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}

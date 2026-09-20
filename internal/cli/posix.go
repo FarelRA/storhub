@@ -553,7 +553,7 @@ func (a *App) runLink(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (a *App) newSyncCmd() *cobra.Command {
+func (a *App) newProjectSyncCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "sync <project>",
 		Short: "Drain a project until published state is durable",
@@ -564,11 +564,11 @@ the standalone form of the --sync flag every mutating command accepts.
 Examples:
   storhub sync docs-project`,
 		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runSync,
+		RunE: a.runProjectSync,
 	}
 }
 
-func (a *App) runSync(cmd *cobra.Command, args []string) error {
+func (a *App) runProjectSync(cmd *cobra.Command, args []string) error {
 	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
 		return err

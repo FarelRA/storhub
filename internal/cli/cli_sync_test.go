@@ -89,10 +89,10 @@ func TestCLISyncCoversEveryMutation(t *testing.T) {
 		{name: "append", args: []string{"append", "--token", "x", "--sync", "demo", "docs/log.txt", "tail"}},
 		{name: "write", args: []string{"write", "--token", "x", "--sync", "demo", "docs/f.txt", "1", "x"}},
 		{name: "patch", args: []string{"patch", "--token", "x", "--sync", "demo", "docs/f.txt", "1", "2", "x"}},
-		{name: "rollback", args: []string{"rollback", "--token", "x", "--sync", "demo", "deadbeef"}},
-		{name: "purge", args: []string{"purge", "--token", "x", "--sync", "demo"}},
-		{name: "prune", args: []string{"purge", "--token", "x", "--sync", "demo", "objects"}},
-		{name: "delete-project", args: []string{"delete-project", "--token", "x", "--sync", "--yes", "demo"}},
+		{name: "rollback", args: []string{"project", "rollback", "--token", "x", "--sync", "demo", "deadbeef"}},
+		{name: "purge", args: []string{"project", "prune", "--token", "x", "--sync", "demo"}},
+		{name: "prune", args: []string{"project", "prune", "--token", "x", "--sync", "demo", "objects"}},
+		{name: "delete-project", args: []string{"project", "delete", "--token", "x", "--sync", "--yes", "demo"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

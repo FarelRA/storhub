@@ -111,15 +111,7 @@ func (readOnlyShare) RevertPathContext(ctx context.Context, project, path, commi
 	return errReadOnly()
 }
 
-func (readOnlyShare) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PurgeResult, error) {
-	return nil, errReadOnly()
-}
-
-func (readOnlyShare) ScanChunkGC(ctx context.Context, project string) (*storage.ChunkGCResult, error) {
-	return nil, errReadOnly()
-}
-
-func (readOnlyShare) CompactOrphanChunks(ctx context.Context, project string, dryRun bool) (*storage.ChunkGCResult, error) {
+func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
 	return nil, errReadOnly()
 }
 

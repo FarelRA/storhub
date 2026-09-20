@@ -694,8 +694,8 @@ func (h *StorHub) RevertPath(project, path, commitSHA string) error {
 // commit, so restoring a path whose bytes were purged fails loudly rather
 // than committing a dangling reference.
 func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSHA string) (err error) {
-	started := h.logOpStart(project, "revert-path", "path", path, "commit_sha", commitSHA)
-	defer func() { h.logOpFinish(project, "revert-path", started, err, "path", path, "commit_sha", commitSHA) }()
+	started := h.logOpStart(project, "revert", "path", path, "commit_sha", commitSHA)
+	defer func() { h.logOpFinish(project, "revert", started, err, "path", path, "commit_sha", commitSHA) }()
 	if err := validateProject(project); err != nil {
 		return err
 	}

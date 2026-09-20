@@ -196,8 +196,8 @@ func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePa
 func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	return nil
 }
-func (f *fakeShowcaseHub) PurgeContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PurgeResult, error) {
-	return &storhub.PurgeResult{DeletedAssets: 1, DeletedReleases: 0}, nil
+func (f *fakeShowcaseHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+	return &storhub.PruneResult{DeletedAssets: 1, DeletedReleases: 0}, nil
 }
 func (f *fakeShowcaseHub) CleanupProjectContext(ctx context.Context, project string) error {
 	return nil
