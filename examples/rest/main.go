@@ -1,3 +1,4 @@
+// Command rest demonstrates serving a project over the REST facade.
 package main
 
 import (

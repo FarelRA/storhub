@@ -18,7 +18,7 @@ func TestCLISyncDrainsAfterMkdir(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)
@@ -36,7 +36,7 @@ func TestCLIDefaultSkipsDrain(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)
@@ -54,7 +54,7 @@ func TestCLISyncDrainFailureLoud(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t, drainErr: errors.New("drain demo: commit failed")}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)
@@ -99,7 +99,7 @@ func TestCLISyncCoversEveryMutation(t *testing.T) {
 			oldFactory := newHubFromFlagsFn
 			t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 			fake := &fakeHub{t: t}
-			newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+			newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 				return fake, nil
 			}
 			// A fresh App per case keeps cobra flag state isolated:

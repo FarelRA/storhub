@@ -18,7 +18,7 @@ func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFile("project-required-slots", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-required-slots", "a.txt", input)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFile("project-equal-scan", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-equal-scan", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-equal-scan")
@@ -117,7 +117,7 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFile("project-rotate-full", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-rotate-full", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 	// exactly like prod where embedded counts lag the true count.
 	backend.addAssetsToRelease(t, "project-rotate-full", firstRelease, 999)
 	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
-	meta2, err := hub.UploadFile("project-rotate-full", "b.txt", input2)
+	meta2, err := hub.UploadFileContext(context.Background(), "project-rotate-full", "b.txt", input2)
 	if err != nil {
 		t.Fatalf("upload must rotate to a new release, got: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFile("project-true-count", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-true-count", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	// terminating empty one: the picker pays 11 list-assets calls, never a
 	// single truncated shot.
 	var apiHits atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/assets") {
 			apiHits.Add(1)
 		}
@@ -188,7 +188,7 @@ func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-compensate", "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-compensate", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var posts atomic.Int32
@@ -203,7 +203,7 @@ func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
 		return false
 	})
 	two := writeTempFile(t, t.TempDir(), "two.txt", []byte("123456789"))
-	if _, err := hub.UploadFile("project-compensate", "two.txt", two); err == nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-compensate", "two.txt", two); err == nil {
 		t.Fatal("expected injected failure")
 	}
 	if got := len(backend.repo("project-compensate").assets); got != 1 {
@@ -228,7 +228,7 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFile("project-cache-lifetime", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-cache-lifetime", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if _, ok := hub.getCachedReleases("project-cache-lifetime"); !ok {
@@ -263,7 +263,7 @@ func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFile("project-race", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-race", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFile("project-oldest", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-oldest", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 	backend.addAssetToRelease(t, "project-oldest", "v9", "elder.bin", []byte("elder"))
 	backend.addRelease(t, "project-oldest", "v10")
 	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
-	meta2, err := hub.UploadFile("project-oldest", "b.txt", input2)
+	meta2, err := hub.UploadFileContext(context.Background(), "project-oldest", "b.txt", input2)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
-	if _, err := hub.UploadFile("project-purge-empty", "kept.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-purge-empty", "kept.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -356,14 +356,14 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 	backend.mu.Unlock()
 	payload := bytes.Repeat([]byte("c"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "collide.txt", payload)
-	if _, err := hub.UploadFile("project-collide", "collide.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-collide", "collide.txt", input); err != nil {
 		t.Fatalf("upload must survive one name collision: %v", err)
 	}
 	if n := len(backend.repo("project-collide").assets); n != 1 {
 		t.Fatalf("expected exactly 1 stored asset after retry, got %d", n)
 	}
 	output := filepath.Join(t.TempDir(), "collide.out")
-	if err := hub.DownloadFile("project-collide", "collide.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-collide", "collide.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	got, err := os.ReadFile(output)
@@ -387,7 +387,7 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("s"))
-	seedMeta, err := hub.UploadFile("project-spread", "seed.txt", seed)
+	seedMeta, err := hub.UploadFileContext(context.Background(), "project-spread", "seed.txt", seed)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	backend.addAssetsToRelease(t, "project-spread", firstRelease, 998) // 999 true, 950 embedded
 	payload := bytes.Repeat([]byte("m"), int(2*testSmallChunkSize+4))  // 3 chunks
 	input := writeTempFile(t, t.TempDir(), "spread.bin", payload)
-	meta, err := hub.UploadFile("project-spread", "spread.bin", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-spread", "spread.bin", input)
 	if err != nil {
 		t.Fatalf("spread upload: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 		}
 	}
 	output := filepath.Join(t.TempDir(), "spread.out")
-	if err := hub.DownloadFile("project-spread", "spread.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-spread", "spread.bin", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	got, err := os.ReadFile(output)

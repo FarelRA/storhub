@@ -17,9 +17,9 @@ func TestSessionUnlinkReadCloseDiscard(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-unlink-discard"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("keep"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("keep"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, id, 4, []byte("more")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -50,9 +50,9 @@ func TestSessionRenameCloseFollowsSurvivor(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-rename-follow"
-	setupSessionFile(t, hub, ctx, proj, "src.txt", []byte("keep"))
+	setupSessionFile(ctx, t, hub, proj, "src.txt", []byte("keep"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "src.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "src.txt", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, id, 4, []byte("more")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -84,9 +84,9 @@ func TestSessionSyncAfterUnlinkRetains(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-sync-unlinked"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("keep"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("keep"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, id, 4, []byte("more")); err != nil {
 		t.Fatalf("write: %v", err)
 	}

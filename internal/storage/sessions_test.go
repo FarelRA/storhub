@@ -20,7 +20,7 @@ func sessUserCtx(uid uint32) context.Context {
 	return shfs.WithIdentity(context.Background(), shfs.Identity{UID: uid, GID: uid})
 }
 
-func setupSessionFile(t *testing.T, hub *StorHub, ctx context.Context, project, path string, content []byte) {
+func setupSessionFile(ctx context.Context, t *testing.T, hub *StorHub, project, path string, content []byte) {
 	t.Helper()
 	seed := writeTempFile(t, t.TempDir(), "seed.bin", content)
 	if _, err := hub.UploadFileContext(ctx, project, path, seed); err != nil {
@@ -49,7 +49,7 @@ func freshSessionBytes(t *testing.T, hub *StorHub, project, path string) []byte 
 	return data
 }
 
-func mustOpenSession(t *testing.T, hub *StorHub, ctx context.Context, project, path string, mode OpenMode, opts ...SessionOption) string {
+func mustOpenSession(ctx context.Context, t *testing.T, hub *StorHub, project, path string, mode OpenMode, opts ...SessionOption) string {
 	t.Helper()
 	id, err := hub.OpenSession(ctx, project, path, mode, opts...)
 	if err != nil {
@@ -64,9 +64,9 @@ func TestSessionOpenReadWriteCloseRoundtrip(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-roundtrip"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("hello"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 	got, err := hub.ReadSession(ctx, id, 0, 64)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -100,9 +100,9 @@ func TestSessionSnapshotStability(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-snapshot"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("version-one"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("version-one"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionReadOnly)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadOnly)
 
 	seed := writeTempFile(t, t.TempDir(), "v2.bin", []byte("version-two"))
 	if _, err := hubB.ReplaceFileContext(ctx, proj, "data.txt", seed); err != nil {
@@ -133,9 +133,9 @@ func TestSessionOwnWritesVisible(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-ownwrites"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("abcdef"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("abcdef"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, id, 0, []byte("XYZ")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -158,9 +158,9 @@ func TestSessionMultiCallAtomicity(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-atomic"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("base"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("base"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
 	if _, err := hubA.WriteSession(ctx, id, 4, []byte("-one")); err != nil {
 		t.Fatalf("write 1: %v", err)
 	}
@@ -185,9 +185,9 @@ func TestSessionSyncMidSession(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-sync"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("start"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("start"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
 	if _, err := hubA.WriteSession(ctx, id, 5, []byte("-mid")); err != nil {
 		t.Fatalf("write mid: %v", err)
 	}
@@ -215,9 +215,9 @@ func TestSessionPureAppend(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-append"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("ab"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("ab"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionWriteOnly|SessionAppend)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionWriteOnly|SessionAppend)
 	if _, err := hubA.WriteSession(ctx, id, 999, []byte("cd")); err != nil {
 		t.Fatalf("append write 1: %v", err)
 	}
@@ -239,9 +239,9 @@ func TestSessionTruncateCommit(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-truncate"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("hello world"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("hello world"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
 	if err := hubA.TruncateSession(ctx, id, 5); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestSessionScratchLinkThenClose(t *testing.T) {
 		t.Fatalf("drain mkdir: %v", err)
 	}
 
-	id := mustOpenSession(t, hubA, ctx, proj, "", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hubA, proj, "", SessionReadWrite)
 	if _, err := hubA.WriteSession(ctx, id, 0, []byte("scratch-data")); err != nil {
 		t.Fatalf("write scratch: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSessionScratchCloseWithoutLinkDiscards(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-scratch-drop"
 
-	id := mustOpenSession(t, hub, ctx, proj, "", SessionWriteOnly)
+	id := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
 	if _, err := hub.WriteSession(ctx, id, 0, []byte("doomed")); err != nil {
 		t.Fatalf("write scratch: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestSessionTTLExpiry(t *testing.T) {
 	hub.config.Now = time.Now
 	hub.ConfigureSessions(WithSessionDefaultTTL(40 * time.Millisecond))
 
-	id := mustOpenSession(t, hub, ctx, "project-session-ttl", "", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, "project-session-ttl", "", SessionReadWrite)
 	time.Sleep(100 * time.Millisecond)
 	if _, err := hub.ReadSession(ctx, id, 0, 1); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("expired handle must be stale, got %v", err)
@@ -338,7 +338,7 @@ func TestSessionTTLExpiry(t *testing.T) {
 		t.Fatalf("want typed StaleSessionError, got %v", err)
 	}
 
-	id2 := mustOpenSession(t, hub, ctx, "project-session-ttl", "", SessionWriteOnly)
+	id2 := mustOpenSession(ctx, t, hub, "project-session-ttl", "", SessionWriteOnly)
 	sh := hub.sessionHub()
 	sh.mu.Lock()
 	live := len(sh.byID)
@@ -375,8 +375,8 @@ func TestSessionCapsEnforced(t *testing.T) {
 	hub.ConfigureSessions(WithSessionMaxPerProject(2), WithSessionMaxPerUser(100))
 	proj := "project-session-caps"
 
-	id1 := mustOpenSession(t, hub, ctx, proj, "", SessionWriteOnly)
-	id2 := mustOpenSession(t, hub, ctx, proj, "", SessionWriteOnly)
+	id1 := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
+	id2 := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
 	if _, err := hub.OpenSession(ctx, proj, "", SessionWriteOnly); !errors.Is(err, ErrSessionProjectBusy) {
 		t.Fatalf("third handle must hit the project cap, got %v", err)
 	}
@@ -394,7 +394,7 @@ func TestSessionUserCapEnforced(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	hub.ConfigureSessions(WithSessionMaxPerUser(1), WithSessionMaxPerProject(100))
 
-	id := mustOpenSession(t, hub, ctx, "project-session-user-a", "", SessionWriteOnly)
+	id := mustOpenSession(ctx, t, hub, "project-session-user-a", "", SessionWriteOnly)
 	if _, err := hub.OpenSession(ctx, "project-session-user-b", "", SessionWriteOnly); !errors.Is(err, ErrSessionUserBusy) {
 		t.Fatalf("second project handle must hit the user cap, got %v", err)
 	}
@@ -408,7 +408,7 @@ func TestSessionOwnershipMismatchFailsClosed(t *testing.T) {
 	hub, adminCtx, _, target := setupPrivProject(t, "project-session-owner", "docs", "f.txt", []byte("secret"), 0o644)
 	otherCtx := sessUserCtx(1002)
 
-	id := mustOpenSession(t, hub, privUserCtx(), "project-session-owner", target, SessionReadOnly)
+	id := mustOpenSession(privUserCtx(), t, hub, "project-session-owner", target, SessionReadOnly)
 
 	if _, err := hub.ReadSession(otherCtx, id, 0, 64); !errors.Is(err, ErrSessionOwnerMismatch) {
 		t.Fatalf("stranger read must fail closed, got %v", err)
@@ -445,7 +445,7 @@ func TestSessionRestartDrops(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 
-	id := mustOpenSession(t, hubA, ctx, "project-session-restart", "", SessionWriteOnly)
+	id := mustOpenSession(ctx, t, hubA, "project-session-restart", "", SessionWriteOnly)
 	if _, err := hubB.ReadSession(ctx, id, 0, 1); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("fresh hub must not know the handle, got %v", err)
 	}
@@ -467,9 +467,9 @@ func TestSessionSabotagedCommitFailsLoud(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-sabotage"
-	setupSessionFile(t, hubA, ctx, proj, "data.txt", []byte("base"))
+	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("base"))
 
-	id := mustOpenSession(t, hubA, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
 	if _, err := hubA.WriteSession(ctx, id, 4, []byte("-staged")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestSessionModeValidation(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-modes"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("hello"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
 	if _, err := hub.OpenSession(ctx, proj, "data.txt", 0); err == nil {
 		t.Fatal("empty mode must fail")
@@ -531,11 +531,11 @@ func TestSessionModeValidation(t *testing.T) {
 		t.Fatal("write without create of missing file must fail")
 	}
 
-	ro := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadOnly)
+	ro := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadOnly)
 	if _, err := hub.WriteSession(ctx, ro, 0, []byte("x")); !errors.Is(err, syscall.EBADF) {
 		t.Fatalf("write on read-only handle must be EBADF, got %v", err)
 	}
-	wo := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionWriteOnly)
+	wo := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionWriteOnly)
 	if _, err := hub.ReadSession(ctx, wo, 0, 1); !errors.Is(err, syscall.EBADF) {
 		t.Fatalf("read on write-only handle must be EBADF, got %v", err)
 	}
@@ -593,7 +593,7 @@ func TestSessionCommitAsOpenerNotCloser(t *testing.T) {
 	if err := hub.ChmodContext(adminCtx, proj, "sub", 0o777); err != nil {
 		t.Fatalf("chmod sub: %v", err)
 	}
-	id := mustOpenSession(t, hub, userA, proj, "", SessionReadWrite)
+	id := mustOpenSession(userA, t, hub, proj, "", SessionReadWrite)
 	if _, err := hub.WriteSession(userA, id, 0, []byte("hi")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestSessionRelinkRescuesTakenTarget(t *testing.T) {
 	if err := hub.ChmodContext(adminCtx, proj, "sub", 0o777); err != nil {
 		t.Fatalf("chmod sub: %v", err)
 	}
-	id := mustOpenSession(t, hub, userA, proj, "", SessionReadWrite)
+	id := mustOpenSession(userA, t, hub, proj, "", SessionReadWrite)
 	if _, err := hub.WriteSession(userA, id, 0, []byte("data")); err != nil {
 		t.Fatalf("write: %v", err)
 	}

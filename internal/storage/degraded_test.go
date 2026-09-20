@@ -38,7 +38,7 @@ func degradedTestHub(t *testing.T, backend *mockGitHub, threshold int) *StorHub 
 func degradedSeed(t *testing.T, hub *StorHub, project string) {
 	t.Helper()
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFile(project, "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(context.Background(), project); err != nil {
@@ -219,7 +219,7 @@ func TestDegradedUploadGateFirst(t *testing.T) {
 	degradedSeed(t, hub, project)
 	driveDegradedFailures(t, hub, backend, project, 3)
 
-	_, err := hub.UploadFile(project, "x.txt", "/nonexistent/input-path")
+	_, err := hub.UploadFileContext(context.Background(), project, "x.txt", "/nonexistent/input-path")
 	_ = asDegraded(t, err)
 }
 

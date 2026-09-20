@@ -119,11 +119,11 @@ func randomChoice(values []string) (string, error) {
 	return values[idx], nil
 }
 
-func randomInt(max int) (int, error) {
-	if max <= 0 {
-		return 0, fmt.Errorf("invalid random bound %d", max)
+func randomInt(bound int) (int, error) {
+	if bound <= 0 {
+		return 0, fmt.Errorf("invalid random bound %d", bound)
 	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(bound)))
 	if err != nil {
 		return 0, fmt.Errorf("generate random int: %w", err)
 	}

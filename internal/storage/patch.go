@@ -267,7 +267,7 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	return sink.results, sink.releaseTag, sink.uploadURL, nil
 }
 
-func (h *StorHub) referenceFileRangeChunks(ctx context.Context, project string, repoChunks map[int64]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
+func (h *StorHub) referenceFileRangeChunks(_ context.Context, _ string, repoChunks map[int64]ChunkInfo, file FileMeta, start, end int64) ([]ChunkInfo, error) {
 	if end <= start {
 		return nil, nil
 	}

@@ -60,13 +60,12 @@ func TestClientForFailsClosedOnForeignContextValue(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo", nil)
 	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "not-a-client"))
-	defer func() {
-		if rec := recover(); rec == nil {
-			t.Fatal("clientFor must fail closed (panic -> logged 500) on a foreign context value, not fall back to the raw client")
-		}
-	}()
-	if got := h.clientFor(req); got == h.client {
-		t.Fatal("clientFor returned the raw unrestricted client")
+	got, err := h.clientFor(req)
+	if err == nil {
+		t.Fatal("clientFor must fail closed with an error on a foreign context value, not fall back to the raw client")
+	}
+	if got != nil {
+		t.Fatal("clientFor must not return a client on a foreign context value")
 	}
 }
 
@@ -78,7 +77,11 @@ func TestClientForKeepsAnonymousRawClient(t *testing.T) {
 		shares: &shareRegistry{items: map[string]*shareRecord{}},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo", nil)
-	if got := h.clientFor(req); got != h.client {
+	got, err := h.clientFor(req)
+	if err != nil {
+		t.Fatalf("clientFor on an absent context value: %v", err)
+	}
+	if got != h.client {
 		t.Fatal("an absent context value (anonymous mode) must keep the configured client")
 	}
 }

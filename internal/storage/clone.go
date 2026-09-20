@@ -10,7 +10,7 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
-// Server-side copy (reflink plus range clone).
+// CloneRange is a server-side copy (reflink plus range clone).
 //
 // CloneRange copies the byte range [srcOff, srcOff+length) of one file onto
 // another file (or the same file) at dstOff, transferring zero bytes: every

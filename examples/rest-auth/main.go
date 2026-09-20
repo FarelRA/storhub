@@ -1,3 +1,4 @@
+// Command rest-auth demonstrates the authenticated REST facade.
 package main
 
 import (

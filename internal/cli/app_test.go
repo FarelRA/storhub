@@ -171,19 +171,19 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	downloadFile := filepath.Join(t.TempDir(), "download.txt")
 	mountDir := t.TempDir()
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
+	newMountHubFromFlagsFn = func(_, _ string, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, _ rest.Options) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
-	restListenAndServeFn = func(server *http.Server) error {
+	restListenAndServeFn = func(_ *http.Server) error {
 		return nil
 	}
 	checks := [][]string{
@@ -245,7 +245,7 @@ func TestRunDrainsHubOncePerCommand(t *testing.T) {
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	if err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"}); err != nil {
@@ -270,7 +270,7 @@ func TestRunWithoutHubSkipsShutdown(t *testing.T) {
 	app, stdout, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
 	var created int
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		created++
 		return fake, nil
 	}
@@ -293,7 +293,7 @@ func TestDeleteProjectRequiresYes(t *testing.T) {
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, stderr := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	err := app.Run([]string{"project", "delete", "demo"})
@@ -330,10 +330,10 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(hub *storhub.StorHub, opts rest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, opts rest.Options) (http.Handler, error) {
 		if opts.Auth == nil || opts.Auth.Realm != "demo" || len(opts.Auth.Users) != 1 || opts.Auth.Users[0].Username != "admin" {
 			t.Fatalf("unexpected auth opts: %+v", opts.Auth)
 		}
@@ -437,11 +437,11 @@ func TestRatePolicyCommandRouting(t *testing.T) {
 		newMountHubFromFlagsFn = oldMountFactory
 	})
 	var oneShot, longRunning int
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		oneShot++
 		return &fakeHub{t: t}, nil
 	}
-	newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
+	newMountHubFromFlagsFn = func(_, _ string, _ logSettings) (hubClient, error) {
 		longRunning++
 		return &fakeHub{t: t}, nil
 	}
@@ -498,7 +498,7 @@ func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	var created int
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		created++
 		return &fakeHub{t: t}, nil
 	}
@@ -553,7 +553,7 @@ func TestRunPropagatesFlushFailure(t *testing.T) {
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, _ := newTestApp(t)
 	fake := &fakeHub{t: t, shutdownErr: errors.New("flush boom")}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"})
@@ -566,7 +566,7 @@ func TestRunPropagatesFlushFailure(t *testing.T) {
 	// A command that already failed keeps its own error primary, but the
 	// flush failure must still be visible, not swallowed.
 	fake2 := &fakeHub{t: t, shutdownErr: errors.New("flush boom"), readDirErr: errors.New("ls boom")}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake2, nil
 	}
 	app2, _, stderr2 := newTestApp(t)
@@ -604,7 +604,7 @@ func TestFlexDurationRejectsNonFinite(t *testing.T) {
 func TestServeRejectsAnonymousWithAuthFile(t *testing.T) {
 	oldFactory := newRESTHubFromFlagsFn
 	t.Cleanup(func() { newRESTHubFromFlagsFn = oldFactory })
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	app, _, _ := newTestApp(t)
@@ -643,7 +643,7 @@ func TestListAcceptsAbsolutePath(t *testing.T) {
 	app, _, _ := newTestApp(t)
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t, assertReadDirPath: "docs/readme.txt"}, nil
 	}
 	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
@@ -699,7 +699,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		newHubFromFlagsFn = func(token, apiBase string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 			if token != "env-token" {
 				t.Fatalf("expected token env-token, got %q", token)
 			}
@@ -717,7 +717,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, _, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		newHubFromFlagsFn = func(token, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 			if token != "override" {
 				t.Fatalf("expected token override, got %q", token)
 			}
@@ -733,7 +733,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 		app, stdout, _ := newTestApp(t)
 		oldFactory := newHubFromFlagsFn
 		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+		newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 			return &fakeHub{t: t}, nil
 		}
 		if err := app.Run([]string{"ls", "--token", "x", "-l", "demo"}); err != nil {
@@ -791,7 +791,7 @@ type fakeHub struct {
 
 // DrainProjectContext records the call so sync tests can assert draining
 // happened (or did not); a configured drainErr simulates a failed commit.
-func (h *fakeHub) DrainProjectContext(ctx context.Context, project string) error {
+func (h *fakeHub) DrainProjectContext(_ context.Context, project string) error {
 	h.drainCalls = append(h.drainCalls, project)
 	return h.drainErr
 }
@@ -799,23 +799,23 @@ func (h *fakeHub) DrainProjectContext(ctx context.Context, project string) error
 // Shutdown records every drain so tests can prove App.Run closed what a
 // command opened - the regression guard for the silent-data-loss bug. A
 // configured shutdownErr simulates a failed commit point.
-func (h *fakeHub) Shutdown(ctx context.Context) error {
+func (h *fakeHub) Shutdown(_ context.Context) error {
 	h.shutdowns++
 	return h.shutdownErr
 }
 
-func (h *fakeHub) DeleteProject(project string) error { return nil }
+func (h *fakeHub) DeleteProject(_ string) error { return nil }
 
-func (h *fakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
+func (h *fakeHub) UploadFileContext(_ context.Context, _, _, _ string) (*storhub.FileMetadata, error) {
 	return &storhub.FileMetadata{Size: 11, Inode: 1, Mode: 0o644}, nil
 }
-func (h *fakeHub) ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
-	return h.UploadFile(project, remotePath, localPath)
+func (h *fakeHub) ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+	return h.UploadFileContext(ctx, project, remotePath, localPath)
 }
-func (h *fakeHub) DownloadFile(project, remotePath, localPath string) error {
+func (h *fakeHub) DownloadFileContext(_ context.Context, _, _, localPath string) error {
 	return os.WriteFile(localPath, []byte("downloaded"), 0o644)
 }
-func (h *fakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
+func (h *fakeHub) ReadDirContext(_ context.Context, _, dir string) ([]storhub.DirEntry, error) {
 	if h.readDirErr != nil {
 		return nil, h.readDirErr
 	}
@@ -830,7 +830,7 @@ func (h *fakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
 	}
 	return []storhub.DirEntry{{Name: "readme.txt", Path: "docs/readme.txt", Size: 11, Mode: 0o644}}, nil
 }
-func (h *fakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, error) {
+func (h *fakeHub) StatPathContext(_ context.Context, _, targetPath string) (*storhub.EntryInfo, error) {
 	if h.assertStatPath != "" {
 		got, err := shfs.NormalizePath(targetPath)
 		if err != nil {
@@ -842,57 +842,71 @@ func (h *fakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, erro
 	}
 	return &storhub.EntryInfo{Path: targetPath, Size: 11, Mode: 0o644, Inode: 1, UID: 1, GID: 2, NLink: 1, ModifiedAt: 1, AccessedAt: 2, ChangedAt: 3}, nil
 }
-func (h *fakeHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+func (h *fakeHub) ReadFileAtContext(_ context.Context, _, _ string, _, _ int64) ([]byte, error) {
 	return []byte("hello world"), nil
 }
-func (h *fakeHub) Mkdir(project, dirPath string) error           { return nil }
-func (h *fakeHub) DeleteFile(project, filePath string) error     { return nil }
-func (h *fakeHub) Rmdir(project, dirPath string) error           { return nil }
-func (h *fakeHub) Rename(project, oldPath, newPath string) error { return nil }
-func (h *fakeHub) AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: int64(len(data)), Inode: 2, Mode: 0o644}, nil
-}
-func (h *fakeHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: offset + int64(len(data)), Inode: 3, Mode: 0o644}, nil
-}
-func (h *fakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: 9, Inode: 4, Mode: 0o644}, nil
-}
-func (h *fakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: 0, Inode: 5, Mode: 0o644}, nil
-}
-func (h *fakeHub) TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: size, Inode: 6, Mode: 0o644}, nil
-}
-func (h *fakeHub) Chmod(project, targetPath string, mode uint32) error          { return nil }
-func (h *fakeHub) Chown(project, targetPath string, uid, gid uint32) error      { return nil }
-func (h *fakeHub) Chtimes(project, targetPath string, atime, mtime int64) error { return nil }
-func (h *fakeHub) Symlink(project, target, linkPath string) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: int64(len(target)), Inode: 7, Mode: 0o777}, nil
-}
-func (h *fakeHub) Readlink(project, linkPath string) (string, error) { return "target", nil }
-func (h *fakeHub) Link(project, existingPath, newPath string) (*storhub.FileMetadata, error) {
-	return &storhub.FileMetadata{Size: 11, Inode: 1, Mode: 0o644}, nil
-}
-func (h *fakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
-	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: 1}}, nil
-}
-func (h *fakeHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (h *fakeHub) MkdirContext(_ context.Context, _, _ string) error { return nil }
+func (h *fakeHub) DeleteFileContext(_ context.Context, _, _ string, _ ...storhub.MutateOption) error {
 	return nil
 }
-func (h *fakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+func (h *fakeHub) RmdirContext(_ context.Context, _, _ string, _ ...storhub.MutateOption) error {
+	return nil
+}
+func (h *fakeHub) RenameContext(_ context.Context, _, _, _ string, _ ...storhub.MutateOption) error {
+	return nil
+}
+func (h *fakeHub) AppendFileContext(_ context.Context, _, _ string, data []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: int64(len(data)), Inode: 2, Mode: 0o644}, nil
+}
+func (h *fakeHub) WriteFileAtContext(_ context.Context, _, _ string, offset int64, data []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: offset + int64(len(data)), Inode: 3, Mode: 0o644}, nil
+}
+func (h *fakeHub) PatchFileContext(_ context.Context, _, _ string, _, _ int64, _ []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: 9, Inode: 4, Mode: 0o644}, nil
+}
+func (h *fakeHub) CreateFileContext(_ context.Context, _, _ string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: 0, Inode: 5, Mode: 0o644}, nil
+}
+func (h *fakeHub) TruncateFileContext(_ context.Context, _, _ string, size int64, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: size, Inode: 6, Mode: 0o644}, nil
+}
+func (h *fakeHub) ChmodContext(_ context.Context, _, _ string, _ uint32) error {
+	return nil
+}
+func (h *fakeHub) ChownContext(_ context.Context, _, _ string, _, _ uint32) error {
+	return nil
+}
+func (h *fakeHub) ChtimesContext(_ context.Context, _, _ string, _, _ int64) error {
+	return nil
+}
+func (h *fakeHub) SymlinkContext(_ context.Context, _, target, _ string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: int64(len(target)), Inode: 7, Mode: 0o777}, nil
+}
+func (h *fakeHub) ReadlinkContext(_ context.Context, _, _ string) (string, error) {
+	return "target", nil
+}
+func (h *fakeHub) LinkContext(_ context.Context, _, _, _ string) (*storhub.FileMetadata, error) {
+	return &storhub.FileMetadata{Size: 11, Inode: 1, Mode: 0o644}, nil
+}
+func (h *fakeHub) ListMetadataRevisionsContext(_ context.Context, _ string) ([]storhub.MetadataRevision, error) {
+	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "demo", CommittedAt: 1}}, nil
+}
+func (h *fakeHub) RollbackMetadataContext(_ context.Context, _, _ string) error {
+	return nil
+}
+func (h *fakeHub) PruneContext(_ context.Context, _, scope string, _ int, dryRun bool) (*storhub.PruneResult, error) {
 	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *fakeHub) DegradedProjects() []string {
 	return nil
 }
-func (h *fakeHub) ReEnableProject(project string) error { return nil }
+func (h *fakeHub) ReEnableProject(_ string) error { return nil }
 func (h *fakeHub) PressureSnapshot() storhub.PressureSnapshot {
 	return storhub.PressureSnapshot{}
 }
-func (h *fakeHub) PressureFailureStreak(project string) uint64 { return 0 }
-func (h *fakeHub) PressurePendingDepth(project string) int     { return 0 }
-func (h *fakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
+func (h *fakeHub) PressureFailureStreak(_ string) uint64 { return 0 }
+func (h *fakeHub) PressurePendingDepth(_ string) int     { return 0 }
+func (h *fakeHub) NewFUSE(_ string, _ storhub.FUSEOptions) (fuseMount, error) {
 	return fakeMount{}, nil
 }
 
@@ -910,10 +924,9 @@ func newTestApp(t *testing.T) (*App, func() string, func() string) {
 	stderrFile, stderr := tempCaptureFile(t)
 	app.stdout = stdoutFile
 	app.stderr = stderrFile
-	// Route package-level configuration warnings through the same capture
-	// seam so tests can assert on them instead of polluting real stderr.
-	restore := setWarnOutput(stderrFile)
-	t.Cleanup(restore)
+	// Route App warnings through the same capture so tests can assert on
+	// them instead of polluting real stderr. Per-App field, no globals.
+	app.warnOut = stderrFile
 	return app, stdout, stderr
 }
 

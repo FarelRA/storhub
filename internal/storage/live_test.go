@@ -17,11 +17,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/FarelRA/storhub/internal/test"
 )
 
 func TestLiveGitHubSmoke(t *testing.T) {
-	requireEnvFlag(t, "STORHUB_RUN_LIVE")
-	token := requireEnvValue(t, "GITHUB_TOKEN")
+	test.RequireFlag(t, "STORHUB_RUN_LIVE")
+	token := test.RequireValue(t, "GITHUB_TOKEN")
 
 	hub := newLiveHub(t, token, liveSmokeConfig())
 
@@ -45,7 +47,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 		t.Fatalf("write second input file: %v", err)
 	}
 
-	fileMeta, err := hub.UploadFile(repoName, "live.txt", inputPath)
+	fileMeta, err := hub.UploadFileContext(context.Background(), repoName, "live.txt", inputPath)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -53,7 +55,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 		t.Fatalf("unexpected uploaded metadata: %+v", fileMeta)
 	}
 
-	files, err := hub.ListFiles(repoName)
+	files, err := hub.ListFilesContext(context.Background(), repoName)
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -61,11 +63,11 @@ func TestLiveGitHubSmoke(t *testing.T) {
 		t.Fatalf("unexpected listed files: %+v", files)
 	}
 
-	if _, err := hub.ReplaceFile(repoName, "live.txt", inputPathV2); err != nil {
+	if _, err := hub.ReplaceFileContext(context.Background(), repoName, "live.txt", inputPathV2); err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
 	for i := 0; i < 10; i++ {
-		files, err = hub.ListFiles(repoName)
+		files, err = hub.ListFilesContext(context.Background(), repoName)
 		if err != nil {
 			t.Fatalf("list files after replace: %v", err)
 		}
@@ -77,7 +79,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	if len(files) != 1 || files[0].Size != int64(len(payloadV2)) {
 		t.Fatalf("replace metadata not visible yet: %+v", files)
 	}
-	patchedMeta, err := hub.PatchFile(repoName, "live.txt", 5, 5, []byte("PATCH"))
+	patchedMeta, err := hub.PatchFileContext(context.Background(), repoName, "live.txt", 5, 5, []byte("PATCH"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -86,7 +88,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	}
 	var revisions []MetadataRevision
 	for i := 0; i < 10; i++ {
-		revisions, err = hub.ListMetadataRevisions(repoName)
+		revisions, err = hub.ListMetadataRevisionsContext(context.Background(), repoName)
 		if err != nil {
 			t.Fatalf("list metadata revisions: %v", err)
 		}
@@ -108,11 +110,11 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	if initialRevision == "" {
 		t.Fatalf("initial metadata revision not found: %+v", revisions)
 	}
-	if err := hub.RollbackMetadata(repoName, initialRevision); err != nil {
+	if err := hub.RollbackMetadataContext(context.Background(), repoName, initialRevision); err != nil {
 		t.Fatalf("rollback metadata: %v", err)
 	}
 
-	if err := hub.DownloadFile(repoName, "live.txt", outputPath); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), repoName, "live.txt", outputPath); err != nil {
 		t.Fatalf("download file: %v", err)
 	}
 
@@ -123,7 +125,7 @@ func TestLiveGitHubSmoke(t *testing.T) {
 	if !bytes.Equal(data, payload) {
 		t.Fatalf("downloaded content mismatch")
 	}
-	if err := hub.DownloadFile(repoName, "live.txt", rollbackPath); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), repoName, "live.txt", rollbackPath); err != nil {
 		t.Fatalf("download rolled back file: %v", err)
 	}
 	rolledBackData, err := os.ReadFile(rollbackPath)
@@ -136,9 +138,9 @@ func TestLiveGitHubSmoke(t *testing.T) {
 }
 
 func TestLiveGitHubFilesystemOps(t *testing.T) {
-	requireEnvFlag(t, "STORHUB_RUN_LIVE")
+	test.RequireFlag(t, "STORHUB_RUN_LIVE")
 
-	hub := newLiveHub(t, requireEnvValue(t, "GITHUB_TOKEN"), liveSmokeConfig())
+	hub := newLiveHub(t, test.RequireValue(t, "GITHUB_TOKEN"), liveSmokeConfig())
 	repoName := fmt.Sprintf("storhub-live-fs-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		if cleanupErr := hub.DeleteProject(repoName); cleanupErr != nil {
@@ -146,44 +148,44 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 		}
 	})
 
-	if err := hub.Mkdir(repoName, "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), repoName, "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
-	if err := hub.Mkdir(repoName, "docs/specs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), repoName, "docs/specs"); err != nil {
 		t.Fatalf("mkdir docs/specs: %v", err)
 	}
-	created, err := hub.CreateFile(repoName, "docs/specs/notes.txt")
+	created, err := hub.CreateFileContext(context.Background(), repoName, "docs/specs/notes.txt")
 	if err != nil {
 		t.Fatalf("create file: %v", err)
 	}
 	if created.Size != 0 {
 		t.Fatalf("expected empty created file, got %+v", created)
 	}
-	if _, err := hub.WriteFileAt(repoName, "docs/specs/notes.txt", 0, []byte("hello")); err != nil {
+	if _, err := hub.WriteFileAtContext(context.Background(), repoName, "docs/specs/notes.txt", 0, []byte("hello")); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if _, err := hub.WriteFileAt(repoName, "docs/specs/notes.txt", 7, []byte("world")); err != nil {
+	if _, err := hub.WriteFileAtContext(context.Background(), repoName, "docs/specs/notes.txt", 7, []byte("world")); err != nil {
 		t.Fatalf("sparse write file: %v", err)
 	}
-	if _, err := hub.AppendFile(repoName, "docs/specs/notes.txt", []byte("!")); err != nil {
+	if _, err := hub.AppendFileContext(context.Background(), repoName, "docs/specs/notes.txt", []byte("!")); err != nil {
 		t.Fatalf("append file: %v", err)
 	}
-	partial, err := hub.ReadFileAt(repoName, "docs/specs/notes.txt", 0, 13)
+	partial, err := hub.ReadFileAtContext(context.Background(), repoName, "docs/specs/notes.txt", 0, 13)
 	if err != nil {
 		t.Fatalf("read file at: %v", err)
 	}
 	if !bytes.Equal(partial, []byte{'h', 'e', 'l', 'l', 'o', 0, 0, 'w', 'o', 'r', 'l', 'd', '!'}) {
 		t.Fatalf("unexpected partial bytes: %v", partial)
 	}
-	if _, err := hub.TruncateFile(repoName, "docs/specs/notes.txt", 5); err != nil {
+	if _, err := hub.TruncateFileContext(context.Background(), repoName, "docs/specs/notes.txt", 5); err != nil {
 		t.Fatalf("truncate file: %v", err)
 	}
-	if err := hub.Rename(repoName, "docs", "archive"); err != nil {
+	if err := hub.RenameContext(context.Background(), repoName, "docs", "archive"); err != nil {
 		t.Fatalf("rename directory: %v", err)
 	}
 
 	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
-		info, err := hub.StatPath(repoName, "archive/specs/notes.txt")
+		info, err := hub.StatPathContext(context.Background(), repoName, "archive/specs/notes.txt")
 		if err != nil {
 			return false, nil
 		}
@@ -192,14 +194,14 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 		t.Fatalf("wait for renamed file metadata: %v", err)
 	}
 
-	entries, err := hub.ReadDir(repoName, "archive")
+	entries, err := hub.ReadDirContext(context.Background(), repoName, "archive")
 	if err != nil {
 		t.Fatalf("readdir archive: %v", err)
 	}
 	if len(entries) != 1 || entries[0].Name != "specs" || !entries[0].IsDir {
 		t.Fatalf("unexpected archive entries: %+v", entries)
 	}
-	stats, err := hub.StatFS(repoName)
+	stats, err := hub.StatFSContext(context.Background(), repoName)
 	if err != nil {
 		t.Fatalf("statfs: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 	}
 
 	outputPath := filepath.Join(t.TempDir(), "live-fs.txt")
-	if err := hub.DownloadFile(repoName, "archive/specs/notes.txt", outputPath); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), repoName, "archive/specs/notes.txt", outputPath); err != nil {
 		t.Fatalf("download file: %v", err)
 	}
 	data, err := os.ReadFile(outputPath)
@@ -218,7 +220,7 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 	if !bytes.Equal(data, []byte("hello")) {
 		t.Fatalf("unexpected downloaded content: %q", data)
 	}
-	meta, err := hub.StatPath(repoName, "archive/specs/notes.txt")
+	meta, err := hub.StatPathContext(context.Background(), repoName, "archive/specs/notes.txt")
 	if err != nil {
 		t.Fatalf("stat file after download: %v", err)
 	}
@@ -229,7 +231,7 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 		t.Fatalf("delete file: %v", err)
 	}
 	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
-		files, err := hub.ListFiles(repoName)
+		files, err := hub.ListFilesContext(context.Background(), repoName)
 		if err != nil {
 			return false, err
 		}
@@ -240,8 +242,8 @@ func TestLiveGitHubFilesystemOps(t *testing.T) {
 }
 
 func TestLiveGitHubPOSIXOps(t *testing.T) {
-	requireEnvFlag(t, "STORHUB_RUN_LIVE")
-	token := requireEnvValue(t, "GITHUB_TOKEN")
+	test.RequireFlag(t, "STORHUB_RUN_LIVE")
+	token := test.RequireValue(t, "GITHUB_TOKEN")
 
 	hub := newLiveHub(t, token, liveSmokeConfig())
 	repoName := fmt.Sprintf("storhub-live-posix-%d", time.Now().UnixNano())
@@ -251,37 +253,37 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 		}
 	})
 
-	if err := hub.Mkdir(repoName, "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), repoName, "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
 	input := filepath.Join(t.TempDir(), "base.txt")
 	if err := os.WriteFile(input, []byte("hello live posix"), 0o644); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
-	base, err := hub.UploadFile(repoName, "docs/base.txt", input)
+	base, err := hub.UploadFileContext(context.Background(), repoName, "docs/base.txt", input)
 	if err != nil {
 		t.Fatalf("upload base: %v", err)
 	}
-	alias, err := hub.Link(repoName, "docs/base.txt", "docs/alias.txt")
+	alias, err := hub.LinkContext(context.Background(), repoName, "docs/base.txt", "docs/alias.txt")
 	if err != nil {
 		t.Fatalf("create hard link: %v", err)
 	}
 	if alias.Inode != base.Inode {
 		t.Fatalf("expected hardlink inode reuse, got %d want %d", alias.Inode, base.Inode)
 	}
-	if err := hub.Chmod(repoName, "docs/base.txt", 0o600); err != nil {
+	if err := hub.ChmodContext(context.Background(), repoName, "docs/base.txt", 0o600); err != nil {
 		t.Fatalf("chmod base: %v", err)
 	}
-	if err := hub.Chown(repoName, "docs/base.txt", 1001, 1002); err != nil {
+	if err := hub.ChownContext(context.Background(), repoName, "docs/base.txt", 1001, 1002); err != nil {
 		t.Fatalf("chown base: %v", err)
 	}
-	if err := hub.Chtimes(repoName, "docs/base.txt", 123, 123); err != nil {
+	if err := hub.ChtimesContext(context.Background(), repoName, "docs/base.txt", 123, 123); err != nil {
 		t.Fatalf("chtimes base: %v", err)
 	}
-	if err := hub.SetXAttr(repoName, "docs/base.txt", "user.note", []byte("present")); err != nil {
+	if err := hub.SetXAttrContext(context.Background(), repoName, "docs/base.txt", "user.note", []byte("present")); err != nil {
 		t.Fatalf("setxattr base: %v", err)
 	}
-	symlink, err := hub.Symlink(repoName, "docs/alias.txt", "docs/link.txt")
+	symlink, err := hub.SymlinkContext(context.Background(), repoName, "docs/alias.txt", "docs/link.txt")
 	if err != nil {
 		t.Fatalf("create symlink: %v", err)
 	}
@@ -289,7 +291,7 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 		t.Fatalf("unexpected symlink metadata: %+v", symlink)
 	}
 	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
-		info, err := hub.StatPath(repoName, "docs/alias.txt")
+		info, err := hub.StatPathContext(context.Background(), repoName, "docs/alias.txt")
 		if err != nil {
 			return false, nil
 		}
@@ -297,39 +299,39 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("wait for hardlink metadata: %v", err)
 	}
-	aliasInfo, err := hub.StatPath(repoName, "docs/alias.txt")
+	aliasInfo, err := hub.StatPathContext(context.Background(), repoName, "docs/alias.txt")
 	if err != nil {
 		t.Fatalf("stat alias: %v", err)
 	}
 	if aliasInfo.ModifiedAt != 123 {
 		t.Fatalf("unexpected alias modified time: %v", aliasInfo.ModifiedAt)
 	}
-	attrs, err := hub.ListXAttr(repoName, "docs/alias.txt")
+	attrs, err := hub.ListXAttrContext(context.Background(), repoName, "docs/alias.txt")
 	if err != nil {
 		t.Fatalf("listxattr alias: %v", err)
 	}
 	if len(attrs) != 1 || attrs[0] != "user.note" {
 		t.Fatalf("unexpected alias xattrs: %v", attrs)
 	}
-	value, err := hub.GetXAttr(repoName, "docs/alias.txt", "user.note")
+	value, err := hub.GetXAttrContext(context.Background(), repoName, "docs/alias.txt", "user.note")
 	if err != nil {
 		t.Fatalf("getxattr alias: %v", err)
 	}
 	if string(value) != "present" {
 		t.Fatalf("unexpected xattr value: %q", value)
 	}
-	target, err := hub.Readlink(repoName, "docs/link.txt")
+	target, err := hub.ReadlinkContext(context.Background(), repoName, "docs/link.txt")
 	if err != nil {
 		t.Fatalf("readlink: %v", err)
 	}
 	if target != "docs/alias.txt" {
 		t.Fatalf("unexpected symlink target: %q", target)
 	}
-	if _, err := hub.ReadFileAt(repoName, "docs/link.txt", 0, 4); err == nil {
+	if _, err := hub.ReadFileAtContext(context.Background(), repoName, "docs/link.txt", 0, 4); err == nil {
 		t.Fatal("expected symlink readfileat to fail")
 	}
 	output := filepath.Join(t.TempDir(), "alias.txt")
-	if err := hub.DownloadFile(repoName, "docs/alias.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), repoName, "docs/alias.txt", output); err != nil {
 		t.Fatalf("download alias: %v", err)
 	}
 	data, err := os.ReadFile(output)
@@ -339,11 +341,11 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 	if !bytes.Equal(data, []byte("hello live posix")) {
 		t.Fatalf("unexpected alias content: %q", data)
 	}
-	if err := hub.Unlink(repoName, "docs/base.txt"); err != nil {
+	if err := hub.UnlinkContext(context.Background(), repoName, "docs/base.txt"); err != nil {
 		t.Fatalf("unlink base: %v", err)
 	}
 	if err := waitForLiveCondition(t, 30*time.Second, 2*time.Second, func() (bool, error) {
-		info, err := hub.StatPath(repoName, "docs/alias.txt")
+		info, err := hub.StatPathContext(context.Background(), repoName, "docs/alias.txt")
 		if err != nil {
 			return false, err
 		}
@@ -354,14 +356,9 @@ func TestLiveGitHubPOSIXOps(t *testing.T) {
 }
 
 func TestLiveGitHubSmoke2GB(t *testing.T) {
-	if os.Getenv("STORHUB_RUN_LIVE_LARGE") != "1" {
-		t.Skip("set STORHUB_RUN_LIVE_LARGE=1 to run 2GB live GitHub smoke test")
-	}
+	test.RequireFlag(t, "STORHUB_RUN_LIVE_LARGE")
 
-	if strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) == "" {
-		t.Fatal("GITHUB_TOKEN is required for live smoke test")
-	}
-	token := os.Getenv("GITHUB_TOKEN")
+	token := test.RequireValue(t, "GITHUB_TOKEN")
 
 	hub := newLiveHub(t, token, liveLargeSmokeConfig(newProgressHTTPClient(t)))
 
@@ -380,7 +377,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 	}
 
 	t.Log("uploading 2GB sparse file")
-	fileMeta, err := hub.UploadFile(repoName, "live-2gb.bin", inputPath)
+	fileMeta, err := hub.UploadFileContext(context.Background(), repoName, "live-2gb.bin", inputPath)
 	if err != nil {
 		t.Fatalf("upload 2GB file: %v", err)
 	}
@@ -392,7 +389,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 		t.Fatalf("unexpected chunk count: got %d want %d", len(fileMeta.Chunks), expectedChunks)
 	}
 
-	files, err := hub.ListFiles(repoName)
+	files, err := hub.ListFilesContext(context.Background(), repoName)
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -401,7 +398,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 	}
 
 	t.Log("downloading 2GB file; integrity verification runs inside DownloadFile")
-	if err := hub.DownloadFile(repoName, "live-2gb.bin", outputPath); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), repoName, "live-2gb.bin", outputPath); err != nil {
 		t.Fatalf("download 2GB file: %v", err)
 	}
 	info, err := os.Stat(outputPath)
@@ -426,9 +423,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 }
 
 func TestSparseZeroFileValidationMatrix(t *testing.T) {
-	if os.Getenv("STORHUB_RUN_LARGE") != "1" {
-		t.Skip("set STORHUB_RUN_LARGE=1 to run large sparse validation")
-	}
+	test.RequireFlag(t, "STORHUB_RUN_LARGE")
 
 	backend := newZeroGitHub(t)
 	hub := backend.newClient(t, largeValidationConfig())
@@ -455,7 +450,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 			t.Fatalf("create sparse file %s: %v", scenario.name, err)
 		}
 
-		meta, err := hub.UploadFile(project, scenario.name, inputPath)
+		meta, err := hub.UploadFileContext(context.Background(), project, scenario.name, inputPath)
 		if err != nil {
 			t.Fatalf("upload %s: %v", scenario.name, err)
 		}
@@ -465,7 +460,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 		}
 		uploaded = append(uploaded, *meta)
 
-		files, err := hub.ListFiles(project)
+		files, err := hub.ListFilesContext(context.Background(), project)
 		if err != nil {
 			t.Fatalf("list files after %s: %v", scenario.name, err)
 		}
@@ -475,7 +470,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 
 		if scenario.downloadVerify {
 			outputPath := filepath.Join(t.TempDir(), scenario.name+".out")
-			if err := hub.DownloadFile(project, scenario.name, outputPath); err != nil {
+			if err := hub.DownloadFileContext(context.Background(), project, scenario.name, outputPath); err != nil {
 				t.Fatalf("download %s: %v", scenario.name, err)
 			}
 			info, err := os.Stat(outputPath)
@@ -502,7 +497,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 		t.Fatal("expected purge to delete untracked two-gb assets")
 	}
 	revision := mustMetadataRevision(t, hub, project, "storhub: add two-gb.bin")
-	if err := hub.RollbackMetadata(project, revision.CommitSHA); err == nil {
+	if err := hub.RollbackMetadataContext(context.Background(), project, revision.CommitSHA); err == nil {
 		t.Fatal("expected rollback to purged two-gb metadata to fail")
 	}
 }

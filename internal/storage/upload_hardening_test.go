@@ -36,7 +36,7 @@ func TestUploadHardeningPatchCompensatesMidUploadFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-hardening-patch", "patch.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-patch", "patch.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var posts atomic.Int32
@@ -65,7 +65,7 @@ func TestUploadHardeningPatchBatchCompensatesMidUploadFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("0123456789abcdef0123456789abcdef"))
-	if _, err := hub.UploadFile("project-hardening-batch", "batch.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-batch", "batch.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var posts atomic.Int32
@@ -98,7 +98,7 @@ func TestUploadHardeningRewriteCompensatesMidUploadFailure(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("0123456789abcdef01234567"))
-	if _, err := hub.UploadFile("project-hardening-rewrite", "rewrite.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-rewrite", "rewrite.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	repoMeta, _, err := hub.loadRepoMetadata(ctx, "project-hardening-rewrite")
@@ -139,7 +139,7 @@ func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-hardening-rotation", "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-rotation", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	releases, err := hub.listReleases(ctx, "project-hardening-rotation")
@@ -159,7 +159,7 @@ func TestUploadHardeningRotationsDoNotConsumeNameBudget(t *testing.T) {
 			return false
 		})
 		return hub.newChunkSink(ctx, "project-hardening-rotation", releases[0].TagName, releases[0].UploadURL, 1,
-			func(remaining int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
+			func(_ int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
 	}
 	sink := newSink(5)
 	if err := sink.put(bytes.NewReader([]byte("12345678")), 8, 0); err != nil {
@@ -185,7 +185,7 @@ func TestUploadHardeningNameCollisionBudgetKeptAcrossRotations(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-hardening-mixed", "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-mixed", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	releases, err := hub.listReleases(ctx, "project-hardening-mixed")
@@ -207,7 +207,7 @@ func TestUploadHardeningNameCollisionBudgetKeptAcrossRotations(t *testing.T) {
 		return false
 	})
 	sink := hub.newChunkSink(ctx, "project-hardening-mixed", releases[0].TagName, releases[0].UploadURL, 1,
-		func(remaining int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
+		func(_ int) (string, string, error) { return releases[0].TagName, releases[0].UploadURL, nil })
 	err = sink.put(bytes.NewReader([]byte("12345678")), 8, 0)
 	if err == nil {
 		t.Fatal("expected name-budget exhaustion")
@@ -228,7 +228,7 @@ func TestUploadHardeningDuplicateRepoMatchesAlreadyExists(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-hardening-dup", "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-hardening-dup", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	req, _ := http.NewRequest(http.MethodPost, backend.server.URL+"/user/repos", strings.NewReader(`{"name":"project-hardening-dup","private":true}`))
@@ -263,7 +263,7 @@ func TestRewrittenCompensationSparesReusedChunks(t *testing.T) {
 	project := "project-rewrite-spares"
 
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("0123456789abcdef01234567"))
-	if _, err := hub.UploadFile(project, "rewrite.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "rewrite.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, project); err != nil {

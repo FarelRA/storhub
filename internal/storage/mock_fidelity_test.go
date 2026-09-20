@@ -33,7 +33,7 @@ func TestMockAssetDownloadRedirectShape(t *testing.T) {
 
 	var apiAssetPath atomic.Value
 	var apiSawAuth atomic.Bool
-	backend.onAssetGET(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onAssetGET(t, func(_ http.ResponseWriter, r *http.Request) bool {
 		apiAssetPath.Store(r.URL.Path)
 		apiSawAuth.Store(r.Header.Get("Authorization") != "")
 		return false
@@ -101,7 +101,7 @@ func TestMockCDNRangeFetches(t *testing.T) {
 	uploadFixture(t, backend, "project-cdn-range", "cdn.txt", payload)
 
 	var apiAssetPath atomic.Value
-	backend.onAssetGET(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onAssetGET(t, func(_ http.ResponseWriter, r *http.Request) bool {
 		apiAssetPath.Store(r.URL.Path)
 		return false
 	})
@@ -211,7 +211,7 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 	}
 	var pages atomic.Int32
 	var sawPage3 atomic.Bool
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/releases") {
 			pages.Add(1)
 			if r.URL.Query().Get("page") == "3" {
@@ -261,7 +261,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 		t.Fatalf("settle flush: %v", err)
 	}
 	var metaPuts atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		// The v5 commit writes content-addressed objects then the manifest;
 		// a 429 on any of them must trigger a retry, so count the whole
 		// .storhub commit surface.
@@ -306,7 +306,7 @@ func TestMockCDN618ForcesReResolution(t *testing.T) {
 	uploadFixture(t, backend, "project-618", "f.txt", payload)
 
 	var apiAssetHits atomic.Int32
-	backend.onAssetGET(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onAssetGET(t, func(_ http.ResponseWriter, _ *http.Request) bool {
 		apiAssetHits.Add(1)
 		return false
 	})

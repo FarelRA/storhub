@@ -35,14 +35,14 @@ func (h *cpFakeHub) modeOf(targetPath string) uint32 {
 	return 0o644
 }
 
-func (h *cpFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, error) {
+func (h *cpFakeHub) StatPathContext(_ context.Context, _, targetPath string) (*storhub.EntryInfo, error) {
 	if data, ok := h.files[targetPath]; ok {
 		return &storhub.EntryInfo{Path: targetPath, Size: int64(len(data)), Mode: h.modeOf(targetPath), Inode: 1, NLink: 1}, nil
 	}
 	return nil, shfs.NotFound(targetPath)
 }
 
-func (h *cpFakeHub) Chmod(project, targetPath string, mode uint32) error {
+func (h *cpFakeHub) ChmodContext(_ context.Context, _, targetPath string, mode uint32) error {
 	h.chmodCalls++
 	if _, ok := h.files[targetPath]; !ok {
 		return shfs.NotFound(targetPath)
@@ -54,7 +54,7 @@ func (h *cpFakeHub) Chmod(project, targetPath string, mode uint32) error {
 	return nil
 }
 
-func (h *cpFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
+func (h *cpFakeHub) CreateFileContext(_ context.Context, _, filePath string) (*storhub.FileMetadata, error) {
 	h.createCalls++
 	if _, ok := h.files[filePath]; ok {
 		return nil, shfs.AlreadyExists(filePath)
@@ -63,7 +63,7 @@ func (h *cpFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata,
 	return &storhub.FileMetadata{Size: 0, Inode: 1, Mode: 0o644}, nil
 }
 
-func (h *cpFakeHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+func (h *cpFakeHub) ReadFileAtContext(_ context.Context, _, filePath string, offset, length int64) ([]byte, error) {
 	h.readCalls++
 	data, ok := h.files[filePath]
 	if !ok {
@@ -79,7 +79,7 @@ func (h *cpFakeHub) ReadFileAt(project, filePath string, offset, length int64) (
 	return append([]byte(nil), data[offset:end]...), nil
 }
 
-func (h *cpFakeHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
+func (h *cpFakeHub) WriteFileAtContext(_ context.Context, _, filePath string, offset int64, data []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	h.writeCalls++
 	content, ok := h.files[filePath]
 	if !ok {
@@ -97,7 +97,7 @@ func (h *cpFakeHub) WriteFileAt(project, filePath string, offset int64, data []b
 	return &storhub.FileMetadata{Size: int64(len(content)), Inode: 1, Mode: 0o644}, nil
 }
 
-func (h *cpFakeHub) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...storhub.MutateOption) (*storhub.FileMetadata, error) {
+func (h *cpFakeHub) CloneRange(_ context.Context, _, src string, srcOff int64, dst string, dstOff int64, length int64, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	h.cloneCalls++
 	h.lastSrcOff, h.lastDstOff, h.lastLength = srcOff, dstOff, length
 	if h.cloneErr != nil {
@@ -117,14 +117,14 @@ func (h *cpFakeHub) CloneRange(ctx context.Context, project, src string, srcOff 
 	return &storhub.FileMetadata{Size: int64(len(d)), Inode: 1, Mode: 0o644}, nil
 }
 
-func (h *cpFakeHub) DrainProjectContext(ctx context.Context, project string) error { return nil }
-func (h *cpFakeHub) Shutdown(ctx context.Context) error                            { return nil }
+func (h *cpFakeHub) DrainProjectContext(_ context.Context, _ string) error { return nil }
+func (h *cpFakeHub) Shutdown(_ context.Context) error                      { return nil }
 
 func runCpWithFake(t *testing.T, fake *cpFakeHub, args []string) error {
 	t.Helper()
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)

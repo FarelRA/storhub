@@ -27,9 +27,9 @@ type (
 	// FUSEOptions configures a FUSE mount (cache location, atime policy,
 	// overlay buffer sizing). See internal/fusefs.Options.
 	FUSEOptions = implfuse.Options
-	// StorHubFS is the mounted filesystem returned by the FUSE facade;
+	// FS is the mounted filesystem returned by the FUSE facade;
 	// callers Unmount and Wait on it.
-	StorHubFS = implfuse.Filesystem
+	FS = implfuse.Filesystem
 	// ChunkInfo describes one stored chunk: its GitHub release asset name,
 	// byte offset within the file, size, owning release tag, and digest.
 	ChunkInfo = meta.ChunkInfo
@@ -92,14 +92,18 @@ const (
 	NodeKindFile = meta.NodeKindFile
 	// NodeKindSymlink marks symlink entries in listings and stats.
 	NodeKindSymlink = meta.NodeKindSymlink
-	// Prune scope values accepted by PruneProject (objects|assets|history|chunks|all).
+	// PruneObjects reclaims dangling objects during a prune run.
 	// Aliased so callers (e.g. the CLI's argument validation) share one
 	// vocabulary with storage instead of duplicating string literals.
 	PruneObjects = impl.PruneObjects
-	PruneAssets  = impl.PruneAssets
+	// PruneAssets reclaims release assets during a prune run.
+	PruneAssets = impl.PruneAssets
+	// PruneHistory reclaims superseded history during a prune run.
 	PruneHistory = impl.PruneHistory
-	PruneChunks  = impl.PruneChunks
-	PruneAll     = impl.PruneAll
+	// PruneChunks reclaims unreferenced chunks during a prune run.
+	PruneChunks = impl.PruneChunks
+	// PruneAll reclaims everything a prune run can reclaim.
+	PruneAll = impl.PruneAll
 )
 
 var (
@@ -116,7 +120,9 @@ type MutateOption = shfs.MutateOption
 type XAttrMode = shfs.XAttrMode
 
 const (
-	XAttrCreate  = shfs.XAttrCreate
+	// XAttrCreate fails SetXAttr with EEXIST when the name is present.
+	XAttrCreate = shfs.XAttrCreate
+	// XAttrReplace fails SetXAttr with ENODATA when the name is absent.
 	XAttrReplace = shfs.XAttrReplace
 )
 

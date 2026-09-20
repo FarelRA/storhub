@@ -55,21 +55,21 @@ func stubServeSeams(t *testing.T) *recordingMount {
 		newRESTHandlerFn = oldHandler
 		restListenAndServeFn = oldListen
 	})
-	newRESTHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
 	mount := newRecordingMount()
-	newFUSEFn = func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
+	newFUSEFn = func(_ *storhub.StorHub, _ string, _ storhub.FUSEOptions) (fuseMount, error) {
 		return mount, nil
 	}
-	newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, _ shrest.Options) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
 	// Mimic a clean server stop without signals: returning
 	// ErrServerClosed is what a real ListenAndServe does when Shutdown
 	// runs, and it is the only arm of runServe's select that a test can
 	// fire deterministically.
-	restListenAndServeFn = func(server *http.Server) error {
+	restListenAndServeFn = func(_ *http.Server) error {
 		return http.ErrServerClosed
 	}
 	return mount
@@ -124,7 +124,7 @@ func TestServeHonorsAuthFile(t *testing.T) {
 	app, _, stderr := newTestApp(t)
 	mount := stubServeSeams(t)
 	var gotOpts shrest.Options
-	newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
 		gotOpts = opts
 		return http.NewServeMux(), nil
 	}

@@ -31,6 +31,7 @@ import (
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	meta "github.com/FarelRA/storhub/internal/metadata"
+	"github.com/FarelRA/storhub/internal/test"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -293,7 +294,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	hub := backend.newClient(t, singleChunkTestConfig())
 
 	input := writeTempFile(t, t.TempDir(), "single.txt", []byte("hello streaming world"))
-	meta, err := hub.UploadFile("project-a", "single.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-a", "single.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -305,7 +306,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	files, err := hub.ListFiles("project-a")
+	files, err := hub.ListFilesContext(context.Background(), "project-a")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "downloaded.txt")
-	if err := hub.DownloadFile("project-a", "single.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-a", "single.txt", output); err != nil {
 		t.Fatalf("download file: %v", err)
 	}
 	assertFileContent(t, output, []byte("hello streaming world"))
@@ -330,7 +331,7 @@ func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 	var active atomic.Int32
 	var maxActive atomic.Int32
 	var chunkGets atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			current := active.Add(1)
 			for {
@@ -375,27 +376,27 @@ func TestDirectoryOperationsAndPathSemantics(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	if err := hub.Mkdir("project-tree", "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-tree", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
-	if err := hub.Mkdir("project-tree", "docs/specs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-tree", "docs/specs"); err != nil {
 		t.Fatalf("mkdir docs/specs: %v", err)
 	}
-	entries, err := hub.ReadDir("project-tree", "")
+	entries, err := hub.ReadDirContext(context.Background(), "project-tree", "")
 	if err != nil {
 		t.Fatalf("readdir root: %v", err)
 	}
 	if len(entries) != 1 || entries[0].Path != "docs" || !entries[0].IsDir {
 		t.Fatalf("unexpected root entries: %+v", entries)
 	}
-	info, err := hub.StatPath("project-tree", "docs/specs")
+	info, err := hub.StatPathContext(context.Background(), "project-tree", "docs/specs")
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
 	if !info.IsDir {
 		t.Fatalf("expected directory info, got %+v", info)
 	}
-	if err := hub.Rmdir("project-tree", "docs"); err == nil {
+	if err := hub.RmdirContext(context.Background(), "project-tree", "docs"); err == nil {
 		t.Fatal("expected non-empty rmdir to fail")
 	}
 }
@@ -404,51 +405,51 @@ func TestCreateRenameReadWriteAndTruncateFileOperations(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 4, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
-	if err := hub.Mkdir("project-fs-ops", "notes"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-fs-ops", "notes"); err != nil {
 		t.Fatalf("mkdir notes: %v", err)
 	}
-	created, err := hub.CreateFile("project-fs-ops", "notes/todo.txt")
+	created, err := hub.CreateFileContext(context.Background(), "project-fs-ops", "notes/todo.txt")
 	if err != nil {
 		t.Fatalf("create file: %v", err)
 	}
 	if created.Size != 0 {
 		t.Fatalf("expected empty file, got %+v", created)
 	}
-	if _, err := hub.WriteFileAt("project-fs-ops", "notes/todo.txt", 0, []byte("hello")); err != nil {
+	if _, err := hub.WriteFileAtContext(context.Background(), "project-fs-ops", "notes/todo.txt", 0, []byte("hello")); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
-	if _, err := hub.WriteFileAt("project-fs-ops", "notes/todo.txt", 7, []byte("world")); err != nil {
+	if _, err := hub.WriteFileAtContext(context.Background(), "project-fs-ops", "notes/todo.txt", 7, []byte("world")); err != nil {
 		t.Fatalf("write beyond eof: %v", err)
 	}
-	data, err := hub.ReadFileAt("project-fs-ops", "notes/todo.txt", 0, 12)
+	data, err := hub.ReadFileAtContext(context.Background(), "project-fs-ops", "notes/todo.txt", 0, 12)
 	if err != nil {
 		t.Fatalf("read file: %v", err)
 	}
 	if !bytes.Equal(data, []byte{'h', 'e', 'l', 'l', 'o', 0, 0, 'w', 'o', 'r', 'l', 'd'}) {
 		t.Fatalf("unexpected file data: %v", data)
 	}
-	if _, err := hub.AppendFile("project-fs-ops", "notes/todo.txt", []byte("!")); err != nil {
+	if _, err := hub.AppendFileContext(context.Background(), "project-fs-ops", "notes/todo.txt", []byte("!")); err != nil {
 		t.Fatalf("append file: %v", err)
 	}
-	if _, err := hub.TruncateFile("project-fs-ops", "notes/todo.txt", 5); err != nil {
+	if _, err := hub.TruncateFileContext(context.Background(), "project-fs-ops", "notes/todo.txt", 5); err != nil {
 		t.Fatalf("truncate shrink: %v", err)
 	}
-	if err := hub.Rename("project-fs-ops", "notes/todo.txt", "notes/done.txt"); err != nil {
+	if err := hub.RenameContext(context.Background(), "project-fs-ops", "notes/todo.txt", "notes/done.txt"); err != nil {
 		t.Fatalf("rename file: %v", err)
 	}
 	output := filepath.Join(t.TempDir(), "done.txt")
-	if err := hub.DownloadFile("project-fs-ops", "notes/done.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-fs-ops", "notes/done.txt", output); err != nil {
 		t.Fatalf("download renamed file: %v", err)
 	}
 	assertFileContent(t, output, []byte("hello"))
-	entries, err := hub.ReadDir("project-fs-ops", "notes")
+	entries, err := hub.ReadDirContext(context.Background(), "project-fs-ops", "notes")
 	if err != nil {
 		t.Fatalf("readdir notes: %v", err)
 	}
 	if len(entries) != 1 || entries[0].Path != "notes/done.txt" {
 		t.Fatalf("unexpected notes entries: %+v", entries)
 	}
-	stats, err := hub.StatFS("project-fs-ops")
+	stats, err := hub.StatFSContext(context.Background(), "project-fs-ops")
 	if err != nil {
 		t.Fatalf("statfs: %v", err)
 	}
@@ -461,17 +462,17 @@ func TestCreateFileStoresEmptyMetadataWithoutAssetUpload(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
 		return false
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
-	if err := hub.Mkdir("project-empty-upload", "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-empty-upload", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
-	meta, err := hub.CreateFile("project-empty-upload", "docs/empty.txt")
+	meta, err := hub.CreateFileContext(context.Background(), "project-empty-upload", "docs/empty.txt")
 	if err != nil {
 		t.Fatalf("create empty file: %v", err)
 	}
@@ -493,41 +494,41 @@ func TestFilesystemEdgeCasesAndRootSemantics(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	// POSIX: mkdir on the always-existing root reports EEXIST.
-	if err := hub.Mkdir("project-fs-edge", "."); err == nil {
+	if err := hub.MkdirContext(context.Background(), "project-fs-edge", "."); err == nil {
 		t.Fatal("expected mkdir on root to fail")
 	}
-	if err := hub.Rmdir("project-fs-edge", ""); err == nil {
+	if err := hub.RmdirContext(context.Background(), "project-fs-edge", ""); err == nil {
 		t.Fatal("expected rmdir root to fail")
 	}
-	if _, err := hub.CreateFile("project-fs-edge", ""); err == nil {
+	if _, err := hub.CreateFileContext(context.Background(), "project-fs-edge", ""); err == nil {
 		t.Fatal("expected empty create path to fail")
 	}
-	if err := hub.Mkdir("project-fs-edge", "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-fs-edge", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
-	if err := hub.Mkdir("project-fs-edge", "docs"); err == nil {
+	if err := hub.MkdirContext(context.Background(), "project-fs-edge", "docs"); err == nil {
 		t.Fatal("expected duplicate mkdir to fail")
 	}
-	if err := hub.Mkdir("project-fs-edge", "docs/nested"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-fs-edge", "docs/nested"); err != nil {
 		t.Fatalf("mkdir docs/nested: %v", err)
 	}
-	if _, err := hub.CreateFile("project-fs-edge", "docs/nested/file.txt"); err != nil {
+	if _, err := hub.CreateFileContext(context.Background(), "project-fs-edge", "docs/nested/file.txt"); err != nil {
 		t.Fatalf("create nested file: %v", err)
 	}
-	if err := hub.Unlink("project-fs-edge", "docs"); err == nil {
+	if err := hub.UnlinkContext(context.Background(), "project-fs-edge", "docs"); err == nil {
 		t.Fatal("expected unlink directory path to fail")
 	}
-	if err := hub.Rename("project-fs-edge", "docs", "docs/nested/docs"); err == nil {
+	if err := hub.RenameContext(context.Background(), "project-fs-edge", "docs", "docs/nested/docs"); err == nil {
 		t.Fatal("expected renaming directory into itself to fail")
 	}
-	rootInfo, err := hub.StatPath("project-fs-edge", "")
+	rootInfo, err := hub.StatPathContext(context.Background(), "project-fs-edge", "")
 	if err != nil {
 		t.Fatalf("stat root: %v", err)
 	}
 	if !rootInfo.IsDir || rootInfo.Path != "" {
 		t.Fatalf("unexpected root stat: %+v", rootInfo)
 	}
-	entries, err := hub.ReadDir("project-fs-edge", "")
+	entries, err := hub.ReadDirContext(context.Background(), "project-fs-edge", "")
 	if err != nil {
 		t.Fatalf("readdir root: %v", err)
 	}
@@ -540,23 +541,23 @@ func TestRenameDirectoryMovesTree(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	if err := hub.Mkdir("project-dir-rename", "a"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-dir-rename", "a"); err != nil {
 		t.Fatalf("mkdir a: %v", err)
 	}
-	if err := hub.Mkdir("project-dir-rename", "a/b"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "project-dir-rename", "a/b"); err != nil {
 		t.Fatalf("mkdir a/b: %v", err)
 	}
 	input := writeTempFile(t, t.TempDir(), "nested.txt", []byte("payload"))
-	if _, err := hub.UploadFile("project-dir-rename", "a/b/file.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-dir-rename", "a/b/file.txt", input); err != nil {
 		t.Fatalf("upload nested file: %v", err)
 	}
-	if err := hub.Rename("project-dir-rename", "a", "renamed"); err != nil {
+	if err := hub.RenameContext(context.Background(), "project-dir-rename", "a", "renamed"); err != nil {
 		t.Fatalf("rename dir: %v", err)
 	}
-	if _, err := hub.StatPath("project-dir-rename", "renamed/b/file.txt"); err != nil {
+	if _, err := hub.StatPathContext(context.Background(), "project-dir-rename", "renamed/b/file.txt"); err != nil {
 		t.Fatalf("stat moved file: %v", err)
 	}
-	if _, err := hub.StatPath("project-dir-rename", "a/b/file.txt"); err == nil {
+	if _, err := hub.StatPathContext(context.Background(), "project-dir-rename", "a/b/file.txt"); err == nil {
 		t.Fatal("expected old path lookup to fail")
 	}
 }
@@ -584,7 +585,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version-a"))
-	first, err := hub.UploadFile("project-history", "artifact.txt", inputA)
+	first, err := hub.UploadFileContext(context.Background(), "project-history", "artifact.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload first: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	inputB := writeTempFile(t, t.TempDir(), "v2.txt", []byte("version-b-better"))
-	_, err = hub.ReplaceFile("project-history", "artifact.txt", inputB)
+	_, err = hub.ReplaceFileContext(context.Background(), "project-history", "artifact.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
@@ -603,7 +604,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("flush metadata after replace: %v", err)
 	}
 
-	revisions, err := hub.ListMetadataRevisions("project-history")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-history")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -614,7 +615,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	if err := hub.DeleteFile("project-history", "artifact.txt"); err != nil {
 		t.Fatalf("delete file: %v", err)
 	}
-	files, err := hub.ListFiles("project-history")
+	files, err := hub.ListFilesContext(context.Background(), "project-history")
 	if err != nil {
 		t.Fatalf("list files after delete: %v", err)
 	}
@@ -633,10 +634,10 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	oldest := revisions[len(revisions)-1]
-	if err := hub.RollbackMetadata("project-history", oldest.CommitSHA); err != nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "project-history", oldest.CommitSHA); err != nil {
 		t.Fatalf("rollback metadata: %v", err)
 	}
-	files, err = hub.ListFiles("project-history")
+	files, err = hub.ListFilesContext(context.Background(), "project-history")
 	if err != nil {
 		t.Fatalf("list files after rollback: %v", err)
 	}
@@ -645,7 +646,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "rolled-back.txt")
-	if err := hub.DownloadFile("project-history", "artifact.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-history", "artifact.txt", output); err != nil {
 		t.Fatalf("download rolled back file: %v", err)
 	}
 	assertFileContent(t, output, []byte("version-a"))
@@ -656,11 +657,11 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch.txt", []byte("abcdefghij"))
-	meta, err := hub.UploadFile("project-patch", "patch.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-patch", "patch.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	patched, err := hub.PatchFile("project-patch", "patch.txt", 3, 3, []byte("XYZ"))
+	patched, err := hub.PatchFileContext(context.Background(), "project-patch", "patch.txt", 3, 3, []byte("XYZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -679,7 +680,7 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 		t.Fatalf("expected edited segment to use a new asset, got %+v", patched.Chunks)
 	}
 	output := filepath.Join(t.TempDir(), "patched.txt")
-	if err := hub.DownloadFile("project-patch", "patch.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-patch", "patch.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcXYZghij"))
@@ -693,21 +694,21 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "ranges.txt", []byte("abcdefghij"))
-	if _, err := hub.UploadFile("project-range-patch", "ranges.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-range-patch", "ranges.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if _, err := hub.PatchFile("project-range-patch", "ranges.txt", 4, 2, []byte("ZZ")); err != nil {
+	if _, err := hub.PatchFileContext(context.Background(), "project-range-patch", "ranges.txt", 4, 2, []byte("ZZ")); err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
 	var sawRange atomic.Bool
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") && r.Header.Get("Range") != "" {
 			sawRange.Store(true)
 		}
 		return false
 	})
 	output := filepath.Join(t.TempDir(), "ranges.out")
-	if err := hub.DownloadFile("project-range-patch", "ranges.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-range-patch", "ranges.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	if !sawRange.Load() {
@@ -723,12 +724,12 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
-	meta, err := hub.UploadFile("project-exact-ranges", "exact-ranges.bin", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	patchedBytes := bytes.Repeat([]byte("b"), 47)
-	patched, err := hub.PatchFile("project-exact-ranges", "exact-ranges.bin", 3, 47, patchedBytes)
+	patched, err := hub.PatchFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", 3, 47, patchedBytes)
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -740,7 +741,7 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	}
 	rangeByAsset := make(map[int64][]string)
 	var rangeMu sync.Mutex
-	backend.onAssetGET(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onAssetGET(t, func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/releases/assets/") {
 			return false
 		}
@@ -754,7 +755,7 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 		return false
 	})
 	output := filepath.Join(t.TempDir(), "exact-ranges.out")
-	if err := hub.DownloadFile("project-exact-ranges", "exact-ranges.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, append(append(append([]byte(nil), original[:3]...), patchedBytes...), original[50:]...))
@@ -783,7 +784,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "multi-release.txt", []byte("abcdefghijklmno"))
-	fileMeta, err := hub.UploadFile("project-multi-release-patch", "multi-release.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -791,7 +792,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 	firstRelease := metaState.Chunks()[fileMeta.Chunks[0]].Release
 	backend.addAssetsToRelease(t, "project-multi-release-patch", firstRelease, 999)
 	hub.invalidateReleaseCache("project-multi-release-patch")
-	patched, err := hub.PatchFile("project-multi-release-patch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
+	patched, err := hub.PatchFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -813,7 +814,7 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 		t.Fatalf("expected patched file to span old and new releases, got %+v", patched.Chunks)
 	}
 	output := filepath.Join(t.TempDir(), "multi-release.out")
-	if err := hub.DownloadFile("project-multi-release-patch", "multi-release.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
@@ -834,10 +835,10 @@ func TestPatchFileRejectsOutOfBoundsEdit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "bounds.txt", []byte("abc"))
-	if _, err := hub.UploadFile("project-patch-bounds", "bounds.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-patch-bounds", "bounds.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if _, err := hub.PatchFile("project-patch-bounds", "bounds.txt", 2, 7, []byte("toolong")); err == nil {
+	if _, err := hub.PatchFileContext(context.Background(), "project-patch-bounds", "bounds.txt", 2, 7, []byte("toolong")); err == nil {
 		t.Fatal("expected out-of-bounds patch to fail")
 	}
 }
@@ -865,10 +866,10 @@ func TestPatchFileSupportsEdits(t *testing.T) {
 			backend := newMockGitHub(t)
 			hub := backend.newClient(t, smallTransferTestConfig())
 			input := writeTempFile(t, t.TempDir(), tc.file, []byte(tc.original))
-			if _, err := hub.UploadFile(tc.project, tc.file, input); err != nil {
+			if _, err := hub.UploadFileContext(context.Background(), tc.project, tc.file, input); err != nil {
 				t.Fatalf("upload file: %v", err)
 			}
-			patched, err := hub.PatchFile(tc.project, tc.file, tc.offset, tc.deleteSize, tc.edit)
+			patched, err := hub.PatchFileContext(context.Background(), tc.project, tc.file, tc.offset, tc.deleteSize, tc.edit)
 			if err != nil {
 				t.Fatalf("patch: %v", err)
 			}
@@ -876,7 +877,7 @@ func TestPatchFileSupportsEdits(t *testing.T) {
 				t.Fatalf("unexpected patched size: %d, want %d", patched.Size, len(tc.want))
 			}
 			output := filepath.Join(t.TempDir(), tc.file+".out")
-			if err := hub.DownloadFile(tc.project, tc.file, output); err != nil {
+			if err := hub.DownloadFileContext(context.Background(), tc.project, tc.file, output); err != nil {
 				t.Fatalf("download patched file: %v", err)
 			}
 			assertFileContent(t, output, []byte(tc.want))
@@ -890,7 +891,7 @@ func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
 	hub := backend.newClient(t, smallRetryDisabledTestConfig())
 
 	input := writeTempFile(t, t.TempDir(), "release.txt", []byte("release payload"))
-	fileMeta, err := hub.UploadFile("project-release", "release.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-release", "release.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -899,7 +900,7 @@ func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
 	if err := hub.DeleteRelease("project-release", firstRelease); err != nil {
 		t.Fatalf("delete release: %v", err)
 	}
-	releases, err := hub.ListReleases("project-release")
+	releases, err := hub.ListReleasesContext(context.Background(), "project-release")
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -917,7 +918,7 @@ func TestDeleteProject(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	input := writeTempFile(t, t.TempDir(), "file.txt", []byte("payload"))
-	if _, err := hub.UploadFile("project-delete", "file.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-delete", "file.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	if err := hub.DeleteProject("project-delete"); err != nil {
@@ -949,7 +950,7 @@ func TestEnsureRepoUsesExistenceCheckBeforeCreate(t *testing.T) {
 	}
 	backend.mu.Unlock()
 	createCalls := 0
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" {
 			createCalls++
 		}
@@ -970,7 +971,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "tracked.txt", []byte("tracked payload"))
-	tracked, err := hub.UploadFile("project-purge", "tracked.txt", inputA)
+	tracked, err := hub.UploadFileContext(context.Background(), "project-purge", "tracked.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload tracked file: %v", err)
 	}
@@ -980,7 +981,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	}
 
 	inputB := writeTempFile(t, t.TempDir(), "orphan.txt", []byte("orphan payload"))
-	orphan, err := hub.UploadFile("project-purge", "orphan.txt", inputB)
+	orphan, err := hub.UploadFileContext(context.Background(), "project-purge", "orphan.txt", inputB)
 	if err != nil {
 		t.Fatalf("upload orphan file: %v", err)
 	}
@@ -1032,7 +1033,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	}
 	// Find a revision that still contained orphan.txt (whose assets the
 	// purge destroyed) to prove rollback after purge fails destructively.
-	revisions, err := hub.ListMetadataRevisions("project-purge")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-purge")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -1050,7 +1051,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	if orphanRevision == "" {
 		t.Fatal("expected a metadata revision containing orphan.txt")
 	}
-	if err := hub.RollbackMetadata("project-purge", orphanRevision); err == nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "project-purge", orphanRevision); err == nil {
 		t.Fatal("expected rollback after purge to fail because purge is destructive")
 	}
 }
@@ -1060,7 +1061,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "missing-data.txt", []byte("payload"))
-	fileMeta, err := hub.UploadFile("project-missing-data", "missing-data.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-missing-data", "missing-data.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1081,7 +1082,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	firstChunk := repoMeta.Chunks()[fileMeta.Chunks[0]]
 	backend.removeAsset(t, "project-missing-data", firstChunk.AssetID)
 	// Get the oldest metadata revision to test rollback failure when data is missing
-	revisions, err := hub.ListMetadataRevisions("project-missing-data")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-missing-data")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -1089,7 +1090,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatal("expecte at least one metadata revision")
 	}
 	revision := revisions[len(revisions)-1] // Last in list is oldest
-	if err := hub.RollbackMetadata("project-missing-data", revision.CommitSHA); err == nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "project-missing-data", revision.CommitSHA); err == nil {
 		t.Fatal("expected rollback to fail when referenced asset is missing")
 	}
 }
@@ -1099,7 +1100,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	inputA := writeTempFile(t, t.TempDir(), "first.txt", []byte("alpha"))
-	fileMeta, err := hub.UploadFile("project-capacity", "capacity.txt", inputA)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-capacity", "capacity.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1108,7 +1109,7 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 	backend.addAssetsToRelease(t, "project-capacity", firstRelease, 999)
 	hub.invalidateReleaseCache("project-capacity")
 	inputB := writeTempFile(t, t.TempDir(), "second.txt", []byte("beta"))
-	replaced, err := hub.ReplaceFile("project-capacity", "capacity.txt", inputB)
+	replaced, err := hub.ReplaceFileContext(context.Background(), "project-capacity", "capacity.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
@@ -1123,7 +1124,7 @@ func TestUploadMissingFile(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
-	_, err := hub.UploadFile("project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
+	_, err := hub.UploadFileContext(context.Background(), "project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
 	if err == nil || !strings.Contains(err.Error(), "stat input file") {
 		t.Fatalf("expected stat error, got %v", err)
 	}
@@ -1134,7 +1135,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "empty-upload.txt", nil)
-	meta, err := hub.UploadFile("project-empty-upload-file", "empty-upload.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-empty-upload-file", "empty-upload.txt", input)
 	if err != nil {
 		t.Fatalf("upload empty file: %v", err)
 	}
@@ -1142,7 +1143,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 		t.Fatalf("unexpected empty upload metadata: %+v", meta)
 	}
 	output := filepath.Join(t.TempDir(), "empty-upload.out")
-	if err := hub.DownloadFile("project-empty-upload-file", "empty-upload.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-empty-upload-file", "empty-upload.txt", output); err != nil {
 		t.Fatalf("download empty file: %v", err)
 	}
 	assertFileContent(t, output, []byte{})
@@ -1152,7 +1153,7 @@ func TestDownloadMissingFile(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
-	err := hub.DownloadFile("project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
+	err := hub.DownloadFileContext(context.Background(), "project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
 	if err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found error, got %v", err)
 	}
@@ -1163,7 +1164,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	backend := newMockGitHub(t)
 	uploader := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "offsets.bin", []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
-	meta, err := uploader.UploadFile("project-offsets", "offsets.bin", input)
+	meta, err := uploader.UploadFileContext(context.Background(), "project-offsets", "offsets.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1175,7 +1176,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	}
 	downloader := backend.newClient(t, singleChunkTestConfig())
 	output := filepath.Join(t.TempDir(), "offsets.out")
-	if err := downloader.DownloadFile("project-offsets", "offsets.bin", output); err != nil {
+	if err := downloader.DownloadFileContext(context.Background(), "project-offsets", "offsets.bin", output); err != nil {
 		t.Fatalf("download file with different chunk size config: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
@@ -1186,17 +1187,17 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "partial.txt", []byte("abcdefghij"))
-	if _, err := hub.UploadFile("project-read-partial", "partial.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-read-partial", "partial.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	data, err := hub.ReadFileAt("project-read-partial", "partial.txt", 7, 10)
+	data, err := hub.ReadFileAtContext(context.Background(), "project-read-partial", "partial.txt", 7, 10)
 	if err != nil {
 		t.Fatalf("partial read: %v", err)
 	}
 	if string(data) != "hij" {
 		t.Fatalf("unexpected partial range: %q", data)
 	}
-	endData, err := hub.ReadFileAt("project-read-partial", "partial.txt", 10, 1)
+	endData, err := hub.ReadFileAtContext(context.Background(), "project-read-partial", "partial.txt", 10, 1)
 	if err != nil {
 		t.Fatalf("read at end should be empty success, got %v", err)
 	}
@@ -1210,7 +1211,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry-download.bin", []byte("download retry payload"))
-	fileMeta, err := hub.UploadFile("project-download-retry", "retry-download.bin", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-download-retry", "retry-download.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1238,7 +1239,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		return true
 	})
 	output := filepath.Join(t.TempDir(), "retry-download.out")
-	if err := hub.DownloadFile("project-download-retry", "retry-download.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-download-retry", "retry-download.bin", output); err != nil {
 		t.Fatalf("download with retry: %v", err)
 	}
 	if failures.Load() != 1 {
@@ -1262,7 +1263,7 @@ func TestRetryOnTransientServerError(t *testing.T) {
 	})
 	hub := backend.newClient(t, retryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry.txt", []byte("retry payload"))
-	if _, err := hub.UploadFile("project-retry", "retry.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-retry", "retry.txt", input); err != nil {
 		t.Fatalf("expected retried idempotent request to succeed, got %v", err)
 	}
 	if failures.Load() != 1 {
@@ -1294,7 +1295,7 @@ func TestNonIdempotentPostsDoNotRetry(t *testing.T) {
 	})
 	hub := backend.newClient(t, retryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "noretry.txt", []byte("no retry payload"))
-	if _, err := hub.UploadFile("project-noretry", "noretry.txt", input); err == nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-noretry", "noretry.txt", input); err == nil {
 		t.Fatal("expected non-idempotent POST failure to surface")
 	}
 	if repoAttempts.Load() != 1 || uploadAttempts.Load() != 0 {
@@ -1326,7 +1327,7 @@ func TestConstructorDefersAuthentication(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Fatalf("expected no auth requests during construction, got %d", hits.Load())
 	}
-	if _, err := hub.ListFiles("project-auth-lazy"); err == nil || !strings.Contains(err.Error(), "resolve authenticated user") {
+	if _, err := hub.ListFilesContext(context.Background(), "project-auth-lazy"); err == nil || !strings.Contains(err.Error(), "resolve authenticated user") {
 		t.Fatalf("expected deferred auth failure, got %v", err)
 	}
 	if hits.Load() != 1 {
@@ -1357,7 +1358,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	hub := backend.newClient(t, smallRetryTestConfig())
 	payload := bytes.Repeat([]byte("r"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", payload)
-	meta, err := hub.UploadFile("project-upload-retry", "upload-retry.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "project-upload-retry", "upload-retry.txt", input)
 	if err != nil {
 		t.Fatalf("transient upload failure must be retried: %v", err)
 	}
@@ -1382,7 +1383,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	hub2 := persistent.newClient(t, smallRetryTestConfig())
 	payload2 := bytes.Repeat([]byte("d"), int(testSmallChunkSize))
 	input2 := writeTempFile(t, t.TempDir(), "upload-broken.txt", payload2)
-	if _, err := hub2.UploadFile("project-upload-doomed", "upload-broken.txt", input2); err == nil {
+	if _, err := hub2.UploadFileContext(context.Background(), "project-upload-doomed", "upload-broken.txt", input2); err == nil {
 		t.Fatal("persistent upload failure must surface")
 	}
 	// initial attempt + MaxRetries(2) retries
@@ -1418,7 +1419,7 @@ func TestRateLimitAwareRetry(t *testing.T) {
 	if hub.Owner() != "" {
 		t.Fatalf("expected lazy owner resolution, got %s", hub.Owner())
 	}
-	if _, err := hub.ListFiles("project-rate-limit-miss"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
+	if _, err := hub.ListFilesContext(context.Background(), "project-rate-limit-miss"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found error after owner resolution, got %v", err)
 	}
 	if hub.Owner() != backend.owner {
@@ -1444,12 +1445,15 @@ func TestReadAPIsReturnProjectNotFound(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{name: "list files", fn: func() error { _, err := hub.ListFiles("missing-project"); return err }},
-		{name: "list releases", fn: func() error { _, err := hub.ListReleases("missing-project"); return err }},
-		{name: "list revisions", fn: func() error { _, err := hub.ListMetadataRevisions("missing-project"); return err }},
-		{name: "read dir", fn: func() error { _, err := hub.ReadDir("missing-project", ""); return err }},
-		{name: "stat path", fn: func() error { _, err := hub.StatPath("missing-project", ""); return err }},
-		{name: "rollback", fn: func() error { return hub.RollbackMetadata("missing-project", "commit-1") }},
+		{name: "list files", fn: func() error { _, err := hub.ListFilesContext(context.Background(), "missing-project"); return err }},
+		{name: "list releases", fn: func() error { _, err := hub.ListReleasesContext(context.Background(), "missing-project"); return err }},
+		{name: "list revisions", fn: func() error {
+			_, err := hub.ListMetadataRevisionsContext(context.Background(), "missing-project")
+			return err
+		}},
+		{name: "read dir", fn: func() error { _, err := hub.ReadDirContext(context.Background(), "missing-project", ""); return err }},
+		{name: "stat path", fn: func() error { _, err := hub.StatPathContext(context.Background(), "missing-project", ""); return err }},
+		{name: "rollback", fn: func() error { return hub.RollbackMetadataContext(context.Background(), "missing-project", "commit-1") }},
 	}
 	for _, check := range checks {
 		if err := check.fn(); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
@@ -1463,21 +1467,21 @@ func TestListFilesUsesMetadataCache(t *testing.T) {
 	backend := newMockGitHub(t)
 	seed := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cache.txt", []byte("cache payload"))
-	if _, err := seed.UploadFile("project-cache", "cache.txt", input); err != nil {
+	if _, err := seed.UploadFileContext(context.Background(), "project-cache", "cache.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var metadataGets atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/index.json") {
 			metadataGets.Add(1)
 		}
 		return false
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
-	if _, err := hub.ListFiles("project-cache"); err != nil {
+	if _, err := hub.ListFilesContext(context.Background(), "project-cache"); err != nil {
 		t.Fatalf("first list files: %v", err)
 	}
-	if _, err := hub.ListFiles("project-cache"); err != nil {
+	if _, err := hub.ListFilesContext(context.Background(), "project-cache"); err != nil {
 		t.Fatalf("second list files: %v", err)
 	}
 	if metadataGets.Load() != 1 {
@@ -1490,17 +1494,17 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cache-mutate.txt", []byte("cache mutate payload"))
-	if _, err := hub.UploadFile("project-cache-mutate", "cache-mutate.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-cache-mutate", "cache-mutate.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	var metadataGets atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/index.json") {
 			metadataGets.Add(1)
 		}
 		return false
 	})
-	if _, err := hub.ListFiles("project-cache-mutate"); err != nil {
+	if _, err := hub.ListFilesContext(context.Background(), "project-cache-mutate"); err != nil {
 		t.Fatalf("list files from warm cache: %v", err)
 	}
 	if metadataGets.Load() != 0 {
@@ -1510,7 +1514,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 		t.Fatalf("delete file: %v", err)
 	}
 	beforeListAfterDelete := metadataGets.Load()
-	files, err := hub.ListFiles("project-cache-mutate")
+	files, err := hub.ListFilesContext(context.Background(), "project-cache-mutate")
 	if err != nil {
 		t.Fatalf("list files after delete: %v", err)
 	}
@@ -1524,7 +1528,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 		t.Fatalf("delete project: %v", err)
 	}
 	beforePostDeleteList := metadataGets.Load()
-	if _, err := hub.ListFiles("project-cache-mutate"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
+	if _, err := hub.ListFilesContext(context.Background(), "project-cache-mutate"); err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
 		t.Fatalf("expected project-not-found after delete project, got %v", err)
 	}
 	if metadataGets.Load() <= beforePostDeleteList {
@@ -1537,7 +1541,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "range-read.txt", []byte("abcdefghijklmnopqrstuvwxyz"))
-	fileMeta, err := hub.UploadFile("project-range-read", "range-read.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-range-read", "range-read.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1564,7 +1568,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		_ = rw.Flush()
 		return true
 	})
-	data, err := hub.ReadFileAt("project-range-read", "range-read.txt", 2, 6)
+	data, err := hub.ReadFileAtContext(context.Background(), "project-range-read", "range-read.txt", 2, 6)
 	if err != nil {
 		t.Fatalf("read file at with retry: %v", err)
 	}
@@ -1581,7 +1585,7 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch-retry.txt", []byte("abcdefghij"))
-	fileMeta, err := hub.UploadFile("project-patch-range-retry", "patch-retry.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -1608,11 +1612,11 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		_ = rw.Flush()
 		return true
 	})
-	if _, err := hub.PatchFile("project-patch-range-retry", "patch-retry.txt", 2, 3, []byte("XYZ")); err != nil {
+	if _, err := hub.PatchFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", 2, 3, []byte("XYZ")); err != nil {
 		t.Fatalf("patch file with retry: %v", err)
 	}
 	output := filepath.Join(t.TempDir(), "patch-retry.out")
-	if err := hub.DownloadFile("project-patch-range-retry", "patch-retry.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abXYZfghij"))
@@ -1679,7 +1683,7 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	var failed atomic.Bool
-	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onContentsPUT(t, func(w http.ResponseWriter, _ *http.Request) bool {
 		if !failed.Load() {
 			failed.Store(true)
 			w.WriteHeader(http.StatusBadGateway)
@@ -1690,13 +1694,13 @@ func TestTransientMetadataCommitFailureRetriesWithRetainedState(t *testing.T) {
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry.txt", []byte("retry payload"))
-	if _, err := hub.UploadFile("project-retry", "retry.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-retry", "retry.txt", input); err != nil {
 		t.Fatalf("upload should succeed (metadata commit is async): %v", err)
 	}
 
 	deadline := time.Now().Add(time.Second)
 	for {
-		files, err := hub.ListFiles("project-retry")
+		files, err := hub.ListFilesContext(context.Background(), "project-retry")
 		if err != nil {
 			t.Fatalf("list files: %v", err)
 		}
@@ -1719,7 +1723,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	backend := newMockGitHub(t)
 	var conflicts atomic.Int32
 	var commitCount atomic.Int32
-	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onContentsPUT(t, func(w http.ResponseWriter, _ *http.Request) bool {
 		commitCount.Add(1)
 		if commitCount.Load() == 2 && conflicts.Load() == 0 {
 			conflicts.Add(1)
@@ -1737,7 +1741,7 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 
 	// First upload to create initial metadata
 	input1 := writeTempFile(t, t.TempDir(), "initial.txt", []byte("initial"))
-	if _, err := hub.UploadFile("project-conflict", "initial.txt", input1); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-conflict", "initial.txt", input1); err != nil {
 		t.Fatalf("upload initial file: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -1749,13 +1753,13 @@ func TestUploadRetriesMetadataConflictByReloading(t *testing.T) {
 	// retry lands it. The observable contract is one conflict plus a
 	// converged two-file state (the mutation SURVIVES the conflict now).
 	input2 := writeTempFile(t, t.TempDir(), "conflict.txt", []byte("conflict payload"))
-	if _, err := hub.UploadFile("project-conflict", "conflict.txt", input2); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-conflict", "conflict.txt", input2); err != nil {
 		t.Fatalf("upload should succeed (commit is async): %v", err)
 	}
 	stateDeadline := time.Now().Add(time.Second)
 	for {
 		conflictsSeen := conflicts.Load() >= 1
-		files, err := hub.ListFiles("project-conflict")
+		files, err := hub.ListFilesContext(context.Background(), "project-conflict")
 		if err != nil {
 			t.Fatalf("list files: %v", err)
 		}
@@ -1789,7 +1793,7 @@ func TestMetadataCommitRetriesTransientFailure(t *testing.T) {
 	cfg.MaxRetryDelay = 5 * time.Millisecond
 	hub := backend.newClient(t, cfg)
 	input := writeTempFile(t, t.TempDir(), "meta-retry.txt", []byte("meta retry payload"))
-	if _, err := hub.UploadFile("project-meta-retry", "meta-retry.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-meta-retry", "meta-retry.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	// With batching, commit happens later. Poll (bounded) for the commit,
@@ -1807,7 +1811,7 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	assetStarted := make(chan struct{}, 1)
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			select {
 			case assetStarted <- struct{}{}:
@@ -1820,7 +1824,7 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cancel.txt", []byte("cancel payload"))
-	if _, err := hub.UploadFile("project-cancel", "cancel.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-cancel", "cancel.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1844,7 +1848,7 @@ func TestMetadataBatchesAndFlushes(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		name := fmt.Sprintf("file-%d.txt", i)
 		input := writeTempFile(t, t.TempDir(), name, []byte(name))
-		if _, err := hub.UploadFile("project-batching", name, input); err != nil {
+		if _, err := hub.UploadFileContext(context.Background(), "project-batching", name, input); err != nil {
 			t.Fatalf("upload %s: %v", name, err)
 		}
 	}
@@ -1855,7 +1859,7 @@ func TestMetadataBatchesAndFlushes(t *testing.T) {
 	}
 
 	// Verify all 3 files are in the metadata
-	files, err := hub.ListFiles("project-batching")
+	files, err := hub.ListFilesContext(context.Background(), "project-batching")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -1869,7 +1873,7 @@ func TestListReleasesPaginates(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFile("project-release-pages", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-release-pages", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	for i := 0; i < 105; i++ {
@@ -1889,7 +1893,7 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "invalid.bin", []byte("invalid metadata payload"))
-	if _, err := hub.UploadFile("project-invalid-metadata", "invalid.bin", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-invalid-metadata", "invalid.bin", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -1907,7 +1911,7 @@ func TestRejectsInvalidMetadataSnapshots(t *testing.T) {
 	}
 	backend.setMetadata(t, "project-invalid-metadata", meta)
 	hub = backend.newClient(t, smallTransferTestConfig())
-	if _, err := hub.ListFiles("project-invalid-metadata"); err == nil {
+	if _, err := hub.ListFilesContext(context.Background(), "project-invalid-metadata"); err == nil {
 		t.Fatal("expected invalid metadata to be rejected")
 	}
 }
@@ -1917,7 +1921,7 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cleanup.txt", []byte("cleanup payload"))
-	if _, err := hub.UploadFile("project-cleanup", "cleanup.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-cleanup", "cleanup.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -2282,14 +2286,14 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 }
 
 func TestFUSEOptionalMountLifecycle(t *testing.T) {
-	requireEnvFlag(t, "STORHUB_RUN_FUSE")
+	test.RequireFlag(t, "STORHUB_RUN_FUSE")
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skip("/dev/fuse unavailable")
 	}
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "mount.txt", []byte("mounted"))
-	if _, err := hub.UploadFile("project-fuse-mount", "mount.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-fuse-mount", "mount.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	fsys, err := hub.NewFUSE("project-fuse-mount", fusefs.DefaultOptions())
@@ -2655,7 +2659,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2713,7 +2717,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2776,7 +2780,7 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	var uploadCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -2974,7 +2978,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	var uploadCalls atomic.Int32
 	var metadataWrites atomic.Int32
 	var assetDownloadCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			uploadCalls.Add(1)
 		}
@@ -4086,8 +4090,8 @@ func (m *mockGitHub) handleListReleaseAssets(w http.ResponseWriter, r *http.Requ
 // embedCap is set; the dedicated list-assets endpoint always serves truth.
 func (m *mockGitHub) embeddedAssetsLocked(repo *mockRepo, tag string) []map[string]any {
 	assets := m.releaseAssetsLocked(repo, tag)
-	if cap := m.faults.embedCap; cap > 0 && len(assets) > cap {
-		assets = assets[:cap]
+	if limit := m.faults.embedCap; limit > 0 && len(assets) > limit {
+		assets = assets[:limit]
 	}
 	return assets
 }
@@ -4644,7 +4648,7 @@ func assertFileContent(t *testing.T, path string, expected []byte) {
 
 func mustMetadataRevision(t *testing.T, hub *StorHub, project, message string) MetadataRevision {
 	t.Helper()
-	revisions, err := hub.ListMetadataRevisions(project)
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), project)
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -4665,7 +4669,7 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "spill.txt", []byte("abcdefghijklmno"))
-	fileMeta, err := hub.UploadFile("project-purge-spill", "spill.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "project-purge-spill", "spill.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -4674,7 +4678,7 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 	backend.addAssetsToRelease(t, "project-purge-spill", firstRelease, 999)
 	hub.invalidateReleaseCache("project-purge-spill")
 
-	patched, err := hub.PatchFile("project-purge-spill", "spill.txt", 4, 4, []byte("ZZZZ"))
+	patched, err := hub.PatchFileContext(context.Background(), "project-purge-spill", "spill.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -4708,7 +4712,7 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatalf("spill release %s was deleted by purge", spillTag)
 	}
 	output := filepath.Join(t.TempDir(), "spill.out")
-	if err := hub.DownloadFile("project-purge-spill", "spill.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-purge-spill", "spill.txt", output); err != nil {
 		t.Fatalf("download after purge: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
@@ -4721,7 +4725,7 @@ func TestDeleteFileWorksOnColdCache(t *testing.T) {
 	backend := newMockGitHub(t)
 	seedHub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cold.txt", []byte("cold payload"))
-	if _, err := seedHub.UploadFile("project-cold-delete", "cold.txt", input); err != nil {
+	if _, err := seedHub.UploadFileContext(context.Background(), "project-cold-delete", "cold.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if err := seedHub.FlushMetadata(context.Background()); err != nil {
@@ -4749,11 +4753,11 @@ func TestPruneAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputV1 := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version one payload"))
-	if _, err := hub.UploadFile("project-prune", "file.txt", inputV1); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-prune", "file.txt", inputV1); err != nil {
 		t.Fatalf("upload v1: %v", err)
 	}
 	inputV2 := writeTempFile(t, t.TempDir(), "v2.txt", []byte("completely different version two"))
-	if _, err := hub.ReplaceFile("project-prune", "file.txt", inputV2); err != nil {
+	if _, err := hub.ReplaceFileContext(context.Background(), "project-prune", "file.txt", inputV2); err != nil {
 		t.Fatalf("replace with v2: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -4787,7 +4791,7 @@ func TestPruneAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "out.txt")
-	if err := hub.DownloadFile("project-prune", "file.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-prune", "file.txt", output); err != nil {
 		t.Fatalf("download after prune: %v", err)
 	}
 	assertFileContent(t, output, []byte("completely different version two"))
@@ -4942,7 +4946,7 @@ func TestExpectedRevisionCAS(t *testing.T) {
 		t.Fatal("remote revision should have advanced")
 	}
 	observer := backend.newClient(t, cfg)
-	files, _ := observer.ListFiles(project)
+	files, _ := observer.ListFilesContext(context.Background(), project)
 	t.Logf("remote files after competing write: %v", files)
 	if _, err := hub.StatPathContext(ctx, project, "docs/cas.txt"); err != nil {
 		t.Fatalf("precondition debug: cas.txt visibility: %v", err)
@@ -5327,7 +5331,7 @@ func TestMockCDNExpiryForcesReResolution(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	var apiAssetHits atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/releases/assets/") {
 			apiAssetHits.Add(1)
 		}

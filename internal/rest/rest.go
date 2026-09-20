@@ -43,6 +43,8 @@ const (
 	nobodyGID = uint32(65534)
 )
 
+// Options tunes the HTTP surface: routing base, streaming sizes, share
+// lifetimes, signing keys, and auth mode.
 type Options struct {
 	BasePath string
 	// DefaultProject pins the console to a single project when the server
@@ -61,21 +63,33 @@ type Options struct {
 	AllowAnonymous bool
 }
 
+// Re-exported model and filesystem-view types for handler signatures.
 type (
-	FileMetadata     = metadata.FileMeta
+	// FileMetadata is a stored file entry with chunks and POSIX metadata.
+	FileMetadata = metadata.FileMeta
+	// MetadataRevision identifies one committed metadata state.
 	MetadataRevision = metadata.MetadataRevision
-	EntryInfo        = shfs.EntryInfo
-	DirEntry         = shfs.DirEntry
-	FSStats          = shfs.FSStats
-	NodeKind         = metadata.NodeKind
+	// EntryInfo is the stat-style view of a path.
+	EntryInfo = shfs.EntryInfo
+	// DirEntry is one child name plus kind in a directory listing.
+	DirEntry = shfs.DirEntry
+	// FSStats aggregates project-wide counts.
+	FSStats = shfs.FSStats
+	// NodeKind discriminates file system node types.
+	NodeKind = metadata.NodeKind
 )
 
+// Re-exported node-kind constants for response shaping.
 const (
-	NodeKindFile    = metadata.NodeKindFile
+	// NodeKindFile is the regular-file node kind.
+	NodeKindFile = metadata.NodeKindFile
+	// NodeKindSymlink is the symlink node kind.
 	NodeKindSymlink = metadata.NodeKindSymlink
 )
 
+// Shared sentinel: no such project path.
 var (
+	// ErrNotFound reports a missing project path.
 	ErrNotFound = shfs.ErrNotFound
 )
 
@@ -159,19 +173,20 @@ const clientCtxKey contextKey = "rest-client"
 
 // clientFor resolves the per-request Client placed in the context by the
 // auth middleware. A foreign value under clientCtxKey is a middleware bug:
-// fail CLOSED (panic -> recoverPanics -> logged 500) rather than silently
-// falling back to the raw unrestricted client, which would turn every
-// project route into an unauthenticated pass-through.
-func (h *restHandler) clientFor(r *http.Request) Client {
+// fail CLOSED with a 500-class error (logged, answering generic
+// internal_error through writeMappedError) rather than silently falling
+// back to the raw unrestricted client, which would turn every project
+// route into an unauthenticated pass-through.
+func (h *restHandler) clientFor(r *http.Request) (Client, error) {
 	if value := r.Context().Value(clientCtxKey); value != nil {
 		client, ok := value.(Client)
 		if !ok {
 			logging.Error(h.logger, "rest: context value under clientCtxKey does not implement Client; failing closed", "type", fmt.Sprintf("%T", value))
-			panic("rest: context client does not implement Client")
+			return nil, &restStatusError{status: http.StatusInternalServerError, message: "rest: context client does not implement Client"}
 		}
-		return client
+		return client, nil
 	}
-	return h.client
+	return h.client, nil
 }
 
 // HTTP status/byte capture lives in internal/logging (HTTPRecorder): the
@@ -249,6 +264,7 @@ func (h *restHandler) isRevoked(id string) bool {
 	return true
 }
 
+// DefaultOptions returns Options with production streaming and share defaults.
 func DefaultOptions() Options {
 	return Options{
 		BasePath:         defaultRESTBasePath,
@@ -258,6 +274,7 @@ func DefaultOptions() Options {
 	}
 }
 
+// NewHandler builds the chi router over hub with opts; a nil hub is an error.
 func NewHandler(hub *storage.StorHub, opts Options) (http.Handler, error) {
 	if hub == nil {
 		return nil, errors.New("storhub: REST handler requires a non-nil hub")
@@ -631,7 +648,7 @@ func (h *restHandler) writeUnauthorized(w http.ResponseWriter, auth *restAuthent
 	h.writeError(w, http.StatusUnauthorized, "unauthorized", message)
 }
 
-func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
+func (h *restHandler) serveConfigJS(w http.ResponseWriter, _ *http.Request) {
 	payload, err := json.Marshal(map[string]any{
 		"basePath":    h.opts.BasePath,
 		"authEnabled": h.opts.Auth != nil,
@@ -648,7 +665,7 @@ func (h *restHandler) serveConfigJS(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIInfo answers GET <basePath>: service identity for the console.
 // A handle* route (JSON document), not a serve* byte stream.
-func (h *restHandler) handleAPIInfo(w http.ResponseWriter, r *http.Request) {
+func (h *restHandler) handleAPIInfo(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"service":   "storhub-rest",
 		"version":   "v1",
@@ -772,7 +789,12 @@ func (h *restHandler) maybeDrain(w http.ResponseWriter, r *http.Request, project
 	if !want {
 		return true
 	}
-	if err := h.clientFor(r).DrainProjectContext(r.Context(), project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	if err := client.DrainProjectContext(r.Context(), project); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return false
 	}

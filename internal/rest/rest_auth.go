@@ -37,6 +37,7 @@ var dummyPasswordHash = sync.OnceValue(func() string {
 	return "bcrypt$" + string(hash)
 })
 
+// AuthOptions configures REST authentication: realm, users, and tokens.
 type AuthOptions struct {
 	Realm           string
 	Users           []User
@@ -45,6 +46,7 @@ type AuthOptions struct {
 	Now             func() time.Time
 }
 
+// User is one REST principal with credentials and identity mapping.
 type User struct {
 	Username     string   `json:"username"`
 	PasswordHash string   `json:"password_hash"`
@@ -107,6 +109,7 @@ type restLoginResponse struct {
 	Principal restPrincipal `json:"principal"`
 }
 
+// HashPassword hashes a password for storage in a User record.
 func HashPassword(password string) (string, error) {
 	if strings.TrimSpace(password) == "" {
 		return "", errors.New("password is required")

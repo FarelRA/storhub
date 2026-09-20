@@ -53,7 +53,7 @@ func (h *fakeHub) sessionStore() *cliSessionStore {
 	return h.sess
 }
 
-func (h *fakeHub) OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
+func (h *fakeHub) OpenSession(_ context.Context, project, path string, mode storage.OpenMode, _ ...storage.SessionOption) (string, error) {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -63,7 +63,7 @@ func (h *fakeHub) OpenSession(ctx context.Context, project, path string, mode st
 	return id, nil
 }
 
-func (h *fakeHub) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
+func (h *fakeHub) ReadSession(_ context.Context, handleID string, offset, length int64) ([]byte, error) {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -81,7 +81,7 @@ func (h *fakeHub) ReadSession(ctx context.Context, handleID string, offset, leng
 	return append([]byte(nil), sess.data[offset:end]...), nil
 }
 
-func (h *fakeHub) WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error) {
+func (h *fakeHub) WriteSession(_ context.Context, handleID string, offset int64, data []byte) (int, error) {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -105,7 +105,7 @@ func (h *fakeHub) WriteSession(ctx context.Context, handleID string, offset int6
 	return len(data), nil
 }
 
-func (h *fakeHub) TruncateSession(ctx context.Context, handleID string, size int64) error {
+func (h *fakeHub) TruncateSession(_ context.Context, handleID string, size int64) error {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -122,7 +122,7 @@ func (h *fakeHub) TruncateSession(ctx context.Context, handleID string, size int
 	return nil
 }
 
-func (h *fakeHub) StatSession(ctx context.Context, handleID string) (storage.SessionStat, error) {
+func (h *fakeHub) StatSession(_ context.Context, handleID string) (storage.SessionStat, error) {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -139,7 +139,7 @@ func (h *fakeHub) StatSession(ctx context.Context, handleID string) (storage.Ses
 	}, nil
 }
 
-func (h *fakeHub) SyncSession(ctx context.Context, handleID string) error {
+func (h *fakeHub) SyncSession(_ context.Context, handleID string) error {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -154,7 +154,7 @@ func (h *fakeHub) SyncSession(ctx context.Context, handleID string) error {
 	return nil
 }
 
-func (h *fakeHub) LinkSession(ctx context.Context, handleID, path string) error {
+func (h *fakeHub) LinkSession(_ context.Context, handleID, path string) error {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -170,7 +170,7 @@ func (h *fakeHub) LinkSession(ctx context.Context, handleID, path string) error 
 	return nil
 }
 
-func (h *fakeHub) RelinkSession(ctx context.Context, handleID, path string) error {
+func (h *fakeHub) RelinkSession(_ context.Context, handleID, path string) error {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -183,7 +183,7 @@ func (h *fakeHub) RelinkSession(ctx context.Context, handleID, path string) erro
 	return nil
 }
 
-func (h *fakeHub) CloseSession(ctx context.Context, handleID string) error {
+func (h *fakeHub) CloseSession(_ context.Context, handleID string) error {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -262,8 +262,7 @@ func (h *pcFakeHub) commitPCSessionLocked(s *pcSession, target string) {
 	f.atime = f.mtime
 }
 
-func (h *pcFakeHub) OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
-	_ = ctx
+func (h *pcFakeHub) OpenSession(_ context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
 	_ = project
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -320,8 +319,7 @@ func (h *pcFakeHub) livePCSessionLocked(id string) (*pcSession, error) {
 	return s, nil
 }
 
-func (h *pcFakeHub) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
-	_ = ctx
+func (h *pcFakeHub) ReadSession(_ context.Context, handleID string, offset, length int64) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -341,8 +339,7 @@ func (h *pcFakeHub) ReadSession(ctx context.Context, handleID string, offset, le
 	return append([]byte(nil), s.data[offset:end]...), nil
 }
 
-func (h *pcFakeHub) WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error) {
-	_ = ctx
+func (h *pcFakeHub) WriteSession(_ context.Context, handleID string, offset int64, data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -374,8 +371,7 @@ func (h *pcFakeHub) WriteSession(ctx context.Context, handleID string, offset in
 	return len(data), nil
 }
 
-func (h *pcFakeHub) TruncateSession(ctx context.Context, handleID string, size int64) error {
-	_ = ctx
+func (h *pcFakeHub) TruncateSession(_ context.Context, handleID string, size int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -397,8 +393,7 @@ func (h *pcFakeHub) TruncateSession(ctx context.Context, handleID string, size i
 	return nil
 }
 
-func (h *pcFakeHub) StatSession(ctx context.Context, handleID string) (storage.SessionStat, error) {
-	_ = ctx
+func (h *pcFakeHub) StatSession(_ context.Context, handleID string) (storage.SessionStat, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -408,8 +403,7 @@ func (h *pcFakeHub) StatSession(ctx context.Context, handleID string) (storage.S
 	return storage.SessionStat{Project: "pc", Path: s.path, Size: int64(len(s.data)), Dirty: s.dirty, Mode: s.mode}, nil
 }
 
-func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
-	_ = ctx
+func (h *pcFakeHub) SyncSession(_ context.Context, handleID string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -437,17 +431,16 @@ func (h *pcFakeHub) SyncSession(ctx context.Context, handleID string) error {
 	}
 	// An inode unlinked after open has nowhere to publish: retain the
 	// staged bytes (fsync equivalent) without publishing.
-	if target := h.resolvePCCommitLocked(s); target == "" {
+	target := h.resolvePCCommitLocked(s)
+	if target == "" {
 		return nil
-	} else {
-		h.commitPCSessionLocked(s, target)
 	}
+	h.commitPCSessionLocked(s, target)
 	s.dirty = false
 	return nil
 }
 
-func (h *pcFakeHub) LinkSession(ctx context.Context, handleID, path string) error {
-	_ = ctx
+func (h *pcFakeHub) LinkSession(_ context.Context, handleID, path string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -481,8 +474,7 @@ func (h *pcFakeHub) LinkSession(ctx context.Context, handleID, path string) erro
 	return nil
 }
 
-func (h *pcFakeHub) RelinkSession(ctx context.Context, handleID, path string) error {
-	_ = ctx
+func (h *pcFakeHub) RelinkSession(_ context.Context, handleID, path string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -513,8 +505,7 @@ func (h *pcFakeHub) RelinkSession(ctx context.Context, handleID, path string) er
 	return nil
 }
 
-func (h *pcFakeHub) CloseSession(ctx context.Context, handleID string) error {
-	_ = ctx
+func (h *pcFakeHub) CloseSession(_ context.Context, handleID string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, err := h.livePCSessionLocked(handleID)
@@ -547,12 +538,12 @@ func (h *pcFakeHub) CloseSession(ctx context.Context, handleID string) error {
 	if s.dirty {
 		// An inode unlinked after open discards with success (POSIX
 		// close); a rename is followed to the surviving name.
-		if target := h.resolvePCCommitLocked(s); target == "" {
+		target := h.resolvePCCommitLocked(s)
+		if target == "" {
 			delete(h.sessions, handleID)
 			return nil
-		} else {
-			h.commitPCSessionLocked(s, target)
 		}
+		h.commitPCSessionLocked(s, target)
 	}
 	delete(h.sessions, handleID)
 	return nil
@@ -575,7 +566,7 @@ func TestCLISessionSequence(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 
@@ -628,7 +619,7 @@ func TestCLISessionSequence(t *testing.T) {
 func TestCLISessionRequiresHandle(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	for _, args := range [][]string{
@@ -668,7 +659,7 @@ func TestCLISessionRelinkRetargetsHandle(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	opened := runSessionCLI(t, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})

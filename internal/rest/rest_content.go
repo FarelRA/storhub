@@ -132,7 +132,12 @@ func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok b
 func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -156,7 +161,12 @@ func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -178,9 +188,9 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if entry.IsDir {
-		err = h.clientFor(r).RmdirContext(r.Context(), project, targetPath, revOpts...)
+		err = client.RmdirContext(r.Context(), project, targetPath, revOpts...)
 	} else {
-		err = h.clientFor(r).DeleteFileContext(r.Context(), project, targetPath, revOpts...)
+		err = client.DeleteFileContext(r.Context(), project, targetPath, revOpts...)
 	}
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -201,7 +211,12 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	// storage cursor to stay consistent across commits, which does not
 	// exist. Clients needing bounded transfers page at a coarser grain
 	// (per-path stat loops) instead.
-	entries, err := h.clientFor(r).ReadDirContext(r.Context(), project, dirPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entries, err := client.ReadDirContext(r.Context(), project, dirPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -224,7 +239,12 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	// User-stored bytes share the API origin with the console: never let a
 	// browser sniff an uploaded file into an executable representation.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, filePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -234,7 +254,7 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entry.IsSymlink {
-		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, filePath)
+		target, readErr := client.ReadlinkContext(r.Context(), project, filePath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return
@@ -288,13 +308,21 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 // streamFileRange streams [start,end) in StreamChunkSize windows. Shared by
 // serveContent and share downloads so the short-read comment lives once.
 func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, project, filePath string, start, end int64) {
+	client, err := h.clientFor(r)
+	if err != nil {
+		// Headers are already on the wire (the caller wrote the status
+		// before streaming), so no error document can follow: log and
+		// truncate like a mid-response read failure.
+		logging.Error(h.logger, "stream aborted before first byte", "project", project, "path", filePath, "err", err)
+		return
+	}
 	sent := int64(0)
 	for offset := start; offset < end; {
 		readLen := h.opts.StreamChunkSize
 		if remaining := end - offset; remaining < readLen {
 			readLen = remaining
 		}
-		chunk, readErr := h.clientFor(r).ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
+		chunk, readErr := client.ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
 			return
@@ -343,9 +371,14 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	// the GitHub client remains the real bound. If the client is gone, the
 	// final response write simply fails silently.
 	uploadCtx := context.WithoutCancel(r.Context())
-	if _, err := h.clientFor(r).ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
-			if cleanupErr := h.clientFor(r).DeleteFileContext(uploadCtx, project, filePath); cleanupErr != nil {
+			if cleanupErr := client.DeleteFileContext(uploadCtx, project, filePath); cleanupErr != nil {
 				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
 			}
 		}
@@ -404,8 +437,13 @@ func (h *restHandler) checkReplacePreconditions(w http.ResponseWriter, r *http.R
 // transfer. It reports whether the file is newly created (for status and
 // failure cleanup). ok=false means the handler already answered.
 func (h *restHandler) createReplacePlaceholder(w http.ResponseWriter, r *http.Request, project, filePath string, entry *shfs.EntryInfo, exists bool) (created, ok bool) {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false, false
+	}
 	if !exists {
-		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
+		if _, err := client.CreateFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return false, false
 		}
@@ -414,11 +452,11 @@ func (h *restHandler) createReplacePlaceholder(w http.ResponseWriter, r *http.Re
 	if entry.IsSymlink {
 		// A symlink is replaced by a regular file, not followed; clear it
 		// first because create refuses existing nodes.
-		if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath); err != nil {
+		if err := client.DeleteFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return false, false
 		}
-		if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
+		if _, err := client.CreateFileContext(r.Context(), project, filePath); err != nil {
 			h.writeMappedError(w, err)
 			return false, false
 		}
@@ -503,7 +541,11 @@ func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) er
 	if err != nil {
 		return err
 	}
-	_, err = h.clientFor(r).PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return err
+	}
+	_, err = client.PatchFileContext(r.Context(), project, filePath, offset, deleteSize, edit, revOpts...)
 	return err
 }
 
@@ -517,7 +559,11 @@ func (h *restHandler) patchOpTruncate(r *http.Request, project, filePath string)
 	if err != nil {
 		return err
 	}
-	_, err = h.clientFor(r).TruncateFileContext(r.Context(), project, filePath, size, revOpts...)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return err
+	}
+	_, err = client.TruncateFileContext(r.Context(), project, filePath, size, revOpts...)
 	return err
 }
 
@@ -531,7 +577,11 @@ func (h *restHandler) enforceFreshPrecondition(r *http.Request, project, targetP
 	if strings.TrimSpace(ifMatch) == "" {
 		return nil
 	}
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return err
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		return err
 	}
@@ -556,7 +606,11 @@ func (h *restHandler) revisionPrecondition(r *http.Request, project string) (opt
 	if ifMatch == "" {
 		return nil, false, nil
 	}
-	rev, err := h.clientFor(r).RevisionContext(r.Context(), project)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return nil, false, err
+	}
+	rev, err := client.RevisionContext(r.Context(), project)
 	if err != nil {
 		return nil, false, err
 	}
@@ -614,7 +668,11 @@ func (h *restHandler) mutationPrecondition(r *http.Request, project, filePath st
 // existing answers 412 (create-only semantics), missing proceeds, and any
 // other stat failure propagates so an unprovable state never applies.
 func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath string) error {
-	if _, err := h.clientFor(r).StatPathContext(r.Context(), project, filePath); err == nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		return err
+	}
+	if _, err := client.StatPathContext(r.Context(), project, filePath); err == nil {
 		return errPreconditionFailed("resource already exists")
 	} else if mappedStatus(err) != http.StatusNotFound {
 		return err
@@ -625,7 +683,12 @@ func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath s
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	names, err := h.clientFor(r).ListXAttrContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	names, err := client.ListXAttrContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -648,7 +711,12 @@ func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	value, err := h.clientFor(r).GetXAttrContext(r.Context(), project, targetPath, name)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	value, err := client.GetXAttrContext(r.Context(), project, targetPath, name)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -684,7 +752,12 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, errPayloadTooLarge("xattr value exceeds the configured limit"))
 		return
 	}
-	if err := h.clientFor(r).SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -707,7 +780,12 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-delete") {
 		return
 	}
-	if err := h.clientFor(r).RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -735,7 +813,12 @@ func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (
 
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	revisions, err := h.clientFor(r).ListMetadataRevisionsContext(r.Context(), project)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	revisions, err := client.ListMetadataRevisionsContext(r.Context(), project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -745,7 +828,12 @@ func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, project, targetPath string, status int) {
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -754,7 +842,11 @@ func (h *restHandler) respondWithNode(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (h *restHandler) lookupOptional(r *http.Request, project, targetPath string) (*shfs.EntryInfo, bool, error) {
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return nil, false, err
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err == nil {
 		return entry, true, nil
 	}
@@ -785,7 +877,11 @@ func (h *restHandler) streamSizedBody(r *http.Request, project, filePath string,
 // streamWriteBody applies an entire write atomically: one WriteFileAt call.
 func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string, body io.Reader, offset int64) error {
 	return h.streamSizedBody(r, project, filePath, body, func(payload []byte, revOpts []shfs.MutateOption) error {
-		_, err := h.clientFor(r).WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOpts...)
+		client, err := h.clientFor(r)
+		if err != nil {
+			return err
+		}
+		_, err = client.WriteFileAtContext(r.Context(), project, filePath, offset, payload, revOpts...)
 		return err
 	})
 }
@@ -793,7 +889,11 @@ func (h *restHandler) streamWriteBody(r *http.Request, project, filePath string,
 // streamAppendBody applies an entire append atomically: one AppendFile call.
 func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string, body io.Reader) error {
 	return h.streamSizedBody(r, project, filePath, body, func(payload []byte, revOpts []shfs.MutateOption) error {
-		_, err := h.clientFor(r).AppendFileContext(r.Context(), project, filePath, payload, revOpts...)
+		client, err := h.clientFor(r)
+		if err != nil {
+			return err
+		}
+		_, err = client.AppendFileContext(r.Context(), project, filePath, payload, revOpts...)
 		return err
 	})
 }
@@ -859,7 +959,11 @@ func (h *restHandler) requireMatch(header, eTag string) error {
 // response header so clients can obtain CAS tokens for later If-Match use.
 // Best effort: a revision fetch failure never fails the read.
 func (h *restHandler) setRevisionHeader(w http.ResponseWriter, r *http.Request, project string) {
-	rev, err := h.clientFor(r).RevisionContext(r.Context(), project)
+	client, err := h.clientFor(r)
+	if err != nil {
+		return
+	}
+	rev, err := client.RevisionContext(r.Context(), project)
 	if err != nil || rev == "" {
 		return
 	}

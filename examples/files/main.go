@@ -1,3 +1,4 @@
+// Command files demonstrates file upload, download, and replace flows.
 package main
 
 import (

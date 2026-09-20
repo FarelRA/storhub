@@ -1,3 +1,4 @@
+// Package storage tests append ordering and replay convergence.
 package storage
 
 import (

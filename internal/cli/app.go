@@ -1,3 +1,6 @@
+// Package cli is the cobra terminal surface: one binary, git-style
+// subcommand groups (project, file verbs, session, mount, serve) with
+// data on stdout, status chatter on stderr, and usage errors as exit 2.
 package cli
 
 import (
@@ -89,10 +92,13 @@ func defaultCliSeams() cliSeams {
 	}
 }
 
+// App is one CLI instance with injected I/O, hub, and seams: two Apps in
+// one process (tests, embedders) never share flag targets or sinks.
 type App struct {
 	stdin   io.Reader
 	stdout  io.Writer
 	stderr  io.Writer
+	warnOut io.Writer
 	rootCmd *cobra.Command
 	hub     hubClient
 	log     logSettings
@@ -107,31 +113,31 @@ type fuseMount interface {
 }
 
 type hubClient interface {
-	UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error)
-	ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error)
-	DownloadFile(project, remotePath, localPath string) error
-	ReadDir(project, dir string) ([]storhub.DirEntry, error)
-	StatPath(project, targetPath string) (*storhub.EntryInfo, error)
-	ReadFileAt(project, filePath string, offset, length int64) ([]byte, error)
-	Mkdir(project, dirPath string) error
-	DeleteFile(project, filePath string) error
-	Rmdir(project, dirPath string) error
-	Rename(project, oldPath, newPath string) error
-	AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error)
-	WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error)
-	PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error)
+	UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error)
+	ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	DownloadFileContext(ctx context.Context, project, remotePath, localPath string) error
+	ReadDirContext(ctx context.Context, project, dir string) ([]storhub.DirEntry, error)
+	StatPathContext(ctx context.Context, project, targetPath string) (*storhub.EntryInfo, error)
+	ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error)
+	MkdirContext(ctx context.Context, project, dirPath string) error
+	DeleteFileContext(ctx context.Context, project, filePath string, opts ...storhub.MutateOption) error
+	RmdirContext(ctx context.Context, project, dirPath string, opts ...storhub.MutateOption) error
+	RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...storhub.MutateOption) error
+	AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
 	// POSIX verbs backing the truncate/chmod/chown/touch/symlink/readlink/
 	// link/sync commands. Signatures mirror *storage.StorHub directly so
 	// storhubClient satisfies them through its embedded hub.
-	CreateFile(project, filePath string) (*storhub.FileMetadata, error)
-	TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error)
-	Chmod(project, targetPath string, mode uint32) error
-	Chown(project, targetPath string, uid, gid uint32) error
-	Chtimes(project, targetPath string, atime, mtime int64) error
-	Symlink(project, target, linkPath string) (*storhub.FileMetadata, error)
-	Readlink(project, linkPath string) (string, error)
-	Link(project, existingPath, newPath string) (*storhub.FileMetadata, error)
-	ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error)
+	CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error)
+	TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...storhub.MutateOption) (*storhub.FileMetadata, error)
+	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
+	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
+	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
+	SymlinkContext(ctx context.Context, project, target, linkPath string) (*storhub.FileMetadata, error)
+	ReadlinkContext(ctx context.Context, project, linkPath string) (string, error)
+	LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error)
+	ListMetadataRevisionsContext(ctx context.Context, project string) ([]storhub.MetadataRevision, error)
 	// The long one-shot maintenance operations take a context so a
 	// Ctrl+C cancels them between units of work instead of killing the
 	// process mid-delete-loop.
@@ -213,10 +219,14 @@ func warnf(format string, args ...any) {
 		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 }
 
-// warnf is the primary warning sink: App.stderr. Package-level warnf above
-// remains only for pre-App constructors without an App handle.
+// warnf is the primary warning sink: App.warnOut (stderr by default,
+// swappable per-App in tests). Package-level warnf above remains only
+// for pre-App constructors without an App handle.
 func (a *App) warnf(format string, args ...any) {
-	out := a.stderr
+	out := a.warnOut
+	if out == nil {
+		out = a.stderr
+	}
 	if out == nil {
 		out = warnSink()
 	}
@@ -283,8 +293,9 @@ func normalizeCLIChunkSize(size int64) int64 {
 	return chunking.NormalizedSize(size)
 }
 
+// New returns an App wired to process stdio with default settings.
 func New() *App {
-	a := &App{stdin: os.Stdin, stdout: io.Writer(os.Stdout), stderr: io.Writer(os.Stderr), log: defaultLogSettings(), seams: defaultCliSeams()}
+	a := &App{stdin: os.Stdin, stdout: io.Writer(os.Stdout), stderr: io.Writer(os.Stderr), warnOut: io.Writer(os.Stderr), log: defaultLogSettings(), seams: defaultCliSeams()}
 	a.buildRootCmd()
 	return a
 }
@@ -342,7 +353,7 @@ Examples:
 	rootCmd.SetVersionTemplate("storhub {{.Version}}\n")
 	// Flag misuse is a usage error: main exits 2 and the shell knows the
 	// difference between "bad command line" and "operation failed".
-	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err}
 	})
 
@@ -383,7 +394,7 @@ Examples:
 	// both must classify as usage errors so main exits 2. Making the root
 	// runnable routes every unmatched first word through the Args
 	// validator, where it is wrapped as a usageError.
-	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
+	rootCmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		return cmd.Help()
 	}
 	rootCmd.Args = usageArgs(func(cmd *cobra.Command, args []string) error {
@@ -798,7 +809,7 @@ func (a *App) runDeleteProject(cmd *cobra.Command, args []string) error {
 	if err := hub.DeleteProject(args[0]); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "deleted project %s\n", args[0])
@@ -848,7 +859,7 @@ func addSyncFlag(cmd *cobra.Command) {
 // the project's journal and surfaces drain errors loudly (a non-zero exit
 // naming the project, via the returned error). Without --sync it is a
 // no-op, so default paths never pay for durability they did not request.
-func (a *App) drainIfSyncRequested(cmd *cobra.Command, ctx context.Context, project string) error {
+func (a *App) drainIfSyncRequested(ctx context.Context, cmd *cobra.Command, project string) error {
 	want, _ := cmd.Flags().GetBool("sync")
 	if !want {
 		return nil
@@ -913,6 +924,8 @@ Examples:
 	return cmd
 }
 
+// Run executes args against the App: usage errors (exit 2 shapes) stay
+// distinguishable from operation failures (exit 1 shapes) via IsUsageError.
 func (a *App) Run(args []string) error {
 	if args == nil {
 		args = []string{}
@@ -1151,7 +1164,7 @@ func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
 	if replace {
 		action = "replaced"
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), project); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, project); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, action, meta)
@@ -1166,7 +1179,7 @@ func (a *App) runDownload(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := hub.DownloadFile(args[0], args[1], args[2]); err != nil {
+	if err := hub.DownloadFileContext(cmd.Context(), args[0], args[1], args[2]); err != nil {
 		return err
 	}
 	// The size in the status line is a nicety; a failed stat of the file we
@@ -1191,7 +1204,7 @@ func (a *App) runList(cmd *cobra.Command, args []string) error {
 	if len(args) == 2 {
 		dir = args[1]
 	}
-	entries, err := hub.ReadDir(args[0], dir)
+	entries, err := hub.ReadDirContext(cmd.Context(), args[0], dir)
 	if err != nil {
 		return err
 	}
@@ -1210,7 +1223,7 @@ func (a *App) runStat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, err := hub.StatPath(args[0], args[1])
+	entry, err := hub.StatPathContext(cmd.Context(), args[0], args[1])
 	if err != nil {
 		return err
 	}
@@ -1226,11 +1239,11 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	entry, err := hub.StatPath(args[0], args[1])
+	entry, err := hub.StatPathContext(cmd.Context(), args[0], args[1])
 	if err != nil {
 		return err
 	}
-	return streamCopyToStdout(hub, a.stdout, args[0], args[1], entry.Size)
+	return streamCopyToStdout(cmd.Context(), hub, a.stdout, args[0], args[1], entry.Size)
 }
 
 // catWindowSize bounds resident memory while cat streams a stored file:
@@ -1238,7 +1251,7 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 // whole object, so multi-gigabyte files cannot OOM the CLI.
 const catWindowSize = 1 << 20
 
-func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size int64) error {
+func streamCopyToStdout(ctx context.Context, hub hubClient, w io.Writer, project, path string, size int64) error {
 	if size <= 0 {
 		return nil
 	}
@@ -1249,7 +1262,7 @@ func streamCopyToStdout(hub hubClient, w io.Writer, project, path string, size i
 		if remaining := size - off; remaining < want {
 			want = remaining
 		}
-		n, err := hub.ReadFileAt(project, path, off, want)
+		n, err := hub.ReadFileAtContext(ctx, project, path, off, want)
 		if err != nil {
 			return err
 		}
@@ -1270,10 +1283,10 @@ func (a *App) runMkdir(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := hub.Mkdir(args[0], args[1]); err != nil {
+	if err := hub.MkdirContext(cmd.Context(), args[0], args[1]); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "created directory %s\n", args[1])
@@ -1289,7 +1302,7 @@ func (a *App) runRemove(cmd *cobra.Command, args []string) error {
 	if err := removeWithFlags(cmd.Context(), hub, args[0], args[1], recursive, cmd); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "removed %s\n", args[1])
@@ -1304,7 +1317,7 @@ func (a *App) runMove(cmd *cobra.Command, args []string) error {
 	if err := renameWithFlags(cmd.Context(), hub, args[0], args[1], args[2], cmd); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "moved %s -> %s\n", args[1], args[2])
@@ -1324,7 +1337,7 @@ func (a *App) runAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "appended", meta)
@@ -1348,7 +1361,7 @@ func (a *App) runWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "written", meta)
@@ -1376,7 +1389,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "patched", meta)
@@ -1388,7 +1401,7 @@ func (a *App) runProjectRevisions(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	revs, err := hub.ListMetadataRevisions(args[0])
+	revs, err := hub.ListMetadataRevisionsContext(cmd.Context(), args[0])
 	if err != nil {
 		return err
 	}
@@ -1420,7 +1433,7 @@ func (a *App) runProjectRollback(cmd *cobra.Command, args []string) error {
 	if err := hub.RollbackMetadataContext(ctx, args[0], args[1]); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
+	if err := a.drainIfSyncRequested(ctx, cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "rolled back %s to %s\n", args[0], args[1])
@@ -1453,7 +1466,7 @@ func (a *App) runProjectPrune(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, ctx, args[0]); err != nil {
+	if err := a.drainIfSyncRequested(ctx, cmd, args[0]); err != nil {
 		return err
 	}
 	verb := "pruned"
@@ -1625,7 +1638,7 @@ const (
 	restJoinTimeout    = 2 * storcfg.PatienceUnit
 )
 
-func (a *App) runServeREST(cmd *cobra.Command, args []string) error {
+func (a *App) runServeREST(cmd *cobra.Command, _ []string) error {
 	token, apiBase := cmdAuth(cmd)
 	listen, _ := cmd.Flags().GetString("listen")
 	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)

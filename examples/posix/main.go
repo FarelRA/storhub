@@ -1,3 +1,4 @@
+// Command posix demonstrates POSIX-style metadata verbs over a project.
 package main
 
 import (

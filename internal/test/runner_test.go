@@ -27,11 +27,11 @@ func TestRunnerBudgetPassthrough(t *testing.T) {
 // the row behind it still runs green.
 func TestRunnerBudgetAbandonsStuck(t *testing.T) {
 	release := make(chan struct{})
-	stuck := Scenario{Name: "stuck", Surfaces: SurfaceAll, Run: func(s Surface) error {
+	stuck := Scenario{Name: "stuck", Surfaces: SurfaceAll, Run: func(_ Surface) error {
 		<-release
 		return nil
 	}}
-	after := Scenario{Name: "after", Surfaces: SurfaceAll, Run: func(s Surface) error { return nil }}
+	after := Scenario{Name: "after", Surfaces: SurfaceAll, Run: func(_ Surface) error { return nil }}
 	results := RunWithBudget(NewMemSurface(), []Scenario{stuck, after}, 50*time.Millisecond)
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2", len(results))
@@ -48,7 +48,7 @@ func TestRunnerBudgetAbandonsStuck(t *testing.T) {
 // TestRunnerBudgetRecoversPanic proves a panicking scenario fails that row
 // without taking down the runner.
 func TestRunnerBudgetRecoversPanic(t *testing.T) {
-	bad := Scenario{Name: "panics", Surfaces: SurfaceAll, Run: func(s Surface) error {
+	bad := Scenario{Name: "panics", Surfaces: SurfaceAll, Run: func(_ Surface) error {
 		panic("boom")
 	}}
 	results := RunWithBudget(NewMemSurface(), []Scenario{bad}, 30*time.Second)

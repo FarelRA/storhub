@@ -100,114 +100,114 @@ func TestRunShowcaseWorkflow(t *testing.T) {
 type fakeShowcaseHub struct{}
 
 func (f *fakeShowcaseHub) Owner() string { return "demo-owner" }
-func (f *fakeShowcaseHub) MkdirContext(ctx context.Context, project, dirPath string) error {
+func (f *fakeShowcaseHub) MkdirContext(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) CreateFileContext(ctx context.Context, project, filePath string) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) CreateFileContext(_ context.Context, _, filePath string) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte{}), nil
 }
-func (f *fakeShowcaseHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) WriteFileAtContext(_ context.Context, _, filePath string, offset int64, data []byte, _ ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, append(make([]byte, offset), data...)), nil
 }
-func (f *fakeShowcaseHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) AppendFileContext(_ context.Context, _, filePath string, data []byte, _ ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, data), nil
 }
-func (f *fakeShowcaseHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
+func (f *fakeShowcaseHub) ReadFileAtContext(_ context.Context, _, _ string, _, _ int64) ([]byte, error) {
 	return []byte("alpha\nbeta\n"), nil
 }
-func (f *fakeShowcaseHub) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
+func (f *fakeShowcaseHub) RenameContext(_ context.Context, _, _, _ string, _ ...shfs.MutateOption) error {
 	return nil
 }
-func (f *fakeShowcaseHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) TruncateFileContext(_ context.Context, _, filePath string, _ int64, _ ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte("alpha")), nil
 }
-func (f *fakeShowcaseHub) UploadFileContext(ctx context.Context, project, remotePath, localPath string) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) UploadFileContext(_ context.Context, _, remotePath, _ string) (*storhub.FileMetadata, error) {
 	return fileMeta(remotePath, []byte("StorHub guide\n")), nil
 }
-func (f *fakeShowcaseHub) ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) ReplaceFileContext(_ context.Context, _, remotePath, _ string, _ ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(remotePath, []byte("StorHub guide v2\n")), nil
 }
-func (f *fakeShowcaseHub) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) PatchFileContext(_ context.Context, _, filePath string, _, _ int64, _ []byte, _ ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	return fileMeta(filePath, []byte("StorHub showcase guide\n")), nil
 }
-func (f *fakeShowcaseHub) DownloadFileContext(ctx context.Context, project, remotePath, localPath string) error {
+func (f *fakeShowcaseHub) DownloadFileContext(_ context.Context, _, _, localPath string) error {
 	return os.WriteFile(localPath, []byte("StorHub showcase guide\n"), 0o644)
 }
-func (f *fakeShowcaseHub) ListFilesContext(ctx context.Context, project string) ([]storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) ListFilesContext(_ context.Context, _ string) ([]storhub.FileMetadata, error) {
 	return []storhub.FileMetadata{*fileMeta("docs/specs/guide.txt", []byte("StorHub showcase guide\n"))}, nil
 }
-func (f *fakeShowcaseHub) ListReleasesContext(ctx context.Context, project string) ([]storhub.ReleaseMetadata, error) {
+func (f *fakeShowcaseHub) ListReleasesContext(_ context.Context, _ string) ([]storhub.ReleaseMetadata, error) {
 	return []storhub.ReleaseMetadata{{AssetCount: 1}}, nil
 }
-func (f *fakeShowcaseHub) ListMetadataRevisionsContext(ctx context.Context, project string) ([]storhub.MetadataRevision, error) {
+func (f *fakeShowcaseHub) ListMetadataRevisionsContext(_ context.Context, _ string) ([]storhub.MetadataRevision, error) {
 	return []storhub.MetadataRevision{{CommitSHA: "deadbeefcafebabe", Message: "new", CommittedAt: 2}, {CommitSHA: "facefeedcafebabe", Message: "old", CommittedAt: 1}}, nil
 }
-func (f *fakeShowcaseHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (f *fakeShowcaseHub) RollbackMetadataContext(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+func (f *fakeShowcaseHub) ChmodContext(_ context.Context, _, _ string, _ uint32) error {
 	return nil
 }
-func (f *fakeShowcaseHub) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+func (f *fakeShowcaseHub) ChownContext(_ context.Context, _, _ string, _, _ uint32) error {
 	return nil
 }
-func (f *fakeShowcaseHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+func (f *fakeShowcaseHub) ChtimesContext(_ context.Context, _, _ string, _, _ int64) error {
 	return nil
 }
-func (f *fakeShowcaseHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
+func (f *fakeShowcaseHub) SetXAttrContext(_ context.Context, _, _, _ string, _ []byte, _ ...shfs.XAttrMode) error {
 	return nil
 }
-func (f *fakeShowcaseHub) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
+func (f *fakeShowcaseHub) GetXAttrContext(_ context.Context, _, _, _ string) ([]byte, error) {
 	return []byte("enabled"), nil
 }
-func (f *fakeShowcaseHub) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
+func (f *fakeShowcaseHub) ListXAttrContext(_ context.Context, _, _ string) ([]string, error) {
 	return []string{"user.demo"}, nil
 }
-func (f *fakeShowcaseHub) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+func (f *fakeShowcaseHub) RemoveXAttrContext(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) SymlinkContext(ctx context.Context, project, target, linkPath string) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) SymlinkContext(_ context.Context, _, target, linkPath string) (*storhub.FileMetadata, error) {
 	meta := fileMeta(linkPath, []byte(target))
 	meta.Symlink = target
 	meta.Mode = 0o777
 	return meta, nil
 }
-func (f *fakeShowcaseHub) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
+func (f *fakeShowcaseHub) ReadlinkContext(_ context.Context, _, _ string) (string, error) {
 	return "docs/specs/guide.txt", nil
 }
-func (f *fakeShowcaseHub) LinkContext(ctx context.Context, project, existingPath, newPath string) (*storhub.FileMetadata, error) {
+func (f *fakeShowcaseHub) LinkContext(_ context.Context, _, _, newPath string) (*storhub.FileMetadata, error) {
 	return fileMeta(newPath, []byte("StorHub showcase guide\n")), nil
 }
-func (f *fakeShowcaseHub) ReadDirContext(ctx context.Context, project, dirPath string) ([]storhub.DirEntry, error) {
+func (f *fakeShowcaseHub) ReadDirContext(_ context.Context, _, _ string) ([]storhub.DirEntry, error) {
 	return []storhub.DirEntry{{Path: "docs/specs/guide.txt", Name: "guide.txt", Size: 23, Inode: 1, Mode: 0o640}, {Path: "docs/specs/guide.link", Name: "guide.link", IsSymlink: true, Inode: 2, Mode: 0o777}}, nil
 }
-func (f *fakeShowcaseHub) StatPathContext(ctx context.Context, project, targetPath string) (*storhub.EntryInfo, error) {
+func (f *fakeShowcaseHub) StatPathContext(_ context.Context, _, targetPath string) (*storhub.EntryInfo, error) {
 	if targetPath == "scratch/rollback-marker.txt" {
 		return nil, fmt.Errorf("file not found")
 	}
 	return &storhub.EntryInfo{Path: targetPath, Inode: 1, Size: 23, Mode: 0o640, UID: 1, GID: 2, NLink: 1, Kind: storhub.NodeKindFile}, nil
 }
-func (f *fakeShowcaseHub) StatFSContext(ctx context.Context, project string) (*storhub.FSStats, error) {
+func (f *fakeShowcaseHub) StatFSContext(_ context.Context, _ string) (*storhub.FSStats, error) {
 	return &storhub.FSStats{Files: 2, Directories: 3, Inodes: 5, Bytes: 42, Releases: 1, Assets: 2}, nil
 }
-func (f *fakeShowcaseHub) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
+func (f *fakeShowcaseHub) DeleteFileContext(_ context.Context, _, _ string, _ ...shfs.MutateOption) error {
 	return nil
 }
-func (f *fakeShowcaseHub) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+func (f *fakeShowcaseHub) RmdirContext(_ context.Context, _, _ string, _ ...shfs.MutateOption) error {
 	return nil
 }
-func (f *fakeShowcaseHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+func (f *fakeShowcaseHub) PruneContext(_ context.Context, _, _ string, _ int, _ bool) (*storhub.PruneResult, error) {
 	return &storhub.PruneResult{DeletedAssets: 1, DeletedReleases: 0}, nil
 }
-func (f *fakeShowcaseHub) CleanupProjectContext(ctx context.Context, project string) error {
+func (f *fakeShowcaseHub) CleanupProjectContext(_ context.Context, _ string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) DeleteReleaseContext(ctx context.Context, project, tag string) error {
+func (f *fakeShowcaseHub) DeleteReleaseContext(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeShowcaseHub) DeleteProjectContext(ctx context.Context, project string) error { return nil }
+func (f *fakeShowcaseHub) DeleteProjectContext(_ context.Context, _ string) error { return nil }
 
-func fileMeta(path string, data []byte) *storhub.FileMetadata {
+func fileMeta(_ string, data []byte) *storhub.FileMetadata {
 	return &storhub.FileMetadata{
 		Size:   int64(len(data)),
 		Inode:  1,
@@ -216,7 +216,7 @@ func fileMeta(path string, data []byte) *storhub.FileMetadata {
 	}
 }
 
-func TestShowcaseHelperProcess(t *testing.T) {
+func TestShowcaseHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_SHOWCASE_HELPER") != "1" {
 		return
 	}

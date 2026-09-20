@@ -101,8 +101,8 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 	}{
 		{
 			name:  "no-op fn",
-			build: func(m *RepoMetadata) {},
-			fn:    func(m *RepoMetadata) error { return nil },
+			build: func(_ *RepoMetadata) {},
+			fn:    func(_ *RepoMetadata) error { return nil },
 		},
 		{
 			name: "rewrite with identical body records no op",
@@ -116,7 +116,7 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 		},
 		{
 			name:  "create file with chunk and parent dir",
-			build: func(m *RepoMetadata) {},
+			build: func(_ *RepoMetadata) {},
 			fn: func(m *RepoMetadata) error {
 				cid := intentTestChunk(m, 4)
 				m.UpsertFile("docs/new.txt", intentTestFile(m, 4, []int64{cid}), intentTestNow)
@@ -125,7 +125,7 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 		},
 		{
 			name:  "create dir",
-			build: func(m *RepoMetadata) {},
+			build: func(_ *RepoMetadata) {},
 			fn: func(m *RepoMetadata) error {
 				m.EnsureDirectory("newdir", intentTestNow)
 				return nil
@@ -226,7 +226,7 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 		},
 		{
 			name:  "symlink create and delete",
-			build: func(m *RepoMetadata) {},
+			build: func(_ *RepoMetadata) {},
 			fn: func(m *RepoMetadata) error {
 				link := intentTestFile(m, 0, nil)
 				link.Symlink = "a.txt"
@@ -412,7 +412,7 @@ func TestIntentOpsReplayReconstructs(t *testing.T) {
 		},
 		{
 			name:  "root setattr",
-			build: func(m *RepoMetadata) {},
+			build: func(_ *RepoMetadata) {},
 			fn: func(m *RepoMetadata) error {
 				m.Root.Mode = 0o700
 				m.Root.UID = 1000

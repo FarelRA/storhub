@@ -1,10 +1,11 @@
+package test
+
 // Session TTL helpers shared by the oracle and the CLI/REST fakes.
 //
 // Boundary: production owns session semantics (internal/storage); the
 // fakes must not each reimplement TTL clamping and expiry checks.
 // ClampTTL is the single implementation so the fakes and the oracle
 // agree with production.
-package test
 
 import "time"
 
@@ -15,21 +16,21 @@ const DefaultTTL = 10 * time.Minute
 // MaxTTL mirrors the product cap: no handle outlives it.
 const MaxTTL = time.Hour
 
-// ClampTTL folds a requested TTL into [default, max]: <=0 takes the
-// default, anything above max clamps to it. One implementation so the
-// CLI fake, the REST fake, and the oracle agree with production.
-func ClampTTL(requested, def, max time.Duration) time.Duration {
+// ClampTTL folds a requested TTL into [default, limit]: <=0 takes the
+// default, anything above the limit clamps to it. One implementation so
+// the CLI fake, the REST fake, and the oracle agree with production.
+func ClampTTL(requested, def, limit time.Duration) time.Duration {
 	if def <= 0 {
 		def = DefaultTTL
 	}
-	if max <= 0 {
-		max = MaxTTL
+	if limit <= 0 {
+		limit = MaxTTL
 	}
 	if requested <= 0 {
 		return def
 	}
-	if requested > max {
-		return max
+	if requested > limit {
+		return limit
 	}
 	return requested
 }

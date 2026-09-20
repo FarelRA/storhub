@@ -12,9 +12,11 @@ import (
 var ErrPreconditionFailed = errors.New("storhub: metadata revision changed since expected revision")
 
 // MutateOption decorates a mutating operation.
-type MutateOption func(*mutateOptions)
+type MutateOption func(*MutateOptions)
 
-type mutateOptions struct {
+// MutateOptions is the folded snapshot of MutateOption decorators for one
+// mutation: expected revision, declared body size, and replace policy.
+type MutateOptions struct {
 	expectedRevision string
 	expectedSize     int64
 	hasSize          bool
@@ -23,12 +25,12 @@ type mutateOptions struct {
 
 // ExpectedRevision returns the revision declared via WithExpectedRevision
 // ("" when none).
-func (o mutateOptions) ExpectedRevision() string { return o.expectedRevision }
+func (o MutateOptions) ExpectedRevision() string { return o.expectedRevision }
 
 // ApplyMutateOptions folds options into a snapshot for inspection; exported
 // for storage-layer enforcement helpers.
-func ApplyMutateOptions(opts []MutateOption) mutateOptions {
-	var o mutateOptions
+func ApplyMutateOptions(opts []MutateOption) MutateOptions {
+	var o MutateOptions
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&o)
@@ -44,7 +46,7 @@ func ApplyMutateOptions(opts []MutateOption) mutateOptions {
 // The empty string means "no expectation" and skips the check entirely, so
 // existing callers are unaffected.
 func WithExpectedRevision(revision string) MutateOption {
-	return func(o *mutateOptions) {
+	return func(o *MutateOptions) {
 		o.expectedRevision = revision
 	}
 }
@@ -56,7 +58,7 @@ func WithExpectedRevision(revision string) MutateOption {
 // guess - storage rejects missing sizes with a descriptive error instead of
 // fragmenting uploads.
 func WithSize(n int64) MutateOption {
-	return func(o *mutateOptions) {
+	return func(o *MutateOptions) {
 		if n >= 0 {
 			o.expectedSize, o.hasSize = n, true
 		}
@@ -64,20 +66,20 @@ func WithSize(n int64) MutateOption {
 }
 
 // ExpectedSize returns the declared body size and whether one was declared.
-func (o mutateOptions) ExpectedSize() (int64, bool) { return o.expectedSize, o.hasSize }
+func (o MutateOptions) ExpectedSize() (int64, bool) { return o.expectedSize, o.hasSize }
 
 // WithNoReplace declares that the mutation must fail with EEXIST if the
 // destination already exists, checked inside the update transaction rather
 // than by a pre-transaction stat (which is a TOCTOU window). Currently
 // consumed by RenameContext for RENAME_NOREPLACE.
 func WithNoReplace() MutateOption {
-	return func(o *mutateOptions) {
+	return func(o *MutateOptions) {
 		o.noReplace = true
 	}
 }
 
 // NoReplace reports whether WithNoReplace was declared.
-func (o mutateOptions) NoReplace() bool { return o.noReplace }
+func (o MutateOptions) NoReplace() bool { return o.noReplace }
 
 // RevisionSource is implemented by backends that can report the current
 // committed metadata revision (content SHA) of a project.

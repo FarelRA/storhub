@@ -83,13 +83,13 @@ func TestPhase5SlowCommitDoesNotStallOtherSessions(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-phase5-sessions"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("hello"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
-	idA := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	idA := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, idA, 5, []byte(" slow")); err != nil {
 		t.Fatalf("write A: %v", err)
 	}
-	idB := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadOnly)
+	idB := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadOnly)
 
 	// Gate commit PUTs (metadata contents writes); reads use GET/CDN and pass.
 	gate := make(chan struct{})

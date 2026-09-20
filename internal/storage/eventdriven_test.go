@@ -83,7 +83,7 @@ func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 	var puts atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) {
 			puts.Add(1)
 		}
@@ -207,7 +207,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 	pollUntil(t, time.Second, "seed commit drain", func() bool { return metaIsClean(pm) })
 
 	var puts atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) {
 			puts.Add(1)
 		}

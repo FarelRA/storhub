@@ -1,3 +1,4 @@
+// Command filesystem demonstrates fs-style operations over a project.
 package main
 
 import (

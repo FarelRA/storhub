@@ -41,7 +41,12 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
-	if err := h.clientFor(r).RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -103,7 +108,12 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
-	result, err := h.clientFor(r).PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	result, err := client.PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)
 	if err != nil {
 		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)
@@ -135,7 +145,12 @@ func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
-	if err := h.clientFor(r).ReEnableProject(project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.ReEnableProject(project); err != nil {
 		logging.Error(h.logger, "enable failed", "project", project, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)
 		return
@@ -161,7 +176,11 @@ type statusResponse struct {
 
 func (h *restHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	client := h.clientFor(r)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	degraded, err := client.DegradedProjects()
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -221,7 +240,12 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
-	if err := h.clientFor(r).RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}

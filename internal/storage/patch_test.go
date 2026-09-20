@@ -110,12 +110,12 @@ func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "batch.txt", []byte("0123456789"))
-	if _, err := hub.UploadFile("project-batch", "batch.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-batch", "batch.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 
 	var listCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/releases") {
 			listCalls.Add(1)
 		}
@@ -134,7 +134,7 @@ func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
 		t.Fatalf("final size must be 11 (10 -3 +4), got %d", patched.Size)
 	}
 	output := filepath.Join(t.TempDir(), "out.txt")
-	if err := hub.DownloadFile("project-batch", "batch.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "project-batch", "batch.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	assertFileContent(t, output, []byte("0XY34!!5689"))

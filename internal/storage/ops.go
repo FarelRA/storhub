@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
+	"syscall"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
@@ -11,6 +13,7 @@ import (
 // OpType classifies one metadata operation in the pending op stack.
 type OpType string
 
+// Op wire values: frozen strings, validated on unmarshal.
 const (
 	OpPutFile    OpType = "put"
 	OpDeleteFile OpType = "del"
@@ -24,6 +27,41 @@ const (
 	OpRelease    OpType = "release"
 	OpChunkPrune OpType = "chunkprune"
 )
+
+// Valid reports whether t is one of the 11 known wire values. The wire
+// strings are frozen for journal compatibility; unknown values fail closed
+// at decode time (UnmarshalText/UnmarshalJSON) instead of replaying
+// silently.
+func (t OpType) Valid() bool {
+	switch t {
+	case OpPutFile, OpDeleteFile, OpMkdir, OpRmdir, OpRename, OpSetattr,
+		OpTruncate, OpPatch, OpXattr, OpRelease, OpChunkPrune:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalText validates one wire value, rejecting unknown op types with
+// an error naming the bad value.
+func (t *OpType) UnmarshalText(text []byte) error {
+	v := OpType(text)
+	if !v.Valid() {
+		return fmt.Errorf("unknown op type %q", string(text))
+	}
+	*t = v
+	return nil
+}
+
+// UnmarshalJSON validates a JSON-encoded wire value the same way. Marshal
+// stays a plain string so the wire encoding is byte-identical.
+func (t *OpType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	return t.UnmarshalText([]byte(s))
+}
 
 // Op is one discrete, self-contained metadata operation. Every op carries
 // the FULL resulting state for its path scope, never a delta: replaying the
@@ -740,36 +778,52 @@ func opAssertPaths(op Op) []string {
 // Collision remapping must never reissue an identifier another batch op
 // carries, or the remap trades one collision for another. The loop is
 // pigeonhole-bounded: at most len(claimed) mints can collide, so
-// len(claimed)+1 iterations always succeed — termination by counting,
-// not by faith in monotonicity.
-func (p *replayPlan) allocInodeAvoiding(meta *RepoMetadata) uint64 {
+// len(claimed)+1 iterations always succeed on a live counter. A wrapped
+// counter (minting math.MaxUint64) means the id space is exhausted: the
+// next mint would reissue low ids, so the allocator fails closed with an
+// ENOSPC-wrapped error instead of reusing identifiers.
+func (p *replayPlan) allocInodeAvoiding(meta *RepoMetadata) (uint64, error) {
 	if p == nil {
-		return meta.AllocateInode()
+		id := meta.AllocateInode()
+		if id == math.MaxUint64 {
+			return 0, fmt.Errorf("alloc inode: %w: inode id space exhausted", syscall.ENOSPC)
+		}
+		return id, nil
 	}
 	for i := 0; i <= len(p.claimedInodes); i++ {
 		id := meta.AllocateInode()
+		if id == math.MaxUint64 {
+			return 0, fmt.Errorf("alloc inode: %w: inode id space exhausted", syscall.ENOSPC)
+		}
 		if _, bad := p.claimedInodes[id]; !bad {
-			return id
+			return id, nil
 		}
 	}
-	// Unreachable: the pigeonhole bound above guarantees a return.
-	// Panicking instead of looping forever turns a logic error into a
-	// loud crash rather than a wedged commit loop.
-	panic("allocInodeAvoiding: exhausted pigeonhole bound")
+	// Unreachable on a live counter: the pigeonhole bound above guarantees
+	// a return. Returning an error instead of looping forever turns a logic
+	// error into a diagnosed commit failure rather than a wedged loop.
+	return 0, fmt.Errorf("alloc inode: %w: exhausted pigeonhole bound with %d claimed ids", syscall.ENOSPC, len(p.claimedInodes))
 }
 
 // allocChunkAvoiding is allocInodeAvoiding for chunk catalog ids.
-func (p *replayPlan) allocChunkAvoiding(meta *RepoMetadata) int64 {
+func (p *replayPlan) allocChunkAvoiding(meta *RepoMetadata) (int64, error) {
 	if p == nil {
-		return meta.AllocateChunkID()
+		id := meta.AllocateChunkID()
+		if id == math.MaxInt64 {
+			return 0, fmt.Errorf("alloc chunk: %w: chunk id space exhausted", syscall.ENOSPC)
+		}
+		return id, nil
 	}
 	for i := 0; i <= len(p.claimedChunks); i++ {
 		id := meta.AllocateChunkID()
+		if id == math.MaxInt64 {
+			return 0, fmt.Errorf("alloc chunk: %w: chunk id space exhausted", syscall.ENOSPC)
+		}
 		if _, bad := p.claimedChunks[id]; !bad {
-			return id
+			return id, nil
 		}
 	}
-	panic("allocChunkAvoiding: exhausted pigeonhole bound")
+	return 0, fmt.Errorf("alloc chunk: %w: exhausted pigeonhole bound with %d claimed ids", syscall.ENOSPC, len(p.claimedChunks))
 }
 
 // untarget drops an op's asserted paths from the target set. Call it when
@@ -1229,7 +1283,11 @@ func applyOneOpIndexed(meta *RepoMetadata, op Op, plan *replayPlan, resolutions 
 	op = cloneOpPayloads(op)
 	// Divergent-writer protection: identifiers both writers allocated for
 	// different records are remapped before the state assertion applies.
-	remapOpCollisionsIndexed(meta, &op, plan, resolutions, cidx)
+	// A remap failure (id space exhausted) aborts the replay: reusing an
+	// identifier would corrupt the tree worse than a failed commit.
+	if err := remapOpCollisionsIndexed(meta, &op, plan, resolutions, cidx); err != nil {
+		return err
+	}
 	handler, ok := opApplyHandlers[op.Type]
 	if !ok {
 		return fmt.Errorf("unknown op type %q", op.Type)
@@ -1237,7 +1295,7 @@ func applyOneOpIndexed(meta *RepoMetadata, op Op, plan *replayPlan, resolutions 
 	return handler(meta, op, plan, resolutions, cidx, now, path)
 }
 
-func applyFileStateOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
+func applyFileStateOp(meta *RepoMetadata, op Op, plan *replayPlan, _ *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
 	target := path
 	if op.Type != OpPutFile {
 		// Rewrite targets reference pre-existing state: resolve a
@@ -1268,7 +1326,7 @@ func applyFileStateOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *
 	return nil
 }
 
-func applyMkdirOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
+func applyMkdirOp(meta *RepoMetadata, op Op, _ *replayPlan, _ *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
 	if op.Dir != nil {
 		ensureParentFor(meta, path, now, cidx)
 		meta.WriteDirDirect(path, op.Dir.Clone())
@@ -1280,14 +1338,14 @@ func applyMkdirOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]Co
 	return nil
 }
 
-func applyDeleteFileOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
+func applyDeleteFileOp(meta *RepoMetadata, _ Op, plan *replayPlan, _ *[]ConflictResolution, cidx *collisionIndex, _ int64, path string) error {
 	target := plan.resolveLive(meta, path)
 	cidx.delFile(target)
 	meta.RemoveFile(target)
 	return nil
 }
 
-func applyRmdirOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error {
+func applyRmdirOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, _ int64, path string) error {
 	path = plan.resolveLive(meta, path)
 	// Order-independent delete: skip only for children the batch did
 	// NOT remove (liveRemovals translates recorded removals to their
@@ -1320,7 +1378,7 @@ func applyRmdirOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]Co
 	return nil
 }
 
-func applyRenameOp(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, _ string) error {
+func applyRenameOp(meta *RepoMetadata, op Op, plan *replayPlan, _ *[]ConflictResolution, cidx *collisionIndex, now int64, _ string) error {
 	if len(op.Paths) != 2 {
 		return fmt.Errorf("rename op %d has %d paths, want 2", op.Seq, len(op.Paths))
 	}

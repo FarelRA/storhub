@@ -47,7 +47,7 @@ func TestPatchedFileDownloadContentCorrectness(t *testing.T) {
 
 	rangeByAsset := make(map[int64][]string)
 	var rangeMu sync.Mutex
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet {
 			return false
 		}
@@ -562,7 +562,7 @@ func TestPublicAPIOnlyMutationCycle(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	var apiCalls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if strings.HasPrefix(r.URL.Path, "/repos/") || strings.HasPrefix(r.URL.Path, "/upload/") {
 			apiCalls.Add(1)
 		}
@@ -649,7 +649,7 @@ func TestRevisionContextServesCachedRevision(t *testing.T) {
 		t.Fatalf("revision: %q %v", rev, err)
 	}
 	var apiCalls atomic.Int64
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, _ *http.Request) bool {
 		apiCalls.Add(1)
 		return false
 	})
@@ -683,7 +683,7 @@ func TestConcurrentColdReadsShareOneLoad(t *testing.T) {
 		t.Fatalf("flush base: %v", err)
 	}
 	var contentGets atomic.Int64
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/") {
 			contentGets.Add(1)
 		}

@@ -93,7 +93,7 @@ func TestPressureCommitFailureStreakAndReset(t *testing.T) {
 	// release exist: a detached pm cannot create them, and object
 	// writes would 404. Counters are baselined after the seed.
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFile(project, "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, project); err != nil {
@@ -177,7 +177,7 @@ func TestPressureRebaseCounted(t *testing.T) {
 	proj := "pressure-rebase"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	if _, err := hubA.UploadFile(proj, "f1.txt", first); err != nil {
+	if _, err := hubA.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}
 	if err := hubA.FlushProjectContext(ctx, proj); err != nil {
@@ -187,7 +187,7 @@ func TestPressureRebaseCounted(t *testing.T) {
 		t.Fatalf("hubB hydrate: %v", err)
 	}
 	second := writeTempFile(t, t.TempDir(), "f2.txt", []byte("two"))
-	if _, err := hubA.UploadFile(proj, "f2.txt", second); err != nil {
+	if _, err := hubA.UploadFileContext(context.Background(), proj, "f2.txt", second); err != nil {
 		t.Fatalf("upload f2: %v", err)
 	}
 	if err := hubA.FlushProjectContext(ctx, proj); err != nil {

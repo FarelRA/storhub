@@ -15,7 +15,12 @@ type projectResponse struct {
 // handleProjectGet serves GET /projects/{project}: filesystem stats.
 func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	stats, err := h.clientFor(r).StatFSContext(r.Context(), project)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	stats, err := client.StatFSContext(r.Context(), project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -32,7 +37,12 @@ func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
-	if err := h.clientFor(r).DeleteProjectContext(r.Context(), project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.DeleteProjectContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}

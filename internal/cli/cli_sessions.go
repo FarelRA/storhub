@@ -45,7 +45,7 @@ Examples:
   storhub session read --handle <id> --offset 0 --length 64
   storhub session close --handle <id> --sync`,
 		Args: usageArgs(cobra.NoArgs),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
@@ -131,7 +131,7 @@ plus the handle's own staged writes. Length defaults to EOF.`,
 	return cmd
 }
 
-func (a *App) runSessionRead(cmd *cobra.Command, args []string) error {
+func (a *App) runSessionRead(cmd *cobra.Command, _ []string) error {
 	handle, err := sessionHandle(cmd)
 	if err != nil {
 		return err
@@ -308,7 +308,7 @@ mode for humans, or one JSON object with --json.`,
 	return cmd
 }
 
-func (a *App) runSessionStat(cmd *cobra.Command, args []string) error {
+func (a *App) runSessionStat(cmd *cobra.Command, _ []string) error {
 	handle, err := sessionHandle(cmd)
 	if err != nil {
 		return err
@@ -350,7 +350,7 @@ to the committed state, keeping the handle open.`,
 	return cmd
 }
 
-func (a *App) runSessionSync(cmd *cobra.Command, args []string) error {
+func (a *App) runSessionSync(cmd *cobra.Command, _ []string) error {
 	handle, err := sessionHandle(cmd)
 	if err != nil {
 		return err
@@ -436,7 +436,7 @@ Closing unlinked scratch without a prior link discards it.`,
 	return cmd
 }
 
-func (a *App) runSessionClose(cmd *cobra.Command, args []string) error {
+func (a *App) runSessionClose(cmd *cobra.Command, _ []string) error {
 	handle, err := sessionHandle(cmd)
 	if err != nil {
 		return err
@@ -457,7 +457,7 @@ func (a *App) runSessionClose(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if project != "" {
-		if err := a.drainIfSyncRequested(cmd, cmd.Context(), project); err != nil {
+		if err := a.drainIfSyncRequested(cmd.Context(), cmd, project); err != nil {
 			return err
 		}
 	}

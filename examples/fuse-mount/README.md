@@ -23,7 +23,7 @@ Public APIs highlighted:
 
 - `fuse.DefaultOptions`
 - `fuse.New`
-- `(*storhub.StorHubFS).Mount`
-- `(*storhub.StorHubFS).Wait`
-- `(*storhub.StorHubFS).Unmount`
-- `(*storhub.StorHubFS).Close`
+- `(*storhub.FS).Mount`
+- `(*storhub.FS).Wait`
+- `(*storhub.FS).Unmount`
+- `(*storhub.FS).Close`

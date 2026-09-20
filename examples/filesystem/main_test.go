@@ -23,7 +23,7 @@ func TestMainRequiresToken(t *testing.T) {
 	}
 }
 
-func TestFilesystemHelperProcess(t *testing.T) {
+func TestFilesystemHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_FILESYSTEM_HELPER") != "1" {
 		return
 	}

@@ -65,7 +65,7 @@ func errRuntimeShape() error { return runtimeErr{} }
 func TestJSONOutputContracts(t *testing.T) {
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	// stat --json: stable object with the documented keys.

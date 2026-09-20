@@ -21,7 +21,7 @@ func TestPruneSeesFreshlyCommittedFiles(t *testing.T) {
 	project := "project-purge-fresh"
 
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
-	if _, err := hub.UploadFile(project, "kept.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "kept.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushMetadata(ctx); err != nil {
@@ -62,7 +62,7 @@ func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
 	project := "project-purge-count-err"
 
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
-	if _, err := hub.UploadFile(project, "kept.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "kept.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushMetadata(ctx); err != nil {
@@ -104,13 +104,13 @@ func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
 	project := "project-purge-dirty"
 
 	input := writeTempFile(t, t.TempDir(), "pending.txt", []byte("pending payload"))
-	if _, err := hub.UploadFile(project, "pending.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), project, "pending.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// Deterministic in-flight state: block metadata commits so the
 	// background loop cannot drain the flag, then mark dirty with a
 	// version bump (a racing commit of an older snapshot cannot clear it).
-	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onContentsPUT(t, func(w http.ResponseWriter, _ *http.Request) bool {
 		http.Error(w, "injected commit failure", http.StatusInternalServerError)
 		return true
 	})
@@ -137,7 +137,7 @@ func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	const project = "project-purge-race"
 
 	input := writeTempFile(t, t.TempDir(), "doomed.txt", []byte("doomed payload"))
-	meta, err := hub.UploadFile(project, "doomed.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), project, "doomed.txt", input)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	if len(spared.Notes) == 0 {
 		t.Fatal("spared tasks must be reported in Notes")
 	}
-	if err := hub.DownloadFile(project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err != nil {
 		t.Fatalf("fenced tail must spare the rescued asset: %v", err)
 	}
 	// And a full purge afterwards still deletes nothing (nothing was

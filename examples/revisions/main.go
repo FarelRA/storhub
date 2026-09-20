@@ -1,3 +1,4 @@
+// Command revisions demonstrates metadata revisions and rollback flows.
 package main
 
 import (

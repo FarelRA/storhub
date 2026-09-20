@@ -472,7 +472,7 @@ type commitSnapshot struct {
 // the snapshot seq lets the success path drop exactly the published ops.
 // Returns nil when clean (nothing to do). Exits with pm.mu released on
 // every path.
-func (h *StorHub) snapshotCommitState(project string, pm *projectMetadata) *commitSnapshot {
+func (h *StorHub) snapshotCommitState(_ string, pm *projectMetadata) *commitSnapshot {
 	pm.mu.Lock()
 	if !pm.dirty {
 		pm.mu.Unlock()
@@ -675,7 +675,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 //
 // The journal is rewritten to the surviving stack, and a fitting commit
 // lifts the size-ceiling breach marker (re-armed on breach).
-func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *commitSnapshot, commitSHA, contentSHA string, newObjectCount uint64, didRebase bool) {
+func (h *StorHub) applyCommittedTree(project string, pm *projectMetadata, snap *commitSnapshot, _, contentSHA string, newObjectCount uint64, didRebase bool) {
 	working := snap.working
 	pm.mu.Lock()
 	pm.sha = contentSHA

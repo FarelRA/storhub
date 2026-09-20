@@ -17,10 +17,11 @@ import (
 // symlink, readlink, link, sync) plus the create-exclusive, no-replace,
 // and expected-revision modifiers on the create/write paths.
 //
-// Flag-to-verb routing rule: plain hubClient methods stay the default so
-// happy paths never change; a set modifier flag type-asserts the hub to
-// the corresponding *Context variant and fails loudly when the hub does
-// not implement it, instead of silently dropping the guard.
+// Flag-to-verb routing rule: every verb is Context-first and every helper
+// below threads the command context straight into it. Modifier flags
+// (--expected-revision, --no-replace) become MutateOptions on the same
+// call, so a set guard can never be silently dropped: there is no
+// plain-method fallback path.
 
 // addRevisionFlag registers the --expected-revision opt-in shared by every
 // write-path command whose storage verb accepts it: the mutation applies
@@ -47,58 +48,22 @@ func revisionOpts(cmd *cobra.Command) []storhub.MutateOption {
 
 // appendWithFlags routes append past the CAS guard when requested.
 func appendWithFlags(ctx context.Context, hub hubClient, project, path string, data []byte, cmd *cobra.Command) (*storhub.FileMetadata, error) {
-	if opts := revisionOpts(cmd); opts != nil {
-		h, ok := hub.(interface {
-			AppendFileContext(context.Context, string, string, []byte, ...storhub.MutateOption) (*storhub.FileMetadata, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("hub does not support --expected-revision for append")
-		}
-		return h.AppendFileContext(ctx, project, path, data, opts...)
-	}
-	return hub.AppendFile(project, path, data)
+	return hub.AppendFileContext(ctx, project, path, data, revisionOpts(cmd)...)
 }
 
 // writeWithFlags routes write past the CAS guard when requested.
 func writeWithFlags(ctx context.Context, hub hubClient, project, path string, offset int64, data []byte, cmd *cobra.Command) (*storhub.FileMetadata, error) {
-	if opts := revisionOpts(cmd); opts != nil {
-		h, ok := hub.(interface {
-			WriteFileAtContext(context.Context, string, string, int64, []byte, ...storhub.MutateOption) (*storhub.FileMetadata, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("hub does not support --expected-revision for write")
-		}
-		return h.WriteFileAtContext(ctx, project, path, offset, data, opts...)
-	}
-	return hub.WriteFileAt(project, path, offset, data)
+	return hub.WriteFileAtContext(ctx, project, path, offset, data, revisionOpts(cmd)...)
 }
 
 // patchWithFlags routes patch past the CAS guard when requested.
 func patchWithFlags(ctx context.Context, hub hubClient, project, path string, offset, deleteSize int64, edit []byte, cmd *cobra.Command) (*storhub.FileMetadata, error) {
-	if opts := revisionOpts(cmd); opts != nil {
-		h, ok := hub.(interface {
-			PatchFileContext(context.Context, string, string, int64, int64, []byte, ...storhub.MutateOption) (*storhub.FileMetadata, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("hub does not support --expected-revision for patch")
-		}
-		return h.PatchFileContext(ctx, project, path, offset, deleteSize, edit, opts...)
-	}
-	return hub.PatchFile(project, path, offset, deleteSize, edit)
+	return hub.PatchFileContext(ctx, project, path, offset, deleteSize, edit, revisionOpts(cmd)...)
 }
 
 // truncateWithFlags routes truncate past the CAS guard when requested.
 func truncateWithFlags(ctx context.Context, hub hubClient, project, path string, size int64, cmd *cobra.Command) (*storhub.FileMetadata, error) {
-	if opts := revisionOpts(cmd); opts != nil {
-		h, ok := hub.(interface {
-			TruncateFileContext(context.Context, string, string, int64, ...storhub.MutateOption) (*storhub.FileMetadata, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("hub does not support --expected-revision for truncate")
-		}
-		return h.TruncateFileContext(ctx, project, path, size, opts...)
-	}
-	return hub.TruncateFile(project, path, size)
+	return hub.TruncateFileContext(ctx, project, path, size, revisionOpts(cmd)...)
 }
 
 // renameWithFlags routes mv past --no-replace/--expected-revision when set.
@@ -110,57 +75,22 @@ func renameWithFlags(ctx context.Context, hub hubClient, project, oldPath, newPa
 	if noReplace {
 		opts = append(opts, shfs.WithNoReplace())
 	}
-	if opts == nil {
-		return hub.Rename(project, oldPath, newPath)
-	}
-	h, ok := hub.(interface {
-		RenameContext(context.Context, string, string, string, ...storhub.MutateOption) error
-	})
-	if !ok {
-		return fmt.Errorf("hub does not support --no-replace/--expected-revision for mv")
-	}
-	return h.RenameContext(ctx, project, oldPath, newPath, opts...)
+	return hub.RenameContext(ctx, project, oldPath, newPath, opts...)
 }
 
 // removeWithFlags routes rm past the CAS guard when requested, on both the
 // file and recursive branches.
 func removeWithFlags(ctx context.Context, hub hubClient, project, path string, recursive bool, cmd *cobra.Command) error {
-	if opts := revisionOpts(cmd); opts != nil {
-		if recursive {
-			h, ok := hub.(interface {
-				RmdirContext(context.Context, string, string, ...storhub.MutateOption) error
-			})
-			if !ok {
-				return fmt.Errorf("hub does not support --expected-revision for rm -r")
-			}
-			return h.RmdirContext(ctx, project, path, opts...)
-		}
-		h, ok := hub.(interface {
-			DeleteFileContext(context.Context, string, string, ...storhub.MutateOption) error
-		})
-		if !ok {
-			return fmt.Errorf("hub does not support --expected-revision for rm")
-		}
-		return h.DeleteFileContext(ctx, project, path, opts...)
-	}
+	opts := revisionOpts(cmd)
 	if recursive {
-		return hub.Rmdir(project, path)
+		return hub.RmdirContext(ctx, project, path, opts...)
 	}
-	return hub.DeleteFile(project, path)
+	return hub.DeleteFileContext(ctx, project, path, opts...)
 }
 
 // replaceWithFlags routes replace past the CAS guard when requested.
 func replaceWithFlags(ctx context.Context, hub hubClient, project, remotePath, localPath string, cmd *cobra.Command) (*storhub.FileMetadata, error) {
-	if opts := revisionOpts(cmd); opts != nil {
-		h, ok := hub.(interface {
-			ReplaceFileContext(context.Context, string, string, string, ...storhub.MutateOption) (*storhub.FileMetadata, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("hub does not support --expected-revision for replace")
-		}
-		return h.ReplaceFileContext(ctx, project, remotePath, localPath, opts...)
-	}
-	return hub.ReplaceFile(project, remotePath, localPath)
+	return hub.ReplaceFileContext(ctx, project, remotePath, localPath, revisionOpts(cmd)...)
 }
 
 // uploadWithFlags gates upload on an atomic exclusive create when
@@ -174,12 +104,12 @@ func replaceWithFlags(ctx context.Context, hub hubClient, project, remotePath, l
 func uploadWithFlags(ctx context.Context, hub hubClient, project, remotePath, localPath string, cmd *cobra.Command) (*storhub.FileMetadata, error) {
 	exclusive, _ := cmd.Flags().GetBool("exclusive")
 	if !exclusive {
-		return hub.UploadFile(project, remotePath, localPath)
+		return hub.UploadFileContext(ctx, project, remotePath, localPath)
 	}
-	if _, err := hub.CreateFile(project, remotePath); err != nil {
+	if _, err := hub.CreateFileContext(ctx, project, remotePath); err != nil {
 		return nil, err
 	}
-	return hub.UploadFile(project, remotePath, localPath)
+	return hub.UploadFileContext(ctx, project, remotePath, localPath)
 }
 
 func (a *App) newTruncateCmd() *cobra.Command {
@@ -212,7 +142,7 @@ func (a *App) runTruncate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "truncated", meta)
@@ -259,12 +189,12 @@ func (a *App) runChmod(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Plain hub.Chmod: no Context revision variant exists on the storage
-	// verb, so there is no --expected-revision to thread (see newChmodCmd).
-	if err := hub.Chmod(args[0], args[1], mode); err != nil {
+	// Chmod takes no revision options (see newChmodCmd), so the command
+	// context is the only thing threaded here.
+	if err := hub.ChmodContext(cmd.Context(), args[0], args[1], mode); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "changed mode of %s to %04o\n", args[1], mode)
@@ -321,12 +251,12 @@ func (a *App) runChown(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Plain hub.Chown: no Context revision variant exists on the storage
-	// verb, so there is no --expected-revision to thread (see newChownCmd).
-	if err := hub.Chown(args[0], args[1], uid, gid); err != nil {
+	// Chown takes no revision options (see newChownCmd), so the command
+	// context is the only thing threaded here.
+	if err := hub.ChownContext(cmd.Context(), args[0], args[1], uid, gid); err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "changed ownership of %s to %d:%d\n", args[1], uid, gid)
@@ -384,13 +314,13 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 	}
 	if exclusive {
 		// Atomic create gate: exactly one concurrent exclusive touch wins.
-		if _, err := hub.CreateFile(args[0], args[1]); err != nil {
+		if _, err := hub.CreateFileContext(cmd.Context(), args[0], args[1]); err != nil {
 			return err
 		}
-		if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
+		if err := hub.ChtimesContext(cmd.Context(), args[0], args[1], atime, mtime); err != nil {
 			return err
 		}
-		if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+		if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(a.stderr, "created %s\n", args[1])
@@ -402,13 +332,13 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 		// path is stamped, tolerating NotFound when it vanishes under
 		// us. The stat is read-only (no mutation TOCTOU); either race
 		// outcome stamps or skips correctly.
-		if _, err := hub.StatPath(args[0], args[1]); err != nil {
+		if _, err := hub.StatPathContext(cmd.Context(), args[0], args[1]); err != nil {
 			if isNotFoundErr(err) {
 				return nil
 			}
 			return err
 		}
-		if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
+		if err := hub.ChtimesContext(cmd.Context(), args[0], args[1], atime, mtime); err != nil {
 			if isNotFoundErr(err) {
 				return nil
 			}
@@ -419,16 +349,16 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 		// directly and tolerate AlreadyExists (a concurrent touch won
 		// the race) or IsDirectory (touching a live directory updates
 		// its stamps), so the timestamp update below always lands.
-		if _, err := hub.CreateFile(args[0], args[1]); err != nil {
+		if _, err := hub.CreateFileContext(cmd.Context(), args[0], args[1]); err != nil {
 			if !isAlreadyExistsErr(err) && !isIsDirErr(err) {
 				return err
 			}
 		}
-		if err := hub.Chtimes(args[0], args[1], atime, mtime); err != nil {
+		if err := hub.ChtimesContext(cmd.Context(), args[0], args[1], atime, mtime); err != nil {
 			return err
 		}
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "touched %s\n", args[1])
@@ -475,13 +405,13 @@ func (a *App) runSymlink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Plain hub.Symlink: no Context revision variant exists on the
-	// storage verb, so there is no --expected-revision to thread.
-	meta, err := hub.Symlink(args[0], args[1], args[2])
+	// Symlink takes no revision options, so the command context is the
+	// only thing threaded here.
+	meta, err := hub.SymlinkContext(cmd.Context(), args[0], args[1], args[2])
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "symlinked", meta)
@@ -506,7 +436,7 @@ func (a *App) runReadlink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	target, err := hub.Readlink(args[0], args[1])
+	target, err := hub.ReadlinkContext(cmd.Context(), args[0], args[1])
 	if err != nil {
 		return err
 	}
@@ -540,13 +470,13 @@ func (a *App) runLink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Plain hub.Link: no Context revision variant exists on the storage
-	// verb, so there is no --expected-revision to thread.
-	meta, err := hub.Link(args[0], args[1], args[2])
+	// Link takes no revision options, so the command context is the only
+	// thing threaded here.
+	meta, err := hub.LinkContext(cmd.Context(), args[0], args[1], args[2])
 	if err != nil {
 		return err
 	}
-	if err := a.drainIfSyncRequested(cmd, cmd.Context(), args[0]); err != nil {
+	if err := a.drainIfSyncRequested(cmd.Context(), cmd, args[0]); err != nil {
 		return err
 	}
 	printFileSummary(a.stderr, "linked", meta)

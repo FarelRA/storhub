@@ -63,12 +63,12 @@ type objectCache struct {
 	total    int64          // sum of sizes (guarded by mu)
 }
 
-func newObjectCache(dir string, max int) *objectCache {
-	if max <= 0 {
-		max = 4096
+func newObjectCache(dir string, limit int) *objectCache {
+	if limit <= 0 {
+		limit = 4096
 	}
 	return &objectCache{
-		dir: dir, max: max, maxBytes: defaultObjectCacheMaxBytes,
+		dir: dir, max: limit, maxBytes: defaultObjectCacheMaxBytes,
 		lru:   list.New(),
 		elems: make(map[string]*list.Element),
 		sizes: make(map[string]int),

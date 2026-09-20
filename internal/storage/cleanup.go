@@ -15,10 +15,12 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
+// DeleteFile deletes the named file using background context.
 func (h *StorHub) DeleteFile(project, fileName string) error {
 	return h.DeleteFileContext(context.Background(), project, fileName)
 }
 
+// DeleteFileContext deletes the named file honoring mutate options.
 func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName string, opts ...shfs.MutateOption) error {
 	if err := h.admitMutation(project); err != nil {
 		return err
@@ -108,10 +110,12 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	return nil
 }
 
+// DeleteRelease deletes the named release using background context.
 func (h *StorHub) DeleteRelease(project, tag string) error {
 	return h.DeleteReleaseContext(context.Background(), project, tag)
 }
 
+// DeleteReleaseContext deletes the named release.
 func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string) error {
 	if err := h.admitMutation(project); err != nil {
 		return err
@@ -159,10 +163,12 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 	return nil
 }
 
+// CleanupProject purges unreferenced data using background context.
 func (h *StorHub) CleanupProject(project string) error {
 	return h.CleanupProjectContext(context.Background(), project)
 }
 
+// CleanupProjectContext purges unreferenced data for the project.
 func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) error {
 	if err := validateProject(project); err != nil {
 		return err
@@ -198,10 +204,12 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 	return err
 }
 
+// DeleteProject deletes the whole project using background context.
 func (h *StorHub) DeleteProject(project string) error {
 	return h.DeleteProjectContext(context.Background(), project)
 }
 
+// DeleteProjectContext deletes the whole project.
 func (h *StorHub) DeleteProjectContext(ctx context.Context, project string) error {
 	if err := validateProject(project); err != nil {
 		return err
@@ -251,7 +259,7 @@ func purgeIsRetryable(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.IsRetryable()
 }
 
-func pruneAssetsLive(h *StorHub, ctx context.Context, project string, res *PruneResult) error {
+func pruneAssetsLive(ctx context.Context, h *StorHub, project string, res *PruneResult) error {
 	if err := validateProject(project); err != nil {
 		return err
 	}

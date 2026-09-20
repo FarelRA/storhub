@@ -37,8 +37,11 @@ import (
 type PruneScope string
 
 const (
+	// PruneObjects reclaims dangling objects during a prune run.
 	PruneObjects PruneScope = "objects"
-	PruneAssets  PruneScope = "assets"
+	// PruneAssets reclaims release assets during a prune run.
+	PruneAssets PruneScope = "assets"
+	// PruneHistory reclaims superseded history during a prune run.
 	PruneHistory PruneScope = "history"
 	// PruneChunks collects orphaned chunk records from the live catalog:
 	// records no file and no pending edit references. Unlike the other
@@ -47,7 +50,8 @@ const (
 	// flush-first gate below. Refuses while any session holds the
 	// project; nothing runs automatically.
 	PruneChunks PruneScope = "chunks"
-	PruneAll    PruneScope = "all"
+	// PruneAll reclaims everything a prune run can reclaim.
+	PruneAll PruneScope = "all"
 )
 
 // PruneResult reports what a prune did (or would do, under DryRun).
@@ -165,7 +169,7 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		}
 		return nil
 	}
-	return pruneAssetsLive(h, ctx, project, res)
+	return pruneAssetsLive(ctx, h, project, res)
 }
 
 // pruneChunks is the chunks scope: orphaned chunk records from the live

@@ -60,7 +60,7 @@ func TestUnmountWithRetryGivesUpAfterBudget(t *testing.T) {
 
 func TestLoggingMiddlewareRedactsTokens(t *testing.T) {
 	app, _, stderr := newTestApp(t)
-	handler := app.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := app.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest("GET", "/shares/sig-capability-token/download?path=/a.txt&sig=secret", nil)

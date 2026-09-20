@@ -23,7 +23,7 @@ func TestMainRequiresToken(t *testing.T) {
 	}
 }
 
-func TestRevisionsHelperProcess(t *testing.T) {
+func TestRevisionsHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_REVISIONS_HELPER") != "1" {
 		return
 	}

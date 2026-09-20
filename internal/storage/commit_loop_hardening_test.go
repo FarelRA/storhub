@@ -23,7 +23,7 @@ func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFile("project-snap-missing", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-snap-missing", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "project-snap-missing"); err != nil {
@@ -52,7 +52,7 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed-data"))
-	if _, err := hub.UploadFile("project-snap-toctou", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-snap-toctou", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "project-snap-toctou"); err != nil {
@@ -71,7 +71,7 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	if err != nil || len(revisions) == 0 {
 		t.Fatalf("revisions: %v %d", err, len(revisions))
 	}
-	backend.onContentsPUT(t, func(w http.ResponseWriter, r *http.Request) bool {
+	backend.onContentsPUT(t, func(_ http.ResponseWriter, _ *http.Request) bool {
 		backend.removeAsset(t, "project-snap-toctou", assetID)
 		return false
 	})
@@ -141,7 +141,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 	hubB := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-flush-conflict"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	if _, err := hubA.UploadFile(proj, "f1.txt", first); err != nil {
+	if _, err := hubA.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}
 	if err := hubA.FlushProjectContext(ctx, proj); err != nil {
@@ -151,7 +151,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 		t.Fatalf("hubB hydrate: %v", err)
 	}
 	second := writeTempFile(t, t.TempDir(), "f2.txt", []byte("two"))
-	if _, err := hubA.UploadFile(proj, "f2.txt", second); err != nil {
+	if _, err := hubA.UploadFileContext(context.Background(), proj, "f2.txt", second); err != nil {
 		t.Fatalf("upload f2: %v", err)
 	}
 	if err := hubA.FlushProjectContext(ctx, proj); err != nil {
@@ -200,7 +200,7 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFile("project-rollback-rev", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-rollback-rev", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "project-rollback-rev"); err != nil {
@@ -231,7 +231,7 @@ func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFile("project-shutdown-drain", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-shutdown-drain", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// No flush: Shutdown alone must persist the mutation.
@@ -256,7 +256,7 @@ func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFile("project-shutdown-gap", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-shutdown-gap", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "project-shutdown-gap"); err != nil {
@@ -294,7 +294,7 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "p.txt", []byte("12345678"))
-	if _, err := hub.UploadFile("project-patch-tag", "p.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-patch-tag", "p.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "project-patch-tag"); err != nil {
@@ -343,7 +343,7 @@ func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFile("project-cache-copy", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-cache-copy", "a.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	_ = ctx
@@ -374,7 +374,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-placeholder-count"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	meta1, err := hub.UploadFile(proj, "f1.txt", first)
+	meta1, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first)
 	if err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}

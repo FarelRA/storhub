@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -112,22 +111,6 @@ func TestNewStorHubAndFUSEDefaults(t *testing.T) {
 	if _, err := hub.NewFUSE("bad/name", fusefs.Options{}); err == nil {
 		t.Fatal("expected invalid project error")
 	}
-}
-
-func requireEnvFlag(t *testing.T, name string) {
-	t.Helper()
-	if os.Getenv(name) != "1" {
-		t.Skipf("set %s=1 to run this smoke test", name)
-	}
-}
-
-func requireEnvValue(t *testing.T, name string) string {
-	t.Helper()
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		t.Fatalf("%s is required for this smoke test", name)
-	}
-	return value
 }
 
 func TestAssetNamingDictionaryRegression(t *testing.T) {

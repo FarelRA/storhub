@@ -14,6 +14,7 @@ import (
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
 
+// PrepareReplaceContext reserves a release and upload URL for a replace.
 func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName string, requiredSlots int) (releaseTag string, uploadURL string, err error) {
 	started := h.logOpStart(project, "prepare-replace", "path", fileName, "required_slots", requiredSlots)
 	defer func() {
@@ -114,6 +115,7 @@ func trimChunks(chunks []ChunkInfo, size int64) []ChunkInfo {
 	return filtered
 }
 
+// FinalizeReplaceChunksContext commits uploaded chunks as the file content.
 func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fileName, releaseTag string, size int64, chunks []ChunkInfo) (result *FileMeta, err error) {
 	started := h.logOpStart(project, "finalize-replace", "path", fileName, "release", releaseTag, "size", size, "chunks", len(chunks))
 	defer func() {
@@ -220,10 +222,12 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	return result, nil
 }
 
+// ReplaceFileFromReader replaces file content from a reader with defaults.
 func (h *StorHub) ReplaceFileFromReader(project, filePath string, body io.Reader) (*metadata.FileMeta, error) {
 	return h.ReplaceFileFromReaderContext(context.Background(), project, filePath, body)
 }
 
+// ReplaceFileFromReaderContext replaces file content from a reader.
 func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (result *metadata.FileMeta, err error) {
 	if body == nil {
 		return nil, fmt.Errorf("request body is nil")

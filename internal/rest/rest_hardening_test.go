@@ -23,7 +23,7 @@ func TestPanickingHandlerReturns500(t *testing.T) {
 		opts:   Options{AllowAnonymous: true}.withDefaults(),
 		shares: &shareRegistry{items: map[string]*shareRecord{}},
 	}
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic(errors.New("boom"))
 	})
 	rec := httptest.NewRecorder()

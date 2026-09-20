@@ -365,11 +365,11 @@ func (c *fakeRESTClient) SyncSession(ctx context.Context, handleID string) error
 	}
 	// An inode unlinked after open has nowhere to publish: sync keeps
 	// the staged bytes readable (fsync equivalent) without publishing.
-	if target := c.resolveFakeCommitLocked(s); target == "" {
+	target := c.resolveFakeCommitLocked(s)
+	if target == "" {
 		return nil
-	} else {
-		c.commitFakeSessionLocked(s.project, target, s.data)
 	}
+	c.commitFakeSessionLocked(s.project, target, s.data)
 	s.dirty = false
 	return nil
 }
@@ -458,12 +458,12 @@ func (c *fakeRESTClient) CloseSession(ctx context.Context, handleID string) erro
 		}
 		// An inode unlinked after open discards with success (POSIX
 		// close); a rename is followed to the surviving name.
-		if target := c.resolveFakeCommitLocked(s); target == "" {
+		target := c.resolveFakeCommitLocked(s)
+		if target == "" {
 			delete(c.sessions, handleID)
 			return nil
-		} else {
-			c.commitFakeSessionLocked(s.project, target, s.data)
 		}
+		c.commitFakeSessionLocked(s.project, target, s.data)
 	}
 	delete(c.sessions, handleID)
 	return nil

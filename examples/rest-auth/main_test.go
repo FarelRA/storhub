@@ -50,7 +50,7 @@ func runRESTAuthHelper(t *testing.T, extraEnv []string) string {
 	return string(out)
 }
 
-func TestRESTAuthHelperProcess(t *testing.T) {
+func TestRESTAuthHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_REST_AUTH_HELPER") != "1" {
 		return
 	}

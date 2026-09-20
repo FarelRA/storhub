@@ -8,6 +8,7 @@ import (
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
+// Logger returns the hub-wide structured logger.
 func (h *StorHub) Logger() *slog.Logger {
 	return h.logger
 }

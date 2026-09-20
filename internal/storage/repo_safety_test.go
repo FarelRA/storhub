@@ -44,7 +44,7 @@ func TestUpdateRepoMetadataReturnsClone(t *testing.T) {
 	if live != first {
 		t.Fatal("UpdateRepoMetadataContext must return the shared live tree, not a Clone")
 	}
-	second, err := hub.UpdateRepoMetadataContext(ctx, "clone-probe", func(m *meta.RepoMetadata) error {
+	second, err := hub.UpdateRepoMetadataContext(ctx, "clone-probe", func(_ *meta.RepoMetadata) error {
 		return nil
 	}, "storhub: noop")
 	if err != nil {

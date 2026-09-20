@@ -1,3 +1,5 @@
+// Command showcase exercises the public API surface end to end against a
+// fake hub and a helper subprocess.
 package main
 
 import (

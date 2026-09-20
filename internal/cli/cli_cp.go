@@ -61,7 +61,7 @@ Examples:
   storhub cp docs-project docs/a.txt docs/b.txt
   storhub cp --reflink=always docs-project docs/a.txt docs/b.txt
   storhub cp docs-project docs/a.txt docs/b.txt 0 4096 4096`,
-		Args: usageArgs(func(cmd *cobra.Command, args []string) error {
+		Args: usageArgs(func(_ *cobra.Command, args []string) error {
 			if len(args) != 3 && len(args) != 6 {
 				return fmt.Errorf("accepts 3 or 6 arg(s), received %d", len(args))
 			}
@@ -104,7 +104,7 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 	}
 	ctx := cmd.Context()
 	if !offsetsGiven {
-		entry, err := hub.StatPath(project, src)
+		entry, err := hub.StatPathContext(ctx, project, src)
 		if err != nil {
 			return err
 		}
@@ -113,10 +113,10 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 	if length == 0 {
 		// Validated no-op like the core: the destination must exist,
 		// and nothing moves.
-		if _, err := hub.StatPath(project, dst); err != nil {
+		if _, err := hub.StatPathContext(ctx, project, dst); err != nil {
 			return err
 		}
-		if err := a.drainIfSyncRequested(cmd, ctx, project); err != nil {
+		if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(a.stderr, "copied %s -> %s (0 bytes, no-op)\n", src, dst)
@@ -135,7 +135,7 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := a.drainIfSyncRequested(cmd, ctx, project); err != nil {
+		if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 			return err
 		}
 		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (reflink)", src, dst), meta)
@@ -145,30 +145,30 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := a.drainIfSyncRequested(cmd, ctx, project); err != nil {
+		if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 			return err
 		}
 		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (streaming)", src, dst), meta)
 		return nil
 	default: // auto
 		if meta, err := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode); err == nil {
-			if err := a.drainIfSyncRequested(cmd, ctx, project); err != nil {
+			if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 				return err
 			}
 			printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (reflink)", src, dst), meta)
 			return nil
-		} else if opts != nil {
+		}
+		if opts != nil {
 			// The clone carried a compare-and-swap guard the streaming
 			// path cannot honor: failing loud beats applying unguarded.
 			return err
-		} else {
-			a.warnf("clone unavailable (%v); falling back to streaming copy", err)
 		}
+		a.warnf("clone unavailable (%v); falling back to streaming copy", err)
 		meta, err := streamingCopy(ctx, hub, project, src, srcOff, dst, dstOff, length)
 		if err != nil {
 			return err
 		}
-		if err := a.drainIfSyncRequested(cmd, ctx, project); err != nil {
+		if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 			return err
 		}
 		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (streaming)", src, dst), meta)
@@ -198,19 +198,18 @@ func cloneWithFlags(ctx context.Context, hub hubClient, project, src string, src
 // its mode (range-write semantics, like CloneRange onto an existing
 // file).
 func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcOff int64, dst string, dstOff int64, length int64) (*storhub.FileMetadata, error) {
-	_ = ctx
-	if _, err := hub.StatPath(project, dst); err != nil {
+	if _, err := hub.StatPathContext(ctx, project, dst); err != nil {
 		if !isNotFoundErr(err) {
 			return nil, err
 		}
-		if _, err := hub.CreateFile(project, dst); err != nil {
+		if _, err := hub.CreateFileContext(ctx, project, dst); err != nil {
 			return nil, err
 		}
-		srcEntry, serr := hub.StatPath(project, src)
+		srcEntry, serr := hub.StatPathContext(ctx, project, src)
 		if serr != nil {
 			return nil, serr
 		}
-		if cerr := hub.Chmod(project, dst, srcEntry.Mode&0o7777&^0o6000); cerr != nil {
+		if cerr := hub.ChmodContext(ctx, project, dst, srcEntry.Mode&0o7777&^0o6000); cerr != nil {
 			return nil, cerr
 		}
 	}
@@ -221,7 +220,7 @@ func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcO
 		if remaining := length - done; remaining < want {
 			want = remaining
 		}
-		chunk, err := hub.ReadFileAt(project, src, srcOff+done, want)
+		chunk, err := hub.ReadFileAtContext(ctx, project, src, srcOff+done, want)
 		if err != nil {
 			return nil, err
 		}
@@ -229,7 +228,7 @@ func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcO
 			// The source shrank underneath us; serve what exists.
 			break
 		}
-		meta, err = hub.WriteFileAt(project, dst, dstOff+done, chunk)
+		meta, err = hub.WriteFileAtContext(ctx, project, dst, dstOff+done, chunk)
 		if err != nil {
 			return nil, err
 		}

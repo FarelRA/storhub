@@ -1,3 +1,4 @@
+// Package rest benchmarks the REST handler paths.
 package rest
 
 import (

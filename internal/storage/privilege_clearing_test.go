@@ -46,7 +46,7 @@ func setupPrivProject(t *testing.T, project, dir, file string, content []byte, m
 	return hub, adminCtx, userCtx, dir + "/" + file
 }
 
-func statMode(t *testing.T, hub *StorHub, ctx context.Context, project, path string) uint32 {
+func statMode(ctx context.Context, t *testing.T, hub *StorHub, project, path string) uint32 {
 	t.Helper()
 	info, err := hub.StatPathContext(ctx, project, path)
 	if err != nil {
@@ -62,7 +62,7 @@ func TestUnprivilegedPutClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.ReplaceFileContext(userCtx, "project-put-clear", target, input); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-put-clear", target); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, "project-put-clear", target); got != 0o777 {
 		t.Fatalf("put mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -74,7 +74,7 @@ func TestAdminPutKeepsPrivilegeBits(t *testing.T) {
 	if _, err := hub.ReplaceFileContext(adminCtx, "project-put-keep", target, input); err != nil {
 		t.Fatalf("admin replace: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-put-keep", target); got != 0o6777 {
+	if got := statMode(adminCtx, t, hub, "project-put-keep", target); got != 0o6777 {
 		t.Fatalf("admin put mode = %o, want %o", got, uint32(0o6777))
 	}
 }
@@ -85,7 +85,7 @@ func TestUnprivilegedPatchClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.PatchFileContext(userCtx, "project-patch-clear", target, 0, 1, []byte("X")); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-patch-clear", target); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, "project-patch-clear", target); got != 0o777 {
 		t.Fatalf("patch mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -96,7 +96,7 @@ func TestAdminPatchKeepsPrivilegeBits(t *testing.T) {
 	if _, err := hub.PatchFileContext(adminCtx, "project-patch-keep", target, 0, 1, []byte("X")); err != nil {
 		t.Fatalf("admin patch: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-patch-keep", target); got != 0o6777 {
+	if got := statMode(adminCtx, t, hub, "project-patch-keep", target); got != 0o6777 {
 		t.Fatalf("admin patch mode = %o, want %o", got, uint32(0o6777))
 	}
 }
@@ -108,7 +108,7 @@ func TestUnprivilegedPatchRangesClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.PatchFileRangesContext(userCtx, "project-ranges-clear", target, edits); err != nil {
 		t.Fatalf("patch ranges: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-ranges-clear", target); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, "project-ranges-clear", target); got != 0o777 {
 		t.Fatalf("patch ranges mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -120,7 +120,7 @@ func TestUnprivilegedReplaceReaderClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.ReplaceFileFromReaderContext(userCtx, "project-replace-reader", target, bytes.NewReader(payload), shfs.WithSize(int64(len(payload)))); err != nil {
 		t.Fatalf("replace from reader: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-replace-reader", target); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, "project-replace-reader", target); got != 0o777 {
 		t.Fatalf("replace reader mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -141,7 +141,7 @@ func TestUnprivilegedRewriteRangesClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.RewriteFileRangesWithMetadataContext(userCtx, "project-rewrite-clear", target, snapshot, repo, file, int64(len("HELLO world")), ranges); err != nil {
 		t.Fatalf("rewrite ranges: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-rewrite-clear", target); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, "project-rewrite-clear", target); got != 0o777 {
 		t.Fatalf("rewrite mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -152,7 +152,7 @@ func TestUnprivilegedTruncateShrinkClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.TruncateFileContext(userCtx, "project-trunc-shrink", target, 5); err != nil {
 		t.Fatalf("truncate shrink: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-trunc-shrink", target); got != 0o666 {
+	if got := statMode(adminCtx, t, hub, "project-trunc-shrink", target); got != 0o666 {
 		t.Fatalf("truncate shrink mode = %o, want %o", got, uint32(0o666))
 	}
 }
@@ -167,7 +167,7 @@ func TestUnprivilegedTruncateNoopClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.TruncateFileContext(userCtx, "project-trunc-noop", target, info.Size); err != nil {
 		t.Fatalf("truncate noop: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-trunc-noop", target); got != 0o666 {
+	if got := statMode(adminCtx, t, hub, "project-trunc-noop", target); got != 0o666 {
 		t.Fatalf("truncate noop mode = %o, want %o", got, uint32(0o666))
 	}
 }
@@ -182,7 +182,7 @@ func TestAdminTruncateNoopKeepsPrivilegeBits(t *testing.T) {
 	if _, err := hub.TruncateFileContext(adminCtx, "project-trunc-noop-keep", target, info.Size); err != nil {
 		t.Fatalf("admin truncate noop: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-trunc-noop-keep", target); got != 0o6666 {
+	if got := statMode(adminCtx, t, hub, "project-trunc-noop-keep", target); got != 0o6666 {
 		t.Fatalf("admin truncate noop mode = %o, want %o", got, uint32(0o6666))
 	}
 }
@@ -193,7 +193,7 @@ func TestUnprivilegedWriteAtClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.WriteFileAtContext(userCtx, "project-writeat-clear", target, 0, []byte("XX")); err != nil {
 		t.Fatalf("write at: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-writeat-clear", target); got != 0o666 {
+	if got := statMode(adminCtx, t, hub, "project-writeat-clear", target); got != 0o666 {
 		t.Fatalf("writeat mode = %o, want %o", got, uint32(0o666))
 	}
 }
@@ -204,7 +204,7 @@ func TestUnprivilegedAppendClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.AppendFileContext(userCtx, "project-append-clear", target, []byte("tail")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-append-clear", target); got != 0o666 {
+	if got := statMode(adminCtx, t, hub, "project-append-clear", target); got != 0o666 {
 		t.Fatalf("append mode = %o, want %o", got, uint32(0o666))
 	}
 }
@@ -233,7 +233,7 @@ func TestUnprivilegedChownClearsFilePrivilegeBits(t *testing.T) {
 	if err := hub.ChownContext(userCtx, project, "docs/owned.txt", keepOwner, 2000); err != nil {
 		t.Fatalf("user chown: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, project, "docs/owned.txt"); got != 0o777 {
+	if got := statMode(adminCtx, t, hub, project, "docs/owned.txt"); got != 0o777 {
 		t.Fatalf("chown file mode = %o, want %o", got, uint32(0o777))
 	}
 }
@@ -261,7 +261,7 @@ func TestUnprivilegedChownClearsDirPrivilegeBits(t *testing.T) {
 	if err := hub.ChownContext(userCtx, project, "docs/sub", keepOwner, 2000); err != nil {
 		t.Fatalf("user chown dir: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, project, "docs/sub"); got != 0o755 {
+	if got := statMode(adminCtx, t, hub, project, "docs/sub"); got != 0o755 {
 		t.Fatalf("chown dir mode = %o, want %o", got, uint32(0o755))
 	}
 }
@@ -272,13 +272,13 @@ func TestAdminChownKeepsPrivilegeBits(t *testing.T) {
 	if err := hub.ChownContext(adminCtx, "project-chown-keep", target, 1001, 1002); err != nil {
 		t.Fatalf("admin chown file: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-chown-keep", target); got != 0o6777 {
+	if got := statMode(adminCtx, t, hub, "project-chown-keep", target); got != 0o6777 {
 		t.Fatalf("admin chown file mode = %o, want %o", got, uint32(0o6777))
 	}
 	if err := hub.ChownContext(adminCtx, "project-chown-keep", "docs", 1001, 1002); err != nil {
 		t.Fatalf("admin chown dir: %v", err)
 	}
-	dirMode := statMode(t, hub, adminCtx, "project-chown-keep", "docs")
+	dirMode := statMode(adminCtx, t, hub, "project-chown-keep", "docs")
 	_ = dirMode
 }
 
@@ -297,7 +297,7 @@ func TestAdminChownKeepsDirPrivilegeBits(t *testing.T) {
 	if err := hub.ChownContext(adminCtx, project, "docs", 1001, 1002); err != nil {
 		t.Fatalf("admin chown dir: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, project, "docs"); got != 0o6775 {
+	if got := statMode(adminCtx, t, hub, project, "docs"); got != 0o6775 {
 		t.Fatalf("admin chown dir mode = %o, want %o", got, uint32(0o6775))
 	}
 }
@@ -308,7 +308,7 @@ func TestTruncateGrowClearsPrivilegeBits(t *testing.T) {
 	if _, err := hub.TruncateFileContext(userCtx, "project-trunc-grow", target, 10); err != nil {
 		t.Fatalf("truncate grow: %v", err)
 	}
-	if got := statMode(t, hub, adminCtx, "project-trunc-grow", target); got != 0o666 {
+	if got := statMode(adminCtx, t, hub, "project-trunc-grow", target); got != 0o666 {
 		t.Fatalf("truncate grow mode = %o, want %o", got, uint32(0o666))
 	}
 }

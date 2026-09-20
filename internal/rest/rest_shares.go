@@ -27,91 +27,91 @@ type readOnlyShare struct{}
 
 func errReadOnly() error { return errForbidden("access denied: read-only share") }
 
-func (readOnlyShare) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
+func (readOnlyShare) CreateFileContext(_ context.Context, _, _ string) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) MkdirContext(ctx context.Context, project, dirPath string) error {
+func (readOnlyShare) MkdirContext(_ context.Context, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
+func (readOnlyShare) DeleteFileContext(_ context.Context, _, _ string, _ ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+func (readOnlyShare) RmdirContext(_ context.Context, _, _ string, _ ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RenameContext(ctx context.Context, project, oldPath, newPath string, _ ...shfs.MutateOption) error {
+func (readOnlyShare) RenameContext(_ context.Context, _, _, _ string, _ ...shfs.MutateOption) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+func (readOnlyShare) CopyContext(_ context.Context, _, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) CloneRange(_ context.Context, _, _ string, _ int64, _ string, _ int64, _ int64, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) TruncateFileContext(_ context.Context, _, _ string, _ int64, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) AppendFileContext(_ context.Context, _, _ string, _ []byte, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) WriteFileAtContext(_ context.Context, _, _ string, _ int64, _ []byte, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) PatchFileContext(_ context.Context, _, _ string, _, _ int64, _ []byte, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) ReplaceFileFromReaderContext(ctx context.Context, project, filePath string, body io.Reader, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
+func (readOnlyShare) ReplaceFileFromReaderContext(_ context.Context, _, _ string, _ io.Reader, _ ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
+func (readOnlyShare) SymlinkContext(_ context.Context, _, _, _ string) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
+func (readOnlyShare) LinkContext(_ context.Context, _, _, _ string) (*metadata.FileMeta, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+func (readOnlyShare) ChmodContext(_ context.Context, _, _ string, _ uint32) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+func (readOnlyShare) ChownContext(_ context.Context, _, _ string, _, _ uint32) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+func (readOnlyShare) ChtimesContext(_ context.Context, _, _ string, _, _ int64) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
+func (readOnlyShare) SetXAttrContext(_ context.Context, _, _, _ string, _ []byte, _ ...shfs.XAttrMode) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+func (readOnlyShare) RemoveXAttrContext(_ context.Context, _, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (readOnlyShare) RollbackMetadataContext(_ context.Context, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+func (readOnlyShare) RevertPathContext(_ context.Context, _, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+func (readOnlyShare) PruneContext(_ context.Context, _, _ string, _ int, _ bool) (*storage.PruneResult, error) {
 	return nil, errReadOnly()
 }
 
@@ -119,7 +119,7 @@ func (readOnlyShare) DegradedProjects() ([]string, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) ReEnableProject(project string) error {
+func (readOnlyShare) ReEnableProject(_ string) error {
 	return errReadOnly()
 }
 
@@ -127,17 +127,17 @@ func (readOnlyShare) PressureSnapshot() (storage.PressureSnapshot, error) {
 	return storage.PressureSnapshot{}, errReadOnly()
 }
 
-func (readOnlyShare) PressureFailureStreak(project string) (uint64, error) { return 0, errReadOnly() }
+func (readOnlyShare) PressureFailureStreak(_ string) (uint64, error) { return 0, errReadOnly() }
 
-func (readOnlyShare) PressurePendingDepth(project string) (int, error) { return 0, errReadOnly() }
+func (readOnlyShare) PressurePendingDepth(_ string) (int, error) { return 0, errReadOnly() }
 
-func (readOnlyShare) DeleteProjectContext(ctx context.Context, project string) error {
+func (readOnlyShare) DeleteProjectContext(_ context.Context, _ string) error {
 	return errReadOnly()
 }
 
 // DrainProjectContext is denied like every other mutation: share visitors
 // are read-only, and their lane never publishes journaled work to drain.
-func (readOnlyShare) DrainProjectContext(ctx context.Context, project string) error {
+func (readOnlyShare) DrainProjectContext(_ context.Context, _ string) error {
 	return errReadOnly()
 }
 
@@ -293,17 +293,17 @@ func (c *restrictedClient) ReadDirContext(ctx context.Context, project, dirPath 
 
 // StatFS and revision listing are denied with share-specific messages:
 // aggregate stats and history leak information beyond the shared subtree.
-func (c *restrictedClient) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
+func (c *restrictedClient) StatFSContext(_ context.Context, _ string) (*shfs.FSStats, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
-func (c *restrictedClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]metadata.MetadataRevision, error) {
+func (c *restrictedClient) ListMetadataRevisionsContext(_ context.Context, _ string) ([]metadata.MetadataRevision, error) {
 	return nil, errForbidden("access denied: share metadata is limited to the shared path")
 }
 
 // Share visitors never learn the project's revision: like stats and
 // history, it is metadata beyond the shared subtree.
-func (c *restrictedClient) RevisionContext(ctx context.Context, project string) (string, error) {
+func (c *restrictedClient) RevisionContext(_ context.Context, _ string) (string, error) {
 	return "", errForbidden("access denied: share metadata is limited to the shared path")
 }
 
@@ -440,7 +440,12 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, errBadRequest("invalid share path"))
 		return
 	}
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, sharePath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -456,8 +461,8 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	if expiresIn <= 0 {
 		expiresIn = h.opts.ShareTTL
 	}
-	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
-		expiresIn = max
+	if ttlCap := h.opts.MaxShareTTL; ttlCap > 0 && expiresIn > ttlCap {
+		expiresIn = ttlCap
 	}
 	// Ownership gate: remember who minted the share so
 	// list/get/delete can be restricted to creator ∪ admin. The identity is
@@ -479,7 +484,12 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
-	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -500,7 +510,12 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -522,7 +537,12 @@ func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	if _, err := h.clientFor(r).StatFSContext(r.Context(), project); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.StatFSContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -640,11 +660,16 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	expiresIn := remaining
-	if max := h.opts.MaxShareTTL; max > 0 && expiresIn > max {
-		expiresIn = max
+	if ttlCap := h.opts.MaxShareTTL; ttlCap > 0 && expiresIn > ttlCap {
+		expiresIn = ttlCap
 	}
 	// Stat to learn IsDir for new record (scoped + nobody identity, above).
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), claims.Project, sharePath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), claims.Project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -684,7 +709,12 @@ func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (str
 }
 
 func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, project, targetPath string) {
-	entry, err := h.clientFor(r).StatPathContext(r.Context(), project, targetPath)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -696,7 +726,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(targetPath)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if entry.IsSymlink {
-		target, readErr := h.clientFor(r).ReadlinkContext(r.Context(), project, targetPath)
+		target, readErr := client.ReadlinkContext(r.Context(), project, targetPath)
 		if readErr != nil {
 			h.writeMappedError(w, readErr)
 			return

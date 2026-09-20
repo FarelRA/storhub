@@ -62,15 +62,7 @@ func (h *StorHub) FlushProjectContext(ctx context.Context, project string) error
 	return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
 }
 
-// Compat shims: the non-Context verbs below are thin wrappers for
-// single-call scripts and embedders without a request scope. They inject
-// context.Background, so they cannot be cancelled: long-running callers
-// must prefer the FooContext variants. New methods are Context-first;
-// no new non-Context wrapper is added.
-func (h *StorHub) UploadFile(project, fileName, inputPath string) (*FileMeta, error) {
-	return h.UploadFileContext(context.Background(), project, fileName, inputPath)
-}
-
+// UploadFileContext stores a local file as new project content.
 func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
 	// Degraded-mode admission first: refuse before any upload work mints
 	// assets that could never commit.
@@ -80,10 +72,7 @@ func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inpu
 	return h.uploadFileContext(ctx, project, fileName, inputPath)
 }
 
-func (h *StorHub) ReplaceFile(project, fileName, inputPath string) (*FileMeta, error) {
-	return h.ReplaceFileContext(context.Background(), project, fileName, inputPath)
-}
-
+// ReplaceFileContext swaps a stored file for new local content.
 func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string, opts ...shfs.MutateOption) (*FileMeta, error) {
 	// Degraded-mode admission first: refuse before the revision check pays
 	// for a remote load.
@@ -96,11 +85,10 @@ func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inp
 	return h.replaceFileContext(ctx, project, fileName, inputPath)
 }
 
-func (h *StorHub) PatchFile(project, fileName string, offset, deleteSize int64, edit []byte) (*FileMeta, error) {
-	return h.PatchFileContext(context.Background(), project, fileName, offset, deleteSize, edit)
-}
-
-func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (result *FileMeta, err error) {
+// PatchFileContext splices one edit into a stored file at offset.
+func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*FileMeta, error) {
+	var result *FileMeta
+	var err error
 	started := h.logOpStart(project, "patch-file", "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
 	defer func() {
 		h.logOpFinish(project, "patch-file", started, err, "path", fileName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
@@ -161,7 +149,8 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 // round-trip and the N-1 intermediate playlist states - on a slow link
 // that turns N+2 latency chains into one. Either the whole batch commits
 // or none of it does.
-func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName string, edits []shfs.RangeEdit) (result *FileMeta, err error) {
+func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName string, edits []shfs.RangeEdit) (*FileMeta, error) {
+	var err error
 	started := h.logOpStart(project, "patch-file-ranges", "path", fileName, "edits", len(edits))
 	defer func() {
 		h.logOpFinish(project, "patch-file-ranges", started, err, "path", fileName, "edits", len(edits))
@@ -479,11 +468,9 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	return &rewritten, nil
 }
 
-func (h *StorHub) DownloadFile(project, fileName, outputPath string) error {
-	return h.DownloadFileContext(context.Background(), project, fileName, outputPath)
-}
-
-func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, outputPath string) (err error) {
+// DownloadFileContext reassembles a stored file to a local path.
+func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, outputPath string) error {
+	var err error
 	started := h.logOpStart(project, "download-file", "path", fileName, "output", outputPath)
 	defer func() { h.logOpFinish(project, "download-file", started, err, "path", fileName, "output", outputPath) }()
 	if err := validateProject(project); err != nil {
@@ -549,14 +536,13 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	}
 	// The deferred closer owns Close so it fires exactly once, whether the
 	// success path completes here or an error unwinds through the defers.
-	return nil
+	return err
 }
 
-func (h *StorHub) ListFiles(project string) ([]FileMeta, error) {
-	return h.ListFilesContext(context.Background(), project)
-}
-
-func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result []FileMeta, err error) {
+// ListFilesContext returns every stored file in project.
+func (h *StorHub) ListFilesContext(ctx context.Context, project string) ([]FileMeta, error) {
+	var result []FileMeta
+	var err error
 	started := h.logOpStart(project, "list-files")
 	defer func() { h.logOpFinish(project, "list-files", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
@@ -571,11 +557,10 @@ func (h *StorHub) ListFilesContext(ctx context.Context, project string) (result 
 	return result, nil
 }
 
-func (h *StorHub) ListReleases(project string) ([]metadata.ReleaseRef, error) {
-	return h.ListReleasesContext(context.Background(), project)
-}
-
-func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (result []metadata.ReleaseRef, err error) {
+// ListReleasesContext returns the chunk-holding releases of project.
+func (h *StorHub) ListReleasesContext(ctx context.Context, project string) ([]metadata.ReleaseRef, error) {
+	var result []metadata.ReleaseRef
+	var err error
 	started := h.logOpStart(project, "list-releases")
 	defer func() { h.logOpFinish(project, "list-releases", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
@@ -592,11 +577,10 @@ func (h *StorHub) ListReleasesContext(ctx context.Context, project string) (resu
 	return result, nil
 }
 
-func (h *StorHub) ListMetadataRevisions(project string) ([]MetadataRevision, error) {
-	return h.ListMetadataRevisionsContext(context.Background(), project)
-}
-
-func (h *StorHub) ListMetadataRevisionsContext(ctx context.Context, project string) (result []MetadataRevision, err error) {
+// ListMetadataRevisionsContext returns the metadata history of project.
+func (h *StorHub) ListMetadataRevisionsContext(ctx context.Context, project string) ([]MetadataRevision, error) {
+	var result []MetadataRevision
+	var err error
 	started := h.logOpStart(project, "list-metadata-revisions")
 	defer func() { h.logOpFinish(project, "list-metadata-revisions", started, err, "count", len(result)) }()
 	if err := validateProject(project); err != nil {
@@ -606,11 +590,9 @@ func (h *StorHub) ListMetadataRevisionsContext(ctx context.Context, project stri
 	return result, err
 }
 
-func (h *StorHub) RollbackMetadata(project, commitSHA string) error {
-	return h.RollbackMetadataContext(context.Background(), project, commitSHA)
-}
-
-func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) (err error) {
+// RollbackMetadataContext resets project metadata to commitSHA.
+func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+	var err error
 	started := h.logOpStart(project, "rollback-metadata", "commit_sha", commitSHA)
 	defer func() { h.logOpFinish(project, "rollback-metadata", started, err, "commit_sha", commitSHA) }()
 	if err := validateProject(project); err != nil {
@@ -684,12 +666,9 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 	return nil
 }
 
-// RevertPath restores a single path (a file or an entire directory subtree) to
+// RevertPathContext restores a single path (a file or an entire directory subtree) to
 // its state at commitSHA, leaving every other path untouched, as a NEW commit.
-func (h *StorHub) RevertPath(project, path, commitSHA string) error {
-	return h.RevertPathContext(context.Background(), project, path, commitSHA)
-}
-
+// its state at commitSHA, leaving every other path untouched, as a NEW commit.
 // RevertPathContext is the per-path counterpart of RollbackMetadataContext:
 // instead of repointing the whole index at an old revision, it replays just
 // `path`'s historical state onto the current tree. It is a revert, not a
@@ -698,7 +677,8 @@ func (h *StorHub) RevertPath(project, path, commitSHA string) error {
 // subtree's assets are validated against live releases before and after the
 // commit, so restoring a path whose bytes were purged fails loudly rather
 // than committing a dangling reference.
-func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSHA string) (err error) {
+func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+	var err error
 	started := h.logOpStart(project, "revert", "path", path, "commit_sha", commitSHA)
 	defer func() { h.logOpFinish(project, "revert", started, err, "path", path, "commit_sha", commitSHA) }()
 	if err := validateProject(project); err != nil {
@@ -789,6 +769,7 @@ func (h *StorHub) validateMetadataRevision(ctx context.Context, project, revisio
 	return fmt.Errorf("invalid metadata revision %q: not a known commit SHA for project %s", revision, project)
 }
 
+// LoadRepoMetadataReadonlyContext loads project metadata plus its revision without tracking.
 func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*metadata.RepoMetadata, string, error) {
 	return h.loadRepoMetadataReadonly(ctx, project)
 }
@@ -1057,6 +1038,7 @@ func (h *StorHub) publishTxLocked(project string, pm *projectMetadata, candidate
 	publishTreeLocked(pm, candidate, txPaths)
 }
 
+// RewriteFileRangesWithMetadataContext rewrites dirty ranges against loaded metadata.
 func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {
 	// Degraded-mode admission: a rewrite mints chunks like any mutation.
 	if err := h.admitMutation(project); err != nil {
@@ -1069,74 +1051,72 @@ func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	return h.rewriteFileRangesWithMetadataContext(ctx, project, cleanName, snapshotPath, repoMeta, fileMeta, finalSize, ranges)
 }
 
+// ValidateProjectName rejects project names outside the allowed shape.
 func (h *StorHub) ValidateProjectName(project string) error {
 	return validateProject(project)
 }
 
+// EnsureRepoContext creates the project repo when absent.
 func (h *StorHub) EnsureRepoContext(ctx context.Context, project string) error {
 	return h.ensureRepo(ctx, project)
 }
 
+// LoadRepoMetadataContext loads tracked project metadata plus its revision.
 func (h *StorHub) LoadRepoMetadataContext(ctx context.Context, project string) (*metadata.RepoMetadata, string, error) {
 	return h.loadRepoMetadata(ctx, project)
 }
 
+// GetOrCreateUploadReleaseContext returns a release with room for requiredSize bytes.
 func (h *StorHub) GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *metadata.RepoMetadata, requiredSize int) (string, string, error) {
 	return h.getOrCreateUploadRelease(ctx, project, repoMeta, requiredSize)
 }
 
+// PatchFileWithMetadataContext splices one edit using caller-loaded metadata.
 func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
 	return h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
 }
 
+// FillAssetRangeContext downloads one chunk segment into dst.
 func (h *StorHub) FillAssetRangeContext(ctx context.Context, project string, segment metadata.ChunkInfo, dst []byte) error {
 	return h.fillAssetRange(ctx, project, segment, dst)
 }
 
+// FileNotFound returns the not-found error for path.
 func (h *StorHub) FileNotFound(path string) error {
 	return shfs.NotFound(path)
 }
 
+// DefaultFileMode returns the creation mode for kind.
 func (h *StorHub) DefaultFileMode(kind metadata.NodeKind) uint32 {
 	return defaultFileMode(kind)
 }
 
+// DefaultOwnerIDs returns the default uid and gid for new entries.
 func (h *StorHub) DefaultOwnerIDs() (uint32, uint32) {
 	return defaultOwnerIDs()
 }
 
+// AtimePolicy returns the effective atime update policy.
 func (h *StorHub) AtimePolicy() storcfg.AtimePolicy {
 	return h.config.AtimePolicy
 }
 
-func (h *StorHub) CreateFile(project, filePath string) (*metadata.FileMeta, error) {
-	return h.CreateFileContext(context.Background(), project, filePath)
-}
-
+// CreateFileContext creates an empty file at filePath.
 func (h *StorHub) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
 	return h.fsService().CreateFileContext(ctx, project, filePath)
 }
 
-func (h *StorHub) Mkdir(project, dirPath string) error {
-	return h.MkdirContext(context.Background(), project, dirPath)
-}
-
+// MkdirContext creates a directory and missing parents.
 func (h *StorHub) MkdirContext(ctx context.Context, project, dirPath string) error {
 	return h.fsService().MkdirContext(ctx, project, dirPath)
 }
 
-func (h *StorHub) Unlink(project, filePath string) error {
-	return h.DeleteFile(project, filePath)
-}
-
+// UnlinkContext deletes the file at filePath.
 func (h *StorHub) UnlinkContext(ctx context.Context, project, filePath string) error {
 	return h.DeleteFileContext(ctx, project, filePath)
 }
 
-func (h *StorHub) Rmdir(project, dirPath string) error {
-	return h.RmdirContext(context.Background(), project, dirPath)
-}
-
+// RmdirContext removes an empty directory.
 func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return err
@@ -1144,26 +1124,17 @@ func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string, opt
 	return h.fsService().RmdirContext(ctx, project, dirPath)
 }
 
-func (h *StorHub) Rename(project, oldPath, newPath string) error {
-	return h.RenameContext(context.Background(), project, oldPath, newPath)
-}
-
+// RenameContext moves oldPath to newPath.
 func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
 	return h.fsService().RenameContext(ctx, project, oldPath, newPath, opts...)
 }
 
-func (h *StorHub) Copy(project, srcPath, dstPath string) error {
-	return h.CopyContext(context.Background(), project, srcPath, dstPath)
-}
-
+// CopyContext duplicates srcPath to dstPath without re-uploading chunks.
 func (h *StorHub) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
 	return h.fsService().CopyContext(ctx, project, srcPath, dstPath)
 }
 
-func (h *StorHub) TruncateFile(project, filePath string, size int64) (*metadata.FileMeta, error) {
-	return h.TruncateFileContext(context.Background(), project, filePath, size)
-}
-
+// TruncateFileContext resizes a file, zero-filling growth.
 func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
@@ -1171,10 +1142,7 @@ func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath str
 	return h.fsService().TruncateFileContext(ctx, project, filePath, size)
 }
 
-func (h *StorHub) AppendFile(project, filePath string, data []byte) (*metadata.FileMeta, error) {
-	return h.AppendFileContext(context.Background(), project, filePath, data)
-}
-
+// AppendFileContext adds data to the end of a file.
 func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
@@ -1182,10 +1150,7 @@ func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath strin
 	return h.fsService().AppendFileContext(ctx, project, filePath, data)
 }
 
-func (h *StorHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*metadata.FileMeta, error) {
-	return h.WriteFileAtContext(context.Background(), project, filePath, offset, data)
-}
-
+// WriteFileAtContext writes data at an absolute offset.
 func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*metadata.FileMeta, error) {
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
@@ -1193,10 +1158,7 @@ func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath stri
 	return h.fsService().WriteFileAtContext(ctx, project, filePath, offset, data)
 }
 
-func (h *StorHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
-	return h.ReadFileAtContext(context.Background(), project, filePath, offset, length)
-}
-
+// ReadFileAtContext reads length bytes at an absolute offset.
 func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) ([]byte, error) {
 	if length == 0 {
 		return []byte{}, nil
@@ -1212,6 +1174,7 @@ func (h *StorHub) ReadFileAtContext(ctx context.Context, project, filePath strin
 	return result[:n], nil
 }
 
+// ReadFileAtBufferContext reads into result and returns the byte count.
 func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath string, offset int64, result []byte) (int, error) {
 	if err := validateProject(project); err != nil {
 		return 0, err
@@ -1294,74 +1257,47 @@ func (h *StorHub) ReadPinnedFileContext(ctx context.Context, project string, fil
 	return result[:end-offset], nil
 }
 
-func (h *StorHub) StatPath(project, targetPath string) (*shfs.EntryInfo, error) {
-	return h.StatPathContext(context.Background(), project, targetPath)
-}
-
+// StatPathContext stats one path.
 func (h *StorHub) StatPathContext(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
 	return h.fsService().StatPathContext(ctx, project, targetPath)
 }
 
-func (h *StorHub) ReadDir(project, dirPath string) ([]shfs.DirEntry, error) {
-	return h.ReadDirContext(context.Background(), project, dirPath)
-}
-
+// ReadDirContext lists one directory.
 func (h *StorHub) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
 	return h.fsService().ReadDirContext(ctx, project, dirPath)
 }
 
-func (h *StorHub) StatFS(project string) (*shfs.FSStats, error) {
-	return h.StatFSContext(context.Background(), project)
-}
-
+// StatFSContext aggregates project-wide counts.
 func (h *StorHub) StatFSContext(ctx context.Context, project string) (*shfs.FSStats, error) {
 	return h.fsService().StatFSContext(ctx, project)
 }
 
-func (h *StorHub) Symlink(project, target, linkPath string) (*metadata.FileMeta, error) {
-	return h.SymlinkContext(context.Background(), project, target, linkPath)
-}
-
+// SymlinkContext points linkPath at target.
 func (h *StorHub) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
 	return h.posixService().SymlinkContext(ctx, project, target, linkPath)
 }
 
-func (h *StorHub) Readlink(project, linkPath string) (string, error) {
-	return h.ReadlinkContext(context.Background(), project, linkPath)
-}
-
+// ReadlinkContext returns the target of linkPath.
 func (h *StorHub) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
 	return h.posixService().ReadlinkContext(ctx, project, linkPath)
 }
 
-func (h *StorHub) Link(project, existingPath, newPath string) (*metadata.FileMeta, error) {
-	return h.LinkContext(context.Background(), project, existingPath, newPath)
-}
-
+// LinkContext hard-links newPath to existingPath.
 func (h *StorHub) LinkContext(ctx context.Context, project, existingPath, newPath string) (*metadata.FileMeta, error) {
 	return h.posixService().LinkContext(ctx, project, existingPath, newPath)
 }
 
-func (h *StorHub) Chmod(project, targetPath string, mode uint32) error {
-	return h.ChmodContext(context.Background(), project, targetPath, mode)
-}
-
+// ChmodContext sets permission bits, clearing setuid on the way.
 func (h *StorHub) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
 	return h.posixService().ChmodContext(ctx, project, targetPath, mode)
 }
 
-func (h *StorHub) Chown(project, targetPath string, uid, gid uint32) error {
-	return h.ChownContext(context.Background(), project, targetPath, uid, gid)
-}
-
+// ChownContext sets owner ids, clearing setuid on the way.
 func (h *StorHub) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
 	return h.posixService().ChownContext(ctx, project, targetPath, uid, gid)
 }
 
-func (h *StorHub) Chtimes(project, targetPath string, atime, mtime int64) error {
-	return h.ChtimesContext(context.Background(), project, targetPath, atime, mtime)
-}
-
+// ChtimesContext sets atime and mtime as Unix nanoseconds.
 func (h *StorHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
 	return h.posixService().ChtimesContext(ctx, project, targetPath, atime, mtime)
 }
@@ -1372,38 +1308,27 @@ func (h *StorHub) ChtimesExplicitContext(ctx context.Context, project, targetPat
 	return h.posixService().ChtimesExplicitContext(ctx, project, targetPath, atime, mtime)
 }
 
-func (h *StorHub) SetXAttr(project, targetPath, attr string, data []byte) error {
-	return h.SetXAttrContext(context.Background(), project, targetPath, attr, data)
-}
-
+// SetXAttrContext stores one extended attribute.
 func (h *StorHub) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error {
 	return h.posixService().SetXAttrContext(ctx, project, targetPath, attr, data, mode...)
 }
 
-func (h *StorHub) GetXAttr(project, targetPath, attr string) ([]byte, error) {
-	return h.GetXAttrContext(context.Background(), project, targetPath, attr)
-}
-
+// GetXAttrContext returns one extended attribute.
 func (h *StorHub) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
 	return h.posixService().GetXAttrContext(ctx, project, targetPath, attr)
 }
 
-func (h *StorHub) ListXAttr(project, targetPath string) ([]string, error) {
-	return h.ListXAttrContext(context.Background(), project, targetPath)
-}
-
+// ListXAttrContext names every extended attribute on a path.
 func (h *StorHub) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
 	return h.posixService().ListXAttrContext(ctx, project, targetPath)
 }
 
-func (h *StorHub) RemoveXAttr(project, targetPath, attr string) error {
-	return h.RemoveXAttrContext(context.Background(), project, targetPath, attr)
-}
-
+// RemoveXAttrContext deletes one extended attribute.
 func (h *StorHub) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
 	return h.posixService().RemoveXAttrContext(ctx, project, targetPath, attr)
 }
 
+// ApplyMetadataPatchContext applies a metadata-only patch to a path.
 func (h *StorHub) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) error {
 	return h.posixService().ApplyMetadataPatchContext(ctx, project, targetPath, patch)
 }

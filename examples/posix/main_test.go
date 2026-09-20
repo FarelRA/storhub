@@ -23,7 +23,7 @@ func TestMainRequiresToken(t *testing.T) {
 	}
 }
 
-func TestPOSIXHelperProcess(t *testing.T) {
+func TestPOSIXHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_POSIX_HELPER") != "1" {
 		return
 	}

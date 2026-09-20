@@ -50,7 +50,7 @@ func runFuseHelper(t *testing.T, extraEnv []string) string {
 	return string(out)
 }
 
-func TestFuseMountHelperProcess(t *testing.T) {
+func TestFuseMountHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_FUSE_MOUNT_HELPER") != "1" {
 		return
 	}

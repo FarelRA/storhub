@@ -77,10 +77,10 @@ func TestObjectCachePutRejectsMismatchedSHA(t *testing.T) {
 func TestObjectCacheLRUEviction(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	max := 4
-	c := newObjectCache(dir, max)
-	shas := make([]string, 0, max+2)
-	for i := 0; i < max+2; i++ {
+	capN := 4
+	c := newObjectCache(dir, capN)
+	shas := make([]string, 0, capN+2)
+	for i := 0; i < capN+2; i++ {
 		data := objBytes(fmt.Sprintf("object-%d", i))
 		sha := meta.ObjectSHA(data)
 		c.put(sha, data)

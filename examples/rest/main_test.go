@@ -23,7 +23,7 @@ func TestMainRequiresToken(t *testing.T) {
 	}
 }
 
-func TestRESTHelperProcess(t *testing.T) {
+func TestRESTHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_REST_HELPER") != "1" {
 		return
 	}

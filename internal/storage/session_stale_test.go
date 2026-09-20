@@ -15,9 +15,9 @@ func TestSessionStatStaleFreshThenRival(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-stale-rival"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("version-one"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("version-one"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadOnly)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadOnly)
 	stat, err := hub.StatSession(ctx, id)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -66,9 +66,9 @@ func TestSessionStatStaleClearsOnSync(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	proj := "project-session-stale-sync"
-	setupSessionFile(t, hub, ctx, proj, "data.txt", []byte("base"))
+	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("base"))
 
-	id := mustOpenSession(t, hub, ctx, proj, "data.txt", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
 
 	seed := writeTempFile(t, t.TempDir(), "rival.bin", []byte("rival-committed"))
 	if _, err := hub.ReplaceFileContext(ctx, proj, "data.txt", seed); err != nil {

@@ -800,11 +800,10 @@ func (r *gitRepo) squashHistoryCAS(ctx context.Context, path, message, expectedO
 	if err != nil {
 		return fmt.Errorf("store leaf tree: %w", err)
 	}
-	// Walk up the directory chain to build parent trees
+	// Walk up the directory chain to build parent trees. A root file needs
+	// no parent trees: treeHash is already the root tree.
 	dir = filepath.Clean(dir)
-	if dir == "." || dir == "" {
-		// File is in the root - treeHash is already the root tree
-	} else {
+	if dir != "." && dir != "" {
 		parts := strings.Split(dir, string(filepath.Separator))
 		for i := len(parts) - 1; i >= 0; i-- {
 			entries = []object.TreeEntry{{
@@ -936,7 +935,7 @@ func (r *gitRepo) squashTreeCAS(ctx context.Context, message, expectedOld string
 }
 
 // readFileContentsNoLock reads current file content from HEAD (no lock, callers must hold syncMu).
-func (r *gitRepo) readFileContentsNoLock(ctx context.Context, path string) ([]byte, error) {
+func (r *gitRepo) readFileContentsNoLock(_ context.Context, path string) ([]byte, error) {
 	ref, err := r.repo.Reference(plumbing.HEAD, true)
 	if err != nil {
 		return nil, fmt.Errorf("HEAD ref: %w", err)

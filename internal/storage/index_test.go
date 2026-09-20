@@ -261,7 +261,7 @@ func TestFailedBuildDoesNotPoisonTreeCache(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFile("project-poison-cache", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "project-poison-cache", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// Simulate the failed attempt's build: same tree, same shared cache,

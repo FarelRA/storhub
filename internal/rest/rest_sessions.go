@@ -171,7 +171,12 @@ func (h *restHandler) handleSessionOpen(w http.ResponseWriter, r *http.Request) 
 		}
 		opts = append(opts, storage.WithSessionTTL(ttl))
 	}
-	id, err := h.clientFor(r).OpenSession(r.Context(), req.Project, req.Path, mode, opts...)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	id, err := client.OpenSession(r.Context(), req.Project, req.Path, mode, opts...)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -193,7 +198,12 @@ func (h *restHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		h.serveSessionRead(w, r, handle, query.Get("offset"), query.Get("length"))
 		return
 	}
-	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -219,7 +229,12 @@ func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, h
 		}
 		offset = parsed
 	}
-	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -236,7 +251,7 @@ func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, h
 		}
 		length = parsed
 	}
-	data, err := h.clientFor(r).ReadSession(r.Context(), handle, offset, length)
+	data, err := client.ReadSession(r.Context(), handle, offset, length)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -286,7 +301,12 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 		h.writeMappedError(w, errPayloadTooLarge("write payload exceeds the configured limit"))
 		return
 	}
-	wrote, err := h.clientFor(r).WriteSession(r.Context(), handle, req.Offset, data)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	wrote, err := client.WriteSession(r.Context(), handle, req.Offset, data)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -311,7 +331,12 @@ func (h *restHandler) handleSessionTruncate(w http.ResponseWriter, r *http.Reque
 		h.writeMappedError(w, errBadRequest("size must be non-negative"))
 		return
 	}
-	if err := h.clientFor(r).TruncateSession(r.Context(), handle, req.Size); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.TruncateSession(r.Context(), handle, req.Size); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
@@ -326,7 +351,12 @@ func (h *restHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) 
 	// SyncSession commits staged state without closing (commit-then-drain
 	// on ?sync=1: the project drain below lands the commit remotely, the
 	// same durability closeSession offers).
-	if err := h.clientFor(r).SyncSession(r.Context(), handle); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.SyncSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
@@ -347,7 +377,12 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).LinkSession(r.Context(), handle, req.Path); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.LinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
@@ -371,7 +406,12 @@ func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := h.clientFor(r).RelinkSession(r.Context(), handle, req.Path); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RelinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
@@ -407,12 +447,17 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 		h.writeMappedError(w, errBadRequest("handle is required"))
 		return false
 	}
-	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return false
 	}
-	if err := h.clientFor(r).CloseSession(r.Context(), handle); err != nil {
+	if err := client.CloseSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return false
 	}
@@ -428,7 +473,12 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 // so every mutating session verb answers one durability spelling. False
 // means the handler already answered.
 func (h *restHandler) drainSessionProject(w http.ResponseWriter, r *http.Request, handle string) bool {
-	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return false
@@ -437,7 +487,12 @@ func (h *restHandler) drainSessionProject(w http.ResponseWriter, r *http.Request
 }
 
 func (h *restHandler) respondWithSessionStat(w http.ResponseWriter, r *http.Request, handle string) {
-	stat, err := h.clientFor(r).StatSession(r.Context(), handle)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -490,38 +545,38 @@ func (c *authorizedClient) CloseSession(ctx context.Context, handleID string) er
 // share visitors are read-only, and the chokepoint test requires each Client
 // method to answer a zero-argument call with an access-denied error.
 
-func (readOnlyShare) OpenSession(ctx context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
+func (readOnlyShare) OpenSession(_ context.Context, _, _ string, _ storage.OpenMode, _ ...storage.SessionOption) (string, error) {
 	return "", errReadOnly()
 }
 
-func (readOnlyShare) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
+func (readOnlyShare) ReadSession(_ context.Context, _ string, _, _ int64) ([]byte, error) {
 	return nil, errReadOnly()
 }
 
-func (readOnlyShare) WriteSession(ctx context.Context, handleID string, offset int64, data []byte) (int, error) {
+func (readOnlyShare) WriteSession(_ context.Context, _ string, _ int64, _ []byte) (int, error) {
 	return 0, errReadOnly()
 }
 
-func (readOnlyShare) TruncateSession(ctx context.Context, handleID string, size int64) error {
+func (readOnlyShare) TruncateSession(_ context.Context, _ string, _ int64) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) StatSession(ctx context.Context, handleID string) (storage.SessionStat, error) {
+func (readOnlyShare) StatSession(_ context.Context, _ string) (storage.SessionStat, error) {
 	return storage.SessionStat{}, errReadOnly()
 }
 
-func (readOnlyShare) SyncSession(ctx context.Context, handleID string) error {
+func (readOnlyShare) SyncSession(_ context.Context, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) LinkSession(ctx context.Context, handleID, path string) error {
+func (readOnlyShare) LinkSession(_ context.Context, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) RelinkSession(ctx context.Context, handleID, path string) error {
+func (readOnlyShare) RelinkSession(_ context.Context, _, _ string) error {
 	return errReadOnly()
 }
 
-func (readOnlyShare) CloseSession(ctx context.Context, handleID string) error {
+func (readOnlyShare) CloseSession(_ context.Context, _ string) error {
 	return errReadOnly()
 }

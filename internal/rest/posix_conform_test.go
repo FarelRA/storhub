@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1027,9 +1026,7 @@ func (h *restScratchHandle) Close() error {
 }
 
 func TestPosixConformREST(t *testing.T) {
-	if os.Getenv("STORHUB_CONFORMANCE") == "" {
-		t.Skip("conformance suite runs only with STORHUB_CONFORMANCE=1 (Phase 0 RED: known deviations open)")
-	}
+	test.RequireConformance(t)
 	client := newFakeRESTClient()
 	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
 	if err != nil {

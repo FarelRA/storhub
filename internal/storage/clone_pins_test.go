@@ -42,14 +42,14 @@ func TestCloneVsOverwrite(t *testing.T) {
 	if _, err := hub.ReplaceFileContext(ctx, project, "src.bin", overInput); err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "dst-pre.bin"); !bytes.Equal(got, before) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst-pre.bin"); !bytes.Equal(got, before) {
 		t.Fatalf("pre-overwrite clone = %q, want %q", got, before)
 	}
 	// Post-commit ordering: a clone after the overwrite sees the new bytes.
 	if _, err := hub.CloneRange(ctx, project, "src.bin", 0, "dst-post.bin", 0, size); err != nil {
 		t.Fatalf("clone after overwrite: %v", err)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "dst-post.bin"); !bytes.Equal(got, after) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst-post.bin"); !bytes.Equal(got, after) {
 		t.Fatalf("post-overwrite clone = %q, want %q", got, after)
 	}
 
@@ -138,7 +138,7 @@ func TestCloneVsOverwrite(t *testing.T) {
 	for err := range errCh {
 		t.Fatal(err)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "src.bin"); !known[string(got)] {
+	if got := cloneFileBytes(ctx, t, hub, project, "src.bin"); !known[string(got)] {
 		t.Fatalf("final source = %q, matches no committed payload", got)
 	}
 }
@@ -157,16 +157,16 @@ func TestCloneOfOverlaySeesCommitted(t *testing.T) {
 
 	committed := bytes.Repeat([]byte("C"), 32)
 	staged := bytes.Repeat([]byte("S"), 32)
-	setupSessionFile(t, hub, ctx, project, "src.bin", committed)
+	setupSessionFile(ctx, t, hub, project, "src.bin", committed)
 
-	id := mustOpenSession(t, hub, ctx, project, "src.bin", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, project, "src.bin", SessionReadWrite)
 	if _, err := hub.WriteSession(ctx, id, 0, staged); err != nil {
 		t.Fatalf("stage session write: %v", err)
 	}
 	if _, err := hub.CloneRange(ctx, project, "src.bin", 0, "dst.bin", 0, int64(len(committed))); err != nil {
 		t.Fatalf("clone over staged session: %v", err)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "dst.bin"); !bytes.Equal(got, committed) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst.bin"); !bytes.Equal(got, committed) {
 		t.Fatalf("clone saw staged bytes: got %q, want committed %q", got, committed)
 	}
 	if err := hub.CloseSession(ctx, id); err != nil {
@@ -175,7 +175,7 @@ func TestCloneOfOverlaySeesCommitted(t *testing.T) {
 	if _, err := hub.CloneRange(ctx, project, "src.bin", 0, "dst2.bin", 0, int64(len(staged))); err != nil {
 		t.Fatalf("clone after session commit: %v", err)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "dst2.bin"); !bytes.Equal(got, staged) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst2.bin"); !bytes.Equal(got, staged) {
 		t.Fatalf("post-commit clone = %q, want %q", got, staged)
 	}
 }

@@ -80,7 +80,7 @@ func TestRevertPathRestoresPriorContent(t *testing.T) {
 		t.Fatalf("revert: %v", err)
 	}
 	out := filepath.Join(t.TempDir(), "f.txt")
-	if err := hub.DownloadFile("rc", "f.txt", out); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "rc", "f.txt", out); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	data, _ := os.ReadFile(out)

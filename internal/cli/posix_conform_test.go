@@ -180,7 +180,7 @@ func (h *pcFakeHub) ensureParentsLocked(p string) {
 	}
 }
 
-func (h *pcFakeHub) UploadFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) UploadFileContext(_ context.Context, _, remotePath, localPath string) (*storhub.FileMetadata, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return nil, err
@@ -209,7 +209,7 @@ func (h *pcFakeHub) UploadFile(project, remotePath, localPath string) (*storhub.
 	return &storhub.FileMetadata{Size: int64(len(cp)), Mode: 0o644, Inode: nf.ino}, nil
 }
 
-func (h *pcFakeHub) ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) ReplaceFileContext(ctx context.Context, project, remotePath, localPath string, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	_, isFile := h.files[strings.TrimPrefix(remotePath, "/")]
 	isDir := h.dirs[strings.TrimPrefix(remotePath, "/")]
@@ -220,10 +220,10 @@ func (h *pcFakeHub) ReplaceFile(project, remotePath, localPath string) (*storhub
 	if !isFile {
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, remotePath)
 	}
-	return h.UploadFile(project, remotePath, localPath)
+	return h.UploadFileContext(ctx, project, remotePath, localPath)
 }
 
-func (h *pcFakeHub) DownloadFile(project, remotePath, localPath string) error {
+func (h *pcFakeHub) DownloadFileContext(_ context.Context, _, remotePath, localPath string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(remotePath, "/")
@@ -237,7 +237,7 @@ func (h *pcFakeHub) DownloadFile(project, remotePath, localPath string) error {
 	return os.WriteFile(localPath, append([]byte(nil), f.data...), 0o644)
 }
 
-func (h *pcFakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
+func (h *pcFakeHub) ReadDirContext(_ context.Context, _, dir string) ([]storhub.DirEntry, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(dir, "/")
@@ -272,7 +272,7 @@ func (h *pcFakeHub) ReadDir(project, dir string) ([]storhub.DirEntry, error) {
 	return out, nil
 }
 
-func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, error) {
+func (h *pcFakeHub) StatPathContext(_ context.Context, _, targetPath string) (*storhub.EntryInfo, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(targetPath, "/")
@@ -298,7 +298,7 @@ func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, er
 	}, nil
 }
 
-func (h *pcFakeHub) ReadFileAt(project, filePath string, offset, length int64) ([]byte, error) {
+func (h *pcFakeHub) ReadFileAtContext(_ context.Context, _, filePath string, offset, length int64) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
@@ -325,7 +325,7 @@ func (h *pcFakeHub) ReadFileAt(project, filePath string, offset, length int64) (
 	return append([]byte(nil), f.data[offset:end]...), nil
 }
 
-func (h *pcFakeHub) Mkdir(project, dirPath string) error {
+func (h *pcFakeHub) MkdirContext(_ context.Context, _, dirPath string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(dirPath, "/")
@@ -337,7 +337,7 @@ func (h *pcFakeHub) Mkdir(project, dirPath string) error {
 	return nil
 }
 
-func (h *pcFakeHub) DeleteFile(project, filePath string) error {
+func (h *pcFakeHub) DeleteFileContext(_ context.Context, _, filePath string, _ ...storhub.MutateOption) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
@@ -357,7 +357,7 @@ func (h *pcFakeHub) DeleteFile(project, filePath string) error {
 	return nil
 }
 
-func (h *pcFakeHub) Rmdir(project, dirPath string) error {
+func (h *pcFakeHub) RmdirContext(_ context.Context, _, dirPath string, _ ...storhub.MutateOption) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(dirPath, "/")
@@ -382,15 +382,7 @@ func (h *pcFakeHub) Rmdir(project, dirPath string) error {
 	return nil
 }
 
-func (h *pcFakeHub) Rename(project, oldPath, newPath string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	o := strings.TrimPrefix(oldPath, "/")
-	n := strings.TrimPrefix(newPath, "/")
-	return h.renameLocked(o, n)
-}
-
-func (h *pcFakeHub) AppendFile(project, filePath string, data []byte) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) AppendFileContext(_ context.Context, _, filePath string, data []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
@@ -407,41 +399,13 @@ func (h *pcFakeHub) AppendFile(project, filePath string, data []byte) (*storhub.
 	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
-func (h *pcFakeHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	p := strings.TrimPrefix(filePath, "/")
-	if h.dirs[p] {
-		return nil, fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
-	}
-	f, ok := h.files[p]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
-	}
-	if offset < 0 {
-		return nil, errors.New("write offset must be non-negative")
-	}
-	if len(data) > 0 {
-		end := offset + int64(len(data))
-		if end > int64(len(f.data)) {
-			nb := make([]byte, end)
-			copy(nb, f.data)
-			f.data = nb
-		}
-		copy(f.data[offset:], data)
-		f.mode &^= 0o4000 | 0o2000
-		f.mtime = h.tick()
-	}
-	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
-}
-
-func (h *pcFakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) PatchFileContext(_ context.Context, _, _ string, _, _ int64, _ []byte, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	return nil, errors.New("pcFakeHub: patch not implemented")
 }
 
 // CreateFile is atomic O_CREAT|O_EXCL like the real backend: it fails
 // with AlreadyExists when anything (file, dir, link) occupies the path.
-func (h *pcFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) CreateFileContext(_ context.Context, _, filePath string) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
@@ -461,7 +425,7 @@ func (h *pcFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata,
 
 // TruncateFile resizes with zero-filling growth, ticking mtime like a
 // real data mutation (which also advances the CAS token).
-func (h *pcFakeHub) TruncateFile(project, filePath string, size int64) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) TruncateFileContext(_ context.Context, _, filePath string, size int64, _ ...storhub.MutateOption) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
@@ -489,7 +453,7 @@ func (h *pcFakeHub) TruncateFile(project, filePath string, size int64) (*storhub
 	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
-func (h *pcFakeHub) Chmod(project, targetPath string, mode uint32) error {
+func (h *pcFakeHub) ChmodContext(_ context.Context, _, targetPath string, mode uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(targetPath, "/")
@@ -511,7 +475,7 @@ func (h *pcFakeHub) Chmod(project, targetPath string, mode uint32) error {
 // Chown replaces owner/group and clears setuid/setgid, like a
 // non-privileged chown that succeeds. Uid/gid arrive as decided by the
 // CLI's -1 sentinel mapping.
-func (h *pcFakeHub) Chown(project, targetPath string, uid, gid uint32) error {
+func (h *pcFakeHub) ChownContext(_ context.Context, _, targetPath string, uid, gid uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(targetPath, "/")
@@ -533,7 +497,7 @@ func (h *pcFakeHub) Chown(project, targetPath string, uid, gid uint32) error {
 
 // Chtimes sets both stamps at nanosecond precision (the fake preserves
 // ns so touch round-trips exactly; the real backend is second-precision).
-func (h *pcFakeHub) Chtimes(project, targetPath string, atime, mtime int64) error {
+func (h *pcFakeHub) ChtimesContext(_ context.Context, _, targetPath string, atime, mtime int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(targetPath, "/")
@@ -551,7 +515,7 @@ func (h *pcFakeHub) Chtimes(project, targetPath string, atime, mtime int64) erro
 	return nil
 }
 
-func (h *pcFakeHub) Symlink(project, target, linkPath string) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) SymlinkContext(_ context.Context, _, target, linkPath string) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(linkPath, "/")
@@ -568,7 +532,7 @@ func (h *pcFakeHub) Symlink(project, target, linkPath string) (*storhub.FileMeta
 	return &storhub.FileMetadata{Size: int64(len(target)), Mode: 0o777, Inode: h.linkIno[p]}, nil
 }
 
-func (h *pcFakeHub) Readlink(project, linkPath string) (string, error) {
+func (h *pcFakeHub) ReadlinkContext(_ context.Context, _, linkPath string) (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(linkPath, "/")
@@ -582,7 +546,7 @@ func (h *pcFakeHub) Readlink(project, linkPath string) (string, error) {
 }
 
 // Link aliases newPath to the same bytes (regular files only).
-func (h *pcFakeHub) Link(project, existingPath, newPath string) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) LinkContext(_ context.Context, _, existingPath, newPath string) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	o := strings.TrimPrefix(existingPath, "/")
@@ -610,10 +574,13 @@ func (h *pcFakeHub) Link(project, existingPath, newPath string) (*storhub.FileMe
 // WriteFileAtContext enforces --expected-revision against the file's
 // ChangedAt token (the adapter's Revision source): a token from before
 // any intervening mutation fails with ErrPreconditionFailed.
-func (h *pcFakeHub) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
+func (h *pcFakeHub) WriteFileAtContext(_ context.Context, _, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := strings.TrimPrefix(filePath, "/")
+	if h.dirs[p] {
+		return nil, fmt.Errorf("%w: %s", shfs.ErrIsDirectory, p)
+	}
 	f, ok := h.files[p]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", shfs.ErrNotFound, p)
@@ -640,7 +607,7 @@ func (h *pcFakeHub) WriteFileAtContext(ctx context.Context, project, filePath st
 
 // RenameContext enforces RENAME_NOREPLACE inside the fake's mutex (no
 // TOCTOU), mirroring the real transaction check; plain renames replace.
-func (h *pcFakeHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
+func (h *pcFakeHub) RenameContext(_ context.Context, _, oldPath, newPath string, opts ...shfs.MutateOption) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	o := strings.TrimPrefix(oldPath, "/")
@@ -693,40 +660,40 @@ func (h *pcFakeHub) renameLocked(o, n string) error {
 	return nil
 }
 
-func (h *pcFakeHub) ListMetadataRevisions(project string) ([]storhub.MetadataRevision, error) {
+func (h *pcFakeHub) ListMetadataRevisionsContext(_ context.Context, _ string) ([]storhub.MetadataRevision, error) {
 	return nil, nil
 }
 
-func (h *pcFakeHub) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (h *pcFakeHub) RollbackMetadataContext(_ context.Context, _, _ string) error {
 	return errors.New("pcFakeHub: rollback not implemented")
 }
 
-func (h *pcFakeHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storhub.PruneResult, error) {
+func (h *pcFakeHub) PruneContext(_ context.Context, _, scope string, _ int, dryRun bool) (*storhub.PruneResult, error) {
 	return &storhub.PruneResult{Scope: storhub.PruneScope(scope), DryRun: dryRun}, nil
 }
 func (h *pcFakeHub) DegradedProjects() []string {
 	return nil
 }
-func (h *pcFakeHub) ReEnableProject(project string) error {
+func (h *pcFakeHub) ReEnableProject(_ string) error {
 	return nil
 }
 func (h *pcFakeHub) PressureSnapshot() storhub.PressureSnapshot {
 	return storhub.PressureSnapshot{}
 }
-func (h *pcFakeHub) PressureFailureStreak(project string) uint64 { return 0 }
-func (h *pcFakeHub) PressurePendingDepth(project string) int     { return 0 }
+func (h *pcFakeHub) PressureFailureStreak(_ string) uint64 { return 0 }
+func (h *pcFakeHub) PressurePendingDepth(_ string) int     { return 0 }
 
-func (h *pcFakeHub) DeleteProject(project string) error { return nil }
+func (h *pcFakeHub) DeleteProject(_ string) error { return nil }
 
-func (h *pcFakeHub) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
+func (h *pcFakeHub) NewFUSE(_ string, _ storhub.FUSEOptions) (fuseMount, error) {
 	return nil, errors.New("pcFakeHub: FUSE not supported")
 }
 
-func (h *pcFakeHub) Shutdown(ctx context.Context) error { return nil }
+func (h *pcFakeHub) Shutdown(_ context.Context) error { return nil }
 
 // DrainProjectContext is a no-op here: the conformance fake journals
 // nothing, and the CLI conformance surface has no fsync equivalent.
-func (h *pcFakeHub) DrainProjectContext(ctx context.Context, project string) error { return nil }
+func (h *pcFakeHub) DrainProjectContext(_ context.Context, _ string) error { return nil }
 
 // ---------------------------------------------------------------------------
 // Surface adapter driving the CLI.
@@ -816,7 +783,7 @@ func (s *cliPOSIXSurface) statViaCLI(path string) (*storhub.EntryInfo, error) {
 	return &entry, nil
 }
 
-func (s *cliPOSIXSurface) CreateFile(path string, perm uint32, exclusive bool) error {
+func (s *cliPOSIXSurface) CreateFile(path string, _ uint32, exclusive bool) error {
 	rel, err := cliPath(path)
 	if err != nil {
 		return err
@@ -1016,7 +983,7 @@ func (s *cliPOSIXSurface) Rename(oldPath, newPath string, noReplace bool) error 
 	return nil
 }
 
-func (s *cliPOSIXSurface) Mkdir(path string, perm uint32) error {
+func (s *cliPOSIXSurface) Mkdir(path string, _ uint32) error {
 	rel, err := cliPath(path)
 	if err != nil {
 		return err
@@ -1711,13 +1678,11 @@ func (h *cliScratchHandle) Close() error {
 // ---------------------------------------------------------------------------
 
 func TestPosixConformCLI(t *testing.T) {
-	if os.Getenv("STORHUB_CONFORMANCE") == "" {
-		t.Skip("conformance suite runs only with STORHUB_CONFORMANCE=1 (Phase 0 RED: known deviations open)")
-	}
+	test.RequireConformance(t)
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := newPCFakeHub()
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 

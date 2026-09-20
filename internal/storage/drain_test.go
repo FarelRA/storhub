@@ -24,7 +24,7 @@ func TestDrainProjectLandsPublishedData(t *testing.T) {
 	proj := "project-drain-lands"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	if _, err := hubA.UploadFile(proj, "f1.txt", first); err != nil {
+	if _, err := hubA.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}
 	// No flush: the data is published in memory but not yet committed.
@@ -55,14 +55,14 @@ func TestDrainProjectCleanIsNoNetwork(t *testing.T) {
 	proj := "project-drain-clean"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	if _, err := hub.UploadFile(proj, "f1.txt", first); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, proj); err != nil {
 		t.Fatalf("flush f1: %v", err)
 	}
 	var apiCalls atomic.Int64
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, _ *http.Request) bool {
 		apiCalls.Add(1)
 		return false
 	})
@@ -82,7 +82,7 @@ func TestDrainProjectReportsCommitFailure(t *testing.T) {
 	proj := "project-drain-fails"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
-	if _, err := hub.UploadFile(proj, "f1.txt", first); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
 	}
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -119,7 +119,7 @@ func TestDrainProjectConvergesUnderConcurrentMutation(t *testing.T) {
 	write := func(name, body string) {
 		t.Helper()
 		seed := writeTempFile(t, t.TempDir(), name, []byte(body))
-		if _, err := hubA.UploadFile(proj, name, seed); err != nil {
+		if _, err := hubA.UploadFileContext(context.Background(), proj, name, seed); err != nil {
 			t.Fatalf("upload %s: %v", name, err)
 		}
 	}
@@ -143,7 +143,7 @@ func TestDrainProjectConvergesUnderConcurrentMutation(t *testing.T) {
 	done := make(chan error, 1)
 	seed3 := writeTempFile(t, t.TempDir(), "f3.txt", []byte("three"))
 	go func() {
-		_, err := hubA.UploadFile(proj, "f3.txt", seed3)
+		_, err := hubA.UploadFileContext(context.Background(), proj, "f3.txt", seed3)
 		done <- err
 	}()
 	if err := hubA.DrainProjectContext(ctx, proj); err != nil {

@@ -30,7 +30,7 @@ func TestTouchToleratesExistingCreate(t *testing.T) {
 	fake := &touchExistsFake{}
 	oldFactory := newHubFromFlagsFn
 	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	app, _, _ := newTestApp(t)
@@ -49,13 +49,13 @@ type touchExistsFake struct {
 	stamped bool
 }
 
-func (f *touchExistsFake) CreateFile(project, filePath string) (*storhub.FileMetadata, error) {
+func (f *touchExistsFake) CreateFileContext(_ context.Context, _, filePath string) (*storhub.FileMetadata, error) {
 	return nil, shfs.AlreadyExists(filePath)
 }
 
-func (f *touchExistsFake) Chtimes(project, targetPath string, atime, mtime int64) error {
+func (f *touchExistsFake) ChtimesContext(_ context.Context, _, _ string, _, _ int64) error {
 	f.stamped = true
 	return nil
 }
 
-func (f *touchExistsFake) Shutdown(ctx context.Context) error { return nil }
+func (f *touchExistsFake) Shutdown(_ context.Context) error { return nil }

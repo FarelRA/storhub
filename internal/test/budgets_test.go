@@ -35,7 +35,6 @@ package test
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -109,9 +108,7 @@ func moduleRoot(t *testing.T) string {
 }
 
 func TestBenchmarkBudgets(t *testing.T) {
-	if os.Getenv("STORHUB_BENCH") != "1" {
-		t.Skip("budget enforcement needs STORHUB_BENCH=1 (CI benchmark-budgets job); table sanity is TestBudgetTableSane")
-	}
+	RequireBench(t)
 	root := moduleRoot(t)
 	byPkg := make(map[string][]budgetEntry)
 	var pkgs []string

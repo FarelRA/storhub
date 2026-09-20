@@ -406,12 +406,16 @@ func (h *StorHub) rebaseOntoUpstream(ctx context.Context, project string, ops []
 // as the batch applies, so per-op checks are O(1) instead of O(tree) scans.
 // Chunk-ID checks stay live against meta (O(1) map lookups); only the inode
 // occupancy reads come from the index.
-func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex) {
+func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex) error {
 	if op.File != nil {
 		idRemap := make(map[int64]int64)
 		for id, record := range op.Chunks {
 			if existing, ok := meta.Chunks()[id]; ok && existing != record {
-				idRemap[id] = plan.allocChunkAvoiding(meta)
+				fresh, err := plan.allocChunkAvoiding(meta)
+				if err != nil {
+					return err
+				}
+				idRemap[id] = fresh
 			}
 		}
 		if len(idRemap) > 0 {
@@ -433,7 +437,11 @@ func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, reso
 				"chunk ids remapped (divergent allocation between writers)")
 		}
 		if op.File.Inode != 0 && cidx.fileCollidesWithLiveDir(op.File.Inode, plan, opPath(*op)) {
-			op.File.Inode = plan.allocInodeAvoiding(meta)
+			fresh, err := plan.allocInodeAvoiding(meta)
+			if err != nil {
+				return err
+			}
+			op.File.Inode = fresh
 			recordResolution(resolutions, *op, opPath(*op),
 				"inode remapped (collides with upstream directory inode)")
 		}
@@ -476,9 +484,14 @@ func remapOpCollisionsIndexed(meta *RepoMetadata, op *Op, plan *replayPlan, reso
 			targets = plan.targets
 		}
 		if !isRootOp && cidx.takenByAnotherNodeExceptTargets(op.Dir.Inode, except, targets) {
-			op.Dir.Inode = plan.allocInodeAvoiding(meta)
+			fresh, err := plan.allocInodeAvoiding(meta)
+			if err != nil {
+				return err
+			}
+			op.Dir.Inode = fresh
 			recordResolution(resolutions, *op, opPath(*op),
 				"directory inode remapped (collides with upstream node)")
 		}
 	}
+	return nil
 }

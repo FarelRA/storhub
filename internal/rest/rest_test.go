@@ -376,7 +376,7 @@ func (c *fakeRESTClient) setDrainErr(err error) {
 
 // DrainProjectContext implements the Client contract: it records the call
 // so sync tests can assert draining happened (or did not).
-func (c *fakeRESTClient) DrainProjectContext(ctx context.Context, project string) error {
+func (c *fakeRESTClient) DrainProjectContext(_ context.Context, project string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.drainCalls = append(c.drainCalls, project)
@@ -433,7 +433,7 @@ func newFakeRESTClient() *fakeRESTClient {
 
 // --- content mutations (ops/mkdir, content PUT/PATCH/DELETE) ---
 
-func (c *fakeRESTClient) CreateFileContext(ctx context.Context, project, filePath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) CreateFileContext(_ context.Context, project, filePath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, filePath)
@@ -451,7 +451,7 @@ func (c *fakeRESTClient) CreateFileContext(ctx context.Context, project, filePat
 	return &FileMetadata{Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) MkdirContext(ctx context.Context, project, dirPath string) error {
+func (c *fakeRESTClient) MkdirContext(_ context.Context, project, dirPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p := c.project(project)
@@ -479,7 +479,7 @@ func (c *fakeRESTClient) MkdirContext(ctx context.Context, project, dirPath stri
 	return nil
 }
 
-func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePath string, opts ...shfs.MutateOption) error {
+func (c *fakeRESTClient) DeleteFileContext(_ context.Context, project, filePath string, opts ...shfs.MutateOption) error {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return err
@@ -510,7 +510,7 @@ func (c *fakeRESTClient) DeleteFileContext(ctx context.Context, project, filePat
 	return nil
 }
 
-func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
+func (c *fakeRESTClient) RmdirContext(_ context.Context, project, dirPath string, opts ...shfs.MutateOption) error {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return err
@@ -549,7 +549,7 @@ func (c *fakeRESTClient) RmdirContext(ctx context.Context, project, dirPath stri
 	return nil
 }
 
-func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
+func (c *fakeRESTClient) RenameContext(_ context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -622,7 +622,7 @@ func (c *fakeRESTClient) RenameContext(ctx context.Context, project, oldPath, ne
 	return nil
 }
 
-func (c *fakeRESTClient) CopyContext(ctx context.Context, project, srcPath, dstPath string) error {
+func (c *fakeRESTClient) CopyContext(_ context.Context, project, srcPath, dstPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -750,7 +750,7 @@ func (c *fakeRESTClient) CopyContext(ctx context.Context, project, srcPath, dstP
 // captured before any destination byte lands), pwrite destination
 // behavior with zero-filled gaps, creation of a missing destination, and
 // the length-0 validated no-op (missing dst answers NotFound).
-func (c *fakeRESTClient) CloneRange(ctx context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
+func (c *fakeRESTClient) CloneRange(_ context.Context, project, src string, srcOff int64, dst string, dstOff int64, length int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return nil, err
@@ -821,7 +821,7 @@ func (c *fakeRESTClient) CloneRange(ctx context.Context, project, src string, sr
 	return &FileMetadata{Size: int64(len(content)), Inode: dstNode.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
+func (c *fakeRESTClient) TruncateFileContext(_ context.Context, project, filePath string, size int64, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return nil, err
@@ -850,7 +850,7 @@ func (c *fakeRESTClient) TruncateFileContext(ctx context.Context, project, fileP
 	return &FileMetadata{Size: size, Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+func (c *fakeRESTClient) AppendFileContext(_ context.Context, project, filePath string, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return nil, err
@@ -872,7 +872,7 @@ func (c *fakeRESTClient) AppendFileContext(ctx context.Context, project, filePat
 	return &FileMetadata{Size: int64(len(node.data.bytes)), Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+func (c *fakeRESTClient) WriteFileAtContext(_ context.Context, project, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return nil, err
@@ -931,7 +931,7 @@ func (c *fakeRESTClient) takeReplaceFailure() error {
 	return err
 }
 
-func (c *fakeRESTClient) PatchFileContext(ctx context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
+func (c *fakeRESTClient) PatchFileContext(_ context.Context, project, filePath string, offset, deleteSize int64, edit []byte, opts ...shfs.MutateOption) (*FileMetadata, error) {
 	c.recordOpts(opts)
 	if err := c.consumeOptErr(); err != nil {
 		return nil, err
@@ -1018,7 +1018,7 @@ func (c *fakeRESTClient) StatPathContext(ctx context.Context, project, targetPat
 	return nil, shfs.NotFound(clean)
 }
 
-func (c *fakeRESTClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]DirEntry, error) {
+func (c *fakeRESTClient) ReadDirContext(_ context.Context, project, dirPath string) ([]DirEntry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -1050,7 +1050,7 @@ func (c *fakeRESTClient) ReadDirContext(ctx context.Context, project, dirPath st
 	return entries, nil
 }
 
-func (c *fakeRESTClient) StatFSContext(ctx context.Context, project string) (*FSStats, error) {
+func (c *fakeRESTClient) StatFSContext(_ context.Context, project string) (*FSStats, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -1076,7 +1076,7 @@ func (c *fakeRESTClient) StatFSContext(ctx context.Context, project string) (*FS
 
 // --- links (symlink/readlink/link verbs) ---
 
-func (c *fakeRESTClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) SymlinkContext(_ context.Context, project, target, linkPath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, linkPath)
@@ -1094,7 +1094,7 @@ func (c *fakeRESTClient) SymlinkContext(ctx context.Context, project, target, li
 	return &FileMetadata{Symlink: target, Inode: node.entry.Inode}, nil
 }
 
-func (c *fakeRESTClient) ReadlinkContext(ctx context.Context, project, linkPath string) (string, error) {
+func (c *fakeRESTClient) ReadlinkContext(_ context.Context, project, linkPath string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, _, err := c.requireReadableFile(project, linkPath)
@@ -1107,7 +1107,7 @@ func (c *fakeRESTClient) ReadlinkContext(ctx context.Context, project, linkPath 
 	return node.data.target, nil
 }
 
-func (c *fakeRESTClient) LinkContext(ctx context.Context, project, existingPath, newPath string) (*FileMetadata, error) {
+func (c *fakeRESTClient) LinkContext(_ context.Context, project, existingPath, newPath string) (*FileMetadata, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, clean, err := c.prepareFileCreate(project, newPath)
@@ -1132,7 +1132,7 @@ func (c *fakeRESTClient) LinkContext(ctx context.Context, project, existingPath,
 
 // --- metadata verbs (chmod/chown/utimes) ---
 
-func (c *fakeRESTClient) ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error {
+func (c *fakeRESTClient) ChmodContext(_ context.Context, project, targetPath string, mode uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1145,7 +1145,7 @@ func (c *fakeRESTClient) ChmodContext(ctx context.Context, project, targetPath s
 	return nil
 }
 
-func (c *fakeRESTClient) ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error {
+func (c *fakeRESTClient) ChownContext(_ context.Context, project, targetPath string, uid, gid uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1168,7 +1168,7 @@ func (c *fakeRESTClient) ChownContext(ctx context.Context, project, targetPath s
 	return nil
 }
 
-func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error {
+func (c *fakeRESTClient) ChtimesContext(_ context.Context, project, targetPath string, atime, mtime int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1186,7 +1186,7 @@ func (c *fakeRESTClient) ChtimesContext(ctx context.Context, project, targetPath
 
 // --- xattrs ---
 
-func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
+func (c *fakeRESTClient) SetXAttrContext(_ context.Context, project, targetPath, attr string, data []byte, _ ...shfs.XAttrMode) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1197,7 +1197,7 @@ func (c *fakeRESTClient) SetXAttrContext(ctx context.Context, project, targetPat
 	return nil
 }
 
-func (c *fakeRESTClient) GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error) {
+func (c *fakeRESTClient) GetXAttrContext(_ context.Context, project, targetPath, attr string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1211,7 +1211,7 @@ func (c *fakeRESTClient) GetXAttrContext(ctx context.Context, project, targetPat
 	return append([]byte(nil), value...), nil
 }
 
-func (c *fakeRESTClient) RemoveXAttrContext(ctx context.Context, project, targetPath, attr string) error {
+func (c *fakeRESTClient) RemoveXAttrContext(_ context.Context, project, targetPath, attr string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1225,7 +1225,7 @@ func (c *fakeRESTClient) RemoveXAttrContext(ctx context.Context, project, target
 	return nil
 }
 
-func (c *fakeRESTClient) ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error) {
+func (c *fakeRESTClient) ListXAttrContext(_ context.Context, project, targetPath string) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	node, err := c.lookupNode(project, targetPath)
@@ -1242,7 +1242,7 @@ func (c *fakeRESTClient) ListXAttrContext(ctx context.Context, project, targetPa
 
 // --- ops (revisions/rollback/purge/revert/prune/delete-project) ---
 
-func (c *fakeRESTClient) ListMetadataRevisionsContext(ctx context.Context, project string) ([]MetadataRevision, error) {
+func (c *fakeRESTClient) ListMetadataRevisionsContext(_ context.Context, project string) ([]MetadataRevision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -1252,7 +1252,7 @@ func (c *fakeRESTClient) ListMetadataRevisionsContext(ctx context.Context, proje
 	return append([]MetadataRevision(nil), p.revisions...), nil
 }
 
-func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, commitSHA string) error {
+func (c *fakeRESTClient) RollbackMetadataContext(_ context.Context, project, commitSHA string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, err := c.getExistingProject(project)
@@ -1268,7 +1268,7 @@ func (c *fakeRESTClient) RollbackMetadataContext(ctx context.Context, project, c
 	return shfs.NotFound(fmt.Sprintf("revision %s", commitSHA))
 }
 
-func (c *fakeRESTClient) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*storage.PruneResult, error) {
+func (c *fakeRESTClient) PruneContext(_ context.Context, project, scope string, _ int, dryRun bool) (*storage.PruneResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := c.getExistingProject(project); err != nil {
@@ -1288,7 +1288,7 @@ func (c *fakeRESTClient) DegradedProjects() ([]string, error) {
 	return nil, nil
 }
 
-func (c *fakeRESTClient) ReEnableProject(project string) error {
+func (c *fakeRESTClient) ReEnableProject(_ string) error {
 	return nil
 }
 
@@ -1296,11 +1296,11 @@ func (c *fakeRESTClient) PressureSnapshot() (storage.PressureSnapshot, error) {
 	return storage.PressureSnapshot{}, nil
 }
 
-func (c *fakeRESTClient) PressureFailureStreak(project string) (uint64, error) { return 0, nil }
+func (c *fakeRESTClient) PressureFailureStreak(_ string) (uint64, error) { return 0, nil }
 
-func (c *fakeRESTClient) PressurePendingDepth(project string) (int, error) { return 0, nil }
+func (c *fakeRESTClient) PressurePendingDepth(_ string) (int, error) { return 0, nil }
 
-func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, commitSHA string) error {
+func (c *fakeRESTClient) RevertPathContext(_ context.Context, project, path, commitSHA string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := c.getExistingProject(project); err != nil {
@@ -1310,7 +1310,7 @@ func (c *fakeRESTClient) RevertPathContext(ctx context.Context, project, path, c
 	return nil
 }
 
-func (c *fakeRESTClient) DeleteProjectContext(ctx context.Context, project string) error {
+func (c *fakeRESTClient) DeleteProjectContext(_ context.Context, project string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.projects[project]; !ok {
@@ -1571,4 +1571,26 @@ func TestReplaceOutlivesCanceledRequestContext(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("replace blocked on canceled request context")
 	}
+}
+
+// TestClientForWrongTypeServes500 pins the fail-closed HTTP surface: a
+// request carrying a foreign value under clientCtxKey must answer 500
+// internal_error through the normal error writer, never panic and never
+// fall back to the raw unrestricted client.
+func TestClientForWrongTypeServes500(t *testing.T) {
+	t.Parallel()
+	client := newFakeRESTClient()
+	handler, err := newHandlerForClient(client, Options{AllowAnonymous: true})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo", nil)
+	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "not-a-client"))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("got status %d, want 500", resp.StatusCode)
+	}
+	assertErrorCode(t, resp, "internal_error")
 }

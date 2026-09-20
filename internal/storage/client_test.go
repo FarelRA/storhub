@@ -168,7 +168,7 @@ func TestMigrationClobberDetectedAndRebased(t *testing.T) {
 	// exactly the window where a concurrent migrator clobbers us.
 	var sawPut atomic.Bool
 	var planted atomic.Bool
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, testIndexPath) {
 			sawPut.Store(true)
 			return false

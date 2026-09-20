@@ -690,7 +690,7 @@ func TestPruneEnumeratesWideShardWithTwoListDirs(t *testing.T) {
 		injected++
 	}
 	var listDirs atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/.storhub/objects") {
 			listDirs.Add(1)
 		}

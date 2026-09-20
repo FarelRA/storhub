@@ -48,29 +48,45 @@ const (
 var githubRepoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type (
-	Config           = storcfg.Config
-	ChunkInfo        = metadata.ChunkInfo
-	FileMeta         = metadata.FileMeta
-	RepoMetadata     = metadata.RepoMetadata
+	// Config is the hub configuration: backend, timeouts, chunking, atime.
+	Config = storcfg.Config
+	// ChunkInfo describes one stored content chunk.
+	ChunkInfo = metadata.ChunkInfo
+	// FileMeta is a stored file entry with chunks and POSIX metadata.
+	FileMeta = metadata.FileMeta
+	// RepoMetadata is the full metadata tree of a project.
+	RepoMetadata = metadata.RepoMetadata
+	// MetadataRevision identifies one committed metadata state.
 	MetadataRevision = metadata.MetadataRevision
-	DirMeta          = metadata.DirMeta
-	NodeKind         = metadata.NodeKind
-	ReleaseRef       = metadata.ReleaseRef
+	// DirMeta is a directory entry.
+	DirMeta = metadata.DirMeta
+	// NodeKind discriminates file system node types.
+	NodeKind = metadata.NodeKind
+	// ReleaseRef references a chunk-holding GitHub release.
+	ReleaseRef = metadata.ReleaseRef
 )
 
+// Re-exported node-kind constants mirroring metadata.
 const (
-	NodeKindFile    = metadata.NodeKindFile
+	// NodeKindFile is the regular-file node kind.
+	NodeKindFile = metadata.NodeKindFile
+	// NodeKindSymlink is the symlink node kind.
 	NodeKindSymlink = metadata.NodeKindSymlink
 )
 
+// DefaultConfig returns the library default configuration.
 func DefaultConfig() Config {
 	return storcfg.Default()
 }
 
+// NewRepoMetadata returns an empty metadata tree for project.
 func NewRepoMetadata(project string) *RepoMetadata {
 	return metadata.NewRepoMetadata(project)
 }
 
+// StorHub is the storage client: project/file/chunk operations over a
+// GitHub backend, with metadata versioning, rollback, and prune tools.
+// Construct it with NewStorHubWithContext; every operation takes ctx.
 type StorHub struct {
 	token      string
 	owner      string
@@ -258,14 +274,21 @@ func isReadOnlyOp(op string) bool {
 	}
 }
 
+// NewStorHub returns a hub with default config for token.
 func NewStorHub(token string) (*StorHub, error) {
-	return NewStorHubWithContext(context.Background(), token, DefaultConfig())
+	return NewStorHubWithConfig(token, DefaultConfig())
 }
 
+// NewStorHubWithConfig is the single compat constructor that injects
+// context.Background: use it only for single-call scripts and embedders
+// without a request scope. The hub lifetime cannot be cancelled through
+// this path, so long-running callers must prefer NewStorHubWithContext.
 func NewStorHubWithConfig(token string, cfg Config) (*StorHub, error) {
 	return NewStorHubWithContext(context.Background(), token, cfg)
 }
 
+// NewStorHubWithContext returns a hub bound to ctx: cancelling ctx shuts
+// down hub background work.
 func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*StorHub, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("token is required")
@@ -311,6 +334,7 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	return hub, nil
 }
 
+// Owner returns the authenticated owner login the hub acts as.
 func (h *StorHub) Owner() string { return h.owner }
 
 func (h *StorHub) ensureOwner(ctx context.Context) error {
@@ -492,6 +516,7 @@ func defaultOwnerIDs() (uint32, uint32) {
 	return implposix.DefaultOwnerIDs()
 }
 
+// NewFUSE mounts project with opts and returns the live filesystem.
 func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesystem, error) {
 	if opts.Logger == nil {
 		opts.Logger = logging.WithComponent(h.logger, "fuse")
@@ -499,10 +524,12 @@ func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesyst
 	return fusefs.New(h, project, opts)
 }
 
+// Now returns the configured clock time in Unix nanoseconds.
 func (h *StorHub) Now() int64 {
 	return h.config.Now().UnixNano()
 }
 
+// ChunkSize returns the configured chunk byte size.
 func (h *StorHub) ChunkSize() int64 {
 	return h.config.ChunkSize
 }

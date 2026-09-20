@@ -116,7 +116,12 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := h.preconditionForCreate(w, r, project, filePath); !ok {
 		return
 	}
-	if _, err := h.clientFor(r).CreateFileContext(r.Context(), project, filePath); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.CreateFileContext(r.Context(), project, filePath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -136,7 +141,12 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := h.preconditionForCreate(w, r, project, dirPath); !ok {
 		return
 	}
-	if err := h.clientFor(r).MkdirContext(r.Context(), project, dirPath); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.MkdirContext(r.Context(), project, dirPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -157,7 +167,12 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.clientFor(r).RmdirContext(r.Context(), project, dirPath, revOpts...); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RmdirContext(r.Context(), project, dirPath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -178,7 +193,12 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.clientFor(r).DeleteFileContext(r.Context(), project, filePath, revOpts...); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.DeleteFileContext(r.Context(), project, filePath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -212,7 +232,12 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		// CLI's mv --no-replace.
 		revOpts = append(revOpts, shfs.WithNoReplace())
 	}
-	if err := h.clientFor(r).RenameContext(r.Context(), project, req.OldPath, req.NewPath, revOpts...); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.RenameContext(r.Context(), project, req.OldPath, req.NewPath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -255,7 +280,12 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForUpdateNoCAS(w, r, project, src, "copy") {
 		return
 	}
-	if err := h.clientFor(r).CopyContext(r.Context(), project, src, dst); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.CopyContext(r.Context(), project, src, dst); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -283,9 +313,14 @@ func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, p
 	if !ok {
 		return
 	}
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
 	resolved := length
 	if resolved == nil {
-		entry, err := h.clientFor(r).StatPathContext(r.Context(), project, src)
+		entry, err := client.StatPathContext(r.Context(), project, src)
 		if err != nil {
 			h.writeMappedError(w, err)
 			return
@@ -300,7 +335,7 @@ func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, p
 		}
 		resolved = &full
 	}
-	if _, err := h.clientFor(r).CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
+	if _, err := client.CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -332,7 +367,12 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.ExistingPath, "link") {
 		return
 	}
-	if _, err := h.clientFor(r).LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -362,7 +402,12 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := h.preconditionForCreate(w, r, project, req.LinkPath); !ok {
 		return
 	}
-	if _, err := h.clientFor(r).SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if _, err := client.SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -390,7 +435,12 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chmod") {
 		return
 	}
-	if err := h.clientFor(r).ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -417,7 +467,12 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chown") {
 		return
 	}
-	if err := h.clientFor(r).ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -454,7 +509,12 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "utimes") {
 		return
 	}
-	if err := h.clientFor(r).ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	if err := client.ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
@@ -557,7 +617,12 @@ func (h *restHandler) preconditionForProjectOp(w http.ResponseWriter, r *http.Re
 	if ifMatch == "" {
 		return true
 	}
-	rev, err := h.clientFor(r).RevisionContext(r.Context(), project)
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return false
+	}
+	rev, err := client.RevisionContext(r.Context(), project)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return false

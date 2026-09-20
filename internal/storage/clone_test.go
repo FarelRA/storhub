@@ -18,7 +18,7 @@ import (
 // (POST to the upload host). CloneRange must never trigger one.
 func countUploads(backend *mockGitHub) *atomic.Int32 {
 	var calls atomic.Int32
-	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
+	backend.intercept.Store(func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/upload/") {
 			calls.Add(1)
 		}
@@ -30,14 +30,14 @@ func countUploads(backend *mockGitHub) *atomic.Int32 {
 func cloneSeedFile(t *testing.T, hub *StorHub, project, path string, data []byte) *FileMeta {
 	t.Helper()
 	input := writeTempFile(t, t.TempDir(), "seed.bin", data)
-	meta, err := hub.UploadFile(project, path, input)
+	meta, err := hub.UploadFileContext(context.Background(), project, path, input)
 	if err != nil {
 		t.Fatalf("seed upload %s: %v", path, err)
 	}
 	return meta
 }
 
-func cloneFileBytes(t *testing.T, hub *StorHub, ctx context.Context, project, path string) []byte {
+func cloneFileBytes(ctx context.Context, t *testing.T, hub *StorHub, project, path string) []byte {
 	t.Helper()
 	repo, _, err := hub.loadRepoMetadataReadonly(ctx, project)
 	if err != nil {
@@ -84,10 +84,10 @@ func TestCloneRangeWholeFileByteExactFreshIDs(t *testing.T) {
 	if dstMeta.Size != int64(len(srcData)) {
 		t.Fatalf("dst size = %d, want %d", dstMeta.Size, len(srcData))
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "dst.bin"); !reflect.DeepEqual(got, srcData) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst.bin"); !reflect.DeepEqual(got, srcData) {
 		t.Fatalf("dst content mismatch: %q", got)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "src.bin"); !reflect.DeepEqual(got, srcData) {
+	if got := cloneFileBytes(ctx, t, hub, project, "src.bin"); !reflect.DeepEqual(got, srcData) {
 		t.Fatalf("src content changed: %q", got)
 	}
 	// Fresh record IDs, never shared between files, pointing at the same
@@ -154,7 +154,7 @@ func TestCloneRangePartialEdgeNarrowing(t *testing.T) {
 		t.Fatalf("dst size = %d, want 22", dstMeta.Size)
 	}
 	want := srcData[5:27]
-	if got := cloneFileBytes(t, hub, ctx, project, "dst.bin"); !reflect.DeepEqual(got, want) {
+	if got := cloneFileBytes(ctx, t, hub, project, "dst.bin"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("narrowed clone mismatch: got %q want %q", got, want)
 	}
 	if len(dstMeta.Chunks) != 4 {
@@ -195,7 +195,7 @@ func TestCloneRangeIntraFileOverlapForward(t *testing.T) {
 	model := append([]byte(nil), srcData...)
 	snap := append([]byte(nil), model...)
 	copy(model[8:24], snap[0:16])
-	if got := cloneFileBytes(t, hub, ctx, project, "f.bin"); !reflect.DeepEqual(got, model) {
+	if got := cloneFileBytes(ctx, t, hub, project, "f.bin"); !reflect.DeepEqual(got, model) {
 		t.Fatalf("forward overlap mismatch: got %q want %q", got, model)
 	}
 }
@@ -217,7 +217,7 @@ func TestCloneRangeIntraFileOverlapBackward(t *testing.T) {
 	model := append([]byte(nil), srcData...)
 	snap := append([]byte(nil), model...)
 	copy(model[0:16], snap[8:24])
-	if got := cloneFileBytes(t, hub, ctx, project, "f.bin"); !reflect.DeepEqual(got, model) {
+	if got := cloneFileBytes(ctx, t, hub, project, "f.bin"); !reflect.DeepEqual(got, model) {
 		t.Fatalf("backward overlap mismatch: got %q want %q", got, model)
 	}
 }
@@ -298,7 +298,7 @@ func TestCloneRangeHoleOnlyYieldsHole(t *testing.T) {
 	}, "storhub: punch test hole"); err != nil {
 		t.Fatalf("punch hole: %v", err)
 	}
-	holey := cloneFileBytes(t, hub, ctx, project, "src.bin")
+	holey := cloneFileBytes(ctx, t, hub, project, "src.bin")
 	wantHoley := append(append([]byte(nil), srcData[:8]...), append(make([]byte, 16), srcData[24:]...)...)
 	if !reflect.DeepEqual(holey, wantHoley) {
 		t.Fatalf("hole fixture mismatch: %q", holey)
@@ -322,7 +322,7 @@ func TestCloneRangeHoleOnlyYieldsHole(t *testing.T) {
 	if !reflect.DeepEqual(dstMeta.Chunks, dstBefore.Chunks) {
 		t.Fatalf("hole-only clone minted records: %v vs %v", dstMeta.Chunks, dstBefore.Chunks)
 	}
-	got := cloneFileBytes(t, hub, ctx, project, "dst.bin")
+	got := cloneFileBytes(ctx, t, hub, project, "dst.bin")
 	want := append([]byte("xxxxxxxx"), make([]byte, 16)...)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("hole clone mismatch: got %q want %q", got, want)
@@ -364,7 +364,7 @@ func TestCloneRangeDestinationGapZeroFills(t *testing.T) {
 	if dstMeta.Size != 32 {
 		t.Fatalf("dst size = %d, want 32", dstMeta.Size)
 	}
-	got := cloneFileBytes(t, hub, ctx, project, "dst.bin")
+	got := cloneFileBytes(ctx, t, hub, project, "dst.bin")
 	want := append(append([]byte("abcdefgh"), make([]byte, 16)...), []byte("01234567")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gap clone mismatch: got %q want %q", got, want)
@@ -403,7 +403,7 @@ func TestCloneRangeSelfCloneIsAtomicNoOp(t *testing.T) {
 	if meta.Size != int64(len(srcData)) {
 		t.Fatalf("self clone size = %d, want %d", meta.Size, len(srcData))
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "f.bin"); !reflect.DeepEqual(got, srcData) {
+	if got := cloneFileBytes(ctx, t, hub, project, "f.bin"); !reflect.DeepEqual(got, srcData) {
 		t.Fatalf("self clone changed bytes: %q", got)
 	}
 }
@@ -623,7 +623,7 @@ func TestCloneRangePurgeSafety(t *testing.T) {
 	if purged.DeletedAssets != 0 {
 		t.Fatalf("purge deleted %d assets while a clone still references them", purged.DeletedAssets)
 	}
-	if got := cloneFileBytes(t, hub, ctx, project, "copy.bin"); string(got) != "hello" {
+	if got := cloneFileBytes(ctx, t, hub, project, "copy.bin"); string(got) != "hello" {
 		t.Fatalf("survivor unreadable after purge: %q", got)
 	}
 
@@ -766,7 +766,7 @@ func TestCloneRangePropertySeeded(t *testing.T) {
 		if _, err := hub.CloneRange(ctx, project, srcPath, srcOff, dstPath, dstOff, length); err != nil {
 			t.Fatalf("trial %d: clone %s [%d,%d) to %s at %d: %v", trial, srcPath, srcOff, srcOff+length, dstPath, dstOff, err)
 		}
-		got := cloneFileBytes(t, hub, ctx, project, dstPath)
+		got := cloneFileBytes(ctx, t, hub, project, dstPath)
 		if !reflect.DeepEqual(got, models[dstPath]) {
 			t.Fatalf("trial %d: %s content mismatch after clone [%d,%d) at %d: got %q want %q",
 				trial, dstPath, srcOff, srcOff+length, dstOff, got, models[dstPath])
