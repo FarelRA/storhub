@@ -685,10 +685,14 @@ func (h *memHandle) Sync() error {
 	return nil
 }
 
-// Close implements Handle.Close and is idempotent.
+// Close implements Handle.Close: the first call releases the handle,
+// later calls fail with ErrClosed like close(2) on a closed fd.
 func (h *memHandle) Close() error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
+	if h.closed {
+		return ErrClosed
+	}
 	h.closed = true
 	return nil
 }

@@ -36,6 +36,14 @@ type restConformHandle struct {
 	mu      sync.Mutex
 	cursor  int64
 	closed  bool
+	// ino pins the open-time inode. Stateless verbs address the path,
+	// but POSIX fds address the inode: after unlink+recreate the path
+	// names a new file, and only the pin tells them apart. Backends
+	// preserve inode identity across commits (updates carry the
+	// existing inode; renames move it), so the pin never needs
+	// refreshing — adopting a new inode here would rebind the handle
+	// to a stranger's file, which is exactly the bug this prevents.
+	ino uint64
 	// session is the server-side open-file description (/handles).
 	// Stateless verbs carry IO while the path is linked (immediate
 	// publish, which is what cross-handle visibility and uncommitted
@@ -348,7 +356,12 @@ func (a *restConformAdapter) Open(path string, mode posixconform.OpenMode) (posi
 	if err != nil {
 		return nil, err
 	}
-	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode, session: id}, nil
+	if entry == nil {
+		if _, entry, _, statErr = a.resolve(resolved); statErr != nil {
+			return nil, statErr
+		}
+	}
+	return &restConformHandle{adapter: a, rest: trimPCPath(resolved), mode: mode, session: id, ino: entry.Inode}, nil
 }
 
 func (a *restConformAdapter) Stat(path string) (posixconform.Stat, error) {
@@ -580,6 +593,26 @@ func (h *restConformHandle) checkClosed() error {
 	return nil
 }
 
+// statLinked stats h.rest and reports whether it still names the
+// open-time inode, returning the entry when it does. A recycled name
+// (same path, new inode after unlink+recreate) must serve the pinned
+// session, never the new file: POSIX fds address the inode, not the
+// name. A gone path reports detached with no error; other stat
+// failures propagate.
+func (h *restConformHandle) statLinked() (entry *EntryInfo, linked bool, err error) {
+	h.mu.Lock()
+	ino := h.ino
+	h.mu.Unlock()
+	entry, _, serr := h.adapter.statEntry("/" + h.rest)
+	if serr != nil {
+		if errors.Is(serr, posixconform.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, serr
+	}
+	return entry, entry.Inode == ino, nil
+}
+
 func (h *restConformHandle) getRange(offset int64, length int) ([]byte, error) {
 	target := pcBase(h.adapter.project) + "/content?path=" + url.QueryEscape(h.rest)
 	end := offset + int64(length) - 1
@@ -614,6 +647,13 @@ func (h *restConformHandle) PRead(offset int64, length int) ([]byte, error) {
 	if length == 0 {
 		return []byte{}, nil
 	}
+	if _, linked, err := h.statLinked(); err != nil {
+		return nil, err
+	} else if !linked {
+		// Detached (unlinked, renamed away, or recycled): serve the
+		// session pin plus staged writes.
+		return h.sessionRead(offset, length)
+	}
 	got, err := h.getRange(offset, length)
 	if err == nil {
 		return got, nil
@@ -621,8 +661,7 @@ func (h *restConformHandle) PRead(offset int64, length int) ([]byte, error) {
 	if !errors.Is(err, posixconform.ErrNotFound) {
 		return nil, err
 	}
-	// The path is gone (unlinked or renamed away) but the open
-	// description survives: serve the session pin plus staged writes.
+	// Racedetach between the stat and the fetch: same session fallback.
 	return h.sessionRead(offset, length)
 }
 
@@ -672,6 +711,18 @@ func (h *restConformHandle) Read(length int) ([]byte, error) {
 	if length == 0 {
 		return []byte{}, nil
 	}
+	if _, linked, err := h.statLinked(); err != nil {
+		return nil, err
+	} else if !linked {
+		sess, serr := h.sessionRead(cursor, length)
+		if serr != nil {
+			return nil, serr
+		}
+		h.mu.Lock()
+		h.cursor = cursor + int64(len(sess))
+		h.mu.Unlock()
+		return sess, nil
+	}
 	got, err := h.getRange(cursor, length)
 	if err != nil {
 		return nil, err
@@ -698,12 +749,13 @@ func (h *restConformHandle) Write(data []byte) (int, error) {
 	}
 	off := cursor
 	if mode == posixconform.OpenAppend {
-		entry, _, err := h.adapter.statEntry("/" + h.rest)
+		entry, linked, err := h.statLinked()
 		if err != nil {
-			if !errors.Is(err, posixconform.ErrNotFound) {
-				return 0, err
-			}
-			// Unlinked mid-append: the session size is the end.
+			return 0, err
+		}
+		if !linked {
+			// Detached mid-append (unlinked, renamed, or recycled):
+			// the session size is the end.
 			st, serr := h.sessionStat()
 			if serr != nil {
 				return 0, serr

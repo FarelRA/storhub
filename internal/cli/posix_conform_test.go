@@ -101,8 +101,13 @@ type pcFakeHub struct {
 	mu    sync.Mutex
 	files map[string]*pcFile
 	links map[string]string
-	dirs  map[string]bool
-	clock int64
+	// linkIno carries symlink identity alongside links: lstat of a link
+	// reports its own inode, rename moves it, unlink drops it — the
+	// same lifecycle as file inodes, in a parallel map so link reads
+	// keep their shape.
+	linkIno map[string]uint64
+	dirs    map[string]bool
+	clock   int64
 	// Session emulation: open handles with pinned snapshots, staged
 	// writes, identity-resolved commit (rename followed, unlink
 	// discarded), mirroring the real session manager.
@@ -113,16 +118,47 @@ type pcFakeHub struct {
 
 func newPCFakeHub() *pcFakeHub {
 	return &pcFakeHub{
-		files: make(map[string]*pcFile),
-		links: make(map[string]string),
-		dirs:  map[string]bool{"": true},
-		clock: 1700000000000000000,
+		files:   make(map[string]*pcFile),
+		links:   make(map[string]string),
+		linkIno: make(map[string]uint64),
+		dirs:    map[string]bool{"": true},
+		clock:   1700000000000000000,
 	}
 }
 
 func (h *pcFakeHub) tick() int64 {
 	h.clock++
 	return h.clock
+}
+
+// allocInoLocked mints a fresh inode. Real backends never reuse an
+// inode while any handle may reference it; the fake's counter only
+// moves forward, so recycled names always observe a new identity and
+// open-file pins (adapter h.ino, session s.ino) can tell them apart.
+// Caller holds h.mu.
+func (h *pcFakeHub) allocInoLocked() uint64 {
+	h.nextIno++
+	return h.nextIno
+}
+
+// fileInoLocked returns the file's identity, assigning one on first
+// touch for entries predating eager allocation. Caller holds h.mu.
+func (h *pcFakeHub) fileInoLocked(f *pcFile) uint64 {
+	if f.ino == 0 {
+		f.ino = h.allocInoLocked()
+	}
+	return f.ino
+}
+
+// linkInoLocked returns the symlink's own (lstat) identity, assigning
+// on first touch like fileInoLocked. Caller holds h.mu.
+func (h *pcFakeHub) linkInoLocked(p string) uint64 {
+	if ino := h.linkIno[p]; ino != 0 {
+		return ino
+	}
+	ino := h.allocInoLocked()
+	h.linkIno[p] = ino
+	return ino
 }
 
 // parentOf returns the parent key of a cleaned relative path ("" = root).
@@ -159,13 +195,16 @@ func (h *pcFakeHub) UploadFile(project, remotePath, localPath string) (*storhub.
 		f.data = cp
 		f.mtime = h.tick()
 		f.atime = f.mtime
-		return &storhub.FileMetadata{Size: int64(len(cp)), Mode: f.mode, Inode: 1}, nil
+		return &storhub.FileMetadata{Size: int64(len(cp)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 	}
 	now := h.tick()
 	cp := append([]byte(nil), data...)
-	h.files[p] = &pcFile{data: cp, mode: 0o644, mtime: now, atime: now}
+	nf := &pcFile{data: cp, mode: 0o644, mtime: now, atime: now}
+	nf.ino = h.allocInoLocked()
+	h.files[p] = nf
 	delete(h.links, p)
-	return &storhub.FileMetadata{Size: int64(len(cp)), Mode: 0o644, Inode: 1}, nil
+	delete(h.linkIno, p)
+	return &storhub.FileMetadata{Size: int64(len(cp)), Mode: 0o644, Inode: nf.ino}, nil
 }
 
 func (h *pcFakeHub) ReplaceFile(project, remotePath, localPath string) (*storhub.FileMetadata, error) {
@@ -242,7 +281,7 @@ func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, er
 		// lstat semantics like the real backend: a terminal symlink
 		// reports itself; the CLI adapter follows through readlink.
 		return &storhub.EntryInfo{
-			Path: targetPath, Size: int64(len(target)), Mode: 0o777, NLink: 1, Inode: 1,
+			Path: targetPath, Size: int64(len(target)), Mode: 0o777, NLink: 1, Inode: h.linkInoLocked(p),
 			IsSymlink: true, SymlinkTarget: target, ModifiedAt: h.clock, AccessedAt: h.clock, ChangedAt: h.clock,
 		}, nil
 	}
@@ -252,7 +291,7 @@ func (h *pcFakeHub) StatPath(project, targetPath string) (*storhub.EntryInfo, er
 	}
 	return &storhub.EntryInfo{
 		Path: targetPath, Size: int64(len(f.data)), Mode: f.mode,
-		UID: f.uid, GID: f.gid, NLink: 1, Inode: 1, ModifiedAt: f.mtime,
+		UID: f.uid, GID: f.gid, NLink: 1, Inode: h.fileInoLocked(f), ModifiedAt: f.mtime,
 		AccessedAt: f.atime, ChangedAt: f.mtime,
 	}, nil
 }
@@ -306,6 +345,7 @@ func (h *pcFakeHub) DeleteFile(project, filePath string) error {
 	// rm on a symlink removes the link itself, never the target.
 	if _, ok := h.links[p]; ok {
 		delete(h.links, p)
+		delete(h.linkIno, p)
 		return nil
 	}
 	if _, ok := h.files[p]; !ok {
@@ -362,7 +402,7 @@ func (h *pcFakeHub) AppendFile(project, filePath string, data []byte) (*storhub.
 	f.data = append(f.data, data...)
 	f.mode &^= 0o4000 | 0o2000
 	f.mtime = h.tick()
-	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
 func (h *pcFakeHub) WriteFileAt(project, filePath string, offset int64, data []byte) (*storhub.FileMetadata, error) {
@@ -390,7 +430,7 @@ func (h *pcFakeHub) WriteFileAt(project, filePath string, offset int64, data []b
 		f.mode &^= 0o4000 | 0o2000
 		f.mtime = h.tick()
 	}
-	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
 func (h *pcFakeHub) PatchFile(project, filePath string, offset, deleteSize int64, edit []byte) (*storhub.FileMetadata, error) {
@@ -411,8 +451,10 @@ func (h *pcFakeHub) CreateFile(project, filePath string) (*storhub.FileMetadata,
 	}
 	h.ensureParentsLocked(p)
 	now := h.tick()
-	h.files[p] = &pcFile{data: []byte{}, mode: 0o644, mtime: now, atime: now}
-	return &storhub.FileMetadata{Size: 0, Mode: 0o644, Inode: 1}, nil
+	nf := &pcFile{data: []byte{}, mode: 0o644, mtime: now, atime: now}
+	nf.ino = h.allocInoLocked()
+	h.files[p] = nf
+	return &storhub.FileMetadata{Size: 0, Mode: 0o644, Inode: nf.ino}, nil
 }
 
 // TruncateFile resizes with zero-filling growth, ticking mtime like a
@@ -442,7 +484,7 @@ func (h *pcFakeHub) TruncateFile(project, filePath string, size int64) (*storhub
 		f.data = append([]byte(nil), f.data[:size]...)
 	}
 	f.mtime = h.tick()
-	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
 func (h *pcFakeHub) Chmod(project, targetPath string, mode uint32) error {
@@ -519,8 +561,9 @@ func (h *pcFakeHub) Symlink(project, target, linkPath string) (*storhub.FileMeta
 	}
 	h.ensureParentsLocked(p)
 	h.links[p] = target
+	h.linkIno[p] = h.allocInoLocked()
 	h.tick()
-	return &storhub.FileMetadata{Size: int64(len(target)), Mode: 0o777, Inode: 1}, nil
+	return &storhub.FileMetadata{Size: int64(len(target)), Mode: 0o777, Inode: h.linkIno[p]}, nil
 }
 
 func (h *pcFakeHub) Readlink(project, linkPath string) (string, error) {
@@ -556,8 +599,10 @@ func (h *pcFakeHub) Link(project, existingPath, newPath string) (*storhub.FileMe
 		return nil, fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, n)
 	}
 	h.ensureParentsLocked(n)
-	h.files[n] = &pcFile{data: append([]byte(nil), src.data...), mode: src.mode, uid: src.uid, gid: src.gid, mtime: h.tick(), atime: src.atime}
-	return &storhub.FileMetadata{Size: int64(len(src.data)), Mode: src.mode, Inode: 1}, nil
+	lf := &pcFile{data: append([]byte(nil), src.data...), mode: src.mode, uid: src.uid, gid: src.gid, mtime: h.tick(), atime: src.atime}
+	lf.ino = h.fileInoLocked(src)
+	h.files[n] = lf
+	return &storhub.FileMetadata{Size: int64(len(src.data)), Mode: src.mode, Inode: lf.ino}, nil
 }
 
 // WriteFileAtContext enforces --expected-revision against the file's
@@ -588,7 +633,7 @@ func (h *pcFakeHub) WriteFileAtContext(ctx context.Context, project, filePath st
 		f.mode &^= 0o6000
 		f.mtime = h.tick()
 	}
-	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: 1}, nil
+	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
 
 // RenameContext enforces RENAME_NOREPLACE inside the fake's mutex (no
@@ -621,10 +666,15 @@ func (h *pcFakeHub) renameLocked(o, n string) error {
 				return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, n)
 			}
 			delete(h.links, n)
+			delete(h.linkIno, n)
 			delete(h.files, n)
 			h.ensureParentsLocked(n)
 			h.links[n] = target
+			if ino := h.linkIno[o]; ino != 0 {
+				h.linkIno[n] = ino
+			}
 			delete(h.links, o)
+			delete(h.linkIno, o)
 			return nil
 		}
 		return fmt.Errorf("%w: %s", shfs.ErrNotFound, o)
@@ -634,6 +684,7 @@ func (h *pcFakeHub) renameLocked(o, n string) error {
 	}
 	delete(h.files, n)
 	delete(h.links, n)
+	delete(h.linkIno, n)
 	h.ensureParentsLocked(n)
 	h.files[n] = f
 	delete(h.files, o)
@@ -836,7 +887,7 @@ func (s *cliPOSIXSurface) Open(path string, mode posixconform.OpenMode) (posixco
 		return nil, err
 	}
 	h.session = id
-	_ = entry
+	h.ino = entry.Inode
 	return h, nil
 }
 
@@ -1120,6 +1171,12 @@ type cliHandle struct {
 	mode    posixconform.OpenMode
 	cursor  int64
 	closed  bool
+	// ino pins the open-time inode: after unlink+recreate the path
+	// names a new file, and only the pin tells them apart. Backends
+	// preserve inode identity across commits, so the pin never needs
+	// refreshing — adopting a new inode would rebind the handle to a
+	// stranger's file.
+	ino uint64
 	// session is the server-side open-file description (session open).
 	// One-shot verbs carry IO while the path is linked (immediate
 	// publish, which is what cross-handle visibility and uncommitted
@@ -1209,6 +1266,22 @@ func (h *cliHandle) writable() bool {
 		h.mode == posixconform.OpenAppend || h.mode == posixconform.OpenTruncate
 }
 
+// statLinkedLocked stats h.path and reports whether it still names the
+// open-time inode, returning the entry when it does. A recycled name
+// (same path, new inode after unlink+recreate) must serve the pinned
+// session, never the new file. Caller holds h.mu, matching catLocked.
+func (h *cliHandle) statLinkedLocked() (entry *storhub.EntryInfo, linked bool, err error) {
+	ino := h.ino
+	entry, err = h.surface.statViaCLI(h.path)
+	if err != nil {
+		if errors.Is(err, posixconform.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return entry, entry.Inode == ino, nil
+}
+
 // catLocked streams the whole file through `cat`; caller holds h.mu.
 func (h *cliHandle) catLocked() ([]byte, error) {
 	rel, err := cliPath(h.path)
@@ -1233,6 +1306,17 @@ func (h *cliHandle) PRead(offset int64, length int) ([]byte, error) {
 	}
 	if offset < 0 || length < 0 {
 		return nil, posixconform.ErrInvalid
+	}
+	if _, linked, err := h.statLinkedLocked(); err != nil {
+		return nil, err
+	} else if !linked {
+		// Detached (unlinked, renamed away, or recycled): serve the
+		// session pin plus staged writes.
+		sess, serr := h.sessionRead(offset, length)
+		if serr != nil {
+			return nil, serr
+		}
+		return sess, nil
 	}
 	data, err := h.catLocked()
 	if err != nil {
@@ -1295,6 +1379,16 @@ func (h *cliHandle) Read(length int) ([]byte, error) {
 	if length < 0 {
 		return nil, posixconform.ErrInvalid
 	}
+	if _, linked, err := h.statLinkedLocked(); err != nil {
+		return nil, err
+	} else if !linked {
+		sess, serr := h.sessionRead(h.cursor, length)
+		if serr != nil {
+			return nil, serr
+		}
+		h.cursor += int64(len(sess))
+		return sess, nil
+	}
 	data, err := h.catLocked()
 	if err != nil {
 		if !errors.Is(pcTranslateErr(err), posixconform.ErrNotFound) {
@@ -1331,18 +1425,23 @@ func (h *cliHandle) Write(data []byte) (int, error) {
 	off := h.cursor
 	if h.mode == posixconform.OpenAppend {
 		// O_APPEND forces the cursor to the end on every cursor write.
-		// Unlinked mid-append, the session size is the end.
-		st, err := h.surface.statViaCLI(h.path)
+		// Detached mid-append (unlinked, renamed, or recycled), the
+		// session size is the end.
+		_, linked, err := h.statLinkedLocked()
 		if err != nil {
-			if !errors.Is(err, posixconform.ErrNotFound) {
-				return 0, err
-			}
+			return 0, err
+		}
+		if !linked {
 			sz, serr := h.sessionSize()
 			if serr != nil {
 				return 0, serr
 			}
 			off = sz
 		} else {
+			st, err := h.surface.statViaCLI(h.path)
+			if err != nil {
+				return 0, err
+			}
 			off = st.Size
 		}
 	}

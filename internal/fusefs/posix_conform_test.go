@@ -1568,7 +1568,7 @@ func (h *pcHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil
+		return posixconform.ErrClosed
 	}
 	h.closed = true
 	return pcTranslate(h.f.Close())
@@ -1667,7 +1667,7 @@ func (h *pcPathHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil
+		return posixconform.ErrClosed
 	}
 	h.closed = true
 	return pcTranslate(syscall.Close(h.fd))
