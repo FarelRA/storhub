@@ -126,8 +126,9 @@ func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
 
 // TestPruneReverifyDropsNewlyTrackedTasks pins the check-then-act fence: a
 // commit landing between classification and deletion that references a
-// task's asset must spare it. Without reverifyPurgePlan, the delete phase
-// destroys bytes a live file needs.
+// task's asset must spare it. The whole-plan reverify plus the per-delete
+// fence inside deletePurgePlan both enforce it; the delete phase destroys
+// nothing a live file needs.
 func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -209,17 +210,26 @@ func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	if result.DeletedAssets != 0 || result.DeletedReleases != 0 {
 		t.Fatalf("fenced tail must spare re-tracked data, deleted %+v", result)
 	}
-	// ...while the unfenced tail destroys the rescued bytes. This control
-	// proves the fence is load-bearing, not the setup: same stale tasks,
-	// no re-verify, live data gone.
-	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, &PruneResult{}); err != nil {
-		t.Fatalf("unfenced delete: %v", err)
+	// ...while a direct call with the same stale tasks spares the rescued
+	// bytes: the per-delete fence inside deletePurgePlan revalidates
+	// against fresh truth on first touch, so no caller can reach an
+	// unfenced tail anymore. Spared tasks are reported, never silent.
+	spared := &PruneResult{}
+	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, spared); err != nil {
+		t.Fatalf("fenced direct delete: %v", err)
 	}
-	if err := hub.DownloadFile(project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err == nil {
-		t.Fatal("unfenced tail should have destroyed the rescued asset")
+	if spared.DeletedAssets != 0 || spared.DeletedReleases != 0 {
+		t.Fatalf("direct stale delete must spare everything, deleted %+v", spared)
 	}
-	// And a full purge afterwards still deletes nothing (assets reaped
-	// above are gone; the fence plus fresh classification agree).
+	if len(spared.Notes) == 0 {
+		t.Fatal("spared tasks must be reported in Notes")
+	}
+	if err := hub.DownloadFile(project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err != nil {
+		t.Fatalf("fenced tail must spare the rescued asset: %v", err)
+	}
+	// And a full purge afterwards still deletes nothing (nothing was
+	// reaped above that shouldn't be; the fence plus fresh classification
+	// agree).
 	res, err := hub.PruneContext(ctx, project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)

@@ -42,6 +42,13 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		return
 	}
 
+	// Degraded projects drop advisory atime like noatime: atime rides the
+	// commit, and a sick backend must not accumulate advisory ops. Reads
+	// (which queue atime) keep working; only the stamp is skipped.
+	if h.isProjectDegraded(project) {
+		return
+	}
+
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 

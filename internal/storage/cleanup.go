@@ -20,6 +20,9 @@ func (h *StorHub) DeleteFile(project, fileName string) error {
 }
 
 func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName string, opts ...shfs.MutateOption) error {
+	if err := h.admitMutation(project); err != nil {
+		return err
+	}
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return err
 	}
@@ -110,6 +113,9 @@ func (h *StorHub) DeleteRelease(project, tag string) error {
 }
 
 func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string) error {
+	if err := h.admitMutation(project); err != nil {
+		return err
+	}
 	if err := validateProject(project); err != nil {
 		return err
 	}
@@ -405,26 +411,134 @@ func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, release
 }
 
 // deletePurgePlan executes the classified deletes and records the counts.
-// A delete failure aborts with the original task context (no partial
-// counts reported on error, matching the old behavior).
+// Every delete is fenced individually: before touching remote state it
+// checks the truth version, and on any movement since the last check it
+// rebuilds the tracked sets once from fresh truth and drops newly-tracked
+// remainders loudly. A concurrent writer landing mid-loop therefore spares
+// its data instead of racing the delete — the old whole-plan reverify
+// could not see writes that landed after it ran. A delete failure aborts
+// with the original task context (no partial counts reported on error,
+// matching the old behavior); skipped tasks are reported in Notes, never
+// silently dropped.
 func (h *StorHub) deletePurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask, result *PruneResult) error {
+	fence := h.purgeFence(project)
+	skippedReleases, skippedAssets := 0, 0
 	for _, task := range releaseTasks {
+		keep, err := fence.checkRelease(ctx, project, task)
+		if err != nil {
+			return err
+		}
+		if !keep {
+			skippedReleases++
+			continue
+		}
 		if err := h.withRetry(ctx, "purge-delete_release", 5, purgeIsRetryable, func() error {
 			return h.deleteReleaseByID(ctx, project, task.id)
 		}); err != nil {
 			return fmt.Errorf("delete untracked release %s: %w", task.tag, err)
 		}
+		result.DeletedReleases++
 	}
-	result.DeletedReleases = len(releaseTasks)
 	for _, task := range assetTasks {
+		keep, err := fence.checkAsset(ctx, project, task)
+		if err != nil {
+			return err
+		}
+		if !keep {
+			skippedAssets++
+			continue
+		}
 		if err := h.withRetry(ctx, "purge-delete_asset", 5, purgeIsRetryable, func() error {
 			return h.deleteAssetByID(ctx, project, task.id)
 		}); err != nil {
 			return fmt.Errorf("delete untracked asset %d: %w", task.id, err)
 		}
+		result.DeletedAssets++
 	}
-	result.DeletedAssets = len(assetTasks)
+	if skippedReleases+skippedAssets > 0 {
+		result.Notes = append(result.Notes, fmt.Sprintf("spared %d releases and %d assets re-tracked by concurrent writes during the purge", skippedReleases, skippedAssets))
+	}
 	return nil
+}
+
+// purgeFence is the per-delete optimistic fence for one deletePurgePlan
+// run. It watches the project's truth version (bumped on every shared
+// truth swap): while nothing moves, deletes proceed with zero extra
+// reads; the first movement rebuilds the tracked sets once from fresh
+// truth and every later check consults them. Lookups never create cache
+// entries (lookupProjectMeta, not getOrCreate): an evicted project
+// simply revalidates from scratch.
+type purgeFence struct {
+	hub      *StorHub
+	version  uint64
+	haveBase bool
+	releases map[string]struct{}
+	assets   map[int64]struct{}
+	loaded   bool
+}
+
+func (h *StorHub) purgeFence(project string) *purgeFence {
+	f := &purgeFence{hub: h}
+	if pm := h.lookupProjectMeta(project); pm != nil {
+		pm.mu.RLock()
+		f.version, f.haveBase = pm.version, true
+		pm.mu.RUnlock()
+	}
+	return f
+}
+
+// revalidate rebuilds the tracked sets from fresh truth. It runs at most
+// when the version moved (or no baseline existed); callers consult the
+// loaded maps after.
+func (f *purgeFence) revalidate(ctx context.Context, project string) error {
+	fresh, _, err := f.hub.loadRepoMetadataFresh(ctx, project)
+	if err != nil {
+		return fmt.Errorf("purge fence revalidate: %w", err)
+	}
+	f.releases, f.assets = trackedPurgeSets(fresh)
+	f.loaded = true
+	if pm := f.hub.lookupProjectMeta(project); pm != nil {
+		pm.mu.RLock()
+		f.version, f.haveBase = pm.version, true
+		pm.mu.RUnlock()
+	}
+	return nil
+}
+
+// current reports whether shared truth moved since the baseline. An
+// absent baseline (evicted project) always counts as moved: safety
+// defaults to revalidating, never to assuming stillness.
+func (f *purgeFence) current(project string) bool {
+	if !f.haveBase {
+		return false
+	}
+	pm := f.hub.lookupProjectMeta(project)
+	if pm == nil {
+		return false
+	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.version == f.version
+}
+
+func (f *purgeFence) checkRelease(ctx context.Context, project string, task purgeReleaseTask) (bool, error) {
+	if !f.loaded || !f.current(project) {
+		if err := f.revalidate(ctx, project); err != nil {
+			return false, err
+		}
+	}
+	_, ok := f.releases[task.tag]
+	return !ok, nil
+}
+
+func (f *purgeFence) checkAsset(ctx context.Context, project string, task purgeAssetTask) (bool, error) {
+	if !f.loaded || !f.current(project) {
+		if err := f.revalidate(ctx, project); err != nil {
+			return false, err
+		}
+	}
+	_, ok := f.assets[task.id]
+	return !ok, nil
 }
 
 // purgeAndSquashUntracked drops chunk records nothing references anymore

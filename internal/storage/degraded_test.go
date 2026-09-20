@@ -337,3 +337,54 @@ func TestDegradedRecoveryBypass(t *testing.T) {
 	// The rescue successes above must not have cleared the latch.
 	_ = asDegraded(t, hub.MkdirContext(ctx, project, "still-no"))
 }
+
+// TestDegradedGateCoversDeleteReleaseAndReader pins the follow-up gates:
+// delete paths, release deletes, and reader uploads refuse on a latched
+// project exactly like the funnel verbs.
+func TestDegradedGateCoversDeleteReleaseAndReader(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := degradedTestHub(t, backend, 3)
+	project := "degraded-wide"
+
+	degradedSeed(t, hub, project)
+	driveDegradedFailures(t, hub, backend, project, 3)
+	_ = asDegraded(t, hub.MkdirContext(context.Background(), project, "trip"))
+
+	_ = asDegraded(t, hub.DeleteFileContext(context.Background(), project, "seed.txt"))
+	_ = asDegraded(t, hub.DeleteReleaseContext(context.Background(), project, "v1"))
+	_, rerr := hub.ReplaceFileFromReaderContext(context.Background(), project, "seed.txt", strings.NewReader("new"))
+	_ = asDegraded(t, rerr)
+}
+
+// TestDegradedAtimeSkipsSilently pins the advisory rule: atime updates on
+// a latched project are dropped without error, so reads (which queue
+// atime) keep working while degraded.
+func TestDegradedAtimeSkipsSilently(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := degradedTestHub(t, backend, 3)
+	project := "degraded-atime"
+
+	degradedSeed(t, hub, project)
+	driveDegradedFailures(t, hub, backend, project, 3)
+	_ = asDegraded(t, hub.MkdirContext(context.Background(), project, "trip"))
+
+	pm := hub.getOrCreateProjectMeta(project)
+	pm.mu.RLock()
+	before := len(pm.opStack.ops)
+	pm.mu.RUnlock()
+	hub.QueueAtimeUpdateContext(context.Background(), project, "seed.txt", false, 1700000000000000000)
+	pm.mu.RLock()
+	after := len(pm.opStack.ops)
+	pm.mu.RUnlock()
+	if after != before {
+		t.Fatalf("degraded atime must append nothing, stack %d -> %d", before, after)
+	}
+	if _, err := hub.ReadFileAtContext(context.Background(), project, "seed.txt", 0, 4); err != nil {
+		t.Fatalf("reads must keep working while degraded: %v", err)
+	}
+	if got := hub.PressureFailureStreak(project); got == 0 {
+		t.Fatal("atime skip must not clear the streak")
+	}
+}

@@ -228,6 +228,11 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	if body == nil {
 		return nil, fmt.Errorf("request body is nil")
 	}
+	// Degraded-mode admission before any upload mints assets or reserves
+	// release slots that could never commit.
+	if err := h.admitMutation(project); err != nil {
+		return nil, err
+	}
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
