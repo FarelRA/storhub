@@ -43,12 +43,13 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 		return
 	}
 
-	// Degraded projects drop advisory atime like noatime: atime rides the
-	// commit, and a sick backend must not accumulate advisory ops. Reads
-	// (which queue atime) keep working; only the stamp is skipped.
-	if h.isProjectDegraded(project) {
-		return
-	}
+	// Degraded projects still queue atime through this cheap metadata-only
+	// path: an atime bump is one OpSetattr with no asset uploads, and
+	// silently skipping it would leave stale stamps on every read made
+	// while degraded. Reads (which queue atime) keep working, and the
+	// stamp is correct. The commit loop still refuses or fails loudly per
+	// the degraded policy; rescue verbs (drain, rollback) carry the
+	// queued atime ops like any other pending work.
 
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()

@@ -26,9 +26,16 @@ package storage
 //   - CloseSession commits staged state and destroys the handle. Close with
 //     no staged state is a no-op success. Close on unlinked scratch without
 //     a prior link discards the temp with no commit.
-//   - LinkSession names an unlinked scratch handle (O_TMPFILE equivalent),
-//     DAC-checked at link time like create. Linking stages the creation, so
-//     link-then-close persists even an empty file.
+//   - LinkSession appends a validated name to the handle's ordered
+//     pending-name set (O_TMPFILE equivalent first link), DAC-checked at
+//     link time like create. Linking stages the creation, so
+//     link-then-close persists even an empty file. Linking an
+//     already-pending name fails with ErrSessionLinked; RelinkSession
+//     replaces the whole pending set with one validated path. Close and
+//     Sync pre-validate every pending name, then publish the staged bytes
+//     to each with create semantics: any taken name fails the whole
+//     operation with AlreadyExists, publishing nothing, and the handle
+//     stays open for Relink.
 //   - Idle TTL defaults to 10 minutes with a configurable max cap. There is
 //     no background goroutine: expired handles are swept when opening new
 //     ones plus lazily on use. Expired and unknown ids answer StaleSessionError.
@@ -91,7 +98,9 @@ var (
 	// ErrSessionUnlinked reports syncing (or committing) a scratch handle
 	// that was never linked to a path.
 	ErrSessionUnlinked = errors.New("storhub: session has no path: link it before sync or close")
-	// ErrSessionLinked reports linking a handle that already has a path.
+	// ErrSessionLinked reports linking an already-pending name, or linking
+	// a handle opened with a path (which keeps single-path replace
+	// semantics and can only be retargeted with RelinkSession).
 	ErrSessionLinked = errors.New("storhub: session already has a path")
 	// ErrSessionPathGone reports a commit or sync for a handle whose
 	// pinned inode lost its last name after open (unlinked or renamed
@@ -291,16 +300,25 @@ type SessionStat struct {
 
 // openSession is one live handle. mu serializes operations on this handle
 // ID so distinct handles proceed in parallel once the table lock is
-// dropped across network I/O. Fields written after insert (path on link,
-// pin/revision/sizes/staging/dirty/applied/ranges/lastUse/tmp) are guarded
-// by mu. project/mode/ownerUID/hasOpener/ttl are immutable after insert
-// and safe to read under the table lock. destroyed marks removal from the
-// table; holders of mu check it after re-acquiring the table lock.
+// dropped across network I/O. Fields written after insert (path and
+// pending on link/relink, pin/revision/sizes/staging/dirty/applied/ranges/
+// lastUse/tmp) are guarded by mu. project/mode/ownerUID/hasOpener/ttl are
+// immutable after insert and safe to read under the table lock. destroyed
+// marks removal from the table; holders of mu check it after re-acquiring
+// the table lock.
 type openSession struct {
-	mu        sync.Mutex
-	id        string
-	project   string
-	path      string
+	mu      sync.Mutex
+	id      string
+	project string
+	path    string
+	// pending is the ordered set of names staged bytes publish to on
+	// Close or Sync. Scratch handles grow it with LinkSession (append)
+	// and replace it with RelinkSession (exactly one name). Handles
+	// opened with a path keep it empty and commit through the single
+	// open path with replace semantics. path always mirrors pending[0]
+	// while pending is non-empty, so single-name readers (StatSession,
+	// quarantine) keep working unchanged.
+	pending   []string
 	mode      OpenMode
 	ownerUID  uint32
 	hasOpener bool

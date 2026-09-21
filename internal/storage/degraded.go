@@ -104,14 +104,22 @@ func (h *StorHub) markProjectDegraded(project string) {
 // admitMutation is the mutation-admission gate: every verbs.go mutation
 // entry passes here first. Healthy projects pass unless their live streak
 // reached the threshold, in which case this call latches them and refuses.
-// Latched projects are always refused, even with a zero streak.
+// Latched projects are always refused, even with a zero streak. A project
+// with a running prune is refused with *PruneConflictError so admitted
+// work never interleaves with the prune's classify-to-delete windows;
+// prune-owned commit tails run with the fence dropped, so they pass here.
 func (h *StorHub) admitMutation(project string) error {
 	threshold := h.degradedThreshold()
 	if !h.isProjectDegraded(project) {
 		if h.PressureFailureStreak(project) < uint64(threshold) {
+			if h.pruneFenceRunning(project) {
+				return &PruneConflictError{Project: project}
+			}
 			return nil
 		}
 		h.markProjectDegraded(project)
+	} else if h.pruneFenceRunning(project) {
+		return &PruneConflictError{Project: project}
 	}
 	return &DegradedProjectError{
 		Project:   project,

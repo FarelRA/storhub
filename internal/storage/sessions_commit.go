@@ -63,9 +63,31 @@ func (h *StorHub) resolveCommitPathLocked(ctx context.Context, s *openSession) (
 	return paths[0], nil
 }
 
+// resolveCommitPathsLocked maps a dirty handle to every path its staged
+// state must publish to, in publish order. Linked handles (a non-empty
+// pending set from Link/Relink) publish the staged bytes to each pending
+// name; opened-with-path handles keep the single-path replace resolution
+// below. Callers must hold s.mu.
+func (h *StorHub) resolveCommitPathsLocked(ctx context.Context, s *openSession) ([]string, error) {
+	if len(s.pending) > 0 {
+		return append([]string(nil), s.pending...), nil
+	}
+	single, err := h.resolveCommitPathLocked(ctx, s)
+	if err != nil || single == "" {
+		return nil, err
+	}
+	return []string{single}, nil
+}
+
+// commitSessionLocked commits one handle's staged state: linked handles
+// (a non-empty pending set) fan out through commitLinkedSessionLocked,
+// every other handle commits its single resolved path below.
 func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, s *openSession) error {
 	if !s.dirty {
 		return nil
+	}
+	if len(s.pending) > 0 {
+		return h.commitLinkedSessionLocked(ctx, sh, s)
 	}
 	if s.path == "" {
 		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionUnlinked)
@@ -142,6 +164,99 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 		return err
 	}
 	return nil
+}
+
+// commitLinkedSessionLocked publishes one linked handle's staged bytes to
+// every pending name in link order, then drains once. A linked creation
+// pre-validates ALL pending names for absence before publishing anything:
+// any taken name fails the whole operation with AlreadyExists, publishing
+// nothing, and the handle stays open for Relink. A linked handle that
+// already published once (created cleared by repin on Sync) republishes
+// its full staged image per name with replace-or-create semantics, so a
+// second Sync after more writes keeps working. DAC is re-validated per
+// name against live state. Like the single-path commit, the verb phase
+// runs once per staged generation (applied marker) and a failed drain
+// retains staged state for retry. Caller holds s.mu.
+func (h *StorHub) commitLinkedSessionLocked(ctx context.Context, sh *sessionHubState, s *openSession) error {
+	pending, err := h.resolveCommitPathsLocked(ctx, s)
+	if err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionUnlinked)
+	}
+	// Commit as the opener, like the single-path commit.
+	commitCtx := ctx
+	if s.hasOpener {
+		commitCtx = shfs.WithIdentity(ctx, s.opener)
+	}
+	if !s.staged && s.baseSize > 0 {
+		if err := h.hydrateSessionLocked(commitCtx, s); err != nil {
+			return err
+		}
+	}
+
+	sh.commitMu.Lock()
+	defer sh.commitMu.Unlock()
+
+	live, _, err := h.loadRepoMetadataReadonly(commitCtx, s.project)
+	if err != nil {
+		return err
+	}
+	if s.created {
+		for _, name := range pending {
+			if live.FindFile(name) != nil {
+				return shfs.AlreadyExists(name)
+			}
+		}
+	}
+	for _, name := range pending {
+		if err := h.recheckSessionDAC(commitCtx, s, name); err != nil {
+			return err
+		}
+	}
+
+	if !s.applied {
+		if s.created {
+			for _, name := range pending {
+				if _, err := h.UploadFileContext(commitCtx, s.project, name, s.tmpName); err != nil {
+					return err
+				}
+			}
+		} else {
+			for _, name := range pending {
+				if err := h.publishSessionImageLocked(commitCtx, s, name, live); err != nil {
+					return err
+				}
+			}
+		}
+		s.applied = true
+	}
+	if err := h.DrainProjectContext(commitCtx, s.project); err != nil {
+		return err
+	}
+	return nil
+}
+
+// publishSessionImageLocked publishes the full staged image of a linked
+// handle that already owns its names (a post-Sync update) to one name:
+// replace when the name exists, create when it does not. live is the
+// pre-publish snapshot read under commitMu; the verbs re-check existence
+// themselves, so a name created concurrently still lands exactly once.
+func (h *StorHub) publishSessionImageLocked(ctx context.Context, s *openSession, name string, live *RepoMetadata) error {
+	if live.FindFile(name) != nil {
+		staged, err := os.Open(s.tmpName)
+		if err != nil {
+			return fmt.Errorf("commit session %s: %w", shortSHA(s.id), err)
+		}
+		defer func() { _ = staged.Close() }()
+		if _, err := h.ReplaceFileFromReaderContext(ctx, s.project, name, staged, shfs.WithSize(s.curSize)); err != nil {
+			return fmt.Errorf("commit session %s: %w", shortSHA(s.id), err)
+		}
+		return nil
+	}
+	_, err := h.UploadFileContext(ctx, s.project, name, s.tmpName)
+	return err
 }
 
 // recheckSessionDAC re-validates write permission against live state before

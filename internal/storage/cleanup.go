@@ -28,6 +28,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	if err := validateProject(project); err != nil {
 		return err
 	}
@@ -71,6 +72,16 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	if existing == nil {
 		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
+	}
+	// In-transaction CAS gate: this path mutates directly under pm.mu
+	// instead of through ensureMutableLocked, so the token check runs
+	// here, in the same critical section as the removal below. Placed
+	// after the existence checks so a missing file still reports
+	// NotFound, and before the COW copy so a rejected CAS publishes
+	// nothing (never partial application).
+	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
+		pm.mu.Unlock()
+		return err
 	}
 	// Run every fallible operation before the irreversible removal so an
 	// error can never leave the file deleted while the caller believes the
@@ -257,40 +268,6 @@ type purgeAssetTask struct {
 func purgeIsRetryable(err error) bool {
 	var apiErr *ghapi.APIError
 	return errors.As(err, &apiErr) && apiErr.IsRetryable()
-}
-
-func pruneAssetsLive(ctx context.Context, h *StorHub, project string, res *PruneResult) error {
-	if err := validateProject(project); err != nil {
-		return err
-	}
-	// Fail closed on in-flight state: a dirty tree means a mutation is
-	// still converging, and classifying against it risks deleting
-	// releases a pending commit is about to reference. Flush first,
-	// then purge.
-	if h.projectHasUncommittedState(project) {
-		return fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
-	}
-	releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
-	if err != nil {
-		return err
-	}
-	// Optimistic fence against concurrent writers landing between
-	// classification and deletion (audit: purge check-then-act race).
-	releaseTasks, assetTasks, err = h.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
-	if err != nil {
-		return err
-	}
-	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, res); err != nil {
-		return err
-	}
-	// Drop chunk records and squash only when something actually changed
-	// (audit 18): the old tail ran UpdateRepoMetadataContext +
-	// commitProjectMetadata unconditionally, so a no-op purge still
-	// dirtied the tree and landed a manifest commit per run.
-	if err := h.purgeAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0); err != nil {
-		return err
-	}
-	return nil
 }
 
 // classifyUntracked loads fresh truth (never the cached snapshot: files

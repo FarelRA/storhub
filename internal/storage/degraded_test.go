@@ -357,34 +357,60 @@ func TestDegradedGateCoversDeleteReleaseAndReader(t *testing.T) {
 	_ = asDegraded(t, rerr)
 }
 
-// TestDegradedAtimeSkipsSilently pins the advisory rule: atime updates on
-// a latched project are dropped without error, so reads (which queue
-// atime) keep working while degraded.
-func TestDegradedAtimeSkipsSilently(t *testing.T) {
+// TestDegradedAtimeQueued pins the advisory rule: atime updates on a
+// latched project are still queued through the cheap metadata-only path,
+// so reads (which queue atime) keep working AND their stamps stay correct
+// while degraded. Only the commit outcome stays loud.
+func TestDegradedAtimeQueued(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := degradedTestHub(t, backend, 3)
+	hub.config.AtimePolicy = "relatime"
 	project := "degraded-atime"
 
 	degradedSeed(t, hub, project)
 	driveDegradedFailures(t, hub, backend, project, 3)
-	_ = asDegraded(t, hub.MkdirContext(context.Background(), project, "trip"))
+	_ = asDegraded(t, hub.MkdirContext(ctx, project, "trip"))
+
+	// Keep the backend failing so the queued atime cannot commit
+	// successfully behind our back and clear the streak mid-test.
+	backend.intercept.Store(
+		func(w http.ResponseWriter, r *http.Request) bool {
+			if r.Method == http.MethodPut &&
+				strings.Contains(r.URL.Path, testIndexPath) {
+				http.Error(w, "injected failure",
+					http.StatusInternalServerError)
+				return true
+			}
+			return false
+		})
+	t.Cleanup(func() {
+		backend.intercept.Store(
+			(func(http.ResponseWriter, *http.Request) bool)(nil))
+	})
 
 	pm := hub.getOrCreateProjectMeta(project)
 	pm.mu.RLock()
 	before := len(pm.opStack.ops)
 	pm.mu.RUnlock()
-	hub.QueueAtimeUpdateContext(context.Background(), project, "seed.txt", false, 1700000000000000000)
+	// A stamp far ahead of the seed trips the relatime ladder.
+	now := hub.config.Now().UnixNano() + 2*86400*1e9
+	hub.QueueAtimeUpdateContext(ctx, project, "seed.txt", false, now)
 	pm.mu.RLock()
 	after := len(pm.opStack.ops)
+	queued := pm.meta.FindFile("seed.txt")
 	pm.mu.RUnlock()
-	if after != before {
-		t.Fatalf("degraded atime must append nothing, stack %d -> %d", before, after)
+	if after != before+1 {
+		t.Fatalf("degraded atime must queue one op, stack %d -> %d", before, after)
 	}
-	if _, err := hub.ReadFileAtContext(context.Background(), project, "seed.txt", 0, 4); err != nil {
+	if queued == nil || queued.AccessedAt != now {
+		t.Fatalf("degraded atime must stamp the tree, got %+v", queued)
+	}
+	if _, err := hub.ReadFileAtContext(ctx, project, "seed.txt", 0, 4); err != nil {
 		t.Fatalf("reads must keep working while degraded: %v", err)
 	}
 	if got := hub.PressureFailureStreak(project); got == 0 {
-		t.Fatal("atime skip must not clear the streak")
+		t.Fatal("queued atime must not clear the streak")
 	}
 }

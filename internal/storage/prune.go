@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
@@ -71,6 +72,132 @@ type PruneResult struct {
 	CollectedBytes  int64 `json:"collected_bytes,omitempty"`
 }
 
+// PruneConflictError is the loud typed refusal a project answers while a
+// prune run holds its write fence: a mutation admitted mid-prune (or a
+// second prune) would interleave with the prune's classify-to-delete
+// window, so it fails here instead of racing silently. Match with
+// errors.As. Writes admitted before the prune started are unaffected;
+// prune refuses a dirty tree up front, so the two directions cover each
+// other without blocking.
+type PruneConflictError struct {
+	Project string
+}
+
+func (e *PruneConflictError) Error() string {
+	return fmt.Sprintf("project %q has a prune running: mutations are refused until it finishes (retry after the prune, or prune again later)", e.Project)
+}
+
+// pruneFenceState is one hub's set of running prunes: project to the
+// generation holding its write fence. Absent means free. Generations make
+// release idempotent-safe: a stale holder can never drop a newer run's
+// fence, which matters when a prune briefly drops the fence around its
+// own commit tail (see pruneFenceGuard) and a second prune starts in the
+// gap.
+type pruneFenceState struct {
+	mu   sync.Mutex
+	held map[string]uint64
+	next uint64
+}
+
+// pruneFences keys fence states by hub: StorHub's struct cannot grow a
+// field from this workstream, so per-hub state hangs off the pointer here,
+// mirroring the degraded latch registry.
+var pruneFences sync.Map // *StorHub -> *pruneFenceState
+
+func (h *StorHub) pruneFenceTable() *pruneFenceState {
+	if v, ok := pruneFences.Load(h); ok {
+		return v.(*pruneFenceState)
+	}
+	v, _ := pruneFences.LoadOrStore(h, &pruneFenceState{held: make(map[string]uint64)})
+	return v.(*pruneFenceState)
+}
+
+// pruneFenceAcquire takes the project's write fence for one prune run,
+// reporting the generation to release with. A second concurrent prune
+// fails loud instead of interleaving.
+func (h *StorHub) pruneFenceAcquire(project string) (uint64, bool) {
+	st := h.pruneFenceTable()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if _, ok := st.held[project]; ok {
+		return 0, false
+	}
+	st.next++
+	st.held[project] = st.next
+	return st.next, true
+}
+
+// pruneFenceRelease drops the fence only when gen still holds it; a stale
+// generation is a no-op that never disturbs a newer run.
+func (h *StorHub) pruneFenceRelease(project string, gen uint64) {
+	st := h.pruneFenceTable()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if cur, ok := st.held[project]; ok && cur == gen {
+		delete(st.held, project)
+	}
+}
+
+// pruneFenceRunning reports whether a prune currently holds the fence.
+// admitMutation consults it so admitted-during-prune mutations fail loud.
+func (h *StorHub) pruneFenceRunning(project string) bool {
+	st := h.pruneFenceTable()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	_, ok := st.held[project]
+	return ok
+}
+
+// pruneFenceGuard tracks one PruneReq's fence ownership across the brief
+// drops around its own commit tails (which re-enter mutation admission).
+// held is false exactly while dropped; release is a no-op then, so a
+// second prune that started in the gap keeps its fence.
+type pruneFenceGuard struct {
+	hub     *StorHub
+	project string
+	gen     uint64
+	held    bool
+}
+
+// holdPruneFence acquires the fence, returning nil when another prune
+// already holds it.
+func (h *StorHub) holdPruneFence(project string) *pruneFenceGuard {
+	gen, ok := h.pruneFenceAcquire(project)
+	if !ok {
+		return nil
+	}
+	return &pruneFenceGuard{hub: h, project: project, gen: gen, held: true}
+}
+
+// drop releases the fence around a prune-owned commit tail (which passes
+// mutation admission like any other metadata transaction). The remote
+// classify-to-delete window that needed the fence already ran.
+func (g *pruneFenceGuard) drop() {
+	if g.held {
+		g.hub.pruneFenceRelease(g.project, g.gen)
+		g.held = false
+	}
+}
+
+// rehold re-acquires after a tail. If a second prune started in the gap
+// it keeps the fence and this run simply finishes unfenced (its remote
+// window already ran fenced); the outcome is logged, never silent.
+func (g *pruneFenceGuard) rehold() {
+	if g.held {
+		return
+	}
+	if gen, ok := g.hub.pruneFenceAcquire(g.project); ok {
+		g.gen, g.held = gen, true
+	} else {
+		logging.Warn(g.hub.projectLogger(g.project), "prune fence re-acquire lost to a second prune; finishing unfenced (remote window already ran fenced)")
+	}
+}
+
+// release drops a still-held fence; call it deferred from PruneReq.
+func (g *pruneFenceGuard) release() {
+	g.drop()
+}
+
 // PruneProject is the context-free CLI/embedder entry point: scope is one of
 // "objects", "assets", "history", or "all".
 func (h *StorHub) PruneProject(project, scope string, keep int, dryRun bool) (*PruneResult, error) {
@@ -96,10 +223,23 @@ type PruneRequest struct {
 
 // PruneReq runs a PruneRequest. Prune/PruneContext/PruneProject are thin
 // public-compat wrappers over it.
+//
+// The whole run holds the project's prune write fence (see
+// PruneConflictError): mutations admitted while it is held fail loud in
+// admitMutation instead of interleaving with the prune's
+// classify-to-delete windows, and a second concurrent prune is refused.
+// The fence drops briefly around prune-owned commit tails (which re-enter
+// admission) and is re-held after; those tails are ordinary metadata
+// transactions serialized by the existing machinery.
 func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest) (*PruneResult, error) {
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
+	guard := h.holdPruneFence(project)
+	if guard == nil {
+		return nil, &PruneConflictError{Project: project}
+	}
+	defer guard.release()
 	res := &PruneResult{Scope: req.Scope, DryRun: req.DryRun}
 	// The chunks scope works on live state (its roots include the pending
 	// op stack) and skips the flush-first gate: collecting catalog
@@ -107,14 +247,14 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 	// other scopes must refuse. Every other scope classifies against
 	// committed state and refuses a dirty tree.
 	if req.Scope == PruneChunks {
-		return res, h.pruneChunks(ctx, project, res)
+		return res, h.pruneChunks(ctx, project, res, guard)
 	}
 	if h.projectHasUncommittedState(project) {
 		return nil, fmt.Errorf("prune refused for project %s: uncommitted metadata changes pending; flush before pruning", project)
 	}
 	switch req.Scope {
 	case PruneAssets:
-		if err := h.pruneAssets(ctx, project, res); err != nil {
+		if err := h.pruneAssets(ctx, project, res, guard); err != nil {
 			return nil, err
 		}
 	case PruneObjects:
@@ -132,7 +272,7 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
 			return nil, err
 		}
-		if err := h.pruneAssets(ctx, project, res); err != nil {
+		if err := h.pruneAssets(ctx, project, res, guard); err != nil {
 			return nil, err
 		}
 	default:
@@ -150,7 +290,7 @@ func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, k
 	return h.PruneReq(ctx, project, PruneRequest{Scope: scope, Keep: keep, DryRun: dryRun})
 }
 
-func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult) error {
+func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult, guard *pruneFenceGuard) error {
 	if res.DryRun {
 		// Dry-run reports the would-delete counts (PruneResult contract:
 		// "what a prune did (or would do, under DryRun)"), like
@@ -169,7 +309,29 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		}
 		return nil
 	}
-	return pruneAssetsLive(ctx, h, project, res)
+	// Live path, fenced in two sections. The remote classify-to-delete
+	// window runs under the PruneReq-held write fence so admitted
+	// mutations fail loud instead of racing the deletes. The commit tail
+	// (ordinary metadata transaction plus history squash) runs with the
+	// fence dropped so it passes admission, then the fence is re-held.
+	// Classification and deletion reuse the shared cleanup.go helpers.
+	if h.projectHasUncommittedState(project) {
+		return fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
+	}
+	releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
+	if err != nil {
+		return err
+	}
+	releaseTasks, assetTasks, err = h.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
+	if err != nil {
+		return err
+	}
+	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, res); err != nil {
+		return err
+	}
+	guard.drop()
+	defer guard.rehold()
+	return h.purgeAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0)
 }
 
 // pruneChunks is the chunks scope: orphaned chunk records from the live
@@ -178,7 +340,7 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 // It runs on live state by design (see PruneReq), so it never joins
 // PruneAll: `all` classifies committed state, chunks classifies live
 // state, and mixing the two rules in one run would be dishonest.
-func (h *StorHub) pruneChunks(ctx context.Context, project string, res *PruneResult) error {
+func (h *StorHub) pruneChunks(ctx context.Context, project string, res *PruneResult, guard *pruneFenceGuard) error {
 	gc, err := h.ScanChunkGC(ctx, project)
 	if err != nil {
 		return err
@@ -189,6 +351,11 @@ func (h *StorHub) pruneChunks(ctx context.Context, project string, res *PruneRes
 	if res.DryRun {
 		return nil
 	}
+	// The compaction transaction re-enters mutation admission, so it runs
+	// with the fence dropped (its own txn serialization is the fence
+	// there); the scan above already ran fenced.
+	guard.drop()
+	defer guard.rehold()
 	got, err := h.CompactOrphanChunks(ctx, project, false)
 	if err != nil {
 		return err

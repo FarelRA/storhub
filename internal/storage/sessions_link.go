@@ -82,10 +82,9 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (int, error)
 
 // resolveLinkTarget validates a link/relink target without mutating:
 // shape, resolve, walk, parent presence, parent write, kind conflicts,
-// and target absence. Shared by LinkSession (unlinked handles only) and
-// RelinkSession (rescues a handle whose target was taken by a concurrent
-// writer). Caller holds s.mu; metadata reads run under it like the rest
-// of the session slow path.
+// and target absence. Shared by LinkSession (append to the pending set)
+// and RelinkSession (replace the whole pending set). Caller holds s.mu;
+// metadata reads run under it like the rest of the session slow path.
 func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path string) (string, error) {
 	if err := shfs.ValidateAccessPathShape(path); err != nil {
 		return "", err
@@ -122,11 +121,15 @@ func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path st
 	return cleanName, nil
 }
 
-// LinkSession names an unlinked scratch handle, DAC-checked at link time
-// like create (parent must exist, parent-write required, target must not
-// exist). Linking stages the creation, so link-then-close persists.
-// Table lock covers lookup only; the metadata checks run under the
-// per-session lock.
+// LinkSession appends a validated name to a scratch handle's ordered
+// pending-name set, DAC-checked at link time like create (parent must
+// exist, parent-write required, target must not exist). Linking stages
+// the creation, so link-then-close persists. Linking an already-pending
+// name fails with ErrSessionLinked, as does linking a handle opened with
+// a path (which keeps single-path replace semantics; use RelinkSession
+// to retarget it). Close and Sync publish the staged bytes to every
+// pending name. Table lock covers lookup only; the metadata checks run
+// under the per-session lock.
 func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error {
 	sh := h.sessionHub()
 	sh.mu.Lock()
@@ -140,26 +143,34 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error 
 	if err := s.authorize(ctx); err != nil {
 		return err
 	}
-	if s.path != "" {
+	if s.path != "" && len(s.pending) == 0 {
 		return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
 	}
 	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {
 		return err
 	}
-	s.path = cleanName
+	for _, p := range s.pending {
+		if p == cleanName {
+			return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
+		}
+	}
+	s.pending = append(s.pending, cleanName)
+	s.path = s.pending[0]
 	s.created = true
 	s.dirty = true
 	s.lastUse = sh.now()
 	return nil
 }
 
-// RelinkSession retargets a handle to a new path: the rescue for a
-// commit that failed with AlreadyExists because a concurrent writer
-// took the linked target. Without it the handle is wedged (close fails
-// on the taken target, link refuses the named handle) until TTL expiry.
-// Same checks as LinkSession; the new target must be absent. Marks the
-// handle dirty so the staged bytes commit at the new path on close.
+// RelinkSession replaces a handle's whole pending-name set with one
+// validated path: the rescue for a commit that failed with AlreadyExists
+// because a concurrent writer took a linked target. Without it the handle
+// is wedged (close fails on the taken target) until TTL expiry. For a
+// multi-linked handle every other pending name is dropped, so only the
+// new path publishes. Same checks as LinkSession; the new target must be
+// absent. Marks the handle dirty so the staged bytes commit at the new
+// path on close.
 func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) error {
 	sh := h.sessionHub()
 	sh.mu.Lock()
@@ -177,6 +188,7 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) erro
 	if err != nil {
 		return err
 	}
+	s.pending = []string{cleanName}
 	s.path = cleanName
 	s.created = true
 	s.dirty = true

@@ -63,7 +63,7 @@ func TestSessionOpenReadWriteCloseRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-roundtrip"
+	proj := "projectsessionroundtrip"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
 	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
@@ -99,7 +99,7 @@ func TestSessionSnapshotStability(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-snapshot"
+	proj := "projectsessionsnapshot"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("version-one"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadOnly)
@@ -132,7 +132,7 @@ func TestSessionOwnWritesVisible(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-ownwrites"
+	proj := "projectsessionownwrites"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("abcdef"))
 
 	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)
@@ -157,7 +157,7 @@ func TestSessionMultiCallAtomicity(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-atomic"
+	proj := "projectsessionatomic"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("base"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
@@ -184,7 +184,7 @@ func TestSessionSyncMidSession(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-sync"
+	proj := "projectsessionsync"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("start"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
@@ -214,7 +214,7 @@ func TestSessionPureAppend(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-append"
+	proj := "projectsessionappend"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("ab"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionWriteOnly|SessionAppend)
@@ -238,7 +238,7 @@ func TestSessionTruncateCommit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-truncate"
+	proj := "projectsessiontruncate"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("hello world"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
@@ -266,7 +266,7 @@ func TestSessionScratchLinkThenClose(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-scratch-link"
+	proj := "projectsessionscratchlink"
 	if err := hubA.MkdirContext(ctx, proj, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestSessionScratchCloseWithoutLinkDiscards(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-scratch-drop"
+	proj := "projectsessionscratchdrop"
 
 	id := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
 	if _, err := hub.WriteSession(ctx, id, 0, []byte("doomed")); err != nil {
@@ -322,13 +322,16 @@ func TestSessionTTLExpiry(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	// The mock harness freezes the hub clock for determinism, which would
-	// freeze idle expiry too: run this hub on wall time.
-	hub.config.Now = time.Now
+	cfg := smallTransferTestConfig()
+	// Wall time for the whole hub: the mock harness freezes the clock
+	// for determinism, which would freeze idle expiry too. Set before
+	// the client exists; reassigning after background loops start
+	// races the reader in commitProjectMetadata.
+	cfg.Now = time.Now
+	hub := backend.newClient(t, cfg)
 	hub.ConfigureSessions(WithSessionDefaultTTL(40 * time.Millisecond))
 
-	id := mustOpenSession(ctx, t, hub, "project-session-ttl", "", SessionReadWrite)
+	id := mustOpenSession(ctx, t, hub, "projectsessionttl", "", SessionReadWrite)
 	time.Sleep(100 * time.Millisecond)
 	if _, err := hub.ReadSession(ctx, id, 0, 1); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("expired handle must be stale, got %v", err)
@@ -338,7 +341,7 @@ func TestSessionTTLExpiry(t *testing.T) {
 		t.Fatalf("want typed StaleSessionError, got %v", err)
 	}
 
-	id2 := mustOpenSession(ctx, t, hub, "project-session-ttl", "", SessionWriteOnly)
+	id2 := mustOpenSession(ctx, t, hub, "projectsessionttl", "", SessionWriteOnly)
 	sh := hub.sessionHub()
 	sh.mu.Lock()
 	live := len(sh.byID)
@@ -373,7 +376,7 @@ func TestSessionCapsEnforced(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	hub.ConfigureSessions(WithSessionMaxPerProject(2), WithSessionMaxPerUser(100))
-	proj := "project-session-caps"
+	proj := "projectsessioncaps"
 
 	id1 := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
 	id2 := mustOpenSession(ctx, t, hub, proj, "", SessionWriteOnly)
@@ -394,8 +397,8 @@ func TestSessionUserCapEnforced(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	hub.ConfigureSessions(WithSessionMaxPerUser(1), WithSessionMaxPerProject(100))
 
-	id := mustOpenSession(ctx, t, hub, "project-session-user-a", "", SessionWriteOnly)
-	if _, err := hub.OpenSession(ctx, "project-session-user-b", "", SessionWriteOnly); !errors.Is(err, ErrSessionUserBusy) {
+	id := mustOpenSession(ctx, t, hub, "projectsessionusera", "", SessionWriteOnly)
+	if _, err := hub.OpenSession(ctx, "projectsessionuserb", "", SessionWriteOnly); !errors.Is(err, ErrSessionUserBusy) {
 		t.Fatalf("second project handle must hit the user cap, got %v", err)
 	}
 	if err := hub.CloseSession(ctx, id); err != nil {
@@ -405,10 +408,10 @@ func TestSessionUserCapEnforced(t *testing.T) {
 
 func TestSessionOwnershipMismatchFailsClosed(t *testing.T) {
 	t.Parallel()
-	hub, adminCtx, _, target := setupPrivProject(t, "project-session-owner", "docs", "f.txt", []byte("secret"), 0o644)
+	hub, adminCtx, _, target := setupPrivProject(t, "projectsessionowner", "docs", "f.txt", []byte("secret"), 0o644)
 	otherCtx := sessUserCtx(1002)
 
-	id := mustOpenSession(privUserCtx(), t, hub, "project-session-owner", target, SessionReadOnly)
+	id := mustOpenSession(privUserCtx(), t, hub, "projectsessionowner", target, SessionReadOnly)
 
 	if _, err := hub.ReadSession(otherCtx, id, 0, 64); !errors.Is(err, ErrSessionOwnerMismatch) {
 		t.Fatalf("stranger read must fail closed, got %v", err)
@@ -445,7 +448,7 @@ func TestSessionRestartDrops(t *testing.T) {
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
 
-	id := mustOpenSession(ctx, t, hubA, "project-session-restart", "", SessionWriteOnly)
+	id := mustOpenSession(ctx, t, hubA, "projectsessionrestart", "", SessionWriteOnly)
 	if _, err := hubB.ReadSession(ctx, id, 0, 1); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("fresh hub must not know the handle, got %v", err)
 	}
@@ -466,7 +469,7 @@ func TestSessionSabotagedCommitFailsLoud(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-sabotage"
+	proj := "projectsessionsabotage"
 	setupSessionFile(ctx, t, hubA, proj, "data.txt", []byte("base"))
 
 	id := mustOpenSession(ctx, t, hubA, proj, "data.txt", SessionReadWrite)
@@ -509,7 +512,7 @@ func TestSessionModeValidation(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-modes"
+	proj := "projectsessionmodes"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
 	if _, err := hub.OpenSession(ctx, proj, "data.txt", 0); err == nil {
@@ -583,7 +586,7 @@ func TestSessionCommitAsOpenerNotCloser(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-opener"
+	proj := "projectsessionopener"
 	adminCtx := shfs.WithIdentity(ctx, shfs.Identity{UID: 0, GID: 0, Admin: true})
 	userA := sessUserCtx(1001)
 
@@ -623,7 +626,7 @@ func TestSessionRelinkRescuesTakenTarget(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-relink"
+	proj := "projectsessionrelink"
 	adminCtx := shfs.WithIdentity(ctx, shfs.Identity{UID: 0, GID: 0, Admin: true})
 	userA := sessUserCtx(1001)
 
