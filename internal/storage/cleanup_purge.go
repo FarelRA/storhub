@@ -66,7 +66,7 @@ func (h *StorHub) classifyUntracked(ctx context.Context, project string) (releas
 			// transient GitHub outage into permanent data loss.
 			count, countErr := h.releaseAssetCount(ctx, project, release)
 			if countErr != nil {
-				logging.Warn(h.projectLogger("purge"), "purge skipping release with unknown asset count", "tag", release.TagName, "err", countErr)
+				logging.Warn(h.projectLogger(project), "purge skipping release with unknown asset count", "tag", release.TagName, "err", countErr)
 				continue
 			}
 			if count == 0 {
@@ -298,6 +298,8 @@ func (f *purgeFence) checkAsset(ctx context.Context, project string, task purgeA
 // still land a manifest commit. Skipping the Update/commit/squash tail on
 // a true no-op keeps purge side-effect free.
 func (h *StorHub) purgeAndSquashUntracked(ctx context.Context, project string, hadDeletes bool) error {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "purge prune start", "scope", "assets")
 	if !hadDeletes {
 		// Read-only no-op probe on fresh truth: a clone the Update never
 		// sees, so the shared tree stays clean when there is nothing to
@@ -319,11 +321,10 @@ func (h *StorHub) purgeAndSquashUntracked(ctx context.Context, project string, h
 		}, "storhub: prune unreferenced chunks")
 		return perr
 	}); err != nil {
+		logging.Error(h.projectLogger(project), "purge prune failed", "scope", "assets", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return fmt.Errorf("prune unreferenced chunks: %w", err)
 	}
-	if pruned > 0 {
-		logging.Info(h.projectLogger(project), "pruned unreferenced chunks", "count", pruned)
-	}
+	logging.Debug(h.projectLogger(project), "purge prune complete", "scope", "assets", "count", pruned, "reclaimed", pruned, "elapsed", h.config.Now().UTC().Sub(started))
 	// Commit the prune synchronously so the squash below cannot race it and
 	// preserve a stale catalog in HEAD.
 	if err := h.withRetry(ctx, "purge-commit_prune", 5, purgeIsRetryable, func() error {

@@ -101,7 +101,7 @@ func (h *StorHub) journalAppend(project string, op Op) {
 	}
 	line, err := json.Marshal(op)
 	if err != nil {
-		logging.Warn(h.projectLogger(project), "op journal marshal failed", "err", err)
+		logging.Warn(h.projectLogger(project), "op journal append failed", "op", string(op.Type), "err", err)
 		return
 	}
 	h.journalMu.Lock()
@@ -109,20 +109,20 @@ func (h *StorHub) journalAppend(project string, op Op) {
 	if !ok {
 		if err := os.MkdirAll(h.config.JournalDir, 0o755); err != nil {
 			h.journalMu.Unlock()
-			logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+			logging.Warn(h.projectLogger(project), "op journal append failed; will retry on next commit", "op", string(op.Type), "err", err)
 			return
 		}
 		f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			h.journalMu.Unlock()
-			logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+			logging.Warn(h.projectLogger(project), "op journal append failed; will retry on next commit", "op", string(op.Type), "err", err)
 			return
 		}
 		h.journalFiles[project] = f
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		h.journalMu.Unlock()
-		logging.Warn(h.projectLogger(project), "op journal append failed", "err", err)
+		logging.Warn(h.projectLogger(project), "op journal append failed; will retry on next commit", "op", string(op.Type), "err", err)
 		return
 	}
 	h.journalDirty[project] = true
@@ -224,7 +224,7 @@ func (h *StorHub) journalRead(project string) []Op {
 	f, err := os.Open(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			logging.Warn(h.projectLogger(project), "op journal read failed", "err", err)
+			logging.Warn(h.projectLogger(project), "op journal read failed; will retry on next load", "err", err)
 		}
 		return nil
 	}
@@ -239,14 +239,14 @@ func (h *StorHub) journalRead(project string) []Op {
 		}
 		var op Op
 		if err := json.Unmarshal(line, &op); err != nil {
-			logging.Warn(h.projectLogger(project), "op journal line unreadable; skipping", "err", err)
+			logging.Debug(h.projectLogger(project), "op journal line unreadable; skipping", "err", err)
 			continue
 		}
 		op.Times = 1
 		ops = append(ops, op)
 	}
 	if err := scanner.Err(); err != nil {
-		logging.Warn(h.projectLogger(project), "op journal read failed", "err", err)
+		logging.Warn(h.projectLogger(project), "op journal read failed; will retry on next load", "err", err)
 		return nil
 	}
 	if len(ops) == 0 {
@@ -317,14 +317,16 @@ func (h *StorHub) journalRewrite(project string, ops []Op) {
 	}
 	if len(ops) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			logging.Warn(h.projectLogger(project), "op journal clear failed", "err", err)
+			logging.Warn(h.projectLogger(project), "op journal clear failed", "ops", 0, "err", err)
+		} else {
+			logging.Debug(h.projectLogger(project), "op journal clear complete", "ops", 0)
 		}
 		return
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", err)
+		logging.Warn(h.projectLogger(project), "op journal rewrite failed; will retry on next commit", "ops", len(ops), "err", err)
 		return
 	}
 	ok := true
@@ -349,12 +351,16 @@ func (h *StorHub) journalRewrite(project string, ops []Op) {
 	closeErr := f.Close()
 	if ok && closeErr == nil {
 		if err := os.Rename(tmp, path); err != nil {
-			logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", err)
+			logging.Warn(h.projectLogger(project), "op journal rewrite failed; will retry on next commit", "ops", len(ops), "err", err)
+		} else {
+			logging.Debug(h.projectLogger(project), "op journal rewrite complete", "ops", len(ops))
 		}
 		return
 	}
 	_ = os.Remove(tmp)
 	if closeErr != nil {
-		logging.Warn(h.projectLogger(project), "op journal rewrite failed", "err", closeErr)
+		logging.Warn(h.projectLogger(project), "op journal rewrite failed; will retry on next commit", "ops", len(ops), "err", closeErr)
+	} else if !ok {
+		logging.Warn(h.projectLogger(project), "op journal rewrite failed; will retry on next commit", "ops", len(ops))
 	}
 }

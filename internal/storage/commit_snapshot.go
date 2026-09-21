@@ -20,6 +20,7 @@ type commitSnapshot struct {
 	objectCount uint64
 	headSplit   bool
 	now         int64
+	opBytes     int64
 }
 
 // snapshotCommitState snapshots the dirty state for one commit: a private
@@ -58,6 +59,7 @@ func (h *StorHub) snapshotCommitState(_ string, pm *projectMetadata) *commitSnap
 		objectCount: pm.objectCount,
 		headSplit:   working.IsSplit(),
 		now:         h.config.Now().UnixNano(),
+		opBytes:     pm.opStack.bytes,
 	}
 	// The freeze is the generational boundary (JBD2 shape): the batch
 	// below is exactly the frozen generation, and every append after

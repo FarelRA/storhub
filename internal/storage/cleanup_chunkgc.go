@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/FarelRA/storhub/internal/logging"
+	"log/slog"
 	"sort"
 )
 
@@ -102,6 +103,8 @@ func (h *StorHub) ScanChunkGC(ctx context.Context, project string) (*ChunkGCResu
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "chunk GC scan start", "dryrun", true)
 	pm := h.lookupProjectMeta(project)
 	if pm == nil {
 		// Untracked project: nothing cached, nothing to classify.
@@ -120,8 +123,8 @@ func (h *StorHub) ScanChunkGC(ctx context.Context, project string) (*ChunkGCResu
 	_ = ctx
 	h.pressure.noteChunkGCScan()
 	h.pressure.noteOrphanSnapshot(uint64(len(orphans)), uint64(unreachable))
-	logging.Info(h.projectLogger(project), "chunk GC scan",
-		"scanned", scanned, "orphans", len(orphans), "unreachable_bytes", unreachable)
+	logging.Debug(h.projectLogger(project), "chunk GC scan complete",
+		"scanned", scanned, "orphaned", len(orphans), "reclaimed", 0, "reclaimed_bytes", int64(0), "unreachable_bytes", unreachable, "dryrun", true, "elapsed", h.config.Now().UTC().Sub(started))
 	return &ChunkGCResult{
 		DryRun:        true,
 		ScannedChunks: scanned,
@@ -143,7 +146,7 @@ func (h *StorHub) CompactOrphanChunks(ctx context.Context, project string, dryRu
 		return nil, err
 	}
 	if h.chunkGCHasLiveSession(project) {
-		logging.Warn(h.projectLogger(project), "chunk GC refused: live session holds pins")
+		logging.Warn(h.projectLogger(project), "chunk GC refused: live session holds pins", "scanned", 0, "orphaned", 0, "reclaimed", 0, "dryrun", dryRun)
 		return nil, &ChunkGCRefusedError{Project: project, Reason: "live session pins chunks; close sessions and retry"}
 	}
 	if dryRun {
@@ -152,10 +155,12 @@ func (h *StorHub) CompactOrphanChunks(ctx context.Context, project string, dryRu
 			return nil, err
 		}
 		res.RefusedBySession = false
-		logging.Info(h.projectLogger(project), "chunk GC dry-run would collect",
-			"orphans", res.OrphanChunks, "unreachable_bytes", res.OrphanBytes, "ids", res.DeletedIDs)
+		logging.Debug(h.projectLogger(project), "chunk GC dry-run complete",
+			"scanned", res.ScannedChunks, "orphaned", res.OrphanChunks, "reclaimed", 0, "reclaimed_bytes", int64(0), "unreachable_bytes", res.OrphanBytes, "dryrun", true)
 		return res, nil
 	}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "chunk GC compact start", "dryrun", false)
 	pm := h.lookupProjectMeta(project)
 	if pm == nil {
 		h.pressure.noteChunkGCScan()
@@ -226,9 +231,10 @@ func (h *StorHub) CompactOrphanChunks(ctx context.Context, project string, dryRu
 			h.pressure.noteChunkGCScan()
 			h.pressure.noteOrphanSnapshot(0, 0)
 			logging.Info(h.projectLogger(project), "chunk GC compaction complete",
-				"scanned", scanned, "collected", 0, "collected_bytes", 0)
+				"scanned", scanned, "orphaned", 0, "reclaimed", 0, "reclaimed_bytes", 0, "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started))
 			return &ChunkGCResult{ScannedChunks: scanned}, nil
 		}
+		logging.Error(h.projectLogger(project), "chunk GC compaction failed", "scanned", scanned, "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
 	h.pressure.noteChunkGCScan()
@@ -236,13 +242,15 @@ func (h *StorHub) CompactOrphanChunks(ctx context.Context, project string, dryRu
 	if len(deleted) > 0 {
 		h.pressure.noteChunkGCCollected(uint64(len(deleted)), uint64(collectedBytes))
 	}
-	// Loud per-object logging: the operator reconstructs exactly what
-	// one compaction removed from this project's catalog.
-	for _, id := range deleted {
-		logging.Info(h.projectLogger(project), "chunk GC collected orphan chunk", "chunk_id", id)
+	// Per-object detail stays at Debug behind the level gate: an idle
+	// operator reads the summary below, not one line per chunk.
+	if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+		for _, id := range deleted {
+			logging.Debug(h.projectLogger(project), "chunk GC collected orphan chunk", "chunk_id", id)
+		}
 	}
 	logging.Info(h.projectLogger(project), "chunk GC compaction complete",
-		"scanned", scanned, "collected", len(deleted), "collected_bytes", collectedBytes)
+		"scanned", scanned, "orphaned", len(deleted), "reclaimed", len(deleted), "reclaimed_bytes", collectedBytes, "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started))
 	return &ChunkGCResult{
 		ScannedChunks:   scanned,
 		OrphanChunks:    len(deleted),

@@ -241,13 +241,21 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 	}
 	defer guard.release()
 	res := &PruneResult{Scope: req.Scope, DryRun: req.DryRun}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "prune start", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun)
 	// The chunks scope works on live state (its roots include the pending
 	// op stack) and skips the flush-first gate: collecting catalog
 	// orphans is safe exactly when the tree is dirty, which is when the
 	// other scopes must refuse. Every other scope classifies against
 	// committed state and refuses a dirty tree.
 	if req.Scope == PruneChunks {
-		return res, h.pruneChunks(ctx, project, res, guard)
+		err := h.pruneChunks(ctx, project, res, guard)
+		if err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			return res, err
+		}
+		logging.Info(h.projectLogger(project), "prune complete", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "scanned", res.ScannedChunks, "orphaned", res.OrphanChunks, "reclaimed", res.CollectedChunks, "reclaimed_bytes", res.CollectedBytes, "elapsed", h.config.Now().UTC().Sub(started))
+		return res, nil
 	}
 	if h.projectHasUncommittedState(project) {
 		return nil, fmt.Errorf("prune refused for project %s: uncommitted metadata changes pending; flush before pruning", project)
@@ -255,29 +263,36 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 	switch req.Scope {
 	case PruneAssets:
 		if err := h.pruneAssets(ctx, project, res, guard); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 	case PruneObjects:
 		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 	case PruneHistory:
 		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 	case PruneAll:
 		if err := h.pruneHistory(ctx, project, req.Keep, res, req.DryRun); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 		if err := h.pruneObjects(ctx, project, res, req.DryRun); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 		if err := h.pruneAssets(ctx, project, res, guard); err != nil {
+			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("unknown prune scope %q (want objects|assets|history|chunks|all)", req.Scope)
 	}
+	logging.Info(h.projectLogger(project), "prune complete", "scope", string(req.Scope), "keep", req.Keep, "dryrun", req.DryRun, "deleted_objects", res.DeletedObjects, "deleted_releases", res.DeletedReleases, "deleted_assets", res.DeletedAssets, "history_compacted", res.HistoryCompacted, "elapsed", h.config.Now().UTC().Sub(started))
 	return res, nil
 }
 
@@ -291,6 +306,8 @@ func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, k
 }
 
 func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult, guard *pruneFenceGuard) error {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "prune assets start", "scope", "assets", "dryrun", res.DryRun)
 	if res.DryRun {
 		// Dry-run reports the would-delete counts (PruneResult contract:
 		// "what a prune did (or would do, under DryRun)"), like
@@ -307,6 +324,7 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		} else {
 			res.Notes = append(res.Notes, fmt.Sprintf("assets: dry-run would delete %d releases and %d assets", len(releaseTasks), len(assetTasks)))
 		}
+		logging.Debug(h.projectLogger(project), "prune assets complete", "scope", "assets", "dryrun", true, "count", len(releaseTasks)+len(assetTasks), "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	// Live path, fenced in two sections. The remote classify-to-delete
@@ -327,11 +345,17 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		return err
 	}
 	if err := h.deletePurgePlan(ctx, project, releaseTasks, assetTasks, res); err != nil {
+		logging.Error(h.projectLogger(project), "prune assets failed", "scope", "assets", "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	guard.drop()
 	defer guard.rehold()
-	return h.purgeAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0)
+	if err := h.purgeAndSquashUntracked(ctx, project, len(releaseTasks)+len(assetTasks) > 0); err != nil {
+		logging.Error(h.projectLogger(project), "prune assets failed", "scope", "assets", "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return err
+	}
+	logging.Debug(h.projectLogger(project), "prune assets complete", "scope", "assets", "dryrun", false, "count", len(releaseTasks)+len(assetTasks), "reclaimed", res.DeletedReleases+res.DeletedAssets, "elapsed", h.config.Now().UTC().Sub(started))
+	return nil
 }
 
 // pruneChunks is the chunks scope: orphaned chunk records from the live
@@ -341,14 +365,18 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 // PruneAll: `all` classifies committed state, chunks classifies live
 // state, and mixing the two rules in one run would be dishonest.
 func (h *StorHub) pruneChunks(ctx context.Context, project string, res *PruneResult, guard *pruneFenceGuard) error {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "prune chunks start", "scope", "chunks", "dryrun", res.DryRun)
 	gc, err := h.ScanChunkGC(ctx, project)
 	if err != nil {
+		logging.Error(h.projectLogger(project), "prune chunks failed", "scope", "chunks", "dryrun", res.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	res.ScannedChunks = gc.ScannedChunks
 	res.OrphanChunks = gc.OrphanChunks
 	res.OrphanBytes = gc.OrphanBytes
 	if res.DryRun {
+		logging.Debug(h.projectLogger(project), "prune chunks complete", "scope", "chunks", "dryrun", true, "scanned", res.ScannedChunks, "orphaned", res.OrphanChunks, "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	// The compaction transaction re-enters mutation admission, so it runs
@@ -358,15 +386,19 @@ func (h *StorHub) pruneChunks(ctx context.Context, project string, res *PruneRes
 	defer guard.rehold()
 	got, err := h.CompactOrphanChunks(ctx, project, false)
 	if err != nil {
+		logging.Error(h.projectLogger(project), "prune chunks failed", "scope", "chunks", "dryrun", false, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	res.CollectedChunks = got.CollectedChunks
 	res.CollectedBytes = got.CollectedBytes
+	logging.Debug(h.projectLogger(project), "prune chunks complete", "scope", "chunks", "dryrun", false, "scanned", res.ScannedChunks, "orphaned", res.OrphanChunks, "reclaimed", res.CollectedChunks, "reclaimed_bytes", res.CollectedBytes, "elapsed", h.config.Now().UTC().Sub(started))
 	return nil
 }
 
 // pruneObjects deletes index objects referenced by no retained manifest.
 func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneResult, dryRun bool) error {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "prune objects start", "scope", "objects", "dryrun", dryRun)
 	// Detect the layout from actual HEAD, not the (possibly uninitialized)
 	// cache: a legacy single-blob project has no objects to prune.
 	headData, _, headFound, err := h.readIndexHead(ctx, project)
@@ -402,6 +434,7 @@ func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneRe
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].path < orphans[j].path })
 	res.DeletedObjects = len(orphans)
 	if dryRun || len(orphans) == 0 {
+		logging.Debug(h.projectLogger(project), "prune objects complete", "scope", "objects", "dryrun", dryRun, "count", len(orphans), "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	// Drop each deleted object from the local cache the moment its upstream
@@ -410,9 +443,10 @@ func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneRe
 	// skip re-uploading bytes that no longer exist upstream.
 	cache := h.objectCacheFor(project)
 	if err := h.deleteRepoObjects(ctx, project, orphans, cache); err != nil {
+		logging.Error(h.projectLogger(project), "prune objects failed", "scope", "objects", "dryrun", dryRun, "count", len(orphans), "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
-	logging.Info(h.projectLogger(project), "pruned orphaned index objects", "count", len(orphans))
+	logging.Debug(h.projectLogger(project), "prune objects complete", "scope", "objects", "dryrun", dryRun, "count", len(orphans), "reclaimed", len(orphans), "elapsed", h.config.Now().UTC().Sub(started))
 	return nil
 }
 
@@ -622,6 +656,8 @@ func (h *StorHub) deleteRepoObjects(ctx context.Context, project string, orphans
 // compaction runs at all, never a number of revisions retained. keep > 1
 // would promise retention the squash cannot deliver, so it is rejected.
 func (h *StorHub) pruneHistory(ctx context.Context, project string, keep int, res *PruneResult, dryRun bool) error {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "prune history start", "scope", "history", "keep", keep, "dryrun", dryRun)
 	if keep > 1 {
 		return fmt.Errorf("prune history: keep=%d is not supported: compaction collapses all but the newest checkpoint into a single commit, so exactly one revision survives; use keep=1", keep)
 	}
@@ -631,29 +667,35 @@ func (h *StorHub) pruneHistory(ctx context.Context, project string, keep int, re
 	repo := h.getGitRepo(project)
 	if repo == nil {
 		res.Notes = append(res.Notes, "history: REST history is owned by GitHub and the contents API cannot delete revisions; use the git backend to compact history")
+		logging.Debug(h.projectLogger(project), "prune history complete", "scope", "history", "keep", keep, "dryrun", dryRun, "count", 0, "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	revs, err := repo.listFileCommits(ctx, indexFilePath)
 	if err != nil {
+		logging.Error(h.projectLogger(project), "prune history failed", "scope", "history", "keep", keep, "dryrun", dryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	if len(revs) <= keep {
 		res.Notes = append(res.Notes, fmt.Sprintf("history: %d manifest commits, at or below keep=%d; nothing to compact", len(revs), keep))
+		logging.Debug(h.projectLogger(project), "prune history complete", "scope", "history", "keep", keep, "dryrun", dryRun, "count", len(revs), "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	if dryRun {
 		res.Notes = append(res.Notes, fmt.Sprintf("history: would collapse %d manifest commits to a single checkpoint (keep %d is a threshold, not a retention count)", len(revs), keep))
+		logging.Debug(h.projectLogger(project), "prune history complete", "scope", "history", "keep", keep, "dryrun", true, "count", len(revs), "reclaimed", 0, "elapsed", h.config.Now().UTC().Sub(started))
 		return nil
 	}
 	if err := h.ensureOwner(ctx); err != nil {
+		logging.Error(h.projectLogger(project), "prune history failed", "scope", "history", "keep", keep, "dryrun", dryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	head := repo.headCommitSHA()
 	if err := repo.squashTreeCAS(ctx, fmt.Sprintf("storhub: prune history (checkpoint, keep %d)", keep), head); err != nil {
+		logging.Error(h.projectLogger(project), "prune history failed", "scope", "history", "keep", keep, "dryrun", dryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return err
 	}
 	res.HistoryCompacted = true
-	logging.Info(h.projectLogger(project), "pruned index history to a checkpoint", "revisions", len(revs), "keep", keep)
+	logging.Debug(h.projectLogger(project), "prune history complete", "scope", "history", "keep", keep, "dryrun", dryRun, "count", len(revs), "reclaimed", 1, "elapsed", h.config.Now().UTC().Sub(started))
 	return nil
 }
 

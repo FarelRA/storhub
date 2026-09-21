@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -133,6 +134,9 @@ func reapDirs(logger *slog.Logger, label, base string, shouldReap func(name stri
 	if base == "" {
 		return 0
 	}
+	if logger != nil && logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("cache reaper scan start", "label", label, "base", base)
+	}
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return 0
@@ -154,8 +158,11 @@ func reapDirs(logger *slog.Logger, label, base string, shouldReap func(name stri
 			after(entry.Name())
 		}
 		if logger != nil {
-			logger.Info("reaped "+label, "dir", dir)
+			logger.Debug("reaped "+label, "dir", dir)
 		}
+	}
+	if logger != nil {
+		logger.Debug("cache reaper scan complete", "label", label, "base", base, "reaped", reaped)
 	}
 	return reaped
 }
@@ -203,6 +210,9 @@ const spoolOrphanAge = 720 * storcfg.PatienceUnit // 1 hour
 // only crash orphans age out. Best-effort; returns files reclaimed.
 // A missing dir is not an error (nothing ever spooled there).
 func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
+	if logger != nil && logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("cache reaper spool scan start", "label", "orphaned spool files", "base", dir)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -229,8 +239,11 @@ func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
 		}
 		reaped++
 		if logger != nil {
-			logger.Info("reaped orphaned spool file", "file", p)
+			logger.Debug("reaped orphaned spool file", "file", p)
 		}
+	}
+	if logger != nil {
+		logger.Debug("cache reaper spool scan complete", "label", "orphaned spool files", "base", dir, "reaped", reaped)
 	}
 	return reaped
 }
@@ -252,6 +265,9 @@ func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
 	if base == "" {
 		return 0
 	}
+	if logger != nil && logger.Enabled(context.Background(), slog.LevelDebug) {
+		logger.Debug("cache reaper start", "base", base)
+	}
 	gitBase := filepath.Join(base, "git")
 	objectsBase := filepath.Join(base, "objects")
 	reaped := reapOrphaned(logger, gitBase, os.TempDir())
@@ -261,6 +277,9 @@ func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
 	// but may still hold files when the symlink was never created.
 	reaped += reapSpoolDir(logger, filepath.Join(base, "rest"), spoolOrphanAge)
 	reaped += reapSpoolDir(logger, filepath.Join(base, "storhub", "rest"), spoolOrphanAge)
+	if logger != nil {
+		logger.Debug("cache reaper complete", "base", base, "reaped", reaped)
+	}
 	return reaped
 }
 

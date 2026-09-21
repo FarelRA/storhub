@@ -45,7 +45,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 		working.RecomputeStats()
 	}
 
-	logging.Info(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "migrating", !headSplit)
+	logging.Debug(h.projectLogger(project), "commit metadata start", "previous_sha", shortSHA(previousSHA), "migrating", !headSplit, "ops", len(snap.ops), "bytes", snap.opBytes)
 
 	if err := h.ensureOwner(ctx); err != nil {
 		return "", "", 0, false, err
@@ -90,6 +90,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 	// resident basePaths map precomputed at store time.
 	var baseFP map[string][16]byte
 	for attempt := 1; ; attempt++ {
+		logging.Debug(h.projectLogger(project), "commit publish attempt start", "attempt", attempt, "ops", len(snap.ops), "bytes", snap.opBytes, "previous_sha", shortSHA(previousSHA))
 		var err error
 		if attempt == 1 && migratedUnderneath {
 			// The manifest appeared after our legacy base was loaded.
@@ -112,11 +113,12 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 			}
 		}
 		if err == nil {
+			logging.Debug(h.projectLogger(project), "commit publish attempt complete", "attempt", attempt, "ops", len(snap.ops), "bytes", snap.opBytes, "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount, "elapsed", h.config.Now().UTC().Sub(started))
 			break
 		}
 		var over *oversizeError
 		if errors.As(err, &over) {
-			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "size_check", "attempt", attempt, "ops", len(snap.ops), "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			// Fail-fast admission from here on: growth mutations are
 			// rejected until a shrink folds the tree back under the ceiling.
 			pm.mu.Lock()
@@ -131,16 +133,16 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 				err = &rebaseExhaustedError{err: err, attempts: attempt}
 			}
 			err = wrapNoSpace(h.config.GitCacheDir, err)
-			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "git_commit", "attempt", attempt, "ops", len(snap.ops), "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 			return "", "", 0, false, &commitError{err: fmt.Errorf("commit metadata: %w", err), version: snap.version}
 		}
-		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(snap.ops))
+		logging.Warn(h.projectLogger(project), "metadata commit conflicted; rebasing op stack", "attempt", attempt, "ops", len(snap.ops), "previous_sha", shortSHA(previousSHA), "elapsed", h.config.Now().UTC().Sub(started))
 		if baseFP == nil && snap.baseTree != nil {
 			baseFP = hashPaths(snap.baseTree)
 		}
 		rebased, upstreamSHA, resolutions, rerr := h.rebaseOntoUpstream(ctx, project, snap.ops, baseFP)
 		if rerr != nil {
-			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "rebase", "elapsed", h.config.Now().UTC().Sub(started), "err", rerr)
+			logging.Error(h.projectLogger(project), "commit metadata failed", "step", "rebase", "attempt", attempt, "ops", len(snap.ops), "elapsed", h.config.Now().UTC().Sub(started), "err", rerr)
 			return "", "", 0, false, &commitError{err: fmt.Errorf("rebase pending ops: %w", rerr), version: snap.version}
 		}
 		didRebase = true
@@ -299,7 +301,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	h.pressure.noteCommitSuccess(project)
 	h.warnHistoryThreshold(project, pm)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
+	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "previous_sha", shortSHA(snap.previousSHA), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
 
 	return nil
 }

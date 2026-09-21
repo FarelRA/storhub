@@ -59,7 +59,7 @@ func (h *StorHub) QueueAtimeUpdateContext(ctx context.Context, project, targetPa
 	// class); hydrate exactly like the mutation transaction path.
 	if err := h.ensureHydratedLocked(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "atime update skipped; hydration failed", "project", project, "path", targetPath, "err", err)
+		logging.Warn(h.projectLogger(project), "atime update skipped; hydration failed, will retry on next access", "project", project, "path", targetPath, "err", err)
 		return
 	}
 

@@ -164,7 +164,7 @@ func (h *StorHub) loadRepoMetadataFreshUnshared(ctx context.Context, project str
 
 func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metadata *RepoMetadata, previousSHA, message string) (string, string, error) {
 	started := h.config.Now().UTC()
-	logging.Info(h.projectLogger(project), "commit metadata start", "message", message, "previous_sha", shortSHA(previousSHA))
+	logging.Debug(h.projectLogger(project), "commit metadata start", "message", message, "previous_sha", shortSHA(previousSHA))
 	if err := h.ensureOwner(ctx); err != nil {
 		return "", "", err
 	}
@@ -569,7 +569,7 @@ func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, 
 				if len(op.Paths) == 2 {
 					to = op.Paths[1]
 				}
-				logging.Warn(logger, "op journal rename superseded by newer remote state; skipped",
+				logging.Debug(logger, "op journal rename superseded by newer remote state; skipped",
 					"project", project, "op", op.Type, "to", to, "op_ts", op.Timestamp)
 				continue
 			}
@@ -577,7 +577,7 @@ func dropSupersededOps(project string, logger *slog.Logger, meta *RepoMetadata, 
 			continue
 		}
 		if exists && changedAt > op.Timestamp {
-			logging.Warn(logger, "op journal entry superseded by newer remote state; skipped",
+			logging.Debug(logger, "op journal entry superseded by newer remote state; skipped",
 				"project", project, "op", op.Type, "path", path, "op_ts", op.Timestamp, "remote_ts", changedAt)
 			continue
 		}

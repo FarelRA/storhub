@@ -388,6 +388,8 @@ const maxCommitAttempts = 3
 // rebaseOntoUpstream is the I/O wrapper around rebaseWorkingTree used by
 // the commit loop: fetch upstream, replay, log the outcome.
 func (h *StorHub) rebaseOntoUpstream(ctx context.Context, project string, ops []Op, base map[string][16]byte) (*RepoMetadata, string, []ConflictResolution, error) {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "rebase start", "ops", len(ops))
 	upstream, upstreamSHA, err := h.loadUpstreamMetadata(ctx, project)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("fetch upstream for rebase: %w", err)
@@ -396,8 +398,8 @@ func (h *StorHub) rebaseOntoUpstream(ctx context.Context, project string, ops []
 	if err != nil {
 		return nil, "", nil, err
 	}
-	logging.Info(h.projectLogger(project), "op stack rebased onto upstream",
-		"ops", len(ops), "resolutions", len(resolutions), "upstream_sha", shortSHA(upstreamSHA))
+	logging.Debug(h.projectLogger(project), "rebase complete",
+		"ops", len(ops), "resolutions", len(resolutions), "upstream_sha", shortSHA(upstreamSHA), "elapsed", h.config.Now().UTC().Sub(started))
 	return rebased, upstreamSHA, resolutions, nil
 }
 
