@@ -35,6 +35,7 @@ func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inp
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.replaceFileContext(ctx, project, fileName, inputPath)
 }
 
@@ -53,6 +54,7 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}

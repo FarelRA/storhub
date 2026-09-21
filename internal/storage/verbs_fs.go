@@ -33,11 +33,16 @@ func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string, opt
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.fsService().RmdirContext(ctx, project, dirPath)
 }
 
 // RenameContext moves oldPath to newPath.
 func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) error {
+	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
+		return err
+	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.fsService().RenameContext(ctx, project, oldPath, newPath, opts...)
 }
 
@@ -51,6 +56,7 @@ func (h *StorHub) TruncateFileContext(ctx context.Context, project, filePath str
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.fsService().TruncateFileContext(ctx, project, filePath, size)
 }
 
@@ -59,6 +65,7 @@ func (h *StorHub) AppendFileContext(ctx context.Context, project, filePath strin
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.fsService().AppendFileContext(ctx, project, filePath, data)
 }
 
@@ -67,6 +74,7 @@ func (h *StorHub) WriteFileAtContext(ctx context.Context, project, filePath stri
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	return h.fsService().WriteFileAtContext(ctx, project, filePath, offset, data)
 }
 

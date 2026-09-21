@@ -341,6 +341,19 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
+	// In-transaction CAS gate: the token the caller pre-checked against
+	// remote HEAD is re-verified against the committed token and consumed
+	// here, before fn runs, in the same pm.mu critical section as the
+	// publish below. A mismatch fails with ErrPreconditionFailed with the
+	// shared tree untouched (never partial application), and two racing
+	// CAS on the same token admit exactly one winner.
+	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
+		pm.mu.Unlock()
+		h.debugf("metadata update rejected project=%s step=revision-gate err=%v", project, err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		return nil, err
+	}
+
 	// 8MB ceiling — fail fast, never accept-then-never-commit. Apply the
 	// mutation to a throwaway COW copy and measure the result before
 	// touching shared state. An oversize growth is rejected at admission

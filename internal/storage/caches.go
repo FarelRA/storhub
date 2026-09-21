@@ -76,6 +76,15 @@ type projectMetadata struct {
 	// pointer instead of a per-path SHA map (~100 B/path resident), and
 	// the fingerprint is only paid on the rare conflict path. Guarded by mu.
 	baseTree *metadata.RepoMetadata
+	// casToken/casArmed is the single-use compare-and-swap gate: the
+	// revision token consumed by the latest admitted CAS mutation whose
+	// commit has not yet advanced pm.sha. Admission checks AND arms the
+	// gate under mu in one step (checkRevisionGateLocked), so two racing
+	// mutations on the same token admit exactly one winner. A stale arm
+	// (token != pm.sha after a commit) is ignored, never cleared eagerly.
+	// Guarded by mu.
+	casToken string
+	casArmed bool
 	// recent is the bounded ring of namespace paths each local publish
 	// touched, newest last, for cross-surface invalidation fan-out (see
 	// notePublishedPathsLocked). A nil paths entry means unknown scope
@@ -358,6 +367,13 @@ func (h *StorHub) ensureMutableLocked(ctx context.Context, project string, pm *p
 	}
 	if pm.sizeCapped {
 		return fmt.Errorf("metadata over size ceiling: growth is rejected until the tree fits again; delete entries or run `storhub prune`")
+	}
+	// In-transaction CAS gate: the token the caller pre-checked against
+	// remote HEAD is re-verified against the committed token and consumed
+	// here, in the same critical section as the write that follows, so a
+	// racing CAS on the same token admits exactly one winner.
+	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
+		return err
 	}
 	return nil
 }

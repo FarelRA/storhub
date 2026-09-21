@@ -240,6 +240,7 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 
 	size, hasSize := shfs.ApplyMutateOptions(opts).ExpectedSize()
 	if !hasSize {

@@ -58,6 +58,7 @@ func (h *StorHub) CloneRange(ctx context.Context, project, src string, srcOff in
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return nil, err
 	}
+	ctx = gateRevisionFromOpts(ctx, opts)
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
@@ -155,6 +156,10 @@ func (h *StorHub) CloneRange(ctx context.Context, project, src string, srcOff in
 	if err != nil {
 		return nil, err
 	}
+	// A clone reads the source: queue the source read stamp through the
+	// usual atime funnel (policy, suppression, and degraded-queue rules
+	// all apply). The destination keeps its own atime.
+	shfs.TouchFileAccessTime(ctx, h, project, srcClean, h.config.Now().UnixNano())
 	updated := live.FindFile(dstClean)
 	if updated == nil {
 		return nil, shfs.NotFound(dstClean)
@@ -310,9 +315,10 @@ func (h *StorHub) applyCloneRange(ctx context.Context, tree *RepoMetadata, srcCl
 		updated.Chunks = finalIDs
 		updated.Size = finalSize
 		updated.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, updated.Mode)
-		// A clone writes the destination but is not a read of either side
-		// for atime: ApplyUpdatedFileIdentity preserves atime, and the
-		// source entry is never touched at all.
+		// A clone writes the destination but only the source counts as a
+		// read for atime: ApplyUpdatedFileIdentity preserves the
+		// destination stamp, and the source stamp is queued by the
+		// caller after the transaction commits.
 		implposix.ApplyUpdatedFileIdentity(dstClean, &updated, dstCur, now)
 		implposix.ReplaceInodeFamily(tree, dstClean, dstCur, updated, now)
 		return nil

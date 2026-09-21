@@ -6,11 +6,13 @@ import (
 	"fmt"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/logging"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -146,7 +148,7 @@ func quarantineIntoDirWithIntent(tempPath, recoveryDir, targetPath, reason strin
 	if err != nil {
 		return failQuarantine(logger, tempPath, "err", err)
 	}
-	manifestTmp, err := os.CreateTemp(recoveryDir, ".manifest-*.tmp")
+	manifestTmp, err := os.CreateTemp(recoveryDir, ".manifest*.tmp")
 	if err != nil {
 		return failQuarantine(logger, tempPath, "err", err)
 	}
@@ -291,11 +293,40 @@ func redriveRecoveryInventory(ctx context.Context, hub Hub, project, recoveryDir
 	}
 }
 
+// casStripeCount shards redrive compare-and-swap serialization across
+// hash buckets keyed by (project, target). Two redrives of the same target
+// serialize on one stripe; redrives of different targets proceed in
+// parallel. This is deliberately NOT a mount-global lock: a single global
+// mutex would serialize every redrive behind the slowest network write.
+const casStripeCount = 64
+
+// casStripes owns the redrive CAS buckets. Package-level (not per-mount)
+// so concurrent mounts over one cache directory still serialize on the
+// same target instead of each passing the fingerprint check and then
+// overwriting each other.
+var casStripes [casStripeCount]sync.Mutex
+
+// casStripeFor resolves the serialization bucket for one redrive target.
+func casStripeFor(project, target string) *sync.Mutex {
+	sum := fnv.New64a()
+	_, _ = sum.Write([]byte(project))
+	_, _ = sum.Write([]byte{0})
+	_, _ = sum.Write([]byte(target))
+	return &casStripes[sum.Sum64()%casStripeCount]
+}
+
 func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry RecoveryEntry, logger *slog.Logger) {
 	target, saved := entry.TargetPath, entry.SavedPath
 	if target == "" || entry.Fingerprint == nil {
 		return // manual recovery only; inventoried (not silent) by the caller
 	}
+	// Per-target CAS lock across the fingerprint check plus the write
+	// plus the verification: without it two redrives of one target (or a
+	// redrive racing a live writer) can both pass the stat check and then
+	// land out of order, resurrecting stale bytes over newer ones.
+	stripe := casStripeFor(project, target)
+	stripe.Lock()
+	defer stripe.Unlock()
 	live, err := hub.StatPathContext(ctx, project, target)
 	if err != nil || live == nil {
 		logging.Warn(logger, "recovery redrive refused: target unreadable, keeping quarantine", "target", target, "saved", saved)
