@@ -153,17 +153,10 @@ func (s *Service) withOp(project, op string, mutating bool, args []any, fn func(
 }
 
 func (s *Service) logFinishState(state *projectState, op string, started time.Time, err error, args ...any) {
-	args = append(args, "elapsed", time.Since(started))
-	logger := state.log(s.backend.Logger())
-	if err != nil {
-		args = append(args, "err", err)
-		logging.Error(logger, op+" failed", args...)
-		return
-	}
 	// Debug, not Info: per-op completion lines are a steady-state fire
 	// hose on a mount (every stat/read/write), and the default level no
 	// longer wants them.
-	logging.Debug(logger, op+" complete", args...)
+	logging.Finish(state.log(s.backend.Logger()), op, started, err, args...)
 }
 
 // RequireParentDirectory fails when the parent of filePath is missing.

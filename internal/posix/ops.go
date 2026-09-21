@@ -69,13 +69,7 @@ func (s *Service) ForgetProject(project string) {
 }
 
 func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
-	args = append(args, "elapsed", time.Since(started))
-	if err != nil {
-		args = append(args, "err", err)
-		logging.Error(s.logger(project), op+" failed", args...)
-		return
-	}
-	logging.Debug(s.logger(project), op+" complete", args...)
+	logging.Finish(s.logger(project), op, started, err, args...)
 }
 
 // withOp wraps one service verb with start/finish debug logging. quiet,
