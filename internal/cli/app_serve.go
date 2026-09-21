@@ -90,20 +90,25 @@ func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 func (a *App) runServeREST(cmd *cobra.Command, _ []string) error {
 	token, apiBase := cmdAuth(cmd)
 	listen, _ := cmd.Flags().GetString("listen")
+	shlog.Debug(a.logger(), "rest serve start", "command", "rest", "listen", listen)
 	hub, err := a.newCmdRESTHub(cmd.Context(), resolveToken(token), apiBase, 0, false)
 	if err != nil {
+		shlog.Error(a.logger(), "rest serve failed", "command", "rest", "listen", listen, "err", err)
 		return err
 	}
 	opts, err := serveAuthOptions(cmd)
 	if err != nil {
+		shlog.Error(a.logger(), "rest serve failed", "command", "rest", "listen", listen, "err", err)
 		return err
 	}
 	handler, err := a.buildRESTHandler(hub, opts)
 	if err != nil {
+		shlog.Error(a.logger(), "rest serve failed", "command", "rest", "listen", listen, "err", err)
 		return err
 	}
 	server := newRESTServer(listen, handler)
 	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
+	shlog.Info(a.logger(), "rest serving", "command", "rest", "listen", listen, "basepath", opts.BasePath, "auth", describeRESTAuth(opts))
 	return a.serveRESTUntilSignal(server)
 }
 
@@ -160,7 +165,7 @@ func shareSigningKey(cmd *cobra.Command) string {
 // own handler directly: request logging lives in exactly one layer
 // (rest.requestLogging), so the former CLI loggingMiddleware wrapper was
 // removed from this chain. The middleware method stays (deprecated) for
-// non-HTTP chatter via App.logf and existing tests.
+// existing tests.
 func (a *App) buildRESTHandler(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 	return a.seamRESTHandler()(hub, opts)
 }
@@ -223,9 +228,11 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	cacheDir, _ := cmd.Flags().GetString("cachedir")
 	umaskRaw, _ := cmd.Flags().GetString("umask")
 	listen, _ := cmd.Flags().GetString("listen")
+	shlog.Debug(a.logger(), "serve start", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen)
 
 	hub, err := a.newCmdRESTHub(cmd.Context(), resolveToken(token), apiBase, 0, false)
 	if err != nil {
+		shlog.Error(a.logger(), "serve failed", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen, "err", err)
 		return err
 	}
 	fuseOpts := storhub.DefaultFUSEOptions()
@@ -248,6 +255,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 		return newFUSE(hub, project, opts)
 	})
 	if err != nil {
+		shlog.Error(a.logger(), "serve failed", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen, "err", err)
 		return err
 	}
 	defer func() {
@@ -270,6 +278,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	}
 	server, opts, err := a.setupServeREST(cmd, hub, args[0], listen)
 	if err != nil {
+		shlog.Error(a.logger(), "serve failed", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen, "err", err)
 		return abort(err)
 	}
 	errCh := make(chan error, 1)
@@ -282,6 +291,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
 	_, _ = fmt.Fprintf(a.stderr, "serving REST API on %s%s %s\n", listen, opts.BasePath, describeRESTAuth(opts))
 	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to stop")
+	shlog.Info(a.logger(), "serve listening", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen, "basepath", opts.BasePath, "auth", describeRESTAuth(opts))
 
 	return a.joinServe(ctx, stop, fsys, args[1], server, fsDone, errCh, errDone)
 }
@@ -289,8 +299,10 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 // setupServeREST resolves auth policy and builds the REST server for serve.
 // The REST surface is pinned to the served project.
 func (a *App) setupServeREST(cmd *cobra.Command, hub *storhub.StorHub, project, listen string) (*http.Server, storhub.RESTOptions, error) {
+	shlog.Debug(a.logger(), "rest setup start", "command", "serve", "project", project, "listen", listen)
 	opts, err := serveAuthOptions(cmd)
 	if err != nil {
+		shlog.Error(a.logger(), "rest setup failed", "command", "serve", "project", project, "listen", listen, "err", err)
 		return nil, opts, err
 	}
 	// `serve <project> <mount>`: the REST surface (and thus the web console)
@@ -298,8 +310,10 @@ func (a *App) setupServeREST(cmd *cobra.Command, hub *storhub.StorHub, project, 
 	opts.DefaultProject = project
 	handler, err := a.buildRESTHandler(hub, opts)
 	if err != nil {
+		shlog.Error(a.logger(), "rest setup failed", "command", "serve", "project", project, "listen", listen, "err", err)
 		return nil, opts, err
 	}
+	shlog.Debug(a.logger(), "rest setup complete", "command", "serve", "project", project, "listen", listen)
 	return newRESTServer(listen, handler), opts, nil
 }
 
@@ -363,6 +377,12 @@ func (a *App) joinServe(ctx context.Context, stop context.CancelFunc, fsys fuseM
 	}
 	// Metadata draining is NOT done here: Run's shutdownHub is the single
 	// owner of hub.Shutdown for every command.
+	if serveErr != nil {
+		shlog.Error(a.logger(), "serve failed", "mountpoint", mountPoint, "err", serveErr)
+	}
+	if joinErr != nil {
+		shlog.Error(a.logger(), "serve teardown failed", "mountpoint", mountPoint, "err", joinErr)
+	}
 	return errors.Join(serveErr, joinErr)
 }
 
@@ -396,6 +416,7 @@ func (a *App) serveRESTUntilSignal(server *http.Server) error {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			stop()
+			shlog.Error(a.logger(), "rest serve failed", "command", "rest", "listen", server.Addr, "err", err)
 			return err
 		}
 	case <-ctx.Done():
@@ -404,6 +425,7 @@ func (a *App) serveRESTUntilSignal(server *http.Server) error {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_, _ = fmt.Fprintf(a.stderr, "graceful shutdown failed: %v\n", err)
+		shlog.Warn(a.logger(), "graceful shutdown failed", "command", "rest", "listen", server.Addr, "err", err)
 	}
 	// Metadata draining is NOT done here: Run's shutdownHub is the single
 	// owner of hub.Shutdown for every command. Draining after the HTTP
@@ -412,17 +434,10 @@ func (a *App) serveRESTUntilSignal(server *http.Server) error {
 	return nil
 }
 
-// httpLogsEnabled reports whether the configured level wants per-request
-// HTTP lines; at error level they are pure noise.
-func (a *App) httpLogsEnabled() bool {
-	level := shlog.NormalizeLevel(a.log.level)
-	return level == shlog.LevelDebug || level == shlog.LevelInfo || level == shlog.LevelWarn
-}
-
 // loggingMiddleware is deprecated: buildRESTHandler no longer wraps the
 // REST handler with it (single log layer: rest.requestLogging). Kept for
 // backward compatibility with existing tests; new code must not wire it
-// into the HTTP chain. App.logf stays for non-HTTP chatter.
+// into the HTTP chain.
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	if next == nil {
 		// A nil inner handler must never degrade into http.Server's
@@ -435,13 +450,10 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := shlog.NewHTTPRecorder(w)
-		if a.httpLogsEnabled() {
-			a.logf("http start: method=%s uri=%s remote=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), r.RemoteAddr)
-		}
+		uri := shlog.RedactRequestURI(r.URL.RequestURI())
+		shlog.Debug(a.logger(), "http start", "method", r.Method, "uri", uri, "remote", r.RemoteAddr)
 		next.ServeHTTP(wrapped, r)
-		if a.httpLogsEnabled() {
-			a.logf("http done: method=%s uri=%s status=%d duration=%s", r.Method, shlog.RedactRequestURI(r.URL.RequestURI()), wrapped.Status(), time.Since(start).Round(time.Millisecond))
-		}
+		shlog.Info(a.logger(), "http done", "method", r.Method, "uri", uri, "remote", r.RemoteAddr, "status", wrapped.Status(), "duration", time.Since(start).Round(time.Millisecond).String())
 	})
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	shlog "github.com/FarelRA/storhub/internal/logging"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
 )
@@ -35,8 +36,10 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	}
 	// mount is a long-running interactive surface: it must get the
 	// pause-to-reset rate policy, not the one-shot fail-fast default.
+	shlog.Debug(a.logger(), "mount start", "command", "mount", "project", args[0], "mountpoint", args[1])
 	hub, err := a.newCmdMountHub(cmd.Context(), resolveToken(token), apiBase)
 	if err != nil {
+		shlog.Error(a.logger(), "mount failed", "command", "mount", "project", args[0], "mountpoint", args[1], "err", err)
 		return err
 	}
 	opts := storhub.DefaultFUSEOptions()
@@ -52,6 +55,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	defer stop()
 	fsys, err := a.setupServeMount(ctx, args[0], args[1], opts, hub.NewFUSE)
 	if err != nil {
+		shlog.Error(a.logger(), "mount failed", "command", "mount", "project", args[0], "mountpoint", args[1], "err", err)
 		return err
 	}
 	defer func() {
@@ -61,6 +65,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	}()
 	_, _ = fmt.Fprintf(a.stderr, "mounted %s at %s\n", args[0], args[1])
 	_, _ = fmt.Fprintln(a.stderr, "press Ctrl+C to unmount")
+	shlog.Info(a.logger(), "mount listening", "command", "mount", "project", args[0], "mountpoint", args[1])
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)

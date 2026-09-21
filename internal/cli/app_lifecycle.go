@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	shlog "github.com/FarelRA/storhub/internal/logging"
 	"io"
 	"os"
 	"os/signal"
@@ -24,11 +25,15 @@ func (a *App) shutdownHub() error {
 	if a.hub == nil {
 		return nil
 	}
+	start := time.Now()
+	shlog.Debug(a.logger(), "metadata flush start")
 	ctx, cancel := context.WithTimeout(context.Background(), hubShutdownTimeout)
 	defer cancel()
 	if err := a.hub.Shutdown(ctx); err != nil {
+		shlog.Error(a.logger(), "metadata flush failed", "elapsed", time.Since(start), "err", err)
 		return fmt.Errorf("metadata flush failed: %w", err)
 	}
+	shlog.Info(a.logger(), "metadata flush complete", "elapsed", time.Since(start))
 	return nil
 }
 

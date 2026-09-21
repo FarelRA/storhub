@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	shlog "github.com/FarelRA/storhub/internal/logging"
 	storage "github.com/FarelRA/storhub/internal/storage"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -207,14 +209,39 @@ func warnSink() io.Writer {
 }
 
 // warnf prints a storhub-prefixed warning to warnOutput (pre-App fallback).
+// It logs at Warn level through slog to the same sink, so the message
+// stays capturable via setWarnOutput while carrying a level.
 func warnf(format string, args ...any) {
-	_, _ = fmt.Fprintf(warnSink(), "%s storhub: warning: "+format+"\n",
-		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
+	shlog.Warn(cliWarnLogger(warnSink(), shlog.FormatPretty, false),
+		fmt.Sprintf("storhub: warning: "+format, args...))
+}
+
+// cliWarnLogger builds a Warn-level slog logger writing to out.
+func cliWarnLogger(out io.Writer, format string, color bool) *slog.Logger {
+	if out == nil {
+		out = warnSink()
+	}
+	base := shlog.NewLogger(shlog.Options{Level: shlog.LevelWarn, Format: format, Color: color, Output: out})
+	return shlog.WithComponent(base, "cli")
+}
+
+// logger returns the App leveled slog logger derived from the --log-*
+// settings, writing to stderr and tagged with component=cli. Stdout stays
+// pipeable data; all logs go to stderr only.
+func (a *App) logger() *slog.Logger {
+	out := a.stderr
+	if out == nil {
+		out = warnSink()
+	}
+	base := shlog.NewLogger(shlog.Options{Level: a.log.level, Format: a.log.format, Color: a.log.color, Output: out})
+	return shlog.WithComponent(base, "cli")
 }
 
 // warnf is the primary warning sink: App.warnOut (stderr by default,
 // swappable per-App in tests). Package-level warnf above remains only
-// for pre-App constructors without an App handle.
+// for pre-App constructors without an App handle. It logs at Warn level
+// through slog to the same sink, preserving the storhub warning prefix
+// tests assert on.
 func (a *App) warnf(format string, args ...any) {
 	out := a.warnOut
 	if out == nil {
@@ -223,8 +250,8 @@ func (a *App) warnf(format string, args ...any) {
 	if out == nil {
 		out = warnSink()
 	}
-	_, _ = fmt.Fprintf(out, "%s storhub: warning: "+format+"\n",
-		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
+	shlog.Warn(cliWarnLogger(out, a.log.format, a.log.color),
+		fmt.Sprintf("storhub: warning: "+format, args...))
 }
 
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
@@ -402,9 +429,17 @@ func (a *App) drainIfSyncRequested(ctx context.Context, cmd *cobra.Command, proj
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	name := ""
+	if cmd != nil {
+		name = cmd.Name()
+	}
+	start := time.Now()
+	shlog.Debug(a.logger(), "sync drain start", "command", name, "project", project)
 	if err := a.hub.DrainProjectContext(ctx, project); err != nil {
+		shlog.Error(a.logger(), "sync drain failed", "command", name, "project", project, "elapsed", time.Since(start), "err", err)
 		return fmt.Errorf("sync %s: %w", project, err)
 	}
+	shlog.Debug(a.logger(), "sync drain complete", "command", name, "project", project, "elapsed", time.Since(start))
 	return nil
 }
 
@@ -540,14 +575,20 @@ func (a *App) flagChanged(name string) bool {
 }
 
 func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+	start := time.Now()
+	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdHub")
 	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
 	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	hub, err := a.seamHub()(ctx, token, apiBase, chunkSize, public, log)
-	if err == nil {
-		a.hub = hub
+	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdHub", "elapsed", time.Since(start), "err", err)
+		return hub, err
 	}
+	a.hub = hub
+	shlog.Debug(a.logger(), "hub creation complete", "op", "newCmdHub", "elapsed", time.Since(start))
 	return hub, err
 }
 
@@ -555,37 +596,41 @@ func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize in
 // (mount): it records the client for Run's flush and uses the
 // pause-to-reset rate policy.
 func (a *App) newCmdMountHub(ctx context.Context, token, apiBase string) (hubClient, error) {
+	start := time.Now()
+	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdMountHub")
 	apiBase, _, _, log, err := a.withFileConfig(apiBase, 0, false)
 	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdMountHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	hub, err := a.seamMountHub()(ctx, token, apiBase, log)
-	if err == nil {
-		a.hub = hub
+	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdMountHub", "elapsed", time.Since(start), "err", err)
+		return hub, err
 	}
+	a.hub = hub
+	shlog.Debug(a.logger(), "hub creation complete", "op", "newCmdMountHub", "elapsed", time.Since(start))
 	return hub, err
 }
 
 func (a *App) newCmdRESTHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+	start := time.Now()
+	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdRESTHub")
 	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
 	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdRESTHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	hub, err := a.seamRESTHub()(ctx, token, apiBase, chunkSize, public, log)
-	if err == nil {
-		// rest/serve need the raw *StorHub for storhub.NewRESTHandler; track the
-		// wrapped form so Run can still flush pending metadata.
-		a.hub = storhubClient{StorHub: hub}
+	if err != nil {
+		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdRESTHub", "elapsed", time.Since(start), "err", err)
+		return hub, err
 	}
+	// rest/serve need the raw *StorHub for storhub.NewRESTHandler; track the
+	// wrapped form so Run can still flush pending metadata.
+	a.hub = storhubClient{StorHub: hub}
+	shlog.Debug(a.logger(), "hub creation complete", "op", "newCmdRESTHub", "elapsed", time.Since(start))
 	return hub, err
-}
-
-func (a *App) logf(format string, args ...any) {
-	if a.stderr == nil {
-		return
-	}
-	stamp := time.Now().UTC().Format(time.RFC3339)
-	_, _ = fmt.Fprintf(a.stderr, "%s storhub: %s\n", stamp, fmt.Sprintf(format, args...))
 }
 
 // readDataArg treats the literal "-" as "read the payload from stdin",
@@ -653,16 +698,21 @@ const (
 // (hub.NewFUSE for mount, the FUSE seam for serve) so both commands share
 // the MkdirAll→Mount→interrupt-check flow instead of twinning it.
 func (a *App) setupServeMount(ctx context.Context, project, mountPoint string, fuseOpts storhub.FUSEOptions, open func(string, storhub.FUSEOptions) (fuseMount, error)) (fuseMount, error) {
+	start := time.Now()
+	shlog.Debug(a.logger(), "mount setup start", "project", project, "mountpoint", mountPoint)
 	fsys, err := open(project, fuseOpts)
 	if err != nil {
+		shlog.Error(a.logger(), "mount setup failed", "project", project, "mountpoint", mountPoint, "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	if err := os.MkdirAll(mountPoint, mountDirPerm); err != nil {
 		_ = fsys.Close()
+		shlog.Error(a.logger(), "mount setup failed", "project", project, "mountpoint", mountPoint, "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	if err := fsys.Mount(mountPoint); err != nil {
 		_ = fsys.Close()
+		shlog.Error(a.logger(), "mount setup failed", "project", project, "mountpoint", mountPoint, "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
 	if ctx.Err() != nil {
@@ -670,8 +720,10 @@ func (a *App) setupServeMount(ctx context.Context, project, mountPoint string, f
 			_, _ = fmt.Fprintf(a.stderr, "warning: interrupted during mount; unmount failed (%v); %s\n", uerr, mayStillBeMounted(mountPoint))
 		}
 		_ = fsys.Close()
+		shlog.Error(a.logger(), "mount setup failed", "project", project, "mountpoint", mountPoint, "elapsed", time.Since(start), "err", ctx.Err())
 		return nil, errors.New("interrupted while mounting " + project)
 	}
+	shlog.Debug(a.logger(), "mount setup complete", "project", project, "mountpoint", mountPoint, "elapsed", time.Since(start))
 	return fsys, nil
 }
 
