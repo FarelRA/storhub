@@ -180,10 +180,10 @@ type storhubClient struct {
 
 // warnOutput is the fallback sink for configuration warnings emitted from
 // package-level constructors that run before any App exists (flag parsing,
-// env layering). Once an App exists, warnings go to a.stderr (see App.warnf);
-// warnf below prefers the App sink and falls back here only for pre-App
-// callers. Atomic so parallel tests swapping the seam never race; tests
-// must use setWarnOutput, never assign the variable directly.
+// env layering). Once an App exists, warnings go through the App sink
+// chain. warnfWithAttrs below prefers the App sink and falls back here
+// only for pre-App callers. Atomic so parallel tests swapping the seam
+// never race; tests must use setWarnOutput, never assign directly.
 var warnOutput atomic.Pointer[io.Writer]
 
 // setWarnOutput swaps the pre-App warning sink, returning a restore func.
@@ -208,12 +208,16 @@ func warnSink() io.Writer {
 	return os.Stderr
 }
 
-// warnf prints a storhub-prefixed warning to warnOutput (pre-App fallback).
-// It logs at Warn level through slog to the same sink, so the message
-// stays capturable via setWarnOutput while carrying a level.
-func warnf(format string, args ...any) {
-	shlog.Warn(cliWarnLogger(warnSink(), shlog.FormatPretty, false),
-		fmt.Sprintf("storhub: warning: "+format, args...))
+// warnfWithAttrs is the structured warning sink for pre-App callers: it
+// renders the exact storhub-prefixed human text via Sprintf and also
+// attaches key values as structured slog attrs. Message text is unchanged;
+// attrs only add machine-readable fields.
+func warnfWithAttrs(out io.Writer, format string, attrs []any, args ...any) {
+	if out == nil {
+		out = warnSink()
+	}
+	msg := fmt.Sprintf("storhub: warning: "+format, args...)
+	shlog.Warn(cliWarnLogger(out, shlog.FormatPretty, false), msg, attrs...)
 }
 
 // cliWarnLogger builds a Warn-level slog logger writing to out.
@@ -237,21 +241,22 @@ func (a *App) logger() *slog.Logger {
 	return shlog.WithComponent(base, "cli")
 }
 
-// warnf is the primary warning sink: App.warnOut (stderr by default,
-// swappable per-App in tests). Package-level warnf above remains only
-// for pre-App constructors without an App handle. It logs at Warn level
-// through slog to the same sink, preserving the storhub warning prefix
-// tests assert on.
-func (a *App) warnf(format string, args ...any) {
-	out := a.warnOut
+// warnfWithAttrs is the App structured warning sink: it renders the exact
+// storhub-prefixed human text tests assert on, plus structured attrs,
+// logged with the App log format and color settings. A nil out resolves
+// through the usual App sink chain.
+func (a *App) warnfWithAttrs(out io.Writer, format string, attrs []any, args ...any) {
+	if out == nil {
+		out = a.warnOut
+	}
 	if out == nil {
 		out = a.stderr
 	}
 	if out == nil {
 		out = warnSink()
 	}
-	shlog.Warn(cliWarnLogger(out, a.log.format, a.log.color),
-		fmt.Sprintf("storhub: warning: "+format, args...))
+	msg := fmt.Sprintf("storhub: warning: "+format, args...)
+	shlog.Warn(cliWarnLogger(out, a.log.format, a.log.color), msg, attrs...)
 }
 
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
@@ -482,7 +487,7 @@ func (a *App) Run(args []string) error {
 			// The command already failed; keep its error primary but never
 			// swallow the flush failure alongside it (via the primary
 			// App warning sink).
-			a.warnf("secondary flush failure: %v", flushErr)
+			a.warnfWithAttrs(nil, "secondary flush failure: %v", []any{"err", flushErr}, flushErr)
 		}
 	}
 	return err
@@ -536,7 +541,7 @@ func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (stri
 		return apiBase, chunkSize, public, log, nil
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		a.warnf("config file %q not found; continuing without it", path)
+		a.warnfWithAttrs(nil, "config file %q not found; continuing without it", []any{"path", path}, path)
 		return apiBase, chunkSize, public, log, nil
 	}
 	fc, err := storcfg.ReadFileConfig(path)

@@ -29,7 +29,8 @@ func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings,
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
 		if normalized != chunkSize {
-			warnf("--chunksize %d outside [%d, %d]; using %d",
+			warnfWithAttrs(warnSink(), "--chunksize %d outside [%d, %d]; using %d",
+				[]any{"key", "chunksize", "value", chunkSize, "fallback", normalized},
 				chunkSize, minCLIChunkSize, chunking.MaxReleaseAssetSize, normalized)
 		}
 		cfg.ChunkSize = normalized
@@ -58,7 +59,8 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 	cfg.RateReserve = parseEnvInt64("STORHUB_RATE_RESERVE", cfg.RateReserve)
 	cfg.RateMaxWait = parseEnvDuration("STORHUB_RATE_MAX_WAIT", defaultMaxWait)
 	if _, set := os.LookupEnv("STORHUB_RATE_MAX_WAIT"); set && cfg.RateMaxWait == 0 {
-		warnf("STORHUB_RATE_MAX_WAIT=0 means \"not configured\": the library default (15m) applies; use a negative duration such as -1s for fail-fast")
+		warnfWithAttrs(warnSink(), "STORHUB_RATE_MAX_WAIT=0 means \"not configured\": the library default (15m) applies; use a negative duration such as -1s for fail-fast",
+			[]any{"key", "STORHUB_RATE_MAX_WAIT", "value", "0"})
 	}
 	cfg.RatePointsPerMin = parseEnvInt64("STORHUB_RATE_POINTS_PER_MIN", cfg.RatePointsPerMin)
 	cfg.RateContentPerMin = parseEnvInt64("STORHUB_RATE_CONTENT_PER_MIN", cfg.RateContentPerMin)
@@ -74,7 +76,9 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 		{"STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests},
 	} {
 		if neg.value < 0 {
-			warnf("%s=%d is negative; the rate governor silently replaces it with the library default", neg.key, neg.value)
+			warnfWithAttrs(warnSink(), "%s=%d is negative; the rate governor silently replaces it with the library default",
+				[]any{"key", neg.key, "value", neg.value},
+				neg.key, neg.value)
 		}
 	}
 }
@@ -126,5 +130,7 @@ func parseEnvBool(key string, fallback bool) bool {
 // default. The fallback preserves behavior; the warning makes the
 // misconfiguration visible instead of silent.
 func warnEnvParse(key, value string, err error) {
-	warnf("invalid %s=%q (%v); using default", key, value, err)
+	warnfWithAttrs(warnSink(), "invalid %s=%q (%v); using default",
+		[]any{"key", key, "value", value},
+		key, value, err)
 }

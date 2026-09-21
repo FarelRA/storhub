@@ -79,7 +79,10 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 	if seconds < 0 {
 		return fmt.Errorf("token_ttl must not be negative, got %s", raw)
 	}
-	warnf("token_ttl as a bare number (%s) is deprecated; use a Go duration string like %q", raw, fmt.Sprintf("%ds", int64(seconds)))
+	suggested := fmt.Sprintf("%ds", int64(seconds))
+	warnfWithAttrs(warnSink(), "token_ttl as a bare number (%s) is deprecated; use a Go duration string like %q",
+		[]any{"key", "token_ttl", "value", raw, "fallback", suggested},
+		raw, suggested)
 	*d = flexDuration(time.Duration(seconds * float64(time.Second)))
 	return nil
 }
