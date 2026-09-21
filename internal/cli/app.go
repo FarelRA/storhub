@@ -21,7 +21,6 @@ import (
 	"github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	storage "github.com/FarelRA/storhub/internal/storage"
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
 )
@@ -56,7 +55,7 @@ type cliSeams struct {
 	newRESTHub  func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error)
 	newMountHub func(token, apiBase string, log logSettings) (hubClient, error)
 	newFUSE     func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error)
-	newREST     func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error)
+	newREST     func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error)
 	listenServe func(server *http.Server) error
 }
 
@@ -80,8 +79,8 @@ func defaultCliSeams() cliSeams {
 		newFUSE: func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
 			return hub.NewFUSE(project, opts)
 		},
-		newREST: func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
-			return shrest.New(hub, opts)
+		newREST: func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
+			return storhub.NewRESTHandler(hub, opts)
 		},
 		listenServe: func(server *http.Server) error { return server.ListenAndServe() },
 	}
@@ -97,7 +96,10 @@ type App struct {
 	rootCmd *cobra.Command
 	hub     hubClient
 	log     logSettings
-	seams   cliSeams
+	// configFile is the --config persistent flag value: path to a JSON
+	// config file with client defaults. Empty means no file.
+	configFile string
+	seams      cliSeams
 }
 
 type fuseMount interface {
@@ -262,7 +264,7 @@ var newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubCl
 var newFUSEFn = func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
 	return defaultCliSeams().newFUSE(hub, project, opts)
 }
-var newRESTHandlerFn = func(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+var newRESTHandlerFn = func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 	return defaultCliSeams().newREST(hub, opts)
 }
 var restListenAndServeFn = func(server *http.Server) error {
@@ -315,7 +317,7 @@ func (a *App) seamFUSE() func(*storhub.StorHub, string, storhub.FUSEOptions) (fu
 	return newFUSEFn
 }
 
-func (a *App) seamRESTHandler() func(*storhub.StorHub, shrest.Options) (http.Handler, error) {
+func (a *App) seamRESTHandler() func(*storhub.StorHub, storhub.RESTOptions) (http.Handler, error) {
 	return newRESTHandlerFn
 }
 
@@ -357,6 +359,7 @@ Examples:
 	rootCmd.PersistentFlags().StringVar(&a.log.level, "log-level", a.log.level, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
 	rootCmd.PersistentFlags().StringVar(&a.log.format, "log-format", a.log.format, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
 	rootCmd.PersistentFlags().BoolVar(&a.log.color, "log-color", a.log.color, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
+	rootCmd.PersistentFlags().StringVar(&a.configFile, "config", "", "Path to a JSON config file with client defaults (flags and $STORHUB_* override file values)")
 
 	rootCmd.AddCommand(a.newUploadCmd())
 	rootCmd.AddCommand(a.newReplaceCmd())
@@ -542,8 +545,69 @@ func parseNonNegativeArg(s, name string) (int64, error) {
 	return v, nil
 }
 
+// withFileConfig layers the --config file under the flag and env values:
+// flags win, then env, then file, then defaults. Callers pass their
+// already-resolved flag values; empty or zero means "unset" so the file
+// may supply it, while any explicit value keeps precedence. Log knobs
+// additionally yield to the environment, which defaultLogSettings folded
+// into a.log at construction. A missing file warns once and proceeds as
+// if no file were given; anything else wrong with the file fails loudly.
+func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (string, int64, bool, logSettings, error) {
+	log := a.log
+	path := strings.TrimSpace(a.configFile)
+	if path == "" {
+		return apiBase, chunkSize, public, log, nil
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		a.warnf("config file %q not found; continuing without it", path)
+		return apiBase, chunkSize, public, log, nil
+	}
+	fc, err := storcfg.ReadFileConfig(path)
+	if err != nil {
+		return "", 0, false, log, fmt.Errorf("load --config %q: %w", path, err)
+	}
+	if apiBase == "" && fc.APIBaseURL != nil {
+		apiBase = *fc.APIBaseURL
+	}
+	if chunkSize == 0 && fc.ChunkSize != nil {
+		chunkSize = *fc.ChunkSize
+	}
+	if fc.CreatePublicRepo != nil {
+		public = public || *fc.CreatePublicRepo
+	}
+	if fc.LogLevel != nil && !a.flagChanged("log-level") && envUnset("STORHUB_LOG_LEVEL") {
+		log.level = *fc.LogLevel
+	}
+	if fc.LogFormat != nil && !a.flagChanged("log-format") && envUnset("STORHUB_LOG_FORMAT") {
+		log.format = *fc.LogFormat
+	}
+	if fc.LogColor != nil && !a.flagChanged("log-color") && envUnset("STORHUB_LOG_COLOR") {
+		log.color = *fc.LogColor
+	}
+	return apiBase, chunkSize, public, log, nil
+}
+
+// flagChanged reports whether the named persistent flag was explicitly
+// set on the command line. A nil root (hand-built App in tests) counts
+// as unchanged so file values still apply there.
+func (a *App) flagChanged(name string) bool {
+	if a.rootCmd == nil {
+		return false
+	}
+	return a.rootCmd.PersistentFlags().Changed(name)
+}
+
+// envUnset mirrors the envOr reader below: blank counts as unset.
+func envUnset(key string) bool {
+	return strings.TrimSpace(os.Getenv(key)) == ""
+}
+
 func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
-	hub, err := a.seamHub()(token, apiBase, chunkSize, public, a.log)
+	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
+	if err != nil {
+		return nil, err
+	}
+	hub, err := a.seamHub()(token, apiBase, chunkSize, public, log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -554,7 +618,11 @@ func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hu
 // (mount): it records the client for Run's flush and uses the
 // pause-to-reset rate policy.
 func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
-	hub, err := a.seamMountHub()(token, apiBase, a.log)
+	apiBase, _, _, log, err := a.withFileConfig(apiBase, 0, false)
+	if err != nil {
+		return nil, err
+	}
+	hub, err := a.seamMountHub()(token, apiBase, log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -562,9 +630,13 @@ func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
 }
 
 func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
-	hub, err := a.seamRESTHub()(token, apiBase, chunkSize, public, a.log)
+	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
+	if err != nil {
+		return nil, err
+	}
+	hub, err := a.seamRESTHub()(token, apiBase, chunkSize, public, log)
 	if err == nil {
-		// rest/serve need the raw *StorHub for shrest.New; track the
+		// rest/serve need the raw *StorHub for storhub.NewRESTHandler; track the
 		// wrapped form so Run can still flush pending metadata.
 		a.hub = storhubClient{StorHub: hub}
 	}
