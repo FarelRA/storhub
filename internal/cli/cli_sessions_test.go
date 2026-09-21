@@ -211,6 +211,11 @@ type pcSession struct {
 	// operation past it fails stale.
 	linked  bool
 	expires time.Time
+	// pending is the multi-name stage for linked scratch: Link
+	// appends, Relink replaces the whole set, Close publishes to
+	// every name after pre-validating all of them. path mirrors
+	// the first pending name for the unlinked resolve paths.
+	pending test.PendingNames
 }
 
 func pcSessionReadable(mode storage.OpenMode) bool {
@@ -415,18 +420,29 @@ func (h *pcFakeHub) SyncSession(_ context.Context, handleID string) error {
 	if !s.dirty {
 		return nil
 	}
-	// Linked scratch commits with create semantics: a taken target
-	// fails instead of overwriting, like CloseSession.
 	if s.linked {
-		if _, ok := h.files[s.path]; ok {
-			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		// Linked scratch publishes to every pending name with
+		// create semantics: pre-validate all names first, so a
+		// target taken since link fails the whole commit with
+		// nothing published and the handle staying open.
+		for _, name := range s.pending.List() {
+			if _, ok := h.files[name]; ok {
+				return fmt.Errorf("%w: %s", shfs.AlreadyExists(name), name)
+			}
+			if h.dirs[name] {
+				return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, name)
+			}
+			if _, ok := h.links[name]; ok {
+				return fmt.Errorf("%w: %s", shfs.AlreadyExists(name), name)
+			}
 		}
-		if h.dirs[s.path] {
-			return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, s.path)
+		if s.dirty {
+			for _, name := range s.pending.List() {
+				h.commitPCSessionLocked(s, name)
+			}
 		}
-		if _, ok := h.links[s.path]; ok {
-			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
-		}
+		s.dirty = false
+		return nil
 	}
 	// An inode unlinked after open has nowhere to publish: retain the
 	// staged bytes (fsync equivalent) without publishing.
@@ -446,7 +462,7 @@ func (h *pcFakeHub) LinkSession(_ context.Context, handleID, path string) error 
 	if err != nil {
 		return err
 	}
-	if s.path != "" {
+	if !s.linked && s.path != "" {
 		return fmt.Errorf("link session %s to %s: %w", handleID, path, storage.ErrSessionLinked)
 	}
 	p := strings.TrimPrefix(path, "/")
@@ -467,7 +483,13 @@ func (h *pcFakeHub) LinkSession(_ context.Context, handleID, path string) error 
 			return test.MissingSessionParent(parent)
 		}
 	}
-	s.path = p
+	first := s.pending.Empty()
+	if err := s.pending.Add(p); err != nil {
+		return fmt.Errorf("link session %s to %s: %w", handleID, path, storage.ErrSessionLinked)
+	}
+	if first {
+		s.path = p
+	}
 	s.linked = true
 	s.dirty = true
 	return nil
@@ -498,6 +520,7 @@ func (h *pcFakeHub) RelinkSession(_ context.Context, handleID, path string) erro
 			return test.MissingSessionParent(parent)
 		}
 	}
+	s.pending.Replace(p)
 	s.path = p
 	s.linked = true
 	s.dirty = true
@@ -516,20 +539,26 @@ func (h *pcFakeHub) CloseSession(_ context.Context, handleID string) error {
 		return nil
 	}
 	if s.linked {
-		// Linked scratch commits with create semantics (like
-		// UploadFileContext): a target taken since link fails instead
-		// of overwriting, leaving the description open for Relink.
-		if _, ok := h.files[s.path]; ok {
-			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
-		}
-		if h.dirs[s.path] {
-			return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, s.path)
-		}
-		if _, ok := h.links[s.path]; ok {
-			return fmt.Errorf("%w: %s", shfs.AlreadyExists(s.path), s.path)
+		// Linked scratch commits to every pending name with create
+		// semantics (like UploadFileContext): pre-validate all
+		// names first, so a target taken since link fails instead
+		// of overwriting, publishing nothing and leaving the
+		// description open for Relink.
+		for _, name := range s.pending.List() {
+			if _, ok := h.files[name]; ok {
+				return fmt.Errorf("%w: %s", shfs.AlreadyExists(name), name)
+			}
+			if h.dirs[name] {
+				return fmt.Errorf("%w: %s", shfs.ErrIsDirectory, name)
+			}
+			if _, ok := h.links[name]; ok {
+				return fmt.Errorf("%w: %s", shfs.AlreadyExists(name), name)
+			}
 		}
 		if s.dirty {
-			h.commitPCSessionLocked(s, s.path)
+			for _, name := range s.pending.List() {
+				h.commitPCSessionLocked(s, name)
+			}
 		}
 		delete(h.sessions, handleID)
 		return nil
@@ -550,9 +579,12 @@ func (h *pcFakeHub) CloseSession(_ context.Context, handleID string) error {
 
 // runSessionCLI executes one CLI invocation against the shared fake and
 // returns stdout. A fresh App per call keeps cobra flag state isolated.
-func runSessionCLI(t *testing.T, args []string) string {
+func runSessionCLI(t *testing.T, fake hubClient, args []string) string {
 	t.Helper()
 	app, stdout, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return fake, nil
+	}
 	if err := app.Run(args); err != nil {
 		t.Fatalf("run %v: %v", args, err)
 	}
@@ -562,47 +594,42 @@ func runSessionCLI(t *testing.T, args []string) string {
 // TestCLISessionSequence drives open/write/read/append/truncate/stat/sync/
 // link/close through real cobra paths against one shared fake hub.
 func TestCLISessionSequence(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-		return fake, nil
-	}
 
-	opened := runSessionCLI(t, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
+	opened := runSessionCLI(t, fake, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
 	handle := strings.TrimSpace(opened)
 	if handle == "" {
 		t.Fatalf("open printed no handle: %q", opened)
 	}
 
-	runSessionCLI(t, []string{"session", "write", "--token", "x", "--handle", handle, "0", "hello"})
-	if got := runSessionCLI(t, []string{"session", "read", "--token", "x", "--handle", handle}); got != "hello" {
+	runSessionCLI(t, fake, []string{"session", "write", "--token", "x", "--handle", handle, "0", "hello"})
+	if got := runSessionCLI(t, fake, []string{"session", "read", "--token", "x", "--handle", handle}); got != "hello" {
 		t.Fatalf("read = %q, want %q", got, "hello")
 	}
 
-	runSessionCLI(t, []string{"session", "append", "--token", "x", "--handle", handle, " world"})
-	if got := runSessionCLI(t, []string{"session", "read", "--token", "x", "--handle", handle, "--offset", "0", "--length", "11"}); got != "hello world" {
+	runSessionCLI(t, fake, []string{"session", "append", "--token", "x", "--handle", handle, " world"})
+	if got := runSessionCLI(t, fake, []string{"session", "read", "--token", "x", "--handle", handle, "--offset", "0", "--length", "11"}); got != "hello world" {
 		t.Fatalf("read after append = %q, want %q", got, "hello world")
 	}
 
-	runSessionCLI(t, []string{"session", "truncate", "--token", "x", "--handle", handle, "5"})
-	if got := runSessionCLI(t, []string{"session", "read", "--token", "x", "--handle", handle}); got != "hello" {
+	runSessionCLI(t, fake, []string{"session", "truncate", "--token", "x", "--handle", handle, "5"})
+	if got := runSessionCLI(t, fake, []string{"session", "read", "--token", "x", "--handle", handle}); got != "hello" {
 		t.Fatalf("read after truncate = %q, want %q", got, "hello")
 	}
 
-	runSessionCLI(t, []string{"session", "link", "--token", "x", "--handle", handle, "docs/new.txt"})
-	statJSON := runSessionCLI(t, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
+	runSessionCLI(t, fake, []string{"session", "link", "--token", "x", "--handle", handle, "docs/new.txt"})
+	statJSON := runSessionCLI(t, fake, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
 	if !strings.Contains(statJSON, `"path":"docs/new.txt"`) || !strings.Contains(statJSON, `"size":5`) || !strings.Contains(statJSON, `"dirty":true`) {
 		t.Fatalf("unexpected stat json: %s", statJSON)
 	}
 
-	runSessionCLI(t, []string{"session", "sync", "--token", "x", "--handle", handle})
-	statJSON = runSessionCLI(t, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
+	runSessionCLI(t, fake, []string{"session", "sync", "--token", "x", "--handle", handle})
+	statJSON = runSessionCLI(t, fake, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
 	if !strings.Contains(statJSON, `"dirty":false`) {
 		t.Fatalf("sync must clear dirty: %s", statJSON)
 	}
 
-	runSessionCLI(t, []string{"session", "close", "--token", "x", "--sync", "--handle", handle})
+	runSessionCLI(t, fake, []string{"session", "close", "--token", "x", "--sync", "--handle", handle})
 	if len(fake.drainCalls) != 1 || fake.drainCalls[0] != "demo" {
 		t.Fatalf("close --sync must drain demo once, got %v", fake.drainCalls)
 	}
@@ -615,12 +642,27 @@ func TestCLISessionSequence(t *testing.T) {
 
 // TestCLISessionRequiresHandle pins that every subcommand except open
 // refuses to run without --handle as a usage error.
-func TestCLISessionRequiresHandle(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-		return &fakeHub{t: t}, nil
+func TestCLISessionHandleFallsBackToEnv(t *testing.T) {
+	// Script composability: export STORHUB_HANDLE once instead of
+	// repeating --handle on every call. Flag wins over env.
+	fake := &fakeHub{t: t}
+	opened := runSessionCLI(t, fake, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
+	handle := strings.TrimSpace(opened)
+	if handle == "" {
+		t.Fatal("open printed no handle")
 	}
+	t.Setenv("STORHUB_HANDLE", handle)
+	runSessionCLI(t, fake, []string{"session", "write", "--token", "x", "0", "hello"})
+	if got := runSessionCLI(t, fake, []string{"session", "read", "--token", "x"}); got != "hello" {
+		t.Fatalf("env-handle read = %q, want %q", got, "hello")
+	}
+	t.Setenv("STORHUB_HANDLE", "bogus-handle")
+	if got := runSessionCLI(t, fake, []string{"session", "read", "--token", "x", "--handle", handle}); got != "hello" {
+		t.Fatalf("flag must win over env, read = %q", got)
+	}
+}
+
+func TestCLISessionRequiresHandle(t *testing.T) {
 	for _, args := range [][]string{
 		{"session", "read", "--token", "x"},
 		{"session", "write", "--token", "x", "0", "data"},
@@ -632,6 +674,9 @@ func TestCLISessionRequiresHandle(t *testing.T) {
 		{"session", "close", "--token", "x"},
 	} {
 		app, _, _ := newTestApp(t)
+		app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+			return &fakeHub{t: t}, nil
+		}
 		err := app.Run(args)
 		if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--handle") {
 			t.Fatalf("%v must be a --handle usage error, got %v", args[1], err)
@@ -655,26 +700,21 @@ func TestCLISessionOpenRejectsBadMode(t *testing.T) {
 }
 
 func TestCLISessionRelinkRetargetsHandle(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-		return fake, nil
-	}
-	opened := runSessionCLI(t, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
+	opened := runSessionCLI(t, fake, []string{"session", "open", "--token", "x", "demo", "--mode", "w"})
 	handle := strings.TrimSpace(opened)
 	if handle == "" {
 		t.Fatalf("open printed no handle: %q", opened)
 	}
-	runSessionCLI(t, []string{"session", "write", "--token", "x", "--handle", handle, "0", "hello"})
-	runSessionCLI(t, []string{"session", "link", "--token", "x", "--handle", handle, "docs/a.txt"})
-	runSessionCLI(t, []string{"session", "relink", "--token", "x", "--handle", handle, "docs/b.txt"})
-	statJSON := runSessionCLI(t, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
+	runSessionCLI(t, fake, []string{"session", "write", "--token", "x", "--handle", handle, "0", "hello"})
+	runSessionCLI(t, fake, []string{"session", "link", "--token", "x", "--handle", handle, "docs/a.txt"})
+	runSessionCLI(t, fake, []string{"session", "relink", "--token", "x", "--handle", handle, "docs/b.txt"})
+	statJSON := runSessionCLI(t, fake, []string{"session", "stat", "--token", "x", "--json", "--handle", handle})
 	if !strings.Contains(statJSON, `"path":"docs/b.txt"`) {
 		t.Fatalf("relink must retarget the handle: %s", statJSON)
 	}
 	app, _, _ := newTestApp(t)
-	if err := app.Run([]string{"session", "relink", "--token", "x", "only-path"}); err == nil {
+	if err := app.Run([]string{"session", "relink", "--token", "x", "onlypath"}); err == nil {
 		t.Fatal("relink without --handle must fail")
 	}
 }

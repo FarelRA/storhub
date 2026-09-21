@@ -39,6 +39,11 @@ type fakeSession struct {
 	// their commit creates, so a taken target fails like UploadFileContext
 	// instead of silently overwriting.
 	linked bool
+	// pending is the multi-name stage for linked scratch: Link
+	// appends, Relink replaces the whole set, Close publishes to
+	// every name after pre-validating all of them. path mirrors
+	// the first pending name for the unlinked resolve paths.
+	pending test.PendingNames
 	// inode is the open-time file identity (0 when the file was missing
 	// at open). Commits resolve the publish target by identity, so a
 	// rename is followed and an unlink discards, mirroring the real
@@ -352,13 +357,21 @@ func (c *fakeRESTClient) SyncSession(ctx context.Context, handleID string) error
 	if !s.dirty {
 		return nil
 	}
-	// Linked scratch commits with create semantics: a taken target
-	// fails instead of overwriting, like CloseSession.
+	// Linked scratch publishes to every pending name with create
+	// semantics: pre-validate all names first, so a target taken
+	// since link fails the whole commit with nothing published.
 	if s.linked {
 		p := c.project(s.project)
-		if _, ok := p.files[s.path]; ok {
-			return shfs.AlreadyExists(s.path)
+		for _, name := range s.pending.List() {
+			if _, ok := p.files[name]; ok {
+				return shfs.AlreadyExists(name)
+			}
 		}
+		for _, name := range s.pending.List() {
+			c.commitFakeSessionLocked(s.project, name, s.data)
+		}
+		s.dirty = false
+		return nil
 	}
 	// An inode unlinked after open has nowhere to publish: sync keeps
 	// the staged bytes readable (fsync equivalent) without publishing.
@@ -381,10 +394,23 @@ func (c *fakeRESTClient) LinkSession(ctx context.Context, handleID, path string)
 	if err := c.authorizeFakeSessionLocked(ctx, handleID, s); err != nil {
 		return err
 	}
-	if s.path != "" {
+	if !s.linked && s.path != "" {
 		return fmt.Errorf("link session %s to %s: %w", shortFakeHandle(handleID), path, storage.ErrSessionLinked)
 	}
-	return c.nameFakeSessionLocked(s, path)
+	clean, err := c.checkFakeSessionTargetLocked(s, path)
+	if err != nil {
+		return err
+	}
+	first := s.pending.Empty()
+	if err := s.pending.Add(clean); err != nil {
+		return fmt.Errorf("link session %s to %s: %w", shortFakeHandle(handleID), path, storage.ErrSessionLinked)
+	}
+	if first {
+		s.path = clean
+	}
+	s.linked = true
+	s.dirty = true
+	return nil
 }
 
 // RelinkSession retargets a linked handle (rescue path); unlike Link it
@@ -399,33 +425,40 @@ func (c *fakeRESTClient) RelinkSession(ctx context.Context, handleID, path strin
 	if err := c.authorizeFakeSessionLocked(ctx, handleID, s); err != nil {
 		return err
 	}
-	return c.nameFakeSessionLocked(s, path)
-}
-
-// nameFakeSessionLocked validates and names a scratch handle (shared by
-// link and relink): parent must exist with nothing at the target. Naming
-// stages creation, so linked=true marks create-semantics for the commit.
-func (c *fakeRESTClient) nameFakeSessionLocked(s *fakeSession, path string) error {
-	clean, err := cleanRESTPath(path)
+	clean, err := c.checkFakeSessionTargetLocked(s, path)
 	if err != nil {
 		return err
 	}
-	p := c.project(s.project)
-	if _, ok := p.files[clean]; ok {
-		return shfs.AlreadyExists(clean)
-	}
-	if _, ok := p.dirs[clean]; ok {
-		return shfs.AlreadyExists(clean)
-	}
-	if parent := parentPath(clean); parent != "" {
-		if _, ok := p.dirs[parent]; !ok {
-			return test.MissingSessionParent(parent)
-		}
-	}
+	s.pending.Replace(clean)
 	s.path = clean
 	s.linked = true
 	s.dirty = true
 	return nil
+}
+
+// checkFakeSessionTargetLocked validates a link target (shared by link
+// and relink): parent must exist with nothing at the target. Naming
+// stages creation, so linked=true marks create-semantics for the commit.
+// Returns the clean name; mutation (pending set, path) stays with the
+// caller, which owns append-vs-replace.
+func (c *fakeRESTClient) checkFakeSessionTargetLocked(s *fakeSession, path string) (string, error) {
+	clean, err := cleanRESTPath(path)
+	if err != nil {
+		return "", err
+	}
+	p := c.project(s.project)
+	if _, ok := p.files[clean]; ok {
+		return "", shfs.AlreadyExists(clean)
+	}
+	if _, ok := p.dirs[clean]; ok {
+		return "", shfs.AlreadyExists(clean)
+	}
+	if parent := parentPath(clean); parent != "" {
+		if _, ok := p.dirs[parent]; !ok {
+			return "", test.MissingSessionParent(parent)
+		}
+	}
+	return clean, nil
 }
 
 func (c *fakeRESTClient) CloseSession(ctx context.Context, handleID string) error {
@@ -442,17 +475,28 @@ func (c *fakeRESTClient) CloseSession(ctx context.Context, handleID string) erro
 		delete(c.sessions, handleID)
 		return nil
 	}
-	if s.dirty {
-		// Linked scratch commits with create semantics (like
-		// UploadFileContext): a target taken since link fails instead
-		// of overwriting. Opened-with-path handles overwrite (replace
-		// semantics) as before.
-		if s.linked {
-			p := c.project(s.project)
-			if _, ok := p.files[s.path]; ok {
-				return shfs.AlreadyExists(s.path)
+	if s.linked {
+		// Linked scratch publishes to every pending name with create
+		// semantics (like UploadFileContext): pre-validate all
+		// names first, so a target taken since link fails instead
+		// of overwriting, publishing nothing and leaving the
+		// description open. Opened-with-path handles overwrite
+		// (replace semantics) as before.
+		p := c.project(s.project)
+		for _, name := range s.pending.List() {
+			if _, ok := p.files[name]; ok {
+				return shfs.AlreadyExists(name)
 			}
 		}
+		if s.dirty {
+			for _, name := range s.pending.List() {
+				c.commitFakeSessionLocked(s.project, name, s.data)
+			}
+		}
+		delete(c.sessions, handleID)
+		return nil
+	}
+	if s.dirty {
 		// An inode unlinked after open discards with success (POSIX
 		// close); a rename is followed to the surviving name.
 		target := c.resolveFakeCommitLocked(s)
@@ -524,11 +568,11 @@ func TestRESTSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
-	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=data.txt", strings.NewReader("version-one"), nil, http.StatusCreated)
+	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=data.txt", strings.NewReader("versionone"), nil, http.StatusCreated)
 
 	handle := openSessionHTTP(t, handler, "demo", "data.txt", "r")
-	if got := string(readSessionHTTP(t, handler, handle, 0, 64)); got != "version-one" {
-		t.Fatalf("pinned read = %q, want %q", got, "version-one")
+	if got := string(readSessionHTTP(t, handler, handle, 0, 64)); got != "versionone" {
+		t.Fatalf("pinned read = %q, want %q", got, "versionone")
 	}
 
 	writer := openSessionHTTP(t, handler, "demo", "data.txt", "w+")
@@ -536,8 +580,8 @@ func TestRESTSessionLifecycle(t *testing.T) {
 	if got := string(readSessionHTTP(t, handler, writer, 0, 64)); got != "version-two!" {
 		t.Fatalf("own staged read = %q, want %q", got, "version-two!")
 	}
-	if got := contentHTTP(t, handler, "demo", "data.txt"); got != "version-one" {
-		t.Fatalf("second client sees %q before commit, want pinned %q", got, "version-one")
+	if got := contentHTTP(t, handler, "demo", "data.txt"); got != "versionone" {
+		t.Fatalf("second client sees %q before commit, want pinned %q", got, "versionone")
 	}
 
 	mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=data.txt", strings.NewReader("RIVAL-replace"), nil, http.StatusOK)
@@ -656,7 +700,7 @@ func TestRESTSessionErrorMapping(t *testing.T) {
 
 	resp = mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles", map[string]string{"project": "demo", "mode": "zzz"}, http.StatusBadRequest)
 	assertErrorCode(t, resp, "bad_request")
-	resp = mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles", map[string]string{"project": "demo", "mode": "r", "ttl": "not-a-duration"}, http.StatusBadRequest)
+	resp = mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles", map[string]string{"project": "demo", "mode": "r", "ttl": "notaduration"}, http.StatusBadRequest)
 	assertErrorCode(t, resp, "bad_request")
 	resp = mustJSONRequest(t, handler, http.MethodPost, "/api/v1/handles", map[string]string{"mode": "r"}, http.StatusBadRequest)
 	assertErrorCode(t, resp, "bad_request")
@@ -693,11 +737,11 @@ func TestRESTSessionOwnerMismatch(t *testing.T) {
 	opts := DefaultOptions()
 	opts.ShareSigningKey = []byte("abcdef0123456789abcdef0123456789")
 	opts.Auth = &AuthOptions{
-		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
+		TokenSigningKey: []byte("testsigningkey0123456789abcdef0000"),
 		Users: []User{
-			{Username: "alice", Password: "alice-pass", UID: 1001, PrimaryGID: 2001},
-			{Username: "bob", Password: "bob-pass", UID: 1002, PrimaryGID: 2002},
-			{Username: "root", Password: "root-pass", UID: 0, PrimaryGID: 0, Admin: true},
+			{Username: "alice", Password: "alicepass", UID: 1001, PrimaryGID: 2001},
+			{Username: "bob", Password: "bobpass", UID: 1002, PrimaryGID: 2002},
+			{Username: "root", Password: "rootpass", UID: 0, PrimaryGID: 0, Admin: true},
 		},
 	}
 	handler, err := newHandlerForClient(client, opts)
@@ -711,7 +755,7 @@ func TestRESTSessionOwnerMismatch(t *testing.T) {
 		decodeJSONBody(t, resp, &logged)
 		return logged.Token
 	}
-	alice, bob, root := login("alice", "alice-pass"), login("bob", "bob-pass"), login("root", "root-pass")
+	alice, bob, root := login("alice", "alicepass"), login("bob", "bobpass"), login("root", "rootpass")
 
 	// Alice opens: the manager records her UID as the owner.
 	authed := map[string]string{"Authorization": "Bearer " + alice}
