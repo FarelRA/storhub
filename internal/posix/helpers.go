@@ -1,3 +1,4 @@
+// Package posix implements the metadata verbs on top of the fs contract.
 package posix
 
 import (

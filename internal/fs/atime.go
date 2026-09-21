@@ -1,3 +1,4 @@
+// Package fs implements the key-addressed file verbs and access control.
 package fs
 
 import (
