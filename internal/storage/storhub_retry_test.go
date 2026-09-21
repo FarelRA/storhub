@@ -284,8 +284,8 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "cache-mutate.txt", []byte("cache mutate payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "projectcachemutate", "cache-mutate.txt", input); err != nil {
+	input := writeTempFile(t, t.TempDir(), "cachemutate.txt", []byte("cache mutate payload"))
+	if _, err := hub.UploadFileContext(context.Background(), "projectcachemutate", "cachemutate.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	var metadataGets atomic.Int32
@@ -301,7 +301,7 @@ func TestMetadataCacheInvalidatesAcrossMutationsAndDeleteProject(t *testing.T) {
 	if metadataGets.Load() != 0 {
 		t.Fatalf("expected warm cache to avoid metadata fetch, got %d", metadataGets.Load())
 	}
-	if err := hub.DeleteFile("projectcachemutate", "cache-mutate.txt"); err != nil {
+	if err := hub.DeleteFileContext(context.Background(), "projectcachemutate", "cachemutate.txt"); err != nil {
 		t.Fatalf("delete file: %v", err)
 	}
 	beforeListAfterDelete := metadataGets.Load()

@@ -115,7 +115,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("flush metadata after second upload: %v", err)
 	}
 
-	if err := hub.DeleteFile("projectpurge", "orphan.txt"); err != nil {
+	if err := hub.DeleteFileContext(context.Background(), "projectpurge", "orphan.txt"); err != nil {
 		t.Fatalf("hide orphan file: %v", err)
 	}
 
@@ -277,7 +277,7 @@ func TestDeleteFileWorksOnColdCache(t *testing.T) {
 	}
 
 	coldHub := backend.newClient(t, smallTransferTestConfig())
-	if err := coldHub.DeleteFile("projectcolddelete", "cold.txt"); err != nil {
+	if err := coldHub.DeleteFileContext(context.Background(), "projectcolddelete", "cold.txt"); err != nil {
 		t.Fatalf("cold-cache delete of existing file failed: %v", err)
 	}
 }

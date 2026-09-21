@@ -50,7 +50,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("expected metadata history, got %+v", revisions)
 	}
 
-	if err := hub.DeleteFile("projecthistory", "artifact.txt"); err != nil {
+	if err := hub.DeleteFileContext(context.Background(), "projecthistory", "artifact.txt"); err != nil {
 		t.Fatalf("delete file: %v", err)
 	}
 	files, err := hub.ListFilesContext(context.Background(), "projecthistory")
@@ -327,8 +327,8 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	input := writeTempFile(t, t.TempDir(), "missing-data.txt", []byte("payload"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "projectmissingdata", "missing-data.txt", input)
+	input := writeTempFile(t, t.TempDir(), "missingdata.txt", []byte("payload"))
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectmissingdata", "missingdata.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	if err := hub.DeleteFile("projectmissingdata", "missing-data.txt"); err != nil {
+	if err := hub.DeleteFileContext(context.Background(), "projectmissingdata", "missingdata.txt"); err != nil {
 		t.Fatalf("hide file: %v", err)
 	}
 
