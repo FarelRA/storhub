@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	storfuse "github.com/FarelRA/storhub/fuse"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -356,12 +355,8 @@ func runShowcase(ctx context.Context, hub showcaseHub, workspace, project string
 }
 
 func previewFUSE(hub *storhub.StorHub, project string) error {
-	storhubOpts := storhub.DefaultFUSEOptions()
-	fuseOpts := storfuse.DefaultOptions()
-	if storhubOpts.OverlayBufferSize != fuseOpts.OverlayBufferSize {
-		return fmt.Errorf("fuse default mismatch: storhub=%d fuse=%d", storhubOpts.OverlayBufferSize, fuseOpts.OverlayBufferSize)
-	}
-	fsys, err := storfuse.New(hub, project, fuseOpts)
+	fuseOpts := storhub.DefaultFUSEOptions()
+	fsys, err := hub.NewFUSE(project, fuseOpts)
 	if err != nil {
 		return fmt.Errorf("create FUSE filesystem: %w", err)
 	}

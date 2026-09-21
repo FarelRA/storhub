@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -28,8 +27,8 @@ func main() {
 	if listen == "" {
 		listen = ":8080"
 	}
-	opts := shrest.DefaultOptions()
-	handler, err := shrest.New(hub, opts)
+	opts := storhub.DefaultRESTOptions()
+	handler, err := storhub.NewRESTHandler(hub, opts)
 	if err != nil {
 		log.Fatal(err)
 	}

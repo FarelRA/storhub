@@ -4,12 +4,14 @@
 //
 // The types below are aliases of internal implementations; they exist so
 // embedders depend only on this package. Start with NewStorHub (or its
-// Config/Context variants), then pass the client to DefaultFUSEOptions/New
-// from the fuse and rest facades, or use the fs-style operations directly.
+// Config/Context variants), then use DefaultFUSEOptions with StorHub.NewFUSE
+// for mounting, or DefaultRESTOptions with NewRESTHandler for HTTP serving,
+// or use the fs-style operations directly.
 package storhub
 
 import (
 	"context"
+	"net/http"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -17,6 +19,7 @@ import (
 	implfuse "github.com/FarelRA/storhub/internal/fusefs"
 	ghapi "github.com/FarelRA/storhub/internal/github"
 	meta "github.com/FarelRA/storhub/internal/metadata"
+	implrest "github.com/FarelRA/storhub/internal/rest"
 	impl "github.com/FarelRA/storhub/internal/storage"
 )
 
@@ -76,6 +79,16 @@ type (
 	// Config tunes a StorHub client: API endpoint, transport, transfer
 	// sizing, retry policy, logging, git cache, and test clocks.
 	Config = storcfg.Config
+	// RESTOptions configures the REST server: listen-time behavior,
+	// body/patch limits, share-token policy, and authentication. See
+	// internal/rest.Options for the field-level contract.
+	RESTOptions = implrest.Options
+	// RESTAuthOptions describes the user database backing HTTP basic auth:
+	// users, their POSIX identities, and token lifetime settings.
+	RESTAuthOptions = implrest.AuthOptions
+	// RESTUser is a single authenticated principal with its POSIX identity
+	// (UID, primary GID, supplementary groups) used for authorization.
+	RESTUser = implrest.User
 )
 
 const (
@@ -158,6 +171,26 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 // individual fields rather than building a zero value.
 func DefaultFUSEOptions() FUSEOptions {
 	return implfuse.DefaultOptions()
+}
+
+// DefaultRESTOptions returns RESTOptions with all defaults applied; use it
+// as the base and override individual fields rather than building a zero
+// RESTOptions.
+func DefaultRESTOptions() RESTOptions {
+	return implrest.DefaultOptions()
+}
+
+// HashRESTPassword bcrypt-hashes a plaintext password for use in
+// RESTAuthOptions.Users.PasswordHash.
+func HashRESTPassword(password string) (string, error) {
+	return implrest.HashPassword(password)
+}
+
+// NewRESTHandler builds the REST HTTP handler serving hub's storage projects
+// according to opts. Authentication is required unless opts explicitly opts
+// into anonymous access; the returned handler is safe for concurrent use.
+func NewRESTHandler(hub *StorHub, opts RESTOptions) (http.Handler, error) {
+	return implrest.NewHandler(hub, opts)
 }
 
 // DefaultConfig returns Config with all defaults applied; use it as the base

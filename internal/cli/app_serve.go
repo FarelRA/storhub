@@ -15,7 +15,6 @@ import (
 	"time"
 
 	shlog "github.com/FarelRA/storhub/internal/logging"
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
 )
@@ -37,10 +36,10 @@ Examples:
 }
 
 type restAuthFile struct {
-	Realm           string        `json:"realm"`
-	TokenSigningKey string        `json:"token_signing_key"`
-	TokenTTL        flexDuration  `json:"token_ttl"`
-	Users           []shrest.User `json:"users"`
+	Realm           string             `json:"realm"`
+	TokenSigningKey string             `json:"token_signing_key"`
+	TokenTTL        flexDuration       `json:"token_ttl"`
+	Users           []storhub.RESTUser `json:"users"`
 }
 
 // flexDuration is a Go duration string ("2h", "30m") for token_ttl.
@@ -112,10 +111,10 @@ func (a *App) runServeREST(cmd *cobra.Command, _ []string) error {
 // authentication. Running without an auth file is a deliberate choice -
 // require the explicit opt-in flag so an open server never happens by
 // accident.
-func serveAuthOptions(cmd *cobra.Command) (shrest.Options, error) {
+func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
 	basePath, _ := cmd.Flags().GetString("base-path")
 	authFile, _ := cmd.Flags().GetString("auth-file")
-	opts := shrest.DefaultOptions()
+	opts := storhub.DefaultRESTOptions()
 	opts.BasePath = basePath
 	if authFile == "" {
 		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
@@ -162,11 +161,11 @@ func shareSigningKey(cmd *cobra.Command) string {
 // (rest.requestLogging), so the former CLI loggingMiddleware wrapper was
 // removed from this chain. The middleware method stays (deprecated) for
 // non-HTTP chatter via App.logf and existing tests.
-func (a *App) buildRESTHandler(hub *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+func (a *App) buildRESTHandler(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 	return a.seamRESTHandler()(hub, opts)
 }
 
-func describeRESTAuth(opts shrest.Options) string {
+func describeRESTAuth(opts storhub.RESTOptions) string {
 	if opts.Auth != nil {
 		return "with auth"
 	}
@@ -289,7 +288,7 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 
 // setupServeREST resolves auth policy and builds the REST server for serve.
 // The REST surface is pinned to the served project.
-func (a *App) setupServeREST(cmd *cobra.Command, hub *storhub.StorHub, project, listen string) (*http.Server, shrest.Options, error) {
+func (a *App) setupServeREST(cmd *cobra.Command, hub *storhub.StorHub, project, listen string) (*http.Server, storhub.RESTOptions, error) {
 	opts, err := serveAuthOptions(cmd)
 	if err != nil {
 		return nil, opts, err
@@ -450,7 +449,7 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 // internal/logging (HTTPRecorder) so one package owns one job.
 // See logging/http_recorder.go.
 
-func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
+func loadRESTAuthOptions(filePath string) (*storhub.RESTAuthOptions, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -467,7 +466,7 @@ func loadRESTAuthOptions(filePath string) (*shrest.AuthOptions, error) {
 	if len(key) == 0 {
 		return nil, errors.New("rest auth file requires token_signing_key")
 	}
-	return &shrest.AuthOptions{
+	return &storhub.RESTAuthOptions{
 		Realm:           file.Realm,
 		Users:           file.Users,
 		TokenSigningKey: key,

@@ -1,0 +1,11 @@
+This file is a build placeholder, not a console asset.
+
+The real bundle in this directory is git-ignored and regenerated from
+source with a pinned bun by running `bun run build:embed` in web/
+(which runs `nuxt generate` and copies .output/public here).
+
+Go-only checkouts carry only this file so that
+`//go:embed all:static/dist` in internal/rest/ui_dist.go still compiles
+(Go refuses to embed an empty directory). It is never served: the UI
+handlers ignore it explicitly, and without a real index.html the server
+answers the clean ui_not_built 404.

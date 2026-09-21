@@ -16,7 +16,6 @@ import (
 	"github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	rest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -180,7 +179,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(_ *storhub.StorHub, _ rest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, _ storhub.RESTOptions) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
 	restListenAndServeFn = func(_ *http.Server) error {
@@ -333,7 +332,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(_ *storhub.StorHub, opts rest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 		if opts.Auth == nil || opts.Auth.Realm != "demo" || len(opts.Auth.Users) != 1 || opts.Auth.Users[0].Username != "admin" {
 			t.Fatalf("unexpected auth opts: %+v", opts.Auth)
 		}

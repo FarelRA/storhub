@@ -18,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	storfuse "github.com/FarelRA/storhub/fuse"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -39,8 +38,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	opts := storfuse.DefaultOptions()
-	fsys, err := storfuse.New(hub, project, opts)
+	opts := storhub.DefaultFUSEOptions()
+	fsys, err := hub.NewFUSE(project, opts)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -84,7 +83,7 @@ func main() {
 	}
 }
 
-func unmountWithRetry(fsys *storfuse.Filesystem, mountPoint string) {
+func unmountWithRetry(fsys *storhub.FS, mountPoint string) {
 	delay := time.Second
 	deadline := time.Now().Add(30 * time.Second)
 	for attempt := 1; ; attempt++ {

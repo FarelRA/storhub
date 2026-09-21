@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -62,7 +61,7 @@ func stubServeSeams(t *testing.T) *recordingMount {
 	newFUSEFn = func(_ *storhub.StorHub, _ string, _ storhub.FUSEOptions) (fuseMount, error) {
 		return mount, nil
 	}
-	newRESTHandlerFn = func(_ *storhub.StorHub, _ shrest.Options) (http.Handler, error) {
+	newRESTHandlerFn = func(_ *storhub.StorHub, _ storhub.RESTOptions) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
 	// Mimic a clean server stop without signals: returning
@@ -123,8 +122,8 @@ func TestServeRefusesOpenAPIAndUnmounts(t *testing.T) {
 func TestServeHonorsAuthFile(t *testing.T) {
 	app, _, stderr := newTestApp(t)
 	mount := stubServeSeams(t)
-	var gotOpts shrest.Options
-	newRESTHandlerFn = func(_ *storhub.StorHub, opts shrest.Options) (http.Handler, error) {
+	var gotOpts storhub.RESTOptions
+	newRESTHandlerFn = func(_ *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 		gotOpts = opts
 		return http.NewServeMux(), nil
 	}

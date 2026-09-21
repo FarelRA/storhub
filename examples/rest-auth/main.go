@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
@@ -32,7 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	hash, err := shrest.HashPassword(password)
+	hash, err := storhub.HashRESTPassword(password)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,12 +39,12 @@ func main() {
 	if listen == "" {
 		listen = ":8080"
 	}
-	opts := shrest.DefaultOptions()
-	opts.Auth = &shrest.AuthOptions{
+	opts := storhub.DefaultRESTOptions()
+	opts.Auth = &storhub.RESTAuthOptions{
 		TokenSigningKey: []byte(key),
-		Users:           []shrest.User{{Username: "admin", PasswordHash: hash, UID: 0, PrimaryGID: 0, Admin: true}},
+		Users:           []storhub.RESTUser{{Username: "admin", PasswordHash: hash, UID: 0, PrimaryGID: 0, Admin: true}},
 	}
-	handler, err := shrest.New(hub, opts)
+	handler, err := storhub.NewRESTHandler(hub, opts)
 	if err != nil {
 		log.Fatal(err)
 	}
