@@ -243,7 +243,9 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 
 // Mount mounts the filesystem at mountPoint and serves it.
 func (s *Filesystem) Mount(mountPoint string) error {
-	s.debugOp("mount start", "project", s.project, "target", mountPoint, "allow_other", s.opts.AllowOther, "cache_dir", s.cacheDir)
+	if s.debugEnabled() {
+		s.debugOp("mount start", "project", s.project, "target", mountPoint, "allow_other", s.opts.AllowOther, "cache_dir", s.cacheDir)
+	}
 	options := &gofusefs.Options{
 		EntryTimeout:    durationPtr(s.opts.EntryTimeout),
 		AttrTimeout:     durationPtr(s.opts.AttrTimeout),
@@ -262,7 +264,9 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
-		s.debugOp("mount failed", "project", s.project, "target", mountPoint, "err", err)
+		if s.debugEnabled() {
+			s.debugOp("mount failed", "project", s.project, "target", mountPoint, "err", err)
+		}
 		return err
 	}
 	// Publish under mu like every other server access (connected(),
@@ -272,7 +276,9 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	s.server = server
 	s.unmounted = false
 	s.mu.Unlock()
-	s.debugOp("mount ready", "project", s.project, "target", mountPoint)
+	if s.debugEnabled() {
+		s.debugOp("mount ready", "project", s.project, "target", mountPoint)
+	}
 	return nil
 }
 
@@ -298,13 +304,17 @@ func (s *Filesystem) Unmount() error {
 	}
 	s.unmounted = true
 	s.mu.Unlock()
-	s.debugOp("unmount start", "project", s.project)
+	if s.debugEnabled() {
+		s.debugOp("unmount start", "project", s.project)
+	}
 	err := server.Unmount()
 	if err != nil {
 		s.mu.Lock()
 		s.unmounted = false
 		s.mu.Unlock()
-		s.debugOp("unmount failed", "project", s.project, "err", err)
+		if s.debugEnabled() {
+			s.debugOp("unmount failed", "project", s.project, "err", err)
+		}
 		return err
 	}
 	s.mu.Lock()
@@ -312,13 +322,17 @@ func (s *Filesystem) Unmount() error {
 		s.server = nil
 	}
 	s.mu.Unlock()
-	s.debugOp("unmount complete", "project", s.project)
+	if s.debugEnabled() {
+		s.debugOp("unmount complete", "project", s.project)
+	}
 	return nil
 }
 
 // Close releases filesystem resources after unmount.
 func (s *Filesystem) Close() error {
-	s.debugOp("close start", "project", s.project)
+	if s.debugEnabled() {
+		s.debugOp("close start", "project", s.project)
+	}
 	s.mu.Lock()
 	if s.closing {
 		s.mu.Unlock()
@@ -379,7 +393,9 @@ func (s *Filesystem) Close() error {
 		_ = s.lockFile.Close()
 		s.lockFile = nil
 	}
-	s.debugOp("close complete", "project", s.project)
+	if s.debugEnabled() {
+		s.debugOp("close complete", "project", s.project)
+	}
 	if unmountErr != nil {
 		s.errorOp("close unmount failed", "project", s.project, "err", unmountErr)
 		return unmountErr

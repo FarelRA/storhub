@@ -155,7 +155,9 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if stale != 0 {
 		return nil, 0, stale
 	}
-	n.fs.debugOp("open start", "path", targetPath, "inode", n.inode, "flags", flags)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("open start", "path", targetPath, "inode", n.inode, "flags", flags)
+	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return nil, 0, errnoFromError(err)
@@ -229,13 +231,17 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		const oPathFlag = 0o10000000
 		if flags&syscall.O_ACCMODE != syscall.O_WRONLY && flags&oPathFlag == 0 {
 			if err := shfs.CheckReadAccess(ctx, repoMeta, targetPath); err != nil {
-				n.fs.debugOp("open denied", "path", targetPath, "err", err)
+				if n.fs.debugEnabled() {
+					n.fs.debugOp("open denied", "path", targetPath, "err", err)
+				}
 				return nil, 0, errnoFromError(err)
 			}
 		}
 		if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
 			if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-				n.fs.debugOp("open denied", "path", targetPath, "err", err)
+				if n.fs.debugEnabled() {
+					n.fs.debugOp("open denied", "path", targetPath, "err", err)
+				}
 				return nil, 0, errnoFromError(err)
 			}
 		}
@@ -266,7 +272,9 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	h.pinned = pin
-	n.fs.debugOp("open complete", "path", targetPath, "inode", n.inode, "flags", flags)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("open complete", "path", targetPath, "inode", n.inode, "flags", flags)
+	}
 	return h, 0, 0
 }
 
@@ -277,10 +285,14 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		return nil, nil, 0, stale
 	}
 	childPath := path.Join(parentPath, name)
-	n.fs.debugOp("create start", "path", childPath, "flags", flags, "mode", mode)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("create start", "path", childPath, "flags", flags, "mode", mode)
+	}
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		n.fs.debugOp("create failed", "path", childPath, "err", err)
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("create failed", "path", childPath, "err", err)
+		}
 		return nil, nil, 0, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
@@ -288,7 +300,9 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	ino := n.attachEntry(ctx, entry, out)
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
-		n.fs.debugOp("create failed", "path", childPath, "err", err)
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("create failed", "path", childPath, "err", err)
+		}
 		// The empty file is already committed remotely; leaving it
 		// behind would orphan an entry the application was told was never
 		// created. Roll it back before reporting the failure.
@@ -301,7 +315,9 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	// The kernel may hold a negative entry for this name (NegativeTimeout);
 	// the create must evict it or the file stays invisible until expiry.
 	n.fs.notifyEntryForPath(parentPath, name)
-	n.fs.debugOp("create complete", "path", childPath, "inode", entry.Inode, "flags", flags, "mode", mode)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("create complete", "path", childPath, "inode", entry.Inode, "flags", flags, "mode", mode)
+	}
 	return ino, h, 0, 0
 }
 
@@ -483,12 +499,16 @@ func (h *storhubHandle) abandonMaterializeLocked(temp *os.File) bool {
 
 func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (result fuse.ReadResult, errno syscall.Errno) {
 	started := time.Now()
-	h.fs.debugOp("read start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(dest))
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("read start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(dest))
+	}
 	// Success is logged once here; every failure path below already logs
 	// at Error with path, inode, offset, and cause.
 	defer func() {
 		if errno == 0 {
-			h.fs.debugOp("read complete", "path", h.handlePath(), "inode", h.inode, "off", off, "elapsed", time.Since(started))
+			if h.fs.debugEnabled() {
+				h.fs.debugOp("read complete", "path", h.handlePath(), "inode", h.inode, "off", off, "elapsed", time.Since(started))
+			}
 		}
 	}()
 	if writeState := h.snapshotWriteState(); writeState != nil {

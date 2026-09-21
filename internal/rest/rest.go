@@ -496,6 +496,13 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 // request (never a token or secret); extra carries endpoint-specific
 // attrs such as scope or op.
 func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func() {
+	// Zero-cost when Debug is off: the alloc-parity benchmark budgets
+	// fail on any per-request heap work, so skip the slice builds,
+	// redaction, and clock read entirely instead of discarding them
+	// inside logging.Debug.
+	if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug) {
+		return func() {}
+	}
 	started := time.Now().UTC()
 	startArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
 	logging.Debug(h.logger, "rest "+op+" start", startArgs...)

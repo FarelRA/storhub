@@ -80,7 +80,9 @@ func (n *storhubNode) CopyFileRange(ctx context.Context, fhIn gofusefs.FileHandl
 	if tracked {
 		n.fs.notifyKernelContentChanged(dstInode)
 	}
-	n.fs.debugOp("copy_file_range", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("copy_file_range", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length)
+	}
 	return uint32(length), 0
 }
 

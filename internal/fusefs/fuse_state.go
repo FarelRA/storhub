@@ -370,7 +370,9 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 		// go-fuse panics on malformed trees; degrade to "no cached child"
 		// loudly instead of taking the request goroutine down.
 		if recover() != nil {
-			n.fs.debugOp("attachChild recovered from panic", "path", n.currentPath(), "inode", child.inode)
+			if n.fs.debugEnabled() {
+				n.fs.debugOp("attachChild recovered from panic", "path", n.currentPath(), "inode", child.inode)
+			}
 			ino = nil
 		}
 	}()

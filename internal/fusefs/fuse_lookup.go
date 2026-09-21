@@ -20,7 +20,9 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	}
 	childPath := path.Join(parentPath, name)
 	started := time.Now()
-	n.fs.debugOp("lookup start", "path", parentPath, "child", name)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("lookup start", "path", parentPath, "child", name)
+	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
 		// Only a genuine ENOENT deserves the negative-entry cache:
@@ -29,14 +31,18 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		if out != nil && errnoFromError(err) == syscall.ENOENT {
 			out.SetEntryTimeout(n.fs.opts.NegativeTimeout)
 		}
-		n.fs.debugOp("lookup failed", "path", childPath, "err", err)
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("lookup failed", "path", childPath, "err", err)
+		}
 		return nil, errnoFromError(err)
 	}
 	n.fs.applyPendingSize(entry)
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
 	fillEntryOut(out, entry, n.fs.opts)
-	n.fs.debugOp("lookup complete", "path", childPath, "inode", entry.Inode, "elapsed", time.Since(started))
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("lookup complete", "path", childPath, "inode", entry.Inode, "elapsed", time.Since(started))
+	}
 	return ino, 0
 }
 
@@ -56,7 +62,9 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 		}
 		return stale
 	}
-	n.fs.debugOp("getattr", "path", targetPath, "inode", n.inode)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("getattr", "path", targetPath, "inode", n.inode)
+	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)
@@ -114,7 +122,9 @@ func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	if stale != 0 {
 		return stale
 	}
-	n.fs.debugOp("access", "path", targetPath, "inode", n.inode, "mask", mask)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("access", "path", targetPath, "inode", n.inode, "mask", mask)
+	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return errnoFromError(err)

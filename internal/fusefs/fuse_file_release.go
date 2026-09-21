@@ -12,7 +12,9 @@ import (
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	started := time.Now()
 	releasePath := h.handlePath()
-	h.fs.debugOp("release start", "path", releasePath, "inode", h.inode)
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("release start", "path", releasePath, "inode", h.inode)
+	}
 	errno := h.commit(ctx)
 	h.releaseTrackedLocks()
 	if errno != 0 {
@@ -69,7 +71,9 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		h.fs.errorOp("release failed", "path", releasePath, "inode", h.inode, "errno", errno, "elapsed", time.Since(started))
 		return errno
 	}
-	h.fs.debugOp("release complete", "path", releasePath, "inode", h.inode, "elapsed", time.Since(started))
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("release complete", "path", releasePath, "inode", h.inode, "elapsed", time.Since(started))
+	}
 	return errno
 }
 

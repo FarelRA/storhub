@@ -19,7 +19,9 @@ func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]
 	if stale != 0 {
 		return nil, nil, stale
 	}
-	n.fs.debugOp("readdir", "path", dirPath)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("readdir", "path", dirPath)
+	}
 	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, dirPath)
 	if err != nil {
 		return nil, nil, errnoFromError(err)
@@ -189,19 +191,27 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		return nil, stale
 	}
 	childPath := path.Join(parentPath, name)
-	n.fs.debugOp("mkdir start", "path", childPath, "mode", mode)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("mkdir start", "path", childPath, "mode", mode)
+	}
 	if err := n.fs.hub.MkdirContext(ctx, n.fs.project, childPath); err != nil {
-		n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
+		}
 		return nil, errnoFromError(err)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
+		}
 		return nil, errnoFromError(err)
 	}
 	ino := n.attachEntry(ctx, entry, out)
 	n.fs.publishEntry(parentPath, name)
-	n.fs.debugOp("mkdir complete", "path", childPath, "inode", entry.Inode)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("mkdir complete", "path", childPath, "inode", entry.Inode)
+	}
 	return ino, 0
 }
 
@@ -227,7 +237,9 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	} else {
 		n.notifyEntry(name)
 	}
-	n.fs.debugOp("unlink", "path", childPath)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("unlink", "path", childPath)
+	}
 	return 0
 }
 
@@ -248,7 +260,9 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	} else {
 		n.notifyEntry(name)
 	}
-	n.fs.debugOp("rmdir", "path", childPath)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("rmdir", "path", childPath)
+	}
 	return 0
 }
 
@@ -321,6 +335,8 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	// Both parents cached the old namespace; evict both or lookups serve
 	// the pre-rename tree until EntryTimeout expires.
 	n.fs.notifyNamespaceChange(oldPath, newPath)
-	n.fs.debugOp("rename", "old", oldPath, "new", newPath, "flags", flags)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("rename", "old", oldPath, "new", newPath, "flags", flags)
+	}
 	return 0
 }

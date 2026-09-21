@@ -350,6 +350,15 @@ func (w *inodeWriteState) pathForLog() string {
 	return w.path
 }
 
+// debugEnabled reports whether structured debug tracing is on. Call
+// sites guard their debugOp calls with it so the variadic boxing and
+// slice build cost nothing in production: debugOp alone cannot avoid
+// that cost because arguments evaluate before the call. One branch per
+// site keeps the alloc-parity benchmark budgets exact.
+func (s *Filesystem) debugEnabled() bool {
+	return s != nil && s.opts.Debug
+}
+
 // debugOp logs a structured debug event through the mount logger. It is
 // gated on Options.Debug like the former debugf, so hot-path call sites
 // stay cheap in production; unlike debugf it keeps every field structured

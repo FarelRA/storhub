@@ -21,10 +21,14 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		// without dirty tracking - the data was acknowledged but silently
 		// discarded at commit. Fail loudly instead of pretending the write
 		// landed.
-		h.fs.debugOp("write rejected", "path", h.handlePath(), "inode", h.inode)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("write rejected", "path", h.handlePath(), "inode", h.inode)
+		}
 		return 0, syscall.EIO
 	}
-	h.fs.debugOp("write start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(data))
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("write start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(data))
+	}
 	writeState.opMu.Lock()
 	writeState.mu.Lock()
 	// A quarantined (poisoned) overlay no longer holds the bytes its
@@ -97,7 +101,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// clear them (see stagePrivClearLocked).
 	h.fs.stagePrivClearForDataWrite(h.fs.callerContext(ctx), writeState, writeState.path)
 	syncWrite := h.flags&syncWriteFlags != 0
-	h.fs.debugOp("write complete", "path", writeState.path, "inode", h.inode, "off", off, "bytes", n)
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("write complete", "path", writeState.path, "inode", h.inode, "off", off, "bytes", n)
+	}
 	writeState.mu.Unlock()
 	unlockOpMu(&writeState.opMu)
 	if !syncWrite {
@@ -269,7 +275,9 @@ func (h *storhubHandle) checkCommitWriteAccess(ctx context.Context, targetPath s
 		return 0
 	}
 	if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-		h.fs.debugOp("commit denied", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit denied", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	return 0
@@ -307,9 +315,13 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 	if len(ws.dirtyRanges) == 0 {
 		ws.mu.Unlock()
 		if logicalSize != baseSize {
-			h.fs.debugOp("commit truncate", "path", targetPath, "inode", h.inode, "size", logicalSize)
+			if h.fs.debugEnabled() {
+				h.fs.debugOp("commit truncate", "path", targetPath, "inode", h.inode, "size", logicalSize)
+			}
 			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-				h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+				if h.fs.debugEnabled() {
+					h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+				}
 				return errnoFromError(err)
 			}
 		}
@@ -356,25 +368,35 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 	baseSize := ws.baseSize
 	ws.mu.Unlock()
 	if err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	// The snapshot is event-scoped: this commit frame owns it and removes
 	// it on every exit path.
 	defer func() { _ = os.Remove(snapshotPath) }()
-	h.fs.debugOp("commit chunk-rewrite", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("commit chunk-rewrite", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
+	}
 	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 	if err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	fileMeta := repoMeta.FindFile(targetPath)
 	if fileMeta == nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode)
+		}
 		return syscall.ENOENT
 	}
 	if _, err := h.fs.hub.RewriteFileRangesWithMetadataContext(ctx, h.fs.project, targetPath, snapshotPath, repoMeta, fileMeta, logicalSize, planned); err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	ws.mu.Lock()
@@ -397,16 +419,22 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	dirtyCount := len(ws.dirtyRanges)
 	ws.mu.Unlock()
 	if err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	if cleanupSnapshot {
 		// Event-scoped snapshot: this commit frame owns the removal.
 		defer func() { _ = os.Remove(snapshotPath) }()
 	}
-	h.fs.debugOp("commit replace", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "dirty_ranges", dirtyCount)
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("commit replace", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "dirty_ranges", dirtyCount)
+	}
 	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	ws.mu.Lock()
@@ -478,9 +506,13 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	// range. Ascending order needs no intermediate offset fixups. Either
 	// the whole batch commits or none of it does, so failures leave every
 	// range dirty and the retry replays the identical batch.
-	h.fs.debugOp("commit patch", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
+	if h.fs.debugEnabled() {
+		h.fs.debugOp("commit patch", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
+	}
 	if _, err := h.fs.hub.PatchFileRangesContext(ctx, h.fs.project, targetPath, edits); err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	// Crash ordering: the commit is not done until the size is
@@ -492,7 +524,9 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
 		if !appendOnly {
 			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-				h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+				if h.fs.debugEnabled() {
+					h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+				}
 				return errnoFromError(err)
 			}
 		}
@@ -515,14 +549,18 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	ws.mu.Unlock()
 	ws.mu.Lock()
 	if err := ws.refreshBaseSnapshotLocked(); err != nil {
-		h.fs.debugOp("commit cache refresh failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit cache refresh failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		ws.clearBaseSnapshotLocked()
 	}
 	ws.baseSize = logicalSize
 	ws.dirtyRanges = nil
 	ws.tempAuthoritative = false
 	if err := ws.temp.Truncate(logicalSize); err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		ws.mu.Unlock()
 		return errnoFromError(err)
 	}
@@ -577,7 +615,9 @@ func (h *storhubHandle) applyMetadataPatch(ctx context.Context, targetPath strin
 		return 0
 	}
 	if err := h.fs.hub.ApplyMetadataPatchContext(ctx, h.fs.project, targetPath, patch); err != nil {
-		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
+		}
 		return errnoFromError(err)
 	}
 	return 0
