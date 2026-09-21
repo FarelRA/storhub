@@ -422,7 +422,7 @@ func (s *Filesystem) stagePrivClearForDataWrite(ctx context.Context, state *inod
 	entry, err := s.hub.StatPathContext(ctx, s.project, targetPath)
 	state.mu.Lock()
 	if err != nil || entry == nil {
-		s.debugf("priv-clear stat failed path=%s err=%v", targetPath, err)
+		s.debugOp("priv-clear stat failed", "path", targetPath, "err", err)
 		return
 	}
 	if state.poisoned || state.deleted {

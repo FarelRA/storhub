@@ -305,19 +305,31 @@ func (c *Client) sendOnce(ctx context.Context, method, endpoint string, bodyFact
 // successful response, sleeps the computed wait and asks for another
 // attempt, or returns the terminal error.
 //
-// Log discipline: Warn fires ONLY when actually sleeping before a retry
-// (actionable: someone waits); the final failure — terminal rejection,
-// exhausted retries, refused wait, or failed sleep — logs at Debug with
-// the status and body snippet attached. Per-attempt start/complete
-// chatter is gone: the hot read path no longer spams the log to prove
-// it is working.
+// Log discipline: Debug traces each failed attempt that will be retried;
+// Warn fires when actually sleeping before a retry (actionable: someone
+// waits) and on terminal client-class failures; terminal 5xx-class
+// upstream failures log at Error. Terminal lines carry the redacted
+// endpoint, status, and attempt for triage.
 func (c *Client) classifyAndWait(ctx context.Context, method, endpoint string, attempt int, resp *http.Response, sendErr error, retryable bool) (*http.Response, bool, error) {
+	// logTerminal records a failure that will not be retried: 5xx-class
+	// upstream failures at Error, everything else at Warn.
+	logTerminal := func(apiErr *APIError) {
+		args := []any{"method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt + 1,
+			"status", apiErr.StatusCode, "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary,
+			"retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset,
+			"body", apiErr.BodySnippet(), "err", apiErr}
+		if apiErr.StatusCode >= http.StatusInternalServerError {
+			logging.Error(c.logger, "http request failed", args...)
+		} else {
+			logging.Warn(c.logger, "http request failed", args...)
+		}
+	}
 	// sleepOrRetry applies the terminal-or-sleep decision for an *APIError
 	// from any source (governor refusal or decoded response). It returns
 	// (true, nil) after sleeping, or (false, err) for terminal outcomes.
 	sleepOrRetry := func(apiErr *APIError) (bool, error) {
 		if attempt >= c.maxRetries || !retryable || !apiErr.IsRetryable() {
-			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "rate_limited", apiErr.RateLimited, "primary", apiErr.Primary, "retry_after", apiErr.RetryAfter, "rate_reset", apiErr.RateLimitReset, "body", apiErr.BodySnippet(), "err", apiErr)
+			logTerminal(apiErr)
 			return false, apiErr
 		}
 		delay := c.retryDelay(attempt, apiErr)
@@ -325,10 +337,11 @@ func (c *Client) classifyAndWait(ctx context.Context, method, endpoint string, a
 		// is gone until reset. Waiting longer than maxWait allows is
 		// refused up front instead of pretending an 8s retry helps.
 		if apiErr.RateLimited && delay > c.governor.cfg.maxWait {
-			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "status", apiErr.StatusCode, "delay", delay, "max_wait", c.governor.cfg.maxWait, "body", apiErr.BodySnippet(), "err", apiErr)
+			logTerminal(apiErr)
 			return false, apiErr
 		}
-		logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay, "status", apiErr.StatusCode)
+		logging.Debug(c.logger, "http request attempt failed, will retry", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1, "status", apiErr.StatusCode, "delay", delay)
+		logging.Warn(c.logger, "http retry sleep", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1, "delay", delay, "status", apiErr.StatusCode)
 		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 			return false, sleepErr
 		}
@@ -344,11 +357,12 @@ func (c *Client) classifyAndWait(ctx context.Context, method, endpoint string, a
 			return nil, retry, err
 		}
 		if attempt >= c.maxRetries || !retryable || !isRetryableNetworkError(sendErr) {
-			logging.Debug(c.logger, "http request failed", "method", method, "url", endpoint, "attempt", attempt+1, "retryable", false, "err", sendErr)
+			logging.Warn(c.logger, "http request failed", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1, "err", sendErr)
 			return nil, false, sendErr
 		}
 		delay := c.retryDelay(attempt, nil)
-		logging.Warn(c.logger, "http retry sleep", "method", method, "url", endpoint, "attempt", attempt+1, "delay", delay)
+		logging.Debug(c.logger, "http request attempt failed, will retry", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1, "delay", delay, "err", sendErr)
+		logging.Warn(c.logger, "http retry sleep", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1, "delay", delay)
 		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
 			return nil, false, sleepErr
 		}
@@ -542,6 +556,20 @@ func minDuration(a, b time.Duration) time.Duration {
 
 func (c *Client) apiURL(path string) string {
 	return c.apiBaseURL + path
+}
+
+// redactEndpoint masks query values in an API endpoint for logging: most
+// endpoints carry only pagination, but redacting by construction keeps
+// credentials out of logs instead of relying on per-endpoint audits.
+func redactEndpoint(endpoint string) string {
+	path, query, hasQuery := strings.Cut(endpoint, "?")
+	if !hasQuery {
+		return path
+	}
+	if redacted := logging.RedactQueryValues(query); redacted != "" {
+		return path + "?" + redacted
+	}
+	return path
 }
 
 func isRetrySafeMethod(method string) bool {

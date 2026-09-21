@@ -69,7 +69,7 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		writeState.markDirtyLocked(writeState.logicalSize, end)
 		writeState.logicalSize = end
 	}
-	h.fs.debugf("fallocate path=%s inode=%d off=%d size=%d mode=%#x", h.handlePath(), h.inode, start, length, mode)
+	h.fs.debugOp("fallocate", "path", h.handlePath(), "inode", h.inode, "off", start, "size", length, "mode", mode)
 	return 0
 }
 
@@ -92,7 +92,7 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
-	h.fs.debugf("fsync path=%s inode=%d", h.handlePath(), h.inode)
+	h.fs.debugOp("fsync", "path", h.handlePath(), "inode", h.inode)
 	return h.commitFlushDrain(ctx)
 }
 

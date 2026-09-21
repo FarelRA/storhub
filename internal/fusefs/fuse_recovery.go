@@ -220,10 +220,10 @@ func (s *Filesystem) quarantineFile(tempPath, targetPath, reason string, intent 
 	}
 	saved := quarantineIntoDirWithIntent(tempPath, s.recoveryDir(), targetPath, reason, intent, s.opts.Logger)
 	if saved == "" {
-		s.errorf("quarantine failed; dirty overlay left in cache path=%s", tempPath)
+		s.errorOp("quarantine failed; dirty overlay left in cache", "path", tempPath)
 		return
 	}
-	s.errorf("commit failed; dirty overlay quarantined for manual recovery path=%s saved=%s", tempPath, saved)
+	s.errorOp("commit failed; dirty overlay quarantined for manual recovery", "path", tempPath, "saved", saved)
 }
 
 // RecoveryInventory replays the recovery directory: every quarantined

@@ -350,11 +350,16 @@ func (w *inodeWriteState) pathForLog() string {
 	return w.path
 }
 
-func (s *Filesystem) debugf(format string, args ...any) {
-	if !s.opts.Debug || s.opts.Logger == nil {
+// debugOp logs a structured debug event through the mount logger. It is
+// gated on Options.Debug like the former debugf, so hot-path call sites
+// stay cheap in production; unlike debugf it keeps every field structured
+// (op plus key/value attrs) instead of collapsing them with fmt.Sprintf.
+// Never pass file bytes, only sizes, offsets, and paths.
+func (s *Filesystem) debugOp(op string, args ...any) {
+	if !s.opts.Debug {
 		return
 	}
-	logging.Debug(s.opts.Logger, fmt.Sprintf(format, args...))
+	logging.Debug(s.log(), "fuse "+op, args...)
 }
 
 // log returns the mount logger, never nil. Operational failures must
@@ -367,14 +372,13 @@ func (s *Filesystem) log() *slog.Logger {
 	return s.opts.Logger
 }
 
-// errorf logs at error level even when no injected logger is configured:
-// operational failures like data preservation must never be silently dropped.
-func (s *Filesystem) errorf(format string, args ...any) {
-	logger := s.opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-	logging.Error(logger, fmt.Sprintf(format, args...))
+// errorOp logs a structured error event through the mount logger. It is
+// ungated like the former errorf: operational failures must never be
+// silently dropped, so errors log even when no logger was injected (via
+// the process-default fallback in log). Fields stay structured; never
+// pass file bytes, only sizes, offsets, paths, and errors.
+func (s *Filesystem) errorOp(op string, args ...any) {
+	logging.Error(s.log(), "fuse "+op, args...)
 }
 
 // quarantine reasons recorded in manifests.

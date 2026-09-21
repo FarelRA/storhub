@@ -21,9 +21,10 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		// without dirty tracking - the data was acknowledged but silently
 		// discarded at commit. Fail loudly instead of pretending the write
 		// landed.
-		h.fs.debugf("write rejected path=%s inode=%d reason=no-write-state", h.handlePath(), h.inode)
+		h.fs.debugOp("write rejected", "path", h.handlePath(), "inode", h.inode)
 		return 0, syscall.EIO
 	}
+	h.fs.debugOp("write start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(data))
 	writeState.opMu.Lock()
 	writeState.mu.Lock()
 	// A quarantined (poisoned) overlay no longer holds the bytes its
@@ -96,7 +97,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// clear them (see stagePrivClearLocked).
 	h.fs.stagePrivClearForDataWrite(h.fs.callerContext(ctx), writeState, writeState.path)
 	syncWrite := h.flags&syncWriteFlags != 0
-	h.fs.debugf("write path=%s inode=%d off=%d bytes=%d", writeState.path, h.inode, off, n)
+	h.fs.debugOp("write complete", "path", writeState.path, "inode", h.inode, "off", off, "bytes", n)
 	writeState.mu.Unlock()
 	unlockOpMu(&writeState.opMu)
 	if !syncWrite {
@@ -115,6 +116,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// later fsync or close to retry); a drain-only failure publishes
 	// without quarantining (see drainProject).
 	if errno := h.commitAndDrain(ctx); errno != 0 {
+		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "errno", errno)
 		return 0, errno
 	}
 	return uint32(n), 0
@@ -232,7 +234,7 @@ func (h *storhubHandle) drainProject(ctx context.Context) syscall.Errno {
 	// the dirty state for retry. Quarantining here would double-replay
 	// the same bytes via redrive plus the quarantined overlay.
 	if err := h.fs.hub.DrainProjectContext(ctx, h.fs.project); err != nil {
-		h.fs.errorf("drain failed path=%s inode=%d err=%v", h.handlePath(), h.inode, err)
+		h.fs.errorOp("drain failed", "path", h.handlePath(), "inode", h.inode, "err", err)
 		return syscall.EIO
 	}
 	return 0
@@ -267,7 +269,7 @@ func (h *storhubHandle) checkCommitWriteAccess(ctx context.Context, targetPath s
 		return 0
 	}
 	if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-		h.fs.debugf("commit denied path=%s inode=%d step=dac err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit denied", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	return 0
@@ -305,9 +307,9 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 	if len(ws.dirtyRanges) == 0 {
 		ws.mu.Unlock()
 		if logicalSize != baseSize {
-			h.fs.debugf("commit truncate path=%s inode=%d size=%d", targetPath, h.inode, logicalSize)
+			h.fs.debugOp("commit truncate", "path", targetPath, "inode", h.inode, "size", logicalSize)
 			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=truncate err=%v", targetPath, h.inode, err)
+				h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 				return errnoFromError(err)
 			}
 		}
@@ -354,25 +356,25 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 	baseSize := ws.baseSize
 	ws.mu.Unlock()
 	if err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=range-snapshot err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	// The snapshot is event-scoped: this commit frame owns it and removes
 	// it on every exit path.
 	defer func() { _ = os.Remove(snapshotPath) }()
-	h.fs.debugf("commit chunk-rewrite path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
+	h.fs.debugOp("commit chunk-rewrite", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
 	repoMeta, _, err := h.fs.hub.LoadRepoMetadataReadonlyContext(ctx, h.fs.project)
 	if err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=load-metadata err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	fileMeta := repoMeta.FindFile(targetPath)
 	if fileMeta == nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=find-file err=not found", targetPath, h.inode)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode)
 		return syscall.ENOENT
 	}
 	if _, err := h.fs.hub.RewriteFileRangesWithMetadataContext(ctx, h.fs.project, targetPath, snapshotPath, repoMeta, fileMeta, logicalSize, planned); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=chunk-rewrite err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	ws.mu.Lock()
@@ -395,16 +397,16 @@ func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, lo
 	dirtyCount := len(ws.dirtyRanges)
 	ws.mu.Unlock()
 	if err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=full-snapshot err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	if cleanupSnapshot {
 		// Event-scoped snapshot: this commit frame owns the removal.
 		defer func() { _ = os.Remove(snapshotPath) }()
 	}
-	h.fs.debugf("commit replace path=%s inode=%d base=%d size=%d dirty_ranges=%d", targetPath, h.inode, baseSize, logicalSize, dirtyCount)
+	h.fs.debugOp("commit replace", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "dirty_ranges", dirtyCount)
 	if _, err := h.fs.hub.ReplaceFileContext(ctx, h.fs.project, targetPath, snapshotPath); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=replace err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	ws.mu.Lock()
@@ -455,7 +457,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		// internal inconsistency: refuse to upload fabricated bytes.
 		if n < len(buf) && dirty.Start+int64(n) < logicalSize {
 			ws.mu.Unlock()
-			h.fs.errorf("commit aborted path=%s inode=%d step=patch-read short read at [%d,%d): got %d of %d bytes before EOF", targetPath, h.inode, dirty.Start, dirty.End, n, len(buf))
+			h.fs.errorOp("commit aborted", "path", targetPath, "inode", h.inode, "step", "patch-read", "start", dirty.Start, "end", dirty.End, "got", n, "want", len(buf))
 			return syscall.EIO
 		}
 		for j := n; j < len(buf); j++ {
@@ -476,9 +478,9 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	// range. Ascending order needs no intermediate offset fixups. Either
 	// the whole batch commits or none of it does, so failures leave every
 	// range dirty and the retry replays the identical batch.
-	h.fs.debugf("commit patch path=%s inode=%d base=%d size=%d ranges=%d", targetPath, h.inode, baseSize, logicalSize, len(planned))
+	h.fs.debugOp("commit patch", "path", targetPath, "inode", h.inode, "base", baseSize, "size", logicalSize, "ranges", len(planned))
 	if _, err := h.fs.hub.PatchFileRangesContext(ctx, h.fs.project, targetPath, edits); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=patch-batch err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	// Crash ordering: the commit is not done until the size is
@@ -490,7 +492,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		appendOnly := len(planned) == 1 && planned[0].Start >= baseSize && logicalSize == planned[0].End
 		if !appendOnly {
 			if _, err := h.fs.hub.TruncateFileContext(ctx, h.fs.project, targetPath, logicalSize); err != nil {
-				h.fs.debugf("commit failed path=%s inode=%d step=post-patch-truncate err=%v", targetPath, h.inode, err)
+				h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 				return errnoFromError(err)
 			}
 		}
@@ -504,7 +506,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	// the remote patch already landed, and the replay is idempotent.
 	if ws.temp == nil || ws.poisoned {
 		ws.mu.Unlock()
-		h.fs.errorf("commit interrupted by quarantine path=%s inode=%d step=post-patch-local", targetPath, h.inode)
+		h.fs.errorOp("commit interrupted by quarantine", "path", targetPath, "inode", h.inode)
 		return syscall.EIO
 	}
 	for _, dirty := range planned {
@@ -513,14 +515,14 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	ws.mu.Unlock()
 	ws.mu.Lock()
 	if err := ws.refreshBaseSnapshotLocked(); err != nil {
-		h.fs.debugf("commit cache refresh failed path=%s inode=%d step=patch-cache err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit cache refresh failed", "path", targetPath, "inode", h.inode, "err", err)
 		ws.clearBaseSnapshotLocked()
 	}
 	ws.baseSize = logicalSize
 	ws.dirtyRanges = nil
 	ws.tempAuthoritative = false
 	if err := ws.temp.Truncate(logicalSize); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=local-truncate err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		ws.mu.Unlock()
 		return errnoFromError(err)
 	}
@@ -575,7 +577,7 @@ func (h *storhubHandle) applyMetadataPatch(ctx context.Context, targetPath strin
 		return 0
 	}
 	if err := h.fs.hub.ApplyMetadataPatchContext(ctx, h.fs.project, targetPath, patch); err != nil {
-		h.fs.debugf("commit failed path=%s inode=%d step=metadata-patch err=%v", targetPath, h.inode, err)
+		h.fs.debugOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		return errnoFromError(err)
 	}
 	return 0

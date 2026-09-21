@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // repoMetadataJSON pins the blob wire format explicitly. The stored maps are
@@ -84,6 +86,7 @@ func (m *RepoMetadata) FromJSON(data []byte) error {
 		return err
 	}
 	if err := json.Unmarshal(upgraded, m); err != nil {
+		logging.Error(metaLog(), "metadata load failed", "err", err)
 		return fmt.Errorf("unmarshal metadata: %w", err)
 	}
 	m.Version = version

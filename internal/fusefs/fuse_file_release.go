@@ -6,10 +6,13 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"os"
 	"syscall"
+	"time"
 )
 
 func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
-	h.fs.debugf("release path=%s inode=%d", h.handlePath(), h.inode)
+	started := time.Now()
+	releasePath := h.handlePath()
+	h.fs.debugOp("release start", "path", releasePath, "inode", h.inode)
 	errno := h.commit(ctx)
 	h.releaseTrackedLocks()
 	if errno != 0 {
@@ -62,6 +65,11 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		h.fs.releaseWriteState(writeState)
 	}
 	_ = ctx
+	if errno != 0 {
+		h.fs.errorOp("release failed", "path", releasePath, "inode", h.inode, "errno", errno, "elapsed", time.Since(started))
+		return errno
+	}
+	h.fs.debugOp("release complete", "path", releasePath, "inode", h.inode, "elapsed", time.Since(started))
 	return errno
 }
 

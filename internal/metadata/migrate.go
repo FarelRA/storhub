@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // CurrentVersion is the newest document version this build reads and writes
@@ -95,15 +98,19 @@ func Migrate(data []byte) ([]byte, int, error) {
 		// write-time layout split, not a blob transform.
 		return data, from, nil
 	}
+	started := time.Now()
+	logging.Warn(metaLog(), "metadata migration", "reason", "upgrading metadata blob to the current schema", "from", from, "to", maxBlobVersion)
 	for v := from; v < maxBlobVersion; v++ {
 		step := migrators[v]
 		if step == nil {
 			return nil, v, fmt.Errorf("no migration path from metadata version %d", v)
 		}
 		if data, err = step(data); err != nil {
+			logging.Error(metaLog(), "metadata migration failed", "from", from, "to", maxBlobVersion, "step", v, "err", err)
 			return nil, v, fmt.Errorf("migrate metadata v%d->v%d: %w", v, v+1, err)
 		}
 	}
+	logging.Debug(metaLog(), "metadata migration complete", "from", from, "to", maxBlobVersion, "elapsed", time.Since(started))
 	return data, maxBlobVersion, nil
 }
 

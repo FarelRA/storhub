@@ -193,7 +193,7 @@ func (w *inodeWriteState) materialize(ctx context.Context) error {
 		// Propagate: silently treating stat failure as "empty file"
 		// would swap an open handle's content to EOF.
 		if rmErr := os.Remove(tempPath); rmErr != nil {
-			w.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", path, tempPath, rmErr)
+			w.fs.errorOp("materialize cleanup failed", "path", path, "temp", tempPath, "err", rmErr)
 		}
 		w.mu.Lock()
 		w.temp = nil

@@ -27,17 +27,22 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	if errno != 0 {
 		return errno
 	}
+	n.fs.debugOp("setattr start", "path", targetPath, "inode", n.inode, "valid", in.Valid)
 	usedLocalSize, localSize, errno := n.setattrSize(ctx, targetPath, in, state)
 	if errno != 0 {
+		n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "size", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrMode(ctx, targetPath, in, state); errno != 0 {
+		n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "mode", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrOwner(ctx, targetPath, in, state); errno != 0 {
+		n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "owner", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrTimes(ctx, targetPath, in, state); errno != 0 {
+		n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "times", "errno", errno)
 		return errno
 	}
 	return n.finishSetattr(ctx, targetPath, state, usedLocalSize, localSize, out, in.Valid)
@@ -248,7 +253,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 	}
 	n.detachedReply(base, state, out)
 	n.fs.notifyKernelContentChanged(n.inode)
-	n.fs.debugf("setattr detached inode=%d valid=%#x", n.inode, in.Valid)
+	n.fs.debugOp("setattr detached", "inode", n.inode, "valid", in.Valid)
 	return 0
 }
 
@@ -503,6 +508,6 @@ func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, stat
 	// The attr response updates this handle's cache line, but other cached
 	// copies (other nodes, readdir-plus) expire only via invalidation.
 	n.fs.notifyKernelContentChanged(n.inode)
-	n.fs.debugf("setattr path=%s valid=%#x", targetPath, valid)
+	n.fs.debugOp("setattr complete", "path", targetPath, "inode", n.inode, "valid", valid)
 	return 0
 }

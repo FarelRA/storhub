@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type storhubHandle struct {
@@ -154,7 +155,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if stale != 0 {
 		return nil, 0, stale
 	}
-	n.fs.debugf("open start path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
+	n.fs.debugOp("open start", "path", targetPath, "inode", n.inode, "flags", flags)
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
 		return nil, 0, errnoFromError(err)
@@ -228,13 +229,13 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		const oPathFlag = 0o10000000
 		if flags&syscall.O_ACCMODE != syscall.O_WRONLY && flags&oPathFlag == 0 {
 			if err := shfs.CheckReadAccess(ctx, repoMeta, targetPath); err != nil {
-				n.fs.debugf("open denied path=%s step=read-dac err=%v", targetPath, err)
+				n.fs.debugOp("open denied", "path", targetPath, "err", err)
 				return nil, 0, errnoFromError(err)
 			}
 		}
 		if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
 			if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-				n.fs.debugf("open denied path=%s step=dac err=%v", targetPath, err)
+				n.fs.debugOp("open denied", "path", targetPath, "err", err)
 				return nil, 0, errnoFromError(err)
 			}
 		}
@@ -265,7 +266,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	h.pinned = pin
-	n.fs.debugf("open path=%s inode=%d flags=%#x", targetPath, n.inode, flags)
+	n.fs.debugOp("open complete", "path", targetPath, "inode", n.inode, "flags", flags)
 	return h, 0, 0
 }
 
@@ -276,10 +277,10 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 		return nil, nil, 0, stale
 	}
 	childPath := path.Join(parentPath, name)
-	n.fs.debugf("create start path=%s flags=%#x mode=%#o", childPath, flags, mode)
+	n.fs.debugOp("create start", "path", childPath, "flags", flags, "mode", mode)
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		n.fs.debugf("create failed path=%s step=create err=%v", childPath, err)
+		n.fs.debugOp("create failed", "path", childPath, "err", err)
 		return nil, nil, 0, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
@@ -287,12 +288,12 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	ino := n.attachEntry(ctx, entry, out)
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
-		n.fs.debugf("create failed path=%s step=open-handle err=%v", childPath, err)
+		n.fs.debugOp("create failed", "path", childPath, "err", err)
 		// The empty file is already committed remotely; leaving it
 		// behind would orphan an entry the application was told was never
 		// created. Roll it back before reporting the failure.
 		if unlinkErr := n.fs.hub.UnlinkContext(ctx, n.fs.project, childPath); unlinkErr != nil {
-			n.fs.errorf("create rollback failed path=%s err=%v (original: %v)", childPath, unlinkErr, err)
+			n.fs.errorOp("create rollback failed", "path", childPath, "err", unlinkErr, "original", err)
 		}
 		n.fs.notifyEntryForPath(parentPath, name)
 		return nil, nil, 0, errnoFromError(err)
@@ -300,7 +301,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	// The kernel may hold a negative entry for this name (NegativeTimeout);
 	// the create must evict it or the file stays invisible until expiry.
 	n.fs.notifyEntryForPath(parentPath, name)
-	n.fs.debugf("create path=%s inode=%d flags=%#x mode=%#o", childPath, entry.Inode, flags, mode)
+	n.fs.debugOp("create complete", "path", childPath, "inode", entry.Inode, "flags", flags, "mode", mode)
 	return ino, h, 0, 0
 }
 
@@ -398,10 +399,10 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 			return nil
 		}
 		if rmErr := temp.Close(); rmErr != nil {
-			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
+			h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", rmErr)
 		}
 		if rmErr := os.Remove(temp.Name()); rmErr != nil {
-			h.fs.errorf("materialize cleanup failed path=%s temp=%s err=%v", targetPath, temp.Name(), rmErr)
+			h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", rmErr)
 		}
 		h.mu.Lock()
 		if h.temp == temp {
@@ -480,7 +481,16 @@ func (h *storhubHandle) abandonMaterializeLocked(temp *os.File) bool {
 	return true
 }
 
-func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (result fuse.ReadResult, errno syscall.Errno) {
+	started := time.Now()
+	h.fs.debugOp("read start", "path", h.handlePath(), "inode", h.inode, "off", off, "size", len(dest))
+	// Success is logged once here; every failure path below already logs
+	// at Error with path, inode, offset, and cause.
+	defer func() {
+		if errno == 0 {
+			h.fs.debugOp("read complete", "path", h.handlePath(), "inode", h.inode, "off", off, "elapsed", time.Since(started))
+		}
+	}()
 	if writeState := h.snapshotWriteState(); writeState != nil {
 		// Serialize with commits on opMu (always opMu before mu): commit
 		// drops mu across its network window while mutating the plan,
@@ -500,7 +510,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		// the returned slice, so the old per-read copy was pure GC churn.
 		n, err := writeState.readIntoLocked(ctx, dest, off)
 		if err != nil {
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
+			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -511,7 +521,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 	if temp != nil {
 		n, err := temp.ReadAt(dest, off)
 		if err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, io.EOF) {
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
+			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", err)
 			return nil, errnoFromError(err)
 		}
 		return fuse.ReadResultData(dest[:n]), 0
@@ -534,7 +544,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 		// A failed read is an operational event users experience as EIO
 		// with no other trace; without this line the backend cause was
 		// invisible unless the mount ran at debug level.
-		h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
+		h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", err)
 		return nil, errnoFromError(err)
 	}
 	return fuse.ReadResultData(data), 0
@@ -608,7 +618,7 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 		n, err := temp.ReadAt(dest[pos-off:e-off], pos)
 		if err != nil && !errors.Is(err, io.EOF) {
 			state.mu.Unlock()
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
+			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", err)
 			return nil, errnoFromError(err), true
 		}
 		for i := int64(n); i < e-pos; i++ {
@@ -629,7 +639,7 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 				}
 				continue
 			}
-			h.fs.errorf("read failed path=%s inode=%d off=%d len=%d err=%v", h.handlePath(), h.inode, off, len(dest), err)
+			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", err)
 			return nil, errnoFromError(err), true
 		}
 		copy(dest[g.start-off:], data)

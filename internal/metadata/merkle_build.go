@@ -6,6 +6,9 @@ import (
 	"maps"
 	"path"
 	"sort"
+	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // BuildTreeStream serializes a flat RepoMetadata into the Merkle object set
@@ -23,6 +26,27 @@ import (
 // Callers must pass a normalized tree (deterministic entry ordering), same
 // as BuildTree. Returns the manifest references.
 func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter) (*TreeRefs, error) {
+	started := time.Now()
+	objects := 0
+	if emit != nil {
+		inner := emit
+		emit = func(sha string, data []byte) error {
+			objects++
+			return inner(sha, data)
+		}
+	}
+	logging.Debug(metaLog(), "metadata build start")
+	refs, err := buildTreeStream(meta, cache, known, emit)
+	if err != nil {
+		logging.Error(metaLog(), "metadata build failed", "err", err, "elapsed", time.Since(started))
+		return nil, err
+	}
+	logging.Debug(metaLog(), "metadata build complete", "objects", objects, "buckets", len(refs.ChunkBuckets), "elapsed", time.Since(started))
+	return refs, nil
+}
+
+// buildTreeStream is the build body behind the logging wrapper above.
+func buildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string) bool, emit TreeEmitter) (*TreeRefs, error) {
 	if err := checkTreeParents(meta); err != nil {
 		return nil, err
 	}

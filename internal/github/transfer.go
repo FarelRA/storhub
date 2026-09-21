@@ -69,11 +69,13 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		// caller bug and must surface as an error.
 		return nil, 0, fmt.Errorf("download asset %d: invalid byte range [%d,%d]", assetID, start, end)
 	}
+	started := time.Now().UTC()
 	for attempt := 0; attempt < 2; attempt++ {
 		cdnURL, cached := c.cachedAssetURL(assetID)
 		if cached {
 			body, size, status, err := c.fetchCDNRange(ctx, cdnURL.url, rangeHeader, end-start+1)
 			if err == nil {
+				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Now().UTC().Sub(started))
 				return body, size, nil
 			}
 			if !isCDNRejection(status) {
@@ -99,6 +101,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			c.storeAssetURL(assetID, location)
 			body, size, status, fetchErr := c.fetchCDNRange(ctx, location, rangeHeader, end-start+1)
 			if fetchErr == nil {
+				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Now().UTC().Sub(started))
 				return body, size, nil
 			}
 			if !isCDNRejection(status) || attempt > 0 {
@@ -112,6 +115,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		// test servers that stream bytes directly working unchanged). Error
 		// statuses never reach here: doRequest already converted every
 		// >=400 response into an *APIError.
+		logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", resp.ContentLength, "elapsed", time.Now().UTC().Sub(started))
 		return resp.Body, resp.ContentLength, nil
 	}
 	return nil, 0, fmt.Errorf("download asset %d: exhausted cdn re-resolution attempts", assetID)

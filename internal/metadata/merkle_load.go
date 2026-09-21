@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // LoadTree reconstructs a flat RepoMetadata from a manifest, fetching each
@@ -16,6 +19,23 @@ import (
 // even if the fetch layer returns it unchecked. The returned tree is not yet
 // normalized; callers Normalize/RecomputeStats as they do after any load.
 func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
+	started := time.Now()
+	buckets := 0
+	if manifest != nil {
+		buckets = len(manifest.ChunkBuckets)
+	}
+	logging.Debug(metaLog(), "metadata load start", "buckets", buckets)
+	meta, err := loadTree(manifest, getObject)
+	if err != nil {
+		logging.Error(metaLog(), "metadata load failed", "err", err, "elapsed", time.Since(started))
+		return nil, err
+	}
+	logging.Debug(metaLog(), "metadata load complete", "files", len(meta.files), "dirs", len(meta.dirs), "chunks", len(meta.chunks), "releases", len(meta.releases), "elapsed", time.Since(started))
+	return meta, nil
+}
+
+// loadTree is the load body behind the logging wrapper above.
+func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("nil manifest")
 	}
@@ -75,6 +95,7 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 	}
 	if manifest.Version < maxMetadataVersion {
 		// Seconds-era manifest: its objects carry seconds timestamps.
+		logging.Warn(metaLog(), "metadata timestamp fallback", "reason", "seconds-era manifest, migrating timestamps to nanoseconds", "from", manifest.Version, "to", maxMetadataVersion)
 		migrateTreeTimesToNano(meta)
 	}
 	meta.RecomputeStats()
@@ -170,6 +191,24 @@ const loadTreeFetchParallelism = 8
 // LoadTree; fetched bytes are memoized, so a deduped object shared by two
 // paths still travels the wire once.
 func LoadTreeParallel(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
+	started := time.Now()
+	buckets := 0
+	if manifest != nil {
+		buckets = len(manifest.ChunkBuckets)
+	}
+	logging.Debug(metaLog(), "metadata parallel load start", "buckets", buckets)
+	meta, err := loadTreeParallel(manifest, getObject)
+	if err != nil {
+		logging.Error(metaLog(), "metadata parallel load failed", "err", err, "elapsed", time.Since(started))
+		return nil, err
+	}
+	logging.Debug(metaLog(), "metadata parallel load complete", "files", len(meta.files), "dirs", len(meta.dirs), "chunks", len(meta.chunks), "releases", len(meta.releases), "elapsed", time.Since(started))
+	return meta, nil
+}
+
+// loadTreeParallel is the parallel load body behind the logging wrapper
+// above.
+func loadTreeParallel(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("nil manifest")
 	}
@@ -220,6 +259,7 @@ func LoadTreeParallel(manifest *Manifest, getObject func(sha string) ([]byte, er
 	}
 	if manifest.Version < maxMetadataVersion {
 		// Seconds-era manifest: its objects carry seconds timestamps.
+		logging.Warn(metaLog(), "metadata timestamp fallback", "reason", "seconds-era manifest, migrating timestamps to nanoseconds", "from", manifest.Version, "to", maxMetadataVersion)
 		migrateTreeTimesToNano(l.meta)
 	}
 	l.meta.RecomputeStats()

@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // The v6 index splits the single metadata blob into a Merkle hierarchy of
@@ -160,6 +163,12 @@ func (c *TreeCache) Clone() *TreeCache {
 	out.releases = c.releases
 	return out
 }
+
+// metaLog reports operational events for the metadata package. The
+// package is a pure library with no logger plumbing, so events go through
+// the process-default logger tagged with the metadata component; messages
+// must never be silently dropped, and no payload bytes are ever logged.
+func metaLog() *slog.Logger { return logging.WithComponent(nil, "metadata") }
 
 // ObjectSHA is the content address of an object's canonical bytes.
 func ObjectSHA(data []byte) string {
