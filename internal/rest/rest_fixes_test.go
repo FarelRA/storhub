@@ -23,7 +23,7 @@ func TestProjectShareGetDoesNotLeakToken(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	bearer := loginBearer(t, handler, "root", "root-pass")
+	bearer := loginBearer(t, handler, "root", "rootpass")
 	auth := map[string]string{"Authorization": bearer, "Content-Type": "application/json"}
 
 	created := mustDecodeShare(t, mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
@@ -59,7 +59,7 @@ func TestClientForFailsClosedOnForeignContextValue(t *testing.T) {
 		shares: &shareRegistry{items: map[string]*shareRecord{}},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo", nil)
-	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "not-a-client"))
+	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "notaclient"))
 	got, err := h.clientFor(req)
 	if err == nil {
 		t.Fatal("clientFor must fail closed with an error on a foreign context value, not fall back to the raw client")
@@ -275,7 +275,7 @@ func TestInternalErrorsAreNotEchoed(t *testing.T) {
 	client.failNextReplace(errors.New("dial tcp 10.0.3.7:8888 /var/lib/storhub/internal/srv-9 exploded"))
 	resp := mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=f.txt", strings.NewReader("payload"), nil, http.StatusInternalServerError)
 	body := string(readBody(t, resp))
-	for _, leak := range []string{"10.0.3.7", "srv-9", "/var/lib", "exploded"} {
+	for _, leak := range []string{"10.0.3.7", "srv9", "/var/lib", "exploded"} {
 		if strings.Contains(body, leak) {
 			t.Fatalf("internal detail %q leaked to the client: %s", leak, body)
 		}
@@ -356,8 +356,8 @@ func TestShareManagementRequiresOwnershipOrAdmin(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	alice := loginBearer(t, handler, "alice", "alice-pass")
-	root := loginBearer(t, handler, "root", "root-pass")
+	alice := loginBearer(t, handler, "alice", "alicepass")
+	root := loginBearer(t, handler, "root", "rootpass")
 
 	aliceShare := mustDecodeShare(t, mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
 		bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared/readme.txt"})),
@@ -399,7 +399,7 @@ func TestAuthMiddlewareRechecksUserRecord(t *testing.T) {
 	t.Parallel()
 	client := newFakeRESTClient()
 	auth, err := newAuthenticator(AuthOptions{
-		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
+		TokenSigningKey: []byte("testsigningkey0123456789abcdef0000"),
 		Users: []User{
 			{Username: "alice", PasswordHash: testHashAlicePass, UID: 1001, PrimaryGID: 2001},
 			{Username: "root", PasswordHash: testHashRootPass, UID: 0, PrimaryGID: 0, Admin: true},
@@ -426,7 +426,7 @@ func TestAuthMiddlewareRechecksUserRecord(t *testing.T) {
 		return rec.Code
 	}
 
-	_, aliceToken, _, err := auth.login("alice", "alice-pass")
+	_, aliceToken, _, err := auth.login("alice", "alicepass")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestAuthMiddlewareRechecksUserRecord(t *testing.T) {
 	auth.users["alice"] = user
 
 	// Demotion: the live record's admin bit wins over stale claims.
-	_, rootToken, _, err := auth.login("root", "root-pass")
+	_, rootToken, _, err := auth.login("root", "rootpass")
 	if err != nil {
 		t.Fatalf("root login: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestAuthTokenRejectedViaQuery(t *testing.T) {
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
-	bearer := loginBearer(t, handler, "alice", "alice-pass")
+	bearer := loginBearer(t, handler, "alice", "alicepass")
 	token := strings.TrimPrefix(bearer, "Bearer ")
 
 	mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo", nil, map[string]string{"Authorization": bearer}, http.StatusOK)
@@ -489,7 +489,7 @@ func TestShareTokenStillAcceptedViaQuery(t *testing.T) {
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
-	root := loginBearer(t, handler, "root", "root-pass")
+	root := loginBearer(t, handler, "root", "rootpass")
 	share := mustDecodeShare(t, mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
 		bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"})),
 		map[string]string{"Authorization": root, "Content-Type": "application/json"}, http.StatusCreated))
@@ -663,7 +663,7 @@ func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
 	t.Parallel()
 	auth, err := newAuthenticator(AuthOptions{
 		TokenSigningKey: []byte("0123456789abcdef0123456789abcdef"),
-		Users:           []User{{Username: "alice", Password: "alice-pass", UID: 1, PrimaryGID: 1}},
+		Users:           []User{{Username: "alice", Password: "alicepass", UID: 1, PrimaryGID: 1}},
 	})
 	if err != nil {
 		t.Fatalf("new authenticator: %v", err)
@@ -676,7 +676,7 @@ func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
 		return verifyPassword(password, encoded)
 	}
 
-	_, _, _, knownErr := auth.login("alice", "wrong-password")
+	_, _, _, knownErr := auth.login("alice", "wrongpassword")
 	if knownErr == nil {
 		t.Fatal("wrong password must fail")
 	}
@@ -685,7 +685,7 @@ func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
 	}
 
 	calls, lastHash = 0, ""
-	_, _, _, unknownErr := auth.login("mallory-not-a-user", "whatever")
+	_, _, _, unknownErr := auth.login("mallorynotauser", "whatever")
 	if unknownErr == nil {
 		t.Fatal("unknown user must fail")
 	}
@@ -700,7 +700,7 @@ func TestLoginConstantWorkForUnknownUsers(t *testing.T) {
 	}
 
 	calls = 0
-	if _, _, _, err := auth.login("alice", "alice-pass"); err != nil || calls != 1 {
+	if _, _, _, err := auth.login("alice", "alicepass"); err != nil || calls != 1 {
 		t.Fatalf("correct login: err=%v verifies=%d", err, calls)
 	}
 }
@@ -712,8 +712,8 @@ func TestOpsRoutesDenyNonAdminAndShareTokens(t *testing.T) {
 	client := newFakeRESTClient()
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
-	alice := loginBearer(t, handler, "alice", "alice-pass")
-	root := loginBearer(t, handler, "root", "root-pass")
+	alice := loginBearer(t, handler, "alice", "alicepass")
+	root := loginBearer(t, handler, "root", "rootpass")
 
 	share := mustDecodeShare(t, mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
 		bytes.NewBuffer(mustJSONMarshal(t, shareRequest{Path: "shared"})),
@@ -737,8 +737,8 @@ func TestOpsRoutesDenyNonAdminAndShareTokens(t *testing.T) {
 	}
 	for _, tc := range cases {
 		for _, caller := range []struct{ who, bearer string }{
-			{"non-admin", alice},
-			{"share-token", "Bearer " + share.Token},
+			{"nonadmin", alice},
+			{"sharetoken", "Bearer " + share.Token},
 		} {
 			t.Run(tc.name+"/"+caller.who, func(t *testing.T) {
 				mustJSONRequestWithBearer(t, handler, tc.target, tc.body, caller.bearer, http.StatusForbidden)
@@ -796,8 +796,8 @@ func TestRESTOwnerChgrpAndKeepConvention(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	rootAuth := map[string]string{"Authorization": loginBearer(t, handler, "root", "root-pass"), "Content-Type": "application/json"}
-	aliceAuth := map[string]string{"Authorization": loginBearer(t, handler, "alice", "alice-pass"), "Content-Type": "application/json"}
+	rootAuth := map[string]string{"Authorization": loginBearer(t, handler, "root", "rootpass"), "Content-Type": "application/json"}
+	aliceAuth := map[string]string{"Authorization": loginBearer(t, handler, "alice", "alicepass"), "Content-Type": "application/json"}
 
 	// Hand shared/readme.txt to alice so she is the file owner.
 	mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/chown",

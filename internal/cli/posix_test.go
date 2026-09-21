@@ -19,12 +19,10 @@ import (
 // runPosixCLI runs one CLI invocation against fakeHub and returns stderr.
 func runPosixCLI(t *testing.T, fake *fakeHub, args []string) string {
 	t.Helper()
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, stderr := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, stderr := newTestApp(t)
 	if err := app.Run(args); err != nil {
 		t.Fatalf("%v: %v", args, err)
 	}
@@ -38,9 +36,7 @@ func TestTruncateCommand(t *testing.T) {
 		t.Fatalf("truncate must report, got %q", out)
 	}
 	app, _, _ := newTestApp(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	if err := app.Run([]string{"truncate", "--token", "x", "demo", "docs/f.txt", "-1"}); err == nil || !IsUsageError(err) {
@@ -66,9 +62,7 @@ func TestChmodCommand(t *testing.T) {
 		t.Fatalf("chmod must report the mode, got %q", out)
 	}
 	app, _, _ := newTestApp(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	for _, bad := range []string{"888", "10000", "abc", ""} {
@@ -85,9 +79,7 @@ func TestChownCommand(t *testing.T) {
 		t.Fatalf("chown must report the -1 keep sentinel as uint32 max, got %q", out)
 	}
 	app, _, _ := newTestApp(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	if err := app.Run([]string{"chown", "--token", "x", "demo", "docs/f.txt", "abc", "0"}); err == nil || !IsUsageError(err) {
@@ -104,43 +96,37 @@ func TestTouchCommand(t *testing.T) {
 		t.Fatalf("touch must report, got %q", out)
 	}
 	app, _, _ := newTestApp(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	if err := app.Run([]string{"touch", "--token", "x", "demo", "docs/f.txt", "--mtime-ns", "-2"}); err == nil || !IsUsageError(err) {
-		t.Fatalf("--mtime-ns -2 must be a usage error, got %v", err)
+	if err := app.Run([]string{"touch", "--token", "x", "demo", "docs/f.txt", "--mtimens", "-2"}); err == nil || !IsUsageError(err) {
+		t.Fatalf("--mtimens -2 must be a usage error, got %v", err)
 	}
 }
 
 func TestTouchNoCreateSkipsMissing(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &touchFake{statErr: shfs.ErrNotFound}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, stderr := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, stderr := newTestApp(t)
-	if err := app.Run([]string{"touch", "--token", "x", "--no-create", "demo", "docs/missing.txt"}); err != nil {
-		t.Fatalf("touch --no-create on missing must succeed silently, got %v", err)
+	if err := app.Run([]string{"touch", "--token", "x", "--nocreate", "demo", "docs/missing.txt"}); err != nil {
+		t.Fatalf("touch --nocreate on missing must succeed silently, got %v", err)
 	}
 	if fake.created || fake.stamped {
-		t.Fatal("touch --no-create must neither create nor stamp a missing file")
+		t.Fatal("touch --nocreate must neither create nor stamp a missing file")
 	}
 	if got := stderr(); strings.Contains(got, "touched") {
-		t.Fatalf("touch --no-create must stay silent, got %q", got)
+		t.Fatalf("touch --nocreate must stay silent, got %q", got)
 	}
 }
 
 func TestTouchCreatesMissing(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &touchFake{statErr: shfs.ErrNotFound}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run([]string{"touch", "--token", "x", "demo", "docs/missing.txt"}); err != nil {
 		t.Fatalf("touch on missing must create, got %v", err)
 	}
@@ -182,12 +168,10 @@ func TestSymlinkReadlinkLinkCommands(t *testing.T) {
 	if !strings.Contains(out, "symlinked") {
 		t.Fatalf("symlink must report, got %q", out)
 	}
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, stdout, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, stdout, _ := newTestApp(t)
 	if err := app.Run([]string{"readlink", "--token", "x", "demo", "docs/alias.txt"}); err != nil {
 		t.Fatalf("readlink: %v", err)
 	}
@@ -212,13 +196,11 @@ func TestSyncCommand(t *testing.T) {
 }
 
 func TestSyncCommandPropagatesDrainError(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t, drainErr: errors.New("drain boom")}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run([]string{"project", "sync", "--token", "x", "demo"}); err == nil || !strings.Contains(err.Error(), "drain boom") {
 		t.Fatalf("drain failure must propagate, got %v", err)
 	}
@@ -277,12 +259,10 @@ func (h *casHub) RenameContext(_ context.Context, _, _, _ string, opts ...storhu
 
 func runWithCasHub(t *testing.T, hub *casHub, args []string) {
 	t.Helper()
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return hub, nil
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run(args); err != nil {
 		t.Fatalf("%v: %v", args, err)
 	}
@@ -295,13 +275,13 @@ func TestExpectedRevisionThreadsToVerbs(t *testing.T) {
 		rev  string
 		want func(h *casHub) string
 	}{
-		{name: "append", args: []string{"append", "--token", "x", "--expected-revision", "rev-1", "demo", "f", "data"}, rev: "rev-1", want: func(h *casHub) string { return h.appendRev }},
-		{name: "write", args: []string{"write", "--token", "x", "--expected-revision", "rev-2", "demo", "f", "0", "data"}, rev: "rev-2", want: func(h *casHub) string { return h.writeRev }},
-		{name: "patch", args: []string{"patch", "--token", "x", "--expected-revision", "rev-3", "demo", "f", "0", "0", "data"}, rev: "rev-3", want: func(h *casHub) string { return h.patchRev }},
-		{name: "truncate", args: []string{"truncate", "--token", "x", "--expected-revision", "rev-4", "demo", "f", "9"}, rev: "rev-4", want: func(h *casHub) string { return h.truncateRev }},
-		{name: "rm", args: []string{"rm", "--token", "x", "--expected-revision", "rev-5", "demo", "f"}, rev: "rev-5", want: func(h *casHub) string { return h.rmRev }},
-		{name: "rm-r", args: []string{"rm", "-r", "--token", "x", "--expected-revision", "rev-6", "demo", "d"}, rev: "rev-6", want: func(h *casHub) string { return h.rmdirRev }},
-		{name: "mv", args: []string{"mv", "--token", "x", "--expected-revision", "rev-7", "demo", "a", "b"}, rev: "rev-7", want: func(h *casHub) string { return h.mvRev }},
+		{name: "append", args: []string{"append", "--token", "x", "--expectedrevision", "rev1", "demo", "f", "data"}, rev: "rev1", want: func(h *casHub) string { return h.appendRev }},
+		{name: "write", args: []string{"write", "--token", "x", "--expectedrevision", "rev2", "demo", "f", "0", "data"}, rev: "rev2", want: func(h *casHub) string { return h.writeRev }},
+		{name: "patch", args: []string{"patch", "--token", "x", "--expectedrevision", "rev3", "demo", "f", "0", "0", "data"}, rev: "rev3", want: func(h *casHub) string { return h.patchRev }},
+		{name: "truncate", args: []string{"truncate", "--token", "x", "--expectedrevision", "rev4", "demo", "f", "9"}, rev: "rev4", want: func(h *casHub) string { return h.truncateRev }},
+		{name: "rm", args: []string{"rm", "--token", "x", "--expectedrevision", "rev5", "demo", "f"}, rev: "rev5", want: func(h *casHub) string { return h.rmRev }},
+		{name: "rmr", args: []string{"rm", "-r", "--token", "x", "--expectedrevision", "rev6", "demo", "d"}, rev: "rev6", want: func(h *casHub) string { return h.rmdirRev }},
+		{name: "mv", args: []string{"mv", "--token", "x", "--expectedrevision", "rev7", "demo", "a", "b"}, rev: "rev7", want: func(h *casHub) string { return h.mvRev }},
 	} {
 		hub := &casHub{}
 		runWithCasHub(t, hub, tc.args)
@@ -313,13 +293,13 @@ func TestExpectedRevisionThreadsToVerbs(t *testing.T) {
 
 func TestExpectedRevisionRmBranches(t *testing.T) {
 	hub := &casHub{}
-	runWithCasHub(t, hub, []string{"rm", "--token", "x", "--expected-revision", "rev-5", "demo", "f"})
-	if hub.rmRev != "rev-5" {
+	runWithCasHub(t, hub, []string{"rm", "--token", "x", "--expectedrevision", "rev5", "demo", "f"})
+	if hub.rmRev != "rev5" {
 		t.Fatalf("rm revision: want rev-5, got %q", hub.rmRev)
 	}
 	hub2 := &casHub{}
-	runWithCasHub(t, hub2, []string{"rm", "-r", "--token", "x", "--expected-revision", "rev-6", "demo", "d"})
-	if hub2.rmdirRev != "rev-6" {
+	runWithCasHub(t, hub2, []string{"rm", "-r", "--token", "x", "--expectedrevision", "rev6", "demo", "d"})
+	if hub2.rmdirRev != "rev6" {
 		t.Fatalf("rm -r revision: want rev-6, got %q", hub2.rmdirRev)
 	}
 }
@@ -330,34 +310,32 @@ func TestReplaceExpectedRevision(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 	hub := &casHub{}
-	runWithCasHub(t, hub, []string{"replace", "--token", "x", "--expected-revision", "rev-r", "demo", "f", local})
-	if hub.replaceRev != "rev-r" {
+	runWithCasHub(t, hub, []string{"replace", "--token", "x", "--expectedrevision", "revr", "demo", "f", local})
+	if hub.replaceRev != "revr" {
 		t.Fatalf("replace revision: want rev-r, got %q", hub.replaceRev)
 	}
 }
 
 func TestNoReplaceThreadsToRename(t *testing.T) {
 	hub := &casHub{}
-	runWithCasHub(t, hub, []string{"mv", "--token", "x", "--no-replace", "demo", "a", "b"})
+	runWithCasHub(t, hub, []string{"mv", "--token", "x", "--noreplace", "demo", "a", "b"})
 	if !hub.noReplace {
-		t.Fatal("mv --no-replace must thread WithNoReplace to RenameContext")
+		t.Fatal("mv --noreplace must thread WithNoReplace to RenameContext")
 	}
 }
 
 func TestUploadExclusiveGate(t *testing.T) {
 	// Exclusive upload gates on the atomic create: an existing path fails
 	// before any bytes move.
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	gate := &exclusiveHub{exists: true}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return gate, nil
 	}
 	local := filepath.Join(t.TempDir(), "payload.txt")
 	if err := os.WriteFile(local, []byte("payload"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run([]string{"upload", "--token", "x", "--exclusive", "demo", "docs/f.txt", local}); err == nil {
 		t.Fatal("exclusive upload over an existing path must fail")
 	}
@@ -366,6 +344,9 @@ func TestUploadExclusiveGate(t *testing.T) {
 	}
 	gate.exists = false
 	app2, _, _ := newTestApp(t)
+	app2.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return gate, nil
+	}
 	if err := app2.Run([]string{"upload", "--token", "x", "--exclusive", "demo", "docs/f.txt", local}); err != nil {
 		t.Fatalf("exclusive upload of a missing path must succeed, got %v", err)
 	}
@@ -438,13 +419,11 @@ func TestSessionStatSurfacesStale(t *testing.T) {
 	// The Stale bit has not landed from the parallel change yet, so the
 	// output must carry stale:false today and stale:true automatically
 	// once SessionStat gains the field (via the reflection shim).
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, stdout, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, stdout, _ := newTestApp(t)
 	if err := app.Run([]string{"session", "open", "--token", "x", "demo", "--mode", "w"}); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -453,6 +432,9 @@ func TestSessionStatSurfacesStale(t *testing.T) {
 		t.Fatal("open printed no handle")
 	}
 	statApp, statOut, _ := newTestApp(t)
+	statApp.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return fake, nil
+	}
 	if err := statApp.Run([]string{"session", "stat", "--token", "x", "--json", "--handle", handle}); err != nil {
 		t.Fatalf("stat: %v", err)
 	}

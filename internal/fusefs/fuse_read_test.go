@@ -84,7 +84,7 @@ func TestReadonlyOpenServesPinnedRangesWithoutFullDownload(t *testing.T) {
 		repo := meta.NewRepoMetadata("demo")
 		repo.UpsertFile("docs/big.txt", meta.FileMeta{Inode: 9, Size: 4096}, now)
 		repo.RebuildIndexes()
-		return repo, "sha-1", nil
+		return repo, "sha1", nil
 	}
 	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 		if target == "docs/big.txt" {

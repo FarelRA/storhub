@@ -34,7 +34,7 @@ func main() {
 	if project == "" {
 		log.Fatal("STORHUB_PROJECT environment variable not set")
 	}
-	hub, err := storhub.NewStorHub(token)
+	hub, err := storhub.NewStorHubWithContext(context.Background(), token, storhub.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}

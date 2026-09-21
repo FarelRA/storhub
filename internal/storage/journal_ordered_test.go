@@ -19,7 +19,7 @@ func TestFailedCommitFlushesJournalSynchronously(t *testing.T) {
 	cfg.JournalDir = t.TempDir()
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
-	project := "project-failed-flush"
+	project := "projectfailedflush"
 
 	if _, err := hub.UploadFileContext(ctx, project, "a.txt", writeTempFile(t, t.TempDir(), "a", []byte("a-content"))); err != nil {
 		t.Fatalf("seed upload: %v", err)

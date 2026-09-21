@@ -51,7 +51,7 @@ Examples:
 
 func (a *App) newProjectRollbackCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "rollback <project> <commit-sha>",
+		Use:   "rollback <project> <commitsha>",
 		Short: "Rollback metadata to a commit",
 		Long: `Rollback restores the project's metadata to a past commit SHA
 (7-64 lowercase hex). A malformed SHA is a usage error (exit 2).
@@ -88,7 +88,7 @@ func (a *App) newProjectPruneCmd() *cobra.Command {
             scope that needs no flush first.
   all       history (where possible) + objects + assets (the default)
 
-Use --dry-run to see what would be reclaimed without deleting anything.
+Use --dryrun to see what would be reclaimed without deleting anything.
 --keep bounds history compaction (manifests newer than keep are retained).
 
 The serve-mode admin boundary covers the REST surface only: this
@@ -97,7 +97,7 @@ command runs with local-process trust and performs no admin check
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
 		RunE: a.runProjectPrune,
 	}
-	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting")
+	cmd.Flags().Bool("dryrun", false, "Report what would be reclaimed without deleting")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
 	addSyncFlag(cmd)
 	return cmd
@@ -267,7 +267,7 @@ func (a *App) runProjectPrune(cmd *cobra.Command, args []string) error {
 	default:
 		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, chunks, all)", scope)}
 	}
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	dryRun, _ := cmd.Flags().GetBool("dryrun")
 	keep, _ := cmd.Flags().GetInt("keep")
 	if keep < 1 {
 		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}

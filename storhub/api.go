@@ -63,7 +63,7 @@ type (
 	// PruneResult reports what a granular prune reclaimed.
 	PruneResult = impl.PruneResult
 	// ChunkGCResult reports what a chunk-GC scan found and a compaction
-	// collected (or would collect under dry-run).
+	// collected (or would collect under dryrun).
 	ChunkGCResult = impl.ChunkGCResult
 	// PressureSnapshot is the operator-visible pressure ledger: monotonic
 	// totals plus per-project consecutive-failure streaks.
@@ -150,19 +150,9 @@ func WithExpectedRevision(rev string) MutateOption {
 // revision moved between observation and application.
 var ErrPreconditionFailed = shfs.ErrPreconditionFailed
 
-// NewStorHub creates a client for the given GitHub token using defaults.
-func NewStorHub(token string) (*StorHub, error) {
-	return impl.NewStorHub(token)
-}
-
-// NewStorHubWithConfig creates a client with explicit configuration; see
-// DefaultConfig for a filled-in starting point.
-func NewStorHubWithConfig(token string, cfg Config) (*StorHub, error) {
-	return impl.NewStorHubWithConfig(token, cfg)
-}
-
 // NewStorHubWithContext creates a client whose lifetime is bounded by ctx:
 // cancellation interrupts in-flight transfers and background maintenance.
+// It is the only constructor.
 func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*StorHub, error) {
 	return impl.NewStorHubWithContext(ctx, token, cfg)
 }

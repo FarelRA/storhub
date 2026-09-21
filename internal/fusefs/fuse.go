@@ -379,9 +379,9 @@ func (s *Filesystem) errorf(format string, args ...any) {
 
 // quarantine reasons recorded in manifests.
 const (
-	quarantineReasonCommitFailure = "commit-failure"
-	quarantineReasonClose         = "close-dirty"
-	quarantineReasonStartupSweep  = "startup-sweep"
+	quarantineReasonCommitFailure = "commitfailure"
+	quarantineReasonClose         = "closedirty"
+	quarantineReasonStartupSweep  = "startupsweep"
 )
 
 // defaultCallerUmask is applied to creation modes because the FUSE

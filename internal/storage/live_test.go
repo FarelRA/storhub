@@ -442,7 +442,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 		{name: "two-gb.bin", size: 2 << 30, downloadVerify: false},
 	}
 
-	project := "project-large-validation"
+	project := "projectlargevalidation"
 	uploaded := make([]FileMeta, 0, len(scenarios))
 	for _, scenario := range scenarios {
 		inputPath := filepath.Join(t.TempDir(), scenario.name)

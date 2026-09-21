@@ -2,7 +2,7 @@
 // upload to GitHub releases and reassembles them on download.
 //
 // A StreamingChunker walks a local file sequentially and hands out
-// ChunkReaders, each covering one chunk-sized window of the file. Chunk
+// ChunkReaders, each covering one chunksized window of the file. Chunk
 // sizes are clamped to the release-asset ceiling; a zero size means "use
 // the default". Empty files yield zero chunks: NumChunks()==0 and every
 // GetChunk index is out of range - there is nothing to store, and callers
@@ -28,7 +28,7 @@ const (
 	DefaultBufferSize = 1 * 1024 * 1024
 )
 
-// ChunkReader reads one chunk-sized window of the underlying file. It is a
+// ChunkReader reads one chunksized window of the underlying file. It is a
 // section reader: Seek is supported, Read stops at the window end, and the
 // window's wire name/index travel with it via Name/Index.
 type ChunkReader struct {

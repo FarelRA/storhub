@@ -27,7 +27,7 @@ export function useApi() {
     options: RequestInit & { rawBody?: boolean; binary?: boolean } = {},
   ): Promise<ApiResult<T>> {
     const { rawBody, headers: extraHeaders, binary, ...rest } = options
-    // Single choke point for base-path resolution: callers pass either bare
+    // Single choke point for basepath resolution: callers pass either bare
     // routes or url()-prefixed paths and both land on the right URL.
     const response = await fetch(joinApiPath(config.basePath, path), {
       ...rest,
@@ -66,7 +66,7 @@ export function useApi() {
     const text = query.toString()
     // Delegate to the same normalizer request() uses: callers pass bare
     // routes here and the result feeds back into request(), so both must
-    // agree on base-path resolution (no silent double-prefixing).
+    // agree on basepath resolution (no silent double-prefixing).
     return joinApiPath(config.basePath, text ? `${path}?${text}` : path)
   }
 

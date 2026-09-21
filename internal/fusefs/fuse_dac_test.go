@@ -32,7 +32,7 @@ func secretRepo() *meta.RepoMetadata {
 func secretHub(extra ...func(*stubHub)) *stubHub {
 	hub := &stubHub{
 		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
-			return secretRepo(), "sha-1", nil
+			return secretRepo(), "sha1", nil
 		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "secret.txt" {

@@ -15,7 +15,7 @@ func TestSingleEditCompensationSparesReusedChunks(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-single-compensate-spares-reused"
+	project := "projectsinglecompensatesparesreused"
 
 	seed := writeTempFile(t, t.TempDir(), "base.bin", []byte("0123456789ABCDEF"))
 	if _, err := hub.UploadFileContext(ctx, project, "f.bin", seed); err != nil {
@@ -81,7 +81,7 @@ func TestSingleEditLoserCompensationPreservesLiveContent(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-single-loser-preserves-live"
+	project := "projectsingleloserpreserveslive"
 
 	seed := writeTempFile(t, t.TempDir(), "base.bin", []byte("0123456789ABCDEF"))
 	if _, err := hub.UploadFileContext(ctx, project, "f.bin", seed); err != nil {
@@ -125,7 +125,7 @@ func TestSingleEditCompensatingPlaylistOrphansLiveData(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-single-compensate-playlist-kills-live"
+	project := "projectsinglecompensateplaylistkillslive"
 
 	seed := writeTempFile(t, t.TempDir(), "base.bin", []byte("0123456789ABCDEF"))
 	if _, err := hub.UploadFileContext(ctx, project, "f.bin", seed); err != nil {

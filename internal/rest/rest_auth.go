@@ -23,7 +23,7 @@ import (
 const (
 	defaultRESTTokenTTL = 12 * 720 * storcfg.PatienceUnit // 12 hours
 	restTokenIssuer     = "storhub"
-	restTokenAudience   = "storhub-rest"
+	restTokenAudience   = "storhubrest"
 )
 
 // dummyPasswordHash lazily builds a valid bcrypt hash of a value nobody

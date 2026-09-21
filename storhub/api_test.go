@@ -41,10 +41,10 @@ func TestDefaultConfigAndConstructors(t *testing.T) {
 	if DefaultConfig().ChunkSize == 0 {
 		t.Fatal("expected non-zero default config")
 	}
-	if _, err := NewStorHub(""); err == nil {
+	if _, err := NewStorHubWithContext(context.Background(), "", DefaultConfig()); err == nil {
 		t.Fatal("expected constructor to reject empty token")
 	}
-	if _, err := NewStorHubWithConfig("", Config{}); err == nil {
+	if _, err := NewStorHubWithContext(context.Background(), "", Config{}); err == nil {
 		t.Fatal("expected config constructor to reject empty token")
 	}
 	if _, err := NewStorHubWithContext(context.Background(), "", Config{}); err == nil {

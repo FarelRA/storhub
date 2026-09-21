@@ -804,7 +804,7 @@ func canonicalSharePath(raw string) (string, error) {
 
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	if h.shareSignKey == nil {
-		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
+		return nil, errForbidden("share signing key not configured (pass --sharekey or serve with an auth file)")
 	}
 	uc := &unifiedClaims{}
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), uc, func(token *jwt.Token) (any, error) {
@@ -838,7 +838,7 @@ func newShareRegistry() *shareRegistry {
 
 func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expiresIn time.Duration, creatorUID uint32, creatorAdmin bool) (*shareRecord, error) {
 	if h.shareSignKey == nil {
-		return nil, errForbidden("share signing key not configured (pass --share-key or serve with an auth file)")
+		return nil, errForbidden("share signing key not configured (pass --sharekey or serve with an auth file)")
 	}
 	id, err := newShareID()
 	if err != nil {

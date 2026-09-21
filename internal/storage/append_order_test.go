@@ -22,7 +22,7 @@ func TestConcurrentAppendByteExactness(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 	ctx := context.Background()
-	const project = "project-append-order"
+	const project = "projectappendorder"
 
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
@@ -105,7 +105,7 @@ func TestPatchedRangeCompensationSparesReusedChunks(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-compensate-spares-reused"
+	project := "projectcompensatesparesreused"
 
 	seed := writeTempFile(t, t.TempDir(), "base.bin", []byte("0123456789ABCDEF"))
 	if _, err := hub.UploadFileContext(ctx, project, "f.bin", seed); err != nil {

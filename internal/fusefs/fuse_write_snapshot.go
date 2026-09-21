@@ -113,7 +113,7 @@ func (s *Filesystem) newSnapshotTemp(prefix string, size int64, fill func(*os.Fi
 }
 
 func (w *inodeWriteState) createCommittedSnapshotLocked(ctx context.Context) (string, error) {
-	return w.fs.newSnapshotTemp("inode-commit-*", w.logicalSize, func(temp *os.File) error {
+	return w.fs.newSnapshotTemp("inodecommit*", w.logicalSize, func(temp *os.File) error {
 		if w.tempAuthoritative || w.coversRangeLocked(0, w.logicalSize) {
 			return w.writeWorkingRangeToLocked(temp, 0, w.logicalSize)
 		}
@@ -136,7 +136,7 @@ func (w *inodeWriteState) replaceInputPathLocked(ctx context.Context) (string, b
 }
 
 func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges []ByteRange) (string, error) {
-	return w.fs.newSnapshotTemp("inode-ranges-*", w.logicalSize, func(temp *os.File) error {
+	return w.fs.newSnapshotTemp("inoderanges*", w.logicalSize, func(temp *os.File) error {
 		buf := make([]byte, w.fs.copyPageSize())
 		for _, r := range ranges {
 			for offset := r.Start; offset < r.End; {

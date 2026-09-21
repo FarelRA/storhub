@@ -9,18 +9,49 @@
 #   GITHUB_TOKEN         required for private repos; optional otherwise
 #   STORHUB_INSTALL_DIR  override install destination (default /usr/local/bin)
 #   --version vX.Y.Z     pin a specific release instead of nightly/stable
+#   --dryrun            resolve and print the install plan without downloading
+#   --uninstall          remove the installed binary and exit
+#   --help               print usage and exit
 
 set -euo pipefail
 
 REPO="FarelRA/storhub"
 DEST="${STORHUB_INSTALL_DIR:-/usr/local/bin}"
 PINNED=""
+DRY_RUN=0
+
+usage() {
+	sed -n '2,12p' "$0"
+}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--version)
 		PINNED="${2:?--version requires a value}"
 		shift 2
+		;;
+	--dryrun)
+		DRY_RUN=1
+		shift
+		;;
+	--uninstall)
+		target="${DEST}/storhub"
+		if [ -f "$target" ]; then
+			if [ -w "$target" ] || [ "$(id -u)" -eq 0 ]; then
+				rm -f "$target"
+			else
+				sudo rm -f "$target"
+			fi
+			echo "install.sh: removed ${target}"
+		else
+			echo "install.sh: nothing installed at ${target}" >&2
+			exit 1
+		fi
+		exit 0
+		;;
+	--help | -h)
+		usage
+		exit 0
 		;;
 	*)
 		echo "install.sh: unknown argument: $1" >&2
@@ -121,6 +152,11 @@ CHECKSUM_ID="$(asset_id_for "checksums\.txt")"
 
 TMPDIR_DL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_DL"' EXIT
+
+if [ "$DRY_RUN" -eq 1 ]; then
+	echo "install.sh: dry run - would install ${TAG} for ${OS}/${ARCH} to ${DEST}/storhub"
+	exit 0
+fi
 
 echo "==> downloading storhub for ${OS}/${ARCH} (${TAG})"
 fetch_asset() {

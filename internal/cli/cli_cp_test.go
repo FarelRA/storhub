@@ -122,12 +122,10 @@ func (h *cpFakeHub) Shutdown(_ context.Context) error                      { ret
 
 func runCpWithFake(t *testing.T, fake *cpFakeHub, args []string) error {
 	t.Helper()
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	return app.Run(args)
 }
 

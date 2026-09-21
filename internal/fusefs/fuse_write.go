@@ -136,7 +136,7 @@ func (w *inodeWriteState) materializeBootstrap(size int64) error {
 	if w.temp != nil {
 		return nil
 	}
-	temp, err := w.fs.newOverlayTemp("inode-*")
+	temp, err := w.fs.newOverlayTemp("inode*")
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (w *inodeWriteState) materialize(ctx context.Context) error {
 		return nil
 	}
 	path := w.path
-	temp, err := w.fs.newOverlayTemp("inode-*")
+	temp, err := w.fs.newOverlayTemp("inode*")
 	if err != nil {
 		w.mu.Unlock()
 		return err
@@ -216,7 +216,7 @@ func (w *inodeWriteState) snapshotBaseLocked(ctx context.Context, targetPath str
 	if w.baseTemp != nil {
 		return nil
 	}
-	baseTemp, err := w.fs.newOverlayTemp("inode-base-*")
+	baseTemp, err := w.fs.newOverlayTemp("inodebase*")
 	if err != nil {
 		return err
 	}

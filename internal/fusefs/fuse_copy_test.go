@@ -145,8 +145,8 @@ func TestCopyFileRangeHandleResolutionAndGuards(t *testing.T) {
 		ctx := context.Background()
 		// Nodes are registered under stale names; the open handles carry
 		// the live (renamed) paths, which must win.
-		srcNode := fsys.EnsureNodeForTest(ctx, &shfs.EntryInfo{Path: "stale-src", Inode: 20, Mode: 0o644})
-		fsys.EnsureNodeForTest(ctx, &shfs.EntryInfo{Path: "stale-dst", Inode: 21, Mode: 0o644})
+		srcNode := fsys.EnsureNodeForTest(ctx, &shfs.EntryInfo{Path: "stalesrc", Inode: 20, Mode: 0o644})
+		fsys.EnsureNodeForTest(ctx, &shfs.EntryInfo{Path: "staledst", Inode: 21, Mode: 0o644})
 		srcH := copyTestHandle(fsys, 20, "live-src.txt")
 		dstH := copyTestHandle(fsys, 21, "live-dst.txt")
 		if _, errno := srcNode.CopyFileRange(ctx, srcH, 0, nil, dstH, 0, 1, 0); errno != 0 {

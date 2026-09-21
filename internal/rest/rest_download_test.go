@@ -100,7 +100,7 @@ func TestDownloadLinkRequiresSigningKey(t *testing.T) {
 	}
 	errResp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
 		strings.NewReader(`{"path":"f.txt"}`), nil, http.StatusForbidden)
-	if body := readBody(t, errResp); !strings.Contains(string(body), "--share-key") {
+	if body := readBody(t, errResp); !strings.Contains(string(body), "--sharekey") {
 		t.Fatalf("expected actionable message, got: %s", body)
 	}
 }

@@ -261,25 +261,25 @@ func TestFailedBuildDoesNotPoisonTreeCache(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-poison-cache", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectpoisoncache", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// Simulate the failed attempt's build: same tree, same shared cache,
 	// results discarded — nothing reaches upstream.
 	hub.metaMu.RLock()
-	pm := hub.metaCache["project-poison-cache"]
+	pm := hub.metaCache["projectpoisoncache"]
 	hub.metaMu.RUnlock()
 	pm.mu.RLock()
 	tree := pm.meta
 	pm.mu.RUnlock()
-	if _, _, _, err := hub.buildIndexStream(ctx, "project-poison-cache", tree); err != nil {
+	if _, _, _, err := hub.buildIndexStream(ctx, "projectpoisoncache", tree); err != nil {
 		t.Fatalf("simulated failed build: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-poison-cache"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectpoisoncache"); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 	probe := backend.newClient(t, smallTransferTestConfig())
-	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "project-poison-cache")
+	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "projectpoisoncache")
 	if err != nil {
 		t.Fatalf("fresh load after poisoned build: %v", err)
 	}

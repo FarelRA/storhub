@@ -23,7 +23,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version-a"))
-	first, err := hub.UploadFileContext(context.Background(), "project-history", "artifact.txt", inputA)
+	first, err := hub.UploadFileContext(context.Background(), "projecthistory", "artifact.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload first: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	inputB := writeTempFile(t, t.TempDir(), "v2.txt", []byte("version-b-better"))
-	_, err = hub.ReplaceFileContext(context.Background(), "project-history", "artifact.txt", inputB)
+	_, err = hub.ReplaceFileContext(context.Background(), "projecthistory", "artifact.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("flush metadata after replace: %v", err)
 	}
 
-	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-history")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "projecthistory")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -50,10 +50,10 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("expected metadata history, got %+v", revisions)
 	}
 
-	if err := hub.DeleteFile("project-history", "artifact.txt"); err != nil {
+	if err := hub.DeleteFile("projecthistory", "artifact.txt"); err != nil {
 		t.Fatalf("delete file: %v", err)
 	}
-	files, err := hub.ListFilesContext(context.Background(), "project-history")
+	files, err := hub.ListFilesContext(context.Background(), "projecthistory")
 	if err != nil {
 		t.Fatalf("list files after delete: %v", err)
 	}
@@ -61,8 +61,8 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 		t.Fatalf("expected no active files, got %+v", files)
 	}
 
-	repo := backend.repo("project-history")
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-history")
+	repo := backend.repo("projecthistory")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projecthistory")
 	firstChunkInfo := repoMeta.Chunks()[first.Chunks[0]]
 	if repo == nil || repo.releasesByTag[firstChunkInfo.Release] == nil {
 		t.Fatalf("expected immutable release to remain")
@@ -72,10 +72,10 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	oldest := revisions[len(revisions)-1]
-	if err := hub.RollbackMetadataContext(context.Background(), "project-history", oldest.CommitSHA); err != nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "projecthistory", oldest.CommitSHA); err != nil {
 		t.Fatalf("rollback metadata: %v", err)
 	}
-	files, err = hub.ListFilesContext(context.Background(), "project-history")
+	files, err = hub.ListFilesContext(context.Background(), "projecthistory")
 	if err != nil {
 		t.Fatalf("list files after rollback: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestReplaceDeleteRollbackMetadata(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "rolled-back.txt")
-	if err := hub.DownloadFileContext(context.Background(), "project-history", "artifact.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projecthistory", "artifact.txt", output); err != nil {
 		t.Fatalf("download rolled back file: %v", err)
 	}
 	assertFileContent(t, output, []byte("version-a"))
@@ -95,18 +95,18 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch.txt", []byte("abcdefghij"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-patch", "patch.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectpatch", "patch.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	patched, err := hub.PatchFileContext(context.Background(), "project-patch", "patch.txt", 3, 3, []byte("XYZ"))
+	patched, err := hub.PatchFileContext(context.Background(), "projectpatch", "patch.txt", 3, 3, []byte("XYZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
 	if len(patched.Chunks) != 3 {
 		t.Fatalf("expected three logical chunks after patch, got %+v", patched.Chunks)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-patch")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectpatch")
 	patchedChunks0 := repoMeta.Chunks()[patched.Chunks[0]]
 	patchedChunks2 := repoMeta.Chunks()[patched.Chunks[2]]
 	metaChunks0 := repoMeta.Chunks()[meta.Chunks[0]]
@@ -118,12 +118,12 @@ func TestPatchFileReusesExistingAssetRanges(t *testing.T) {
 		t.Fatalf("expected edited segment to use a new asset, got %+v", patched.Chunks)
 	}
 	output := filepath.Join(t.TempDir(), "patched.txt")
-	if err := hub.DownloadFileContext(context.Background(), "project-patch", "patch.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectpatch", "patch.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcXYZghij"))
-	if len(backend.repo("project-patch").assets) != 2 {
-		t.Fatalf("expected one original asset and one patch asset, got %d", len(backend.repo("project-patch").assets))
+	if len(backend.repo("projectpatch").assets) != 2 {
+		t.Fatalf("expected one original asset and one patch asset, got %d", len(backend.repo("projectpatch").assets))
 	}
 }
 
@@ -132,10 +132,10 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "ranges.txt", []byte("abcdefghij"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-range-patch", "ranges.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectrangepatch", "ranges.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if _, err := hub.PatchFileContext(context.Background(), "project-range-patch", "ranges.txt", 4, 2, []byte("ZZ")); err != nil {
+	if _, err := hub.PatchFileContext(context.Background(), "projectrangepatch", "ranges.txt", 4, 2, []byte("ZZ")); err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
 	var sawRange atomic.Bool
@@ -146,7 +146,7 @@ func TestPatchFileUsesRangeDownloads(t *testing.T) {
 		return false
 	})
 	output := filepath.Join(t.TempDir(), "ranges.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-range-patch", "ranges.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectrangepatch", "ranges.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	if !sawRange.Load() {
@@ -162,12 +162,12 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 	hub := backend.newClient(t, Config{ChunkSize: 128, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "exact-ranges.bin", original)
-	meta, err := hub.UploadFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectexactranges", "exact-ranges.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	patchedBytes := bytes.Repeat([]byte("b"), 47)
-	patched, err := hub.PatchFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", 3, 47, patchedBytes)
+	patched, err := hub.PatchFileContext(context.Background(), "projectexactranges", "exact-ranges.bin", 3, 47, patchedBytes)
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -193,11 +193,11 @@ func TestPatchedFileDownloadUsesExactAssetRanges(t *testing.T) {
 		return false
 	})
 	output := filepath.Join(t.TempDir(), "exact-ranges.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-exact-ranges", "exact-ranges.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectexactranges", "exact-ranges.bin", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, append(append(append([]byte(nil), original[:3]...), patchedBytes...), original[50:]...))
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-exact-ranges")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectexactranges")
 	metaChunk0 := repoMeta.Chunks()[meta.Chunks[0]]
 	patchedChunk1 := repoMeta.Chunks()[patched.Chunks[1]]
 	for assetID := range rangeByAsset {
@@ -222,19 +222,19 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "multi-release.txt", []byte("abcdefghijklmno"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectmultireleasepatch", "multi-release.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-multi-release-patch")
+	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "projectmultireleasepatch")
 	firstRelease := metaState.Chunks()[fileMeta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-multi-release-patch", firstRelease, 999)
-	hub.invalidateReleaseCache("project-multi-release-patch")
-	patched, err := hub.PatchFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
+	backend.addAssetsToRelease(t, "projectmultireleasepatch", firstRelease, 999)
+	hub.invalidateReleaseCache("projectmultireleasepatch")
+	patched, err := hub.PatchFileContext(context.Background(), "projectmultireleasepatch", "multi-release.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
-	metaState, _, err = hub.loadRepoMetadata(context.Background(), "project-multi-release-patch")
+	metaState, _, err = hub.loadRepoMetadata(context.Background(), "projectmultireleasepatch")
 	if err != nil {
 		t.Fatalf("load metadata: %v", err)
 	}
@@ -252,18 +252,18 @@ func TestPatchFileCanSpanMultipleReleases(t *testing.T) {
 		t.Fatalf("expected patched file to span old and new releases, got %+v", patched.Chunks)
 	}
 	output := filepath.Join(t.TempDir(), "multi-release.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-multi-release-patch", "multi-release.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectmultireleasepatch", "multi-release.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
-	metaState, _, err = hub.loadRepoMetadata(context.Background(), "project-multi-release-patch")
+	metaState, _, err = hub.loadRepoMetadata(context.Background(), "projectmultireleasepatch")
 	if err != nil {
 		t.Fatalf("load metadata: %v", err)
 	}
 	if metaState.GetRelease(firstRelease) == nil {
 		t.Fatalf("expected old release to remain referenced in metadata")
 	}
-	if err := hub.DeleteRelease("project-multi-release-patch", firstRelease); err != nil {
+	if err := hub.DeleteRelease("projectmultireleasepatch", firstRelease); err != nil {
 		t.Fatalf("delete release: %v", err)
 	}
 }
@@ -273,10 +273,10 @@ func TestPatchFileRejectsOutOfBoundsEdit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "bounds.txt", []byte("abc"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-patch-bounds", "bounds.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectpatchbounds", "bounds.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if _, err := hub.PatchFileContext(context.Background(), "project-patch-bounds", "bounds.txt", 2, 7, []byte("toolong")); err == nil {
+	if _, err := hub.PatchFileContext(context.Background(), "projectpatchbounds", "bounds.txt", 2, 7, []byte("toolong")); err == nil {
 		t.Fatal("expected out-of-bounds patch to fail")
 	}
 }
@@ -293,10 +293,10 @@ func TestPatchFileSupportsEdits(t *testing.T) {
 		edit       []byte
 		want       string
 	}{
-		{"insert growth", "project-patch-insert", "insert.txt", "abcdij", 4, 0, []byte("efgh"), "abcdefghij"},
-		{"delete shrink", "project-patch-delete", "delete.txt", "abcXXdef", 3, 2, nil, "abcdef"},
-		{"replace different size", "project-patch-resize", "resize.txt", "abc123xyz", 3, 3, []byte("LONGER"), "abcLONGERxyz"},
-		{"truncate to empty", "project-patch-empty", "empty.txt", "abc", 0, 3, nil, ""},
+		{"insert growth", "projectpatchinsert", "insert.txt", "abcdij", 4, 0, []byte("efgh"), "abcdefghij"},
+		{"delete shrink", "projectpatchdelete", "delete.txt", "abcXXdef", 3, 2, nil, "abcdef"},
+		{"replace different size", "projectpatchresize", "resize.txt", "abc123xyz", 3, 3, []byte("LONGER"), "abcLONGERxyz"},
+		{"truncate to empty", "projectpatchempty", "empty.txt", "abc", 0, 3, nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -328,7 +328,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "missing-data.txt", []byte("payload"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-missing-data", "missing-data.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectmissingdata", "missing-data.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	if err := hub.DeleteFile("project-missing-data", "missing-data.txt"); err != nil {
+	if err := hub.DeleteFile("projectmissingdata", "missing-data.txt"); err != nil {
 		t.Fatalf("hide file: %v", err)
 	}
 
@@ -345,11 +345,11 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-missing-data")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectmissingdata")
 	firstChunk := repoMeta.Chunks()[fileMeta.Chunks[0]]
-	backend.removeAsset(t, "project-missing-data", firstChunk.AssetID)
+	backend.removeAsset(t, "projectmissingdata", firstChunk.AssetID)
 	// Get the oldest metadata revision to test rollback failure when data is missing
-	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-missing-data")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "projectmissingdata")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestRollbackMetadataFailsWhenDataMissing(t *testing.T) {
 		t.Fatal("expecte at least one metadata revision")
 	}
 	revision := revisions[len(revisions)-1] // Last in list is oldest
-	if err := hub.RollbackMetadataContext(context.Background(), "project-missing-data", revision.CommitSHA); err == nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "projectmissingdata", revision.CommitSHA); err == nil {
 		t.Fatal("expected rollback to fail when referenced asset is missing")
 	}
 }
@@ -367,20 +367,20 @@ func TestReplaceAvoidsFullPreferredRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	inputA := writeTempFile(t, t.TempDir(), "first.txt", []byte("alpha"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-capacity", "capacity.txt", inputA)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectcapacity", "capacity.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-capacity")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectcapacity")
 	firstRelease := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-capacity", firstRelease, 999)
-	hub.invalidateReleaseCache("project-capacity")
+	backend.addAssetsToRelease(t, "projectcapacity", firstRelease, 999)
+	hub.invalidateReleaseCache("projectcapacity")
 	inputB := writeTempFile(t, t.TempDir(), "second.txt", []byte("beta"))
-	replaced, err := hub.ReplaceFileContext(context.Background(), "project-capacity", "capacity.txt", inputB)
+	replaced, err := hub.ReplaceFileContext(context.Background(), "projectcapacity", "capacity.txt", inputB)
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
-	repoMeta, _, _ = hub.loadRepoMetadata(context.Background(), "project-capacity")
+	repoMeta, _, _ = hub.loadRepoMetadata(context.Background(), "projectcapacity")
 	replacedRelease := repoMeta.Chunks()[replaced.Chunks[0]].Release
 	if replacedRelease == firstRelease {
 		t.Fatalf("expected replacement to avoid full release")
@@ -392,11 +392,11 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "patch-retry.txt", []byte("abcdefghij"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectpatchrangeretry", "patch-retry.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-patch-range-retry")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectpatchrangeretry")
 	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -419,11 +419,11 @@ func TestPatchRetriesInterruptedRangeSliceRead(t *testing.T) {
 		_ = rw.Flush()
 		return true
 	})
-	if _, err := hub.PatchFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", 2, 3, []byte("XYZ")); err != nil {
+	if _, err := hub.PatchFileContext(context.Background(), "projectpatchrangeretry", "patch-retry.txt", 2, 3, []byte("XYZ")); err != nil {
 		t.Fatalf("patch file with retry: %v", err)
 	}
 	output := filepath.Join(t.TempDir(), "patch-retry.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-patch-range-retry", "patch-retry.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectpatchrangeretry", "patch-retry.txt", output); err != nil {
 		t.Fatalf("download patched file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abXYZfghij"))

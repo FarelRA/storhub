@@ -2,13 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -21,6 +21,23 @@ import (
 // commands on a fresh App per operation.
 type cliPOSIXSurface struct {
 	project string
+	mu      sync.Mutex
+	// umask masks CreateFile modes (see test.UmaskSurface; zero
+	// disables masking). Guarded by mu: scenarios run sequentially,
+	// but concurrent workers inside one scenario read it.
+	umask uint32
+	// hub is the fake backend every fresh App in runCLI serves.
+	// Set once by the entrypoint; runCLI injects it per-App.
+	hub hubClient
+}
+
+var _ test.UmaskSurface = (*cliPOSIXSurface)(nil)
+
+// SetUmask implements test.UmaskSurface.SetUmask.
+func (s *cliPOSIXSurface) SetUmask(mask uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.umask = mask & 0o777
 }
 
 // runCLI executes one CLI invocation and returns what the command wrote to
@@ -28,6 +45,9 @@ type cliPOSIXSurface struct {
 // concurrent scenarios.
 func (s *cliPOSIXSurface) runCLI(args []string) ([]byte, error) {
 	app := New()
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return s.hub, nil
+	}
 	var stdout, stderr bytes.Buffer
 	app.stdout = &stdout
 	app.stderr = &stderr
@@ -37,7 +57,7 @@ func (s *cliPOSIXSurface) runCLI(args []string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// cliPath validates an absolute Surface path and maps it to the remote-path
+// cliPath validates an absolute Surface path and maps it to the remotepath
 // spelling the CLI accepts.
 func cliPath(p string) (string, error) {
 	if len(p) < 2 || p[0] != '/' {
@@ -47,41 +67,25 @@ func cliPath(p string) (string, error) {
 }
 
 // pcTranslateErr maps backend/CLI failures onto the posixconform sentinels
-// so callers can match with errors.Is. Unrecognized errors pass through
-// untouched so scenarios fail with the raw CLI error attached.
+// so callers can match with errors.Is. The shared backend-to-sentinel
+// knowledge lives in test.Translate; this delegate only adds the CLI
+// context and the two storage-scoped lines (session linked/stale),
+// which cannot move into internal/test without an import cycle.
+// Unrecognized errors pass through untouched so scenarios fail with the
+// raw CLI error attached.
 func pcTranslateErr(err error) error {
 	if err == nil {
 		return nil
 	}
 	switch {
-	case errors.Is(err, shfs.ErrNotFound):
-		return fmt.Errorf("%w (cli: %v)", test.ErrNotFound, err)
-	case errors.Is(err, shfs.ErrAlreadyExists):
-		return fmt.Errorf("%w (cli: %v)", test.ErrExists, err)
-	case errors.Is(err, shfs.ErrIsDirectory):
-		return fmt.Errorf("%w (cli: %v)", test.ErrIsDir, err)
-	case errors.Is(err, shfs.ErrNotDirectory):
-		return fmt.Errorf("%w (cli: %v)", test.ErrNotDir, err)
-	case errors.Is(err, shfs.ErrNotEmpty):
-		return fmt.Errorf("%w (cli: %v)", test.ErrNotEmpty, err)
-	case errors.Is(err, syscall.ELOOP):
-		return fmt.Errorf("%w (cli: %v)", test.ErrLoop, err)
 	case errors.Is(err, storage.ErrSessionLinked):
 		return fmt.Errorf("%w (cli: %v)", test.ErrExists, err)
 	case errors.Is(err, storage.ErrStaleSession):
 		return fmt.Errorf("%w (cli: %v)", test.ErrStale, err)
 	}
-	for _, sentinel := range []error{
-		test.ErrNotFound, test.ErrExists, test.ErrIsDir,
-		test.ErrNotDir, test.ErrNotEmpty, test.ErrLoop,
-		test.ErrUnsatisfiableRange, test.ErrClosed,
-		test.ErrAccess, test.ErrInvalid, test.ErrStale,
-	} {
-		if errors.Is(err, sentinel) {
-			return err
-		}
-	}
-	return err
+	return test.Translate(err, func(mapped error) error {
+		return fmt.Errorf("%w (cli: %v)", mapped, err)
+	})
 }
 
 // statViaCLI runs `stat --json` and decodes the entry.
@@ -101,7 +105,7 @@ func (s *cliPOSIXSurface) statViaCLI(path string) (*storhub.EntryInfo, error) {
 	return &entry, nil
 }
 
-func (s *cliPOSIXSurface) CreateFile(path string, _ uint32, exclusive bool) error {
+func (s *cliPOSIXSurface) CreateFile(path string, perm uint32, exclusive bool) error {
 	rel, err := cliPath(path)
 	if err != nil {
 		return err
@@ -116,13 +120,32 @@ func (s *cliPOSIXSurface) CreateFile(path string, _ uint32, exclusive bool) erro
 	if _, err := s.runCLI(args); err != nil {
 		return pcTranslateErr(err)
 	}
+	// The CLI has no mode flag, so the fake always creates 0o644: apply
+	// the umask here with an explicit chmod, but only when a mask is
+	// configured, leaving the unmasked path (and every existing row)
+	// byte-identical.
+	s.mu.Lock()
+	umask := s.umask
+	s.mu.Unlock()
+	if umask != 0 {
+		if target := (perm & 0o7777) &^ (umask & 0o777); target != 0o644 {
+			if st, err := s.statViaCLI(path); err == nil && st.Mode&0o7777 != target {
+				return s.Chmod(path, target)
+			}
+		}
+	}
 	return nil
 }
 
-func (s *cliPOSIXSurface) Open(path string, mode test.OpenMode) (test.Handle, error) {
+func (s *cliPOSIXSurface) Open(path string, mode test.OpenMode, disp test.CreateDisposition) (test.Handle, error) {
 	switch mode {
 	case test.OpenReadOnly, test.OpenWriteOnly,
 		test.OpenReadWrite, test.OpenAppend, test.OpenTruncate:
+	default:
+		return nil, test.ErrInvalid
+	}
+	switch disp {
+	case test.CreateNever, test.CreateIfMissing:
 	default:
 		return nil, test.ErrInvalid
 	}
@@ -136,11 +159,13 @@ func (s *cliPOSIXSurface) Open(path string, mode test.OpenMode) (test.Handle, er
 		if !errors.Is(err, test.ErrNotFound) {
 			return nil, err
 		}
-		if mode == test.OpenReadOnly {
+		// Creation intent travels in disp, like O_CREAT: CreateNever
+		// reports the missing path, while CreateIfMissing materializes
+		// it through the CLI before handing out the cursor. OpenReadOnly
+		// never creates.
+		if disp == test.CreateNever || mode == test.OpenReadOnly {
 			return nil, err
 		}
-		// Every other mode creates a missing file, so materialize it
-		// through the CLI before handing out the cursor.
 		if cErr := s.CreateFile(resolved, 0o644, false); cErr != nil {
 			return nil, cErr
 		}
@@ -265,7 +290,7 @@ func (s *cliPOSIXSurface) Utimens(path string, mtime int64) error {
 		return err
 	}
 	stamp := strconv.FormatInt(mtime, 10)
-	if _, err := s.runCLI([]string{"touch", "--token", "x", s.project, rel, "--mtime-ns", stamp, "--atime-ns", stamp}); err != nil {
+	if _, err := s.runCLI([]string{"touch", "--token", "x", s.project, rel, "--mtimens", stamp, "--atimens", stamp}); err != nil {
 		return pcTranslateErr(err)
 	}
 	return nil
@@ -293,7 +318,7 @@ func (s *cliPOSIXSurface) Rename(oldPath, newPath string, noReplace bool) error 
 	}
 	args := []string{"mv", "--token", "x", s.project, oldRel, newRel}
 	if noReplace {
-		args = append(args, "--no-replace")
+		args = append(args, "--noreplace")
 	}
 	if _, err := s.runCLI(args); err != nil {
 		return pcTranslateErr(err)
@@ -438,7 +463,7 @@ func (s *cliPOSIXSurface) CompareAndWrite(path string, offset int64, data []byte
 		return test.ErrInvalid
 	}
 	rev := strconv.FormatUint(token, 10)
-	if _, err := s.runCLI([]string{"write", "--token", "x", "--expected-revision", rev, s.project, rel, strconv.FormatInt(offset, 10), string(data)}); err != nil {
+	if _, err := s.runCLI([]string{"write", "--token", "x", "--expectedrevision", rev, s.project, rel, strconv.FormatInt(offset, 10), string(data)}); err != nil {
 		if errors.Is(err, shfs.ErrPreconditionFailed) {
 			current, statErr := s.Revision(path)
 			if statErr != nil {

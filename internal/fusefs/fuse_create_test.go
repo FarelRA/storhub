@@ -15,7 +15,7 @@ import (
 func TestCallerContextSuppressesAtime(t *testing.T) {
 	t.Parallel()
 	fake := &stubHub{}
-	fsys, err := New(fake, "demo-project", Options{CacheDir: t.TempDir()})
+	fsys, err := New(fake, "demoproject", Options{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestSetattrOnWriteHandleDefersMetadataPatchUntilRelease(t *testing.T) {
 			repo := meta.NewRepoMetadata("demo")
 			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 10}, now)
 			repo.RebuildIndexes()
-			return repo, "sha-1", nil
+			return repo, "sha1", nil
 		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
@@ -397,7 +397,7 @@ func TestOpenReturnsKernelCachedFlags(t *testing.T) {
 			repo := meta.NewRepoMetadata("demo")
 			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 10}, now)
 			repo.RebuildIndexes()
-			return repo, "sha-1", nil
+			return repo, "sha1", nil
 		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target == "docs/file.txt" {
@@ -437,7 +437,7 @@ func TestSetattrWithAttachedHandleUsesActiveWriteState(t *testing.T) {
 			repo := meta.NewRepoMetadata("demo")
 			repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: backendSize}, now)
 			repo.RebuildIndexes()
-			return repo, "sha-1", nil
+			return repo, "sha1", nil
 		},
 		statPath: func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 			if target != "docs/file.txt" {

@@ -18,31 +18,31 @@ func TestRegressionRequiredSlotsNoNewVar(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-required-slots", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectrequiredslots", "a.txt", input)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-required-slots")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectrequiredslots")
 	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-required-slots", firstRelease, 998)
-	hub.invalidateReleaseCache("project-required-slots")
+	backend.addAssetsToRelease(t, "projectrequiredslots", firstRelease, 998)
+	hub.invalidateReleaseCache("projectrequiredslots")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
-	tag1, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 1)
+	tag1, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectrequiredslots", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate 1 slot: %v", err)
 	}
 	if tag1 != firstRelease {
 		t.Fatalf("expected reuse of %s for 1 slot, got %s", firstRelease, tag1)
 	}
-	tag2, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 2)
+	tag2, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectrequiredslots", workingMeta, 2)
 	if err != nil {
 		t.Fatalf("getOrCreate 2 slots: %v", err)
 	}
 	if tag2 == firstRelease {
 		t.Fatalf("expected new release for 2 slots, got same %s", tag2)
 	}
-	tag0, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-required-slots", workingMeta, 0)
+	tag0, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectrequiredslots", workingMeta, 0)
 	if err != nil {
 		t.Fatalf("getOrCreate 0 slots: %v", err)
 	}
@@ -56,12 +56,12 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-equal-scan", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectequalscan", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-equal-scan")
-	backend.addRelease(t, "project-equal-scan", "v999")
-	hub.invalidateReleaseCache("project-equal-scan")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectequalscan")
+	backend.addRelease(t, "projectequalscan", "v999")
+	hub.invalidateReleaseCache("projectequalscan")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
 	firstRelease := ""
@@ -69,9 +69,9 @@ func TestRegressionEqualScanOrphaned(t *testing.T) {
 		firstRelease = tag
 		break
 	}
-	backend.addAssetsToRelease(t, "project-equal-scan", firstRelease, 999)
-	hub.invalidateReleaseCache("project-equal-scan")
-	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-equal-scan", workingMeta, 1)
+	backend.addAssetsToRelease(t, "projectequalscan", firstRelease, 999)
+	hub.invalidateReleaseCache("projectequalscan")
+	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectequalscan", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
@@ -117,21 +117,21 @@ func TestRegressionReplaceRotatesWhenReleaseFillsMidUpload(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-rotate-full", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectrotatefull", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
+	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "projectrotatefull")
 	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
 	// Fill the release server-side WITHOUT touching the client cache,
 	// exactly like prod where embedded counts lag the true count.
-	backend.addAssetsToRelease(t, "project-rotate-full", firstRelease, 999)
+	backend.addAssetsToRelease(t, "projectrotatefull", firstRelease, 999)
 	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
-	meta2, err := hub.UploadFileContext(context.Background(), "project-rotate-full", "b.txt", input2)
+	meta2, err := hub.UploadFileContext(context.Background(), "projectrotatefull", "b.txt", input2)
 	if err != nil {
 		t.Fatalf("upload must rotate to a new release, got: %v", err)
 	}
-	repoMeta2, _, _ := hub.loadRepoMetadata(ctx, "project-rotate-full")
+	repoMeta2, _, _ := hub.loadRepoMetadata(ctx, "projectrotatefull")
 	if got := repoMeta2.Chunks()[meta2.Chunks[0]].Release; got == firstRelease {
 		t.Fatalf("upload landed on full release %s, must rotate", got)
 	}
@@ -149,14 +149,14 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-true-count", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projecttruecount", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "project-true-count")
+	repoMeta, _, _ := hub.loadRepoMetadata(ctx, "projecttruecount")
 	fullRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-true-count", fullRelease, 999)
-	hub.invalidateReleaseCache("project-true-count")
+	backend.addAssetsToRelease(t, "projecttruecount", fullRelease, 999)
+	hub.invalidateReleaseCache("projecttruecount")
 	workingMeta := repoMeta.Clone()
 	workingMeta.RemoveFile("a.txt")
 	// 1000 assets at per_page=100 must page 10 full pages plus the
@@ -169,7 +169,7 @@ func TestRegressionReleasePickerUsesTrueCountNearCeiling(t *testing.T) {
 		}
 		return false
 	})
-	tag, _, err := hub.getOrCreateUploadRelease(ctx, "project-true-count", workingMeta, 1)
+	tag, _, err := hub.getOrCreateUploadRelease(ctx, "projecttruecount", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("getOrCreate: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("12345678"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-compensate", "seed.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcompensate", "seed.txt", seed); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	var posts atomic.Int32
@@ -203,10 +203,10 @@ func TestRegressionPutFileCompensatesMidUploadFailure(t *testing.T) {
 		return false
 	})
 	two := writeTempFile(t, t.TempDir(), "two.txt", []byte("123456789"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-compensate", "two.txt", two); err == nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcompensate", "two.txt", two); err == nil {
 		t.Fatal("expected injected failure")
 	}
-	if got := len(backend.repo("project-compensate").assets); got != 1 {
+	if got := len(backend.repo("projectcompensate").assets); got != 1 {
 		t.Fatalf("leaked orphan assets after mid-upload failure: got %d assets, want 1 (seed only)", got)
 	}
 }
@@ -215,12 +215,12 @@ func TestRegressionPreferredTagRemoved(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-preferred-removed")
-	_, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-preferred-removed", repoMeta, 1)
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectpreferredremoved")
+	_, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectpreferredremoved", repoMeta, 1)
 	if err != nil {
 		t.Logf("getOrCreate without hint returned: %v", err)
 	}
-	_, _, _ = hub.GetOrCreateUploadReleaseContext(context.Background(), "project-preferred-removed", repoMeta, 1)
+	_, _, _ = hub.GetOrCreateUploadReleaseContext(context.Background(), "projectpreferredremoved", repoMeta, 1)
 }
 
 func TestRegressionReleaseCacheLifetime(t *testing.T) {
@@ -228,27 +228,27 @@ func TestRegressionReleaseCacheLifetime(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-cache-lifetime", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcachelifetime", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if _, ok := hub.getCachedReleases("project-cache-lifetime"); !ok {
+	if _, ok := hub.getCachedReleases("projectcachelifetime"); !ok {
 		t.Fatal("expected cache to be populated after first list")
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-cache-lifetime")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectcachelifetime")
 	firstRelease := ""
 	for tag := range repoMeta.Releases() {
 		firstRelease = tag
 		break
 	}
-	backend.addAssetsToRelease(t, "project-cache-lifetime", firstRelease, 999)
-	backend.addRelease(t, "project-cache-lifetime", "v999")
+	backend.addAssetsToRelease(t, "projectcachelifetime", firstRelease, 999)
+	backend.addRelease(t, "projectcachelifetime", "v999")
 	workingMeta := repoMeta.Clone()
-	tag, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", workingMeta, 1)
+	tag, _, _ := hub.getOrCreateUploadRelease(context.Background(), "projectcachelifetime", workingMeta, 1)
 	if tag == "v999" {
 		t.Fatal("expected cached result (not v999) before invalidation, got v999")
 	}
-	hub.invalidateReleaseCache("project-cache-lifetime")
-	tag2, _, _ := hub.getOrCreateUploadRelease(context.Background(), "project-cache-lifetime", workingMeta, 1)
+	hub.invalidateReleaseCache("projectcachelifetime")
+	tag2, _, _ := hub.getOrCreateUploadRelease(context.Background(), "projectcachelifetime", workingMeta, 1)
 	if tag2 != "v999" {
 		t.Fatalf("expected v999 after invalidation, got %s", tag2)
 	}
@@ -263,21 +263,21 @@ func TestRegressionDoubleCreateReusesRivalRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-race", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectrace", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-race")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectrace")
 	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-race", firstRelease, 999)
+	backend.addAssetsToRelease(t, "projectrace", firstRelease, 999)
 	// Prime the release cache with only the (now full) first release, then
 	// let the rival create v2 out-of-band: our cache is stale by design.
-	if _, err := hub.listReleases(context.Background(), "project-race"); err != nil {
+	if _, err := hub.listReleases(context.Background(), "projectrace"); err != nil {
 		t.Fatalf("prime cache: %v", err)
 	}
-	rival := backend.addRelease(t, "project-race", "v2")
+	rival := backend.addRelease(t, "projectrace", "v2")
 	workingMeta := repoMeta.Clone()
-	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "project-race", workingMeta, 1)
+	tag, _, err := hub.getOrCreateUploadRelease(context.Background(), "projectrace", workingMeta, 1)
 	if err != nil {
 		t.Fatalf("must reuse rival release instead of failing: %v", err)
 	}
@@ -296,22 +296,22 @@ func TestRegressionPickerPrefersOldestRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-oldest", "a.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectoldest", "a.txt", input)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectoldest")
 	firstRelease := repoMeta.Chunks()[meta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-oldest", firstRelease, 999)
-	backend.addRelease(t, "project-oldest", "v9")
-	backend.addAssetToRelease(t, "project-oldest", "v9", "elder.bin", []byte("elder"))
-	backend.addRelease(t, "project-oldest", "v10")
+	backend.addAssetsToRelease(t, "projectoldest", firstRelease, 999)
+	backend.addRelease(t, "projectoldest", "v9")
+	backend.addAssetToRelease(t, "projectoldest", "v9", "elder.bin", []byte("elder"))
+	backend.addRelease(t, "projectoldest", "v10")
 	input2 := writeTempFile(t, t.TempDir(), "b.txt", []byte("b"))
-	meta2, err := hub.UploadFileContext(context.Background(), "project-oldest", "b.txt", input2)
+	meta2, err := hub.UploadFileContext(context.Background(), "projectoldest", "b.txt", input2)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	repoMeta2, _, _ := hub.loadRepoMetadata(context.Background(), "project-oldest")
+	repoMeta2, _, _ := hub.loadRepoMetadata(context.Background(), "projectoldest")
 	if got := repoMeta2.Chunks()[meta2.Chunks[0]].Release; got != "v9" {
 		t.Fatalf("expected oldest-with-space v9, landed %s", got)
 	}
@@ -325,21 +325,21 @@ func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-purge-empty", "kept.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectpurgeempty", "kept.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	empty := backend.addRelease(t, "project-purge-empty", "v-empty")
-	result, err := hub.PruneProject("project-purge-empty", "assets", 0, false)
+	empty := backend.addRelease(t, "projectpurgeempty", "v-empty")
+	result, err := hub.PruneProject("projectpurgeempty", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 	if result.DeletedReleases != 0 {
 		t.Fatalf("purge must not drop empty releases, got %+v", result)
 	}
-	if backend.repo("project-purge-empty").releasesByTag[empty.tag] == nil {
+	if backend.repo("projectpurgeempty").releasesByTag[empty.tag] == nil {
 		t.Fatal("empty release was deleted by purge")
 	}
 }
@@ -356,14 +356,14 @@ func TestRegressionAssetNameCollisionRetries(t *testing.T) {
 	backend.mu.Unlock()
 	payload := bytes.Repeat([]byte("c"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "collide.txt", payload)
-	if _, err := hub.UploadFileContext(context.Background(), "project-collide", "collide.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcollide", "collide.txt", input); err != nil {
 		t.Fatalf("upload must survive one name collision: %v", err)
 	}
-	if n := len(backend.repo("project-collide").assets); n != 1 {
+	if n := len(backend.repo("projectcollide").assets); n != 1 {
 		t.Fatalf("expected exactly 1 stored asset after retry, got %d", n)
 	}
 	output := filepath.Join(t.TempDir(), "collide.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-collide", "collide.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectcollide", "collide.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	got, err := os.ReadFile(output)
@@ -387,23 +387,23 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seed := writeTempFile(t, t.TempDir(), "seed.txt", []byte("s"))
-	seedMeta, err := hub.UploadFileContext(context.Background(), "project-spread", "seed.txt", seed)
+	seedMeta, err := hub.UploadFileContext(context.Background(), "projectspread", "seed.txt", seed)
 	if err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectspread")
 	firstRelease := repoMeta.Chunks()[seedMeta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-spread", firstRelease, 998) // 999 true, 950 embedded
-	payload := bytes.Repeat([]byte("m"), int(2*testSmallChunkSize+4))  // 3 chunks
+	backend.addAssetsToRelease(t, "projectspread", firstRelease, 998) // 999 true, 950 embedded
+	payload := bytes.Repeat([]byte("m"), int(2*testSmallChunkSize+4)) // 3 chunks
 	input := writeTempFile(t, t.TempDir(), "spread.bin", payload)
-	meta, err := hub.UploadFileContext(context.Background(), "project-spread", "spread.bin", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectspread", "spread.bin", input)
 	if err != nil {
 		t.Fatalf("spread upload: %v", err)
 	}
 	if len(meta.Chunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(meta.Chunks))
 	}
-	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-spread")
+	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "projectspread")
 	seen := map[string]bool{}
 	for _, id := range meta.Chunks {
 		seen[metaState.Chunks()[id].Release] = true
@@ -417,7 +417,7 @@ func TestRegressionMultiChunkFileRotatesMidUpload(t *testing.T) {
 		}
 	}
 	output := filepath.Join(t.TempDir(), "spread.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-spread", "spread.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectspread", "spread.bin", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	got, err := os.ReadFile(output)

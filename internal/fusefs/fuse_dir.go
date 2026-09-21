@@ -270,7 +270,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	}
 	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
 	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
-	// The pre-stat is only a fast path; the authoritative no-replace
+	// The pre-stat is only a fast path; the authoritative noreplace
 	// decision is enforced inside RenameContext's transaction via
 	// shfs.WithNoReplace, so a target created between this stat and the
 	// transaction still fails with EEXIST instead of being clobbered.

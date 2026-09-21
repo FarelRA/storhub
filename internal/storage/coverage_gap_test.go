@@ -33,11 +33,11 @@ func TestPatchedFileDownloadContentCorrectness(t *testing.T) {
 	ctx := context.Background()
 	original := bytes.Repeat([]byte("a"), 100)
 	input := writeTempFile(t, t.TempDir(), "relaxed-ranges.bin", original)
-	if _, err := hub.UploadFileContext(ctx, "project-relaxed-ranges", "relaxed-ranges.bin", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectrelaxedranges", "relaxed-ranges.bin", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	patchedBytes := bytes.Repeat([]byte("b"), 47)
-	if _, err := hub.PatchFileContext(ctx, "project-relaxed-ranges", "relaxed-ranges.bin", 3, 47, patchedBytes); err != nil {
+	if _, err := hub.PatchFileContext(ctx, "projectrelaxedranges", "relaxed-ranges.bin", 3, 47, patchedBytes); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
 	if err := hub.FlushMetadata(ctx); err != nil {
@@ -70,7 +70,7 @@ func TestPatchedFileDownloadContentCorrectness(t *testing.T) {
 		return false
 	})
 	output := t.TempDir() + "/relaxed-ranges.out"
-	if err := hub.DownloadFileContext(ctx, "project-relaxed-ranges", "relaxed-ranges.bin", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectrelaxedranges", "relaxed-ranges.bin", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	assertFileContent(t, output, expected)
@@ -135,26 +135,26 @@ func TestRenameOntoExistingFileReplaces(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-rename", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectrename", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for _, tc := range []struct{ path, body string }{{"docs/a.txt", "aaa"}, {"docs/b.txt", "bb"}} {
 		seed := writeTempFile(t, t.TempDir(), "seed", []byte(tc.body))
-		if _, err := hub.UploadFileContext(ctx, "project-rename", tc.path, seed); err != nil {
+		if _, err := hub.UploadFileContext(ctx, "projectrename", tc.path, seed); err != nil {
 			t.Fatalf("upload %s: %v", tc.path, err)
 		}
 	}
-	if err := hub.RenameContext(ctx, "project-rename", "docs/a.txt", "docs/b.txt"); err != nil {
+	if err := hub.RenameContext(ctx, "projectrename", "docs/a.txt", "docs/b.txt"); err != nil {
 		t.Fatalf("rename onto file: %v", err)
 	}
-	got, err := hub.ReadFileAtContext(ctx, "project-rename", "docs/b.txt", 0, 3)
+	got, err := hub.ReadFileAtContext(ctx, "projectrename", "docs/b.txt", 0, 3)
 	if err != nil {
 		t.Fatalf("read replacement: %v", err)
 	}
 	if string(got) != "aaa" {
 		t.Fatalf("expected replacement content %q, got %q", "aaa", got)
 	}
-	if _, err := hub.StatPathContext(ctx, "project-rename", "docs/a.txt"); err == nil {
+	if _, err := hub.StatPathContext(ctx, "projectrename", "docs/a.txt"); err == nil {
 		t.Fatal("source must be gone after rename")
 	}
 }
@@ -166,17 +166,17 @@ func TestRenameAcrossKindsFails(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-rename-kind", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectrenamekind", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	seed := writeTempFile(t, t.TempDir(), "f", []byte("f"))
-	if _, err := hub.UploadFileContext(ctx, "project-rename-kind", "f.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectrenamekind", "f.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if err := hub.RenameContext(ctx, "project-rename-kind", "f.txt", "docs"); !errors.Is(err, syscall.EISDIR) {
+	if err := hub.RenameContext(ctx, "projectrenamekind", "f.txt", "docs"); !errors.Is(err, syscall.EISDIR) {
 		t.Fatalf("file onto dir must fail with EISDIR, got %v", err)
 	}
-	if err := hub.RenameContext(ctx, "project-rename-kind", "docs", "f.txt"); !errors.Is(err, syscall.ENOTDIR) {
+	if err := hub.RenameContext(ctx, "projectrenamekind", "docs", "f.txt"); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("dir onto file must fail with ENOTDIR, got %v", err)
 	}
 }
@@ -187,18 +187,18 @@ func TestCopyFileAndDirectory(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-copy", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectcopy", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	seed := writeTempFile(t, t.TempDir(), "src", []byte("hello copy"))
-	if _, err := hub.UploadFileContext(ctx, "project-copy", "docs/src.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectcopy", "docs/src.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if err := hub.CopyContext(ctx, "project-copy", "docs/src.txt", "docs/dst.txt"); err != nil {
+	if err := hub.CopyContext(ctx, "projectcopy", "docs/src.txt", "docs/dst.txt"); err != nil {
 		t.Fatalf("copy file: %v", err)
 	}
 	for _, path := range []string{"docs/src.txt", "docs/dst.txt"} {
-		got, err := hub.ReadFileAtContext(ctx, "project-copy", path, 0, 10)
+		got, err := hub.ReadFileAtContext(ctx, "projectcopy", path, 0, 10)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
@@ -206,16 +206,16 @@ func TestCopyFileAndDirectory(t *testing.T) {
 			t.Fatalf("unexpected content for %s: %q", path, got)
 		}
 	}
-	if err := hub.CopyContext(ctx, "project-copy", "docs", "docs2"); err != nil {
+	if err := hub.CopyContext(ctx, "projectcopy", "docs", "docs2"); err != nil {
 		t.Fatalf("copy dir: %v", err)
 	}
 	// docs held src.txt and dst.txt at copy time, so the tree copy has both.
-	entries, err := hub.ReadDirContext(ctx, "project-copy", "docs2")
+	entries, err := hub.ReadDirContext(ctx, "projectcopy", "docs2")
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected copied dir listing: %+v %v", entries, err)
 	}
 	for _, path := range []string{"docs2/src.txt", "docs2/dst.txt"} {
-		got, err := hub.ReadFileAtContext(ctx, "project-copy", path, 0, 10)
+		got, err := hub.ReadFileAtContext(ctx, "projectcopy", path, 0, 10)
 		if err != nil || string(got) != "hello copy" {
 			t.Fatalf("copied tree file %s unreadable: %q %v", path, got, err)
 		}
@@ -228,20 +228,20 @@ func TestCopyErrors(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-copy-err", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectcopyerr", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	seed := writeTempFile(t, t.TempDir(), "c", []byte("c"))
-	if _, err := hub.UploadFileContext(ctx, "project-copy-err", "docs/c.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectcopyerr", "docs/c.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if err := hub.CopyContext(ctx, "project-copy-err", "docs/nope.txt", "docs/x.txt"); err == nil {
+	if err := hub.CopyContext(ctx, "projectcopyerr", "docs/nope.txt", "docs/x.txt"); err == nil {
 		t.Fatal("copy of missing source must fail")
 	}
-	if err := hub.CopyContext(ctx, "project-copy-err", "docs/c.txt", "docs/c.txt"); err == nil {
+	if err := hub.CopyContext(ctx, "projectcopyerr", "docs/c.txt", "docs/c.txt"); err == nil {
 		t.Fatal("self-copy must fail")
 	}
-	if err := hub.CopyContext(ctx, "project-copy-err", "docs", "docs/c.txt"); !errors.Is(err, syscall.ENOTDIR) {
+	if err := hub.CopyContext(ctx, "projectcopyerr", "docs", "docs/c.txt"); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("dir onto file must fail with ENOTDIR, got %v", err)
 	}
 }
@@ -347,7 +347,7 @@ func TestAdvancedMetadataAPI(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	project := "project-meta-api"
+	project := "projectmetaapi"
 
 	seed := writeTempFile(t, t.TempDir(), "base.txt", []byte("base content"))
 	if _, err := hub.UploadFileContext(ctx, project, "base.txt", seed); err != nil {
@@ -442,7 +442,7 @@ func TestAtimePolicies(t *testing.T) {
 	strictCfg.AtimePolicy = "strictatime"
 	hub := backend.newClient(t, strictCfg)
 	ctx := context.Background()
-	project := "project-atime"
+	project := "projectatime"
 	seed := writeTempFile(t, t.TempDir(), "atime.txt", []byte("read me"))
 	if _, err := hub.UploadFileContext(ctx, project, "atime.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
@@ -488,7 +488,7 @@ func TestAtimePolicies(t *testing.T) {
 	noCfg := smallTransferTestConfig()
 	noCfg.AtimePolicy = "noatime"
 	noHub := backend.newClient(t, noCfg)
-	noProject := "project-noatime"
+	noProject := "projectnoatime"
 	seed2 := writeTempFile(t, t.TempDir(), "noatime.txt", []byte("no touch"))
 	if _, err := noHub.UploadFileContext(ctx, noProject, "noatime.txt", seed2); err != nil {
 		t.Fatalf("upload: %v", err)
@@ -520,24 +520,24 @@ func TestFlushProject(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-flush-a", "d1"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectflusha", "d1"); err != nil {
 		t.Fatalf("mkdir a: %v", err)
 	}
-	if err := hub.MkdirContext(ctx, "project-flush-b", "d2"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectflushb", "d2"); err != nil {
 		t.Fatalf("mkdir b: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-flush-a"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectflusha"); err != nil {
 		t.Fatalf("flush project a: %v", err)
 	}
 	observer := backend.newClient(t, smallTransferTestConfig())
-	entry, err := observer.StatPathContext(ctx, "project-flush-a", "d1")
+	entry, err := observer.StatPathContext(ctx, "projectflusha", "d1")
 	if err != nil {
 		t.Fatalf("flushed project must be visible remotely: %v", err)
 	}
 	if !entry.IsDir {
 		t.Fatalf("expected d1 to be a dir: %+v", entry)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-never-touched"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectnevertouched"); err != nil {
 		t.Fatalf("unknown project flush must succeed: %v", err)
 	}
 	if err := hub.FlushProjectContext(ctx, "bad/name"); err == nil {
@@ -548,7 +548,7 @@ func TestFlushProject(t *testing.T) {
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush all: %v", err)
 	}
-	if _, err := observer.StatPathContext(ctx, "project-flush-b", "d2"); err != nil {
+	if _, err := observer.StatPathContext(ctx, "projectflushb", "d2"); err != nil {
 		t.Fatalf("sibling project state lost: %v", err)
 	}
 }
@@ -569,13 +569,13 @@ func TestPublicAPIOnlyMutationCycle(t *testing.T) {
 		return false
 	})
 	seed := writeTempFile(t, t.TempDir(), "pub.txt", []byte("public path"))
-	if _, err := hub.UploadFileContext(ctx, "project-public", "pub.txt", seed); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectpublic", "pub.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if err := hub.FlushMetadata(ctx); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if _, err := hub.StatPathContext(ctx, "project-public", "pub.txt"); err != nil {
+	if _, err := hub.StatPathContext(ctx, "projectpublic", "pub.txt"); err != nil {
 		t.Fatalf("stat: %v", err)
 	}
 	if apiCalls.Load() == 0 {
@@ -591,7 +591,7 @@ func TestDeepTreeUploadStatRoundTrip(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	const project = "project-deep-tree"
+	const project = "projectdeeptree"
 	deep := "a/b/c/d/e/f/g/h.txt"
 	payload := []byte("deep payload")
 	// Uploads do not mkdir -p (POSIX open(O_CREAT) semantics: the parent
@@ -635,7 +635,7 @@ func TestRevisionContextServesCachedRevision(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	project := "project-revision-cached"
+	project := "projectrevisioncached"
 
 	seed := writeTempFile(t, t.TempDir(), "base.txt", []byte("base content"))
 	if _, err := hub.UploadFileContext(ctx, project, "base.txt", seed); err != nil {
@@ -673,7 +673,7 @@ func TestConcurrentColdReadsShareOneLoad(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	project := "project-cold-singleflight"
+	project := "projectcoldsingleflight"
 
 	seed := writeTempFile(t, t.TempDir(), "base.txt", []byte("base content"))
 	if _, err := hub.UploadFileContext(ctx, project, "base.txt", seed); err != nil {

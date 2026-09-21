@@ -371,7 +371,7 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 		h.mu.Unlock()
 		return nil
 	}
-	temp, err := h.fs.newOverlayTemp("handle-*")
+	temp, err := h.fs.newOverlayTemp("handle*")
 	if err != nil {
 		h.mu.Unlock()
 		return err

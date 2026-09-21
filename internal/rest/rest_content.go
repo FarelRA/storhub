@@ -740,7 +740,7 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	// SetXAttrContext takes no mutate options: a revision token fails loud
 	// with 412 (preconditionForUpdateNoCAS) instead of silently degrading
 	// to a start-of-request check.
-	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-put") {
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrput") {
 		return
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
@@ -775,9 +775,9 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	// RemoveXAttrContext takes no mutate options: like xattr-put, a
+	// RemoveXAttrContext takes no mutate options: like xattrput, a
 	// revision token fails loud with 412 (preconditionForUpdateNoCAS).
-	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-delete") {
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrdelete") {
 		return
 	}
 	client, err := h.clientFor(r)

@@ -356,7 +356,7 @@ func TestRecoveryMutationsInvalidateKernelCaches(t *testing.T) {
 		loadReadonly: func(_ context.Context, _ string) (*meta.RepoMetadata, string, error) {
 			repo := meta.NewRepoMetadata("demo")
 			repo.RebuildIndexes()
-			return repo, "sha-1", nil
+			return repo, "sha1", nil
 		},
 		renameFn: func(_ context.Context, _, _, _ string) error {
 			renames++
@@ -434,11 +434,11 @@ func TestRecoveryErrnoMappingGaps(t *testing.T) {
 		{"nil", nil, 0},
 		{"canceled", context.Canceled, syscall.EINTR},
 		{"deadline", context.DeadlineExceeded, syscall.ETIMEDOUT},
-		{"ecanceled-raw", syscall.ECANCELED, syscall.EINTR},
-		{"canceled-unwrapped", errors.New("download: context canceled"), syscall.EINTR},
-		{"deadline-unwrapped", errors.New("rpc: deadline exceeded"), syscall.ETIMEDOUT},
+		{"ecanceledraw", syscall.ECANCELED, syscall.EINTR},
+		{"canceledunwrapped", errors.New("download: context canceled"), syscall.EINTR},
+		{"deadlineunwrapped", errors.New("rpc: deadline exceeded"), syscall.ETIMEDOUT},
 		{"corrupted", shfs.Corrupted("repo/meta"), errCorruptedErrno},
-		{"corrupted-wrapped", errors.Join(errors.New("load"), shfs.Corrupted("x")), errCorruptedErrno},
+		{"corruptedwrapped", errors.Join(errors.New("load"), shfs.Corrupted("x")), errCorruptedErrno},
 		{"notfound", shfs.NotFound("a"), syscall.ENOENT},
 		{"unknown", errors.New("boom"), syscall.EIO},
 	}
@@ -537,7 +537,7 @@ func TestRecoveryQuarantineWritesManifestAndSurvivesRestart(t *testing.T) {
 func TestRecoveryStartupSweepWritesManifests(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	for name, content := range map[string]string{"inode-aaa": "dirty-inode", "handle-bbb": "dirty-handle"} {
+	for name, content := range map[string]string{"inodeaaa": "dirtyinode", "handlebbb": "dirtyhandle"} {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -562,7 +562,7 @@ func TestRecoveryStartupSweepWritesManifests(t *testing.T) {
 			t.Fatalf("quarantined entry unreadable: %+v (err=%v)", e, err)
 		}
 	}
-	if !seen["startup-sweep"] {
+	if !seen["startupsweep"] {
 		t.Fatalf("sweep entries must carry their reason, got %+v", inventory)
 	}
 }

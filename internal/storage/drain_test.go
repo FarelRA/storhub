@@ -21,7 +21,7 @@ func TestDrainProjectLandsPublishedData(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-drain-lands"
+	proj := "projectdrainlands"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
 	if _, err := hubA.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
@@ -52,7 +52,7 @@ func TestDrainProjectCleanIsNoNetwork(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-drain-clean"
+	proj := "projectdrainclean"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
 	if _, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
@@ -79,7 +79,7 @@ func TestDrainProjectReportsCommitFailure(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-drain-fails"
+	proj := "projectdrainfails"
 
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
 	if _, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
@@ -114,7 +114,7 @@ func TestDrainProjectConvergesUnderConcurrentMutation(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-drain-concurrent"
+	proj := "projectdrainconcurrent"
 
 	write := func(name, body string) {
 		t.Helper()

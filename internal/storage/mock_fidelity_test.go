@@ -28,7 +28,7 @@ import (
 func TestMockAssetDownloadRedirectShape(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
-	uploadFixture(t, backend, "project-cdn", "cdn.txt", []byte("cdn redirect payload"))
+	uploadFixture(t, backend, "projectcdn", "cdn.txt", []byte("cdn redirect payload"))
 	ctx := context.Background()
 
 	var apiAssetPath atomic.Value
@@ -42,7 +42,7 @@ func TestMockAssetDownloadRedirectShape(t *testing.T) {
 	// A fresh client has an empty signed-URL cache, forcing full resolution.
 	reader := backend.newClient(t, smallTransferTestConfig())
 	output := filepath.Join(t.TempDir(), "cdn.out")
-	if err := reader.DownloadFileContext(ctx, "project-cdn", "cdn.txt", output); err != nil {
+	if err := reader.DownloadFileContext(ctx, "projectcdn", "cdn.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	assertFileContent(t, output, []byte("cdn redirect payload"))
@@ -98,7 +98,7 @@ func TestMockCDNRangeFetches(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	payload := []byte("cdn redirect payload")
-	uploadFixture(t, backend, "project-cdn-range", "cdn.txt", payload)
+	uploadFixture(t, backend, "projectcdnrange", "cdn.txt", payload)
 
 	var apiAssetPath atomic.Value
 	backend.onAssetGET(t, func(_ http.ResponseWriter, r *http.Request) bool {
@@ -107,7 +107,7 @@ func TestMockCDNRangeFetches(t *testing.T) {
 	})
 	reader := backend.newClient(t, smallTransferTestConfig())
 	output := filepath.Join(t.TempDir(), "cdn.out")
-	if err := reader.DownloadFileContext(context.Background(), "project-cdn-range", "cdn.txt", output); err != nil {
+	if err := reader.DownloadFileContext(context.Background(), "projectcdnrange", "cdn.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	assetPath, _ := apiAssetPath.Load().(string)
@@ -167,15 +167,15 @@ func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-links"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectlinks"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
 	for i := 0; i < 205; i++ {
-		backend.addRelease(t, "project-links", fmt.Sprintf("tag-%03d", i))
+		backend.addRelease(t, "projectlinks", fmt.Sprintf("tag-%03d", i))
 	}
 
 	req, _ := http.NewRequest(http.MethodGet,
-		backend.server.URL+"/repos/"+backend.owner+"/project-links/releases?per_page=100&page=1", nil)
+		backend.server.URL+"/repos/"+backend.owner+"/projectlinks/releases?per_page=100&page=1", nil)
 	req.Header.Set("Authorization", "Bearer "+backend.token)
 	resp, err := backend.server.Client().Do(req)
 	if err != nil {
@@ -187,7 +187,7 @@ func TestMockListReleasesEmitsLinkHeaders(t *testing.T) {
 		t.Fatalf("expected Link next+last headers, got %q", link)
 	}
 
-	releases, err := hub.gh.ListReleases(ctx, hub.Owner(), "project-links")
+	releases, err := hub.gh.ListReleases(ctx, hub.Owner(), "projectlinks")
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -203,11 +203,11 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-exact100"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectexact100"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
 	for i := 0; i < 200; i++ {
-		backend.addRelease(t, "project-exact100", fmt.Sprintf("tag-%03d", i))
+		backend.addRelease(t, "projectexact100", fmt.Sprintf("tag-%03d", i))
 	}
 	var pages atomic.Int32
 	var sawPage3 atomic.Bool
@@ -220,7 +220,7 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 		}
 		return false
 	})
-	releases, err := hub.gh.ListReleases(ctx, hub.Owner(), "project-exact100")
+	releases, err := hub.gh.ListReleases(ctx, hub.Owner(), "projectexact100")
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 	hub := backend.newClient(t, throttleCfg)
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "throttle.txt", []byte("throttled payload"))
-	if _, err := hub.UploadFileContext(ctx, "project-throttle", "throttle.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectthrottle", "throttle.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// Settle the upload's metadata BEFORE arming: otherwise the async
@@ -274,7 +274,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 	// A fresh mutation guarantees a dirty metadata commit, so a PUT must
 	// follow the armed fault no matter whether the async loop or this
 	// flush lands it first.
-	if err := hub.MkdirContext(ctx, "project-throttle", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectthrottle", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := hub.FlushMetadata(ctx); err != nil {
@@ -287,7 +287,7 @@ func TestMockRateLimitRetryOptIn(t *testing.T) {
 		t.Fatalf("expected the 429 to trigger a metadata PUT retry, saw %d PUTs", metaPuts.Load())
 	}
 	observer := backend.newClient(t, smallTransferTestConfig())
-	entry, err := observer.StatPathContext(ctx, "project-throttle", "throttle.txt")
+	entry, err := observer.StatPathContext(ctx, "projectthrottle", "throttle.txt")
 	if err != nil {
 		t.Fatalf("observer stat after throttled flush: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestMockCDN618ForcesReResolution(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	payload := []byte("618 re-resolution payload")
-	uploadFixture(t, backend, "project-618", "f.txt", payload)
+	uploadFixture(t, backend, "project618", "f.txt", payload)
 
 	var apiAssetHits atomic.Int32
 	backend.onAssetGET(t, func(_ http.ResponseWriter, _ *http.Request) bool {
@@ -314,7 +314,7 @@ func TestMockCDN618ForcesReResolution(t *testing.T) {
 
 	reader := backend.newClient(t, smallTransferTestConfig())
 	out := filepath.Join(t.TempDir(), "f.out")
-	if err := reader.DownloadFileContext(context.Background(), "project-618", "f.txt", out); err != nil {
+	if err := reader.DownloadFileContext(context.Background(), "project618", "f.txt", out); err != nil {
 		t.Fatalf("download past a 618 must re-resolve, got: %v", err)
 	}
 	assertFileContent(t, out, payload)
@@ -329,13 +329,13 @@ func TestMockCDNDelayStillConverges(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	payload := []byte("slow cdn payload")
-	uploadFixture(t, backend, "project-delay", "f.txt", payload)
+	uploadFixture(t, backend, "projectdelay", "f.txt", payload)
 	backend.faults.cdnDelay.Store(int64(50 * time.Millisecond))
 
 	reader := backend.newClient(t, smallTransferTestConfig())
 	out := filepath.Join(t.TempDir(), "f.out")
 	start := time.Now()
-	if err := reader.DownloadFileContext(context.Background(), "project-delay", "f.txt", out); err != nil {
+	if err := reader.DownloadFileContext(context.Background(), "projectdelay", "f.txt", out); err != nil {
 		t.Fatalf("download over a slow CDN must converge, got: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed < 25*time.Millisecond {
@@ -355,18 +355,18 @@ func TestMockNowDrivesSignedExpiry(t *testing.T) {
 	backend.faults.SetCDNTTL(time.Minute)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-now"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectnow"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
-	backend.addRelease(t, "project-now", "v1")
-	id := backend.addAssetToRelease(t, "project-now", "v1", "data.bin", []byte("x"))
+	backend.addRelease(t, "projectnow", "v1")
+	id := backend.addAssetToRelease(t, "projectnow", "v1", "data.bin", []byte("x"))
 
 	noRedirect := backend.server.Client()
 	noRedirect.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	req, _ := http.NewRequest(http.MethodGet,
-		fmt.Sprintf("%s/repos/%s/project-now/releases/assets/%d", backend.server.URL, backend.owner, id), nil)
+		fmt.Sprintf("%s/repos/%s/projectnow/releases/assets/%d", backend.server.URL, backend.owner, id), nil)
 	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("Authorization", "Bearer "+backend.token)
 	resp, err := noRedirect.Do(req)
@@ -410,7 +410,7 @@ func TestMockMaxChunkSizeSlowCDNConverges(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte(strings.Repeat("s", 3000))
 	input := writeTempFile(t, t.TempDir(), "big.txt", payload)
-	fileMeta, err := hub.UploadFileContext(ctx, "project-maxchunk", "big.txt", input)
+	fileMeta, err := hub.UploadFileContext(ctx, "projectmaxchunk", "big.txt", input)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestMockMaxChunkSizeSlowCDNConverges(t *testing.T) {
 	backend.faults.cdnDelay.Store(int64(20 * time.Millisecond))
 	reader := backend.newClient(t, cfg)
 	out := filepath.Join(t.TempDir(), "big.out")
-	if err := reader.DownloadFileContext(ctx, "project-maxchunk", "big.txt", out); err != nil {
+	if err := reader.DownloadFileContext(ctx, "projectmaxchunk", "big.txt", out); err != nil {
 		t.Fatalf("slow-CDN download at max chunk size must converge, got: %v", err)
 	}
 	assertFileContent(t, out, payload)
@@ -453,14 +453,14 @@ func TestMockRateLimitHeadersThrottleGovernor(t *testing.T) {
 	cfg.RateMaxWait = time.Minute
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-headers"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectheaders"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
 	backend.faults.rateLimitHeadersOnce.Store(true)
-	if _, err := hub.gh.ListReleases(ctx, hub.Owner(), "project-headers"); err != nil {
+	if _, err := hub.gh.ListReleases(ctx, hub.Owner(), "projectheaders"); err != nil {
 		t.Fatalf("first list (observes headers): %v", err)
 	}
-	if _, err := hub.gh.ListReleases(ctx, hub.Owner(), "project-headers"); err != nil {
+	if _, err := hub.gh.ListReleases(ctx, hub.Owner(), "projectheaders"); err != nil {
 		t.Fatalf("second list (throttled) must still succeed: %v", err)
 	}
 	if slept.Load() < 1 {
@@ -475,11 +475,11 @@ func TestMockPerPageDefaultsTo30(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-pp"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectpp"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
 	for i := 0; i < 35; i++ {
-		backend.addRelease(t, "project-pp", fmt.Sprintf("tag-%02d", i))
+		backend.addRelease(t, "projectpp", fmt.Sprintf("tag-%02d", i))
 	}
 	decode := func(path string) []map[string]any {
 		t.Helper()
@@ -490,7 +490,7 @@ func TestMockPerPageDefaultsTo30(t *testing.T) {
 		}
 		return got
 	}
-	base := "/repos/" + backend.owner + "/project-pp/releases"
+	base := "/repos/" + backend.owner + "/projectpp/releases"
 	if got := decode(base); len(got) != 30 {
 		t.Fatalf("missing per_page must default to 30, got %d items", len(got))
 	}
@@ -544,7 +544,7 @@ func TestMockRequiresAuthorization(t *testing.T) {
 	// The regular client (correct token) is unaffected.
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "auth.txt", []byte("auth ok"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-auth", "auth.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectauth", "auth.txt", input); err != nil {
 		t.Fatalf("authenticated upload: %v", err)
 	}
 }
@@ -556,16 +556,16 @@ func TestMockEmbeddedAssetsDeterministicOrder(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.EnsureRepoContext(ctx, "project-order"); err != nil {
+	if err := hub.EnsureRepoContext(ctx, "projectorder"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
-	backend.addRelease(t, "project-order", "v1")
+	backend.addRelease(t, "projectorder", "v1")
 	for i := 0; i < 50; i++ {
-		backend.addAssetToRelease(t, "project-order", "v1", fmt.Sprintf("asset-%02d.bin", i), []byte("x"))
+		backend.addAssetToRelease(t, "projectorder", "v1", fmt.Sprintf("asset-%02d.bin", i), []byte("x"))
 	}
 	previous := ""
 	for round := 0; round < 10; round++ {
-		release, err := hub.gh.GetReleaseByTag(ctx, hub.Owner(), "project-order", "v1")
+		release, err := hub.gh.GetReleaseByTag(ctx, hub.Owner(), "projectorder", "v1")
 		if err != nil {
 			t.Fatalf("get release: %v", err)
 		}

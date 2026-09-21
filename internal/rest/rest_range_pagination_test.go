@@ -35,10 +35,10 @@ func TestContentRangeEdges(t *testing.T) {
 		wantLength string
 	}{
 		{name: "suffix", rangeHdr: "bytes=-3", wantRange: "bytes 7-9/10", wantBody: "789", wantLength: "3"},
-		{name: "suffix-larger-than-file", rangeHdr: "bytes=-100", wantRange: "bytes 0-9/10", wantBody: "0123456789", wantLength: "10"},
-		{name: "open-ended", rangeHdr: "bytes=8-", wantRange: "bytes 8-9/10", wantBody: "89", wantLength: "2"},
-		{name: "clamped-end", rangeHdr: "bytes=8-100", wantRange: "bytes 8-9/10", wantBody: "89", wantLength: "2"},
-		{name: "single-byte", rangeHdr: "bytes=0-0", wantRange: "bytes 0-0/10", wantBody: "0", wantLength: "1"},
+		{name: "suffixlargerthanfile", rangeHdr: "bytes=-100", wantRange: "bytes 0-9/10", wantBody: "0123456789", wantLength: "10"},
+		{name: "openended", rangeHdr: "bytes=8-", wantRange: "bytes 8-9/10", wantBody: "89", wantLength: "2"},
+		{name: "clampedend", rangeHdr: "bytes=8-100", wantRange: "bytes 8-9/10", wantBody: "89", wantLength: "2"},
+		{name: "singlebyte", rangeHdr: "bytes=0-0", wantRange: "bytes 0-0/10", wantBody: "0", wantLength: "1"},
 	}
 	for _, tc := range partial {
 		t.Run("partial/"+tc.name, func(t *testing.T) {
@@ -62,12 +62,12 @@ func TestContentRangeEdges(t *testing.T) {
 		path     string
 		rangeHdr string
 	}{
-		{name: "start-past-eof", path: base, rangeHdr: "bytes=10-12"},
-		{name: "multi-range", path: base, rangeHdr: "bytes=0-1,3-4"},
-		{name: "bad-unit", path: base, rangeHdr: "items=0-1"},
+		{name: "startpasteof", path: base, rangeHdr: "bytes=10-12"},
+		{name: "multirange", path: base, rangeHdr: "bytes=0-1,3-4"},
+		{name: "badunit", path: base, rangeHdr: "items=0-1"},
 		{name: "unparseable", path: base, rangeHdr: "bytes=abc"},
 		{name: "inverted", path: base, rangeHdr: "bytes=5-3"},
-		{name: "empty-file", path: "/api/v1/projects/demo/content?path=docs/empty.txt", rangeHdr: "bytes=0-"},
+		{name: "emptyfile", path: "/api/v1/projects/demo/content?path=docs/empty.txt", rangeHdr: "bytes=0-"},
 	}
 	for _, tc := range unsatisfiable {
 		t.Run("unsatisfiable/"+tc.name, func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestContentRangeEdges(t *testing.T) {
 			handler := newSeeded(t)
 			resp := mustRequest(t, handler, http.MethodGet, tc.path, nil, map[string]string{"Range": tc.rangeHdr}, http.StatusRequestedRangeNotSatisfiable)
 			size := "10"
-			if tc.name == "empty-file" {
+			if tc.name == "emptyfile" {
 				size = "0"
 			}
 			if got := resp.Header.Get("Content-Range"); got != "bytes */"+size {
@@ -85,7 +85,7 @@ func TestContentRangeEdges(t *testing.T) {
 		})
 	}
 
-	t.Run("if-none-match-wins-over-range", func(t *testing.T) {
+	t.Run("ifnonematchwinsoverrange", func(t *testing.T) {
 		t.Parallel()
 		handler := newSeeded(t)
 		nodeResp := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=docs/f.txt", nil, nil, http.StatusOK)
@@ -98,7 +98,7 @@ func TestContentRangeEdges(t *testing.T) {
 		}
 	})
 
-	t.Run("head-with-range", func(t *testing.T) {
+	t.Run("headwithrange", func(t *testing.T) {
 		t.Parallel()
 		handler := newSeeded(t)
 		resp := mustRequest(t, handler, http.MethodHead, base, nil, map[string]string{"Range": "bytes=2-4"}, http.StatusPartialContent)
@@ -173,15 +173,15 @@ func TestPreconditionRevisionTokenThreadsToStorage(t *testing.T) {
 			}
 			mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 			mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("hello"), nil, http.StatusCreated)
-			client.SetRevision("rev-1")
-			current := map[string]string{"If-Match": `"rev-1"`}
+			client.SetRevision("rev1")
+			current := map[string]string{"If-Match": `"rev1"`}
 			want := http.StatusOK
 			if tc.name == "unlink" {
 				want = http.StatusNoContent
 			}
 			mustJSONRequestWithHeaders(t, handler, tc.method, tc.target, tc.body, current, want)
 			// The revision moved under the client: the same token is stale now.
-			client.SetRevision("rev-2")
+			client.SetRevision("rev2")
 			mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/content?path=docs/f.txt", strings.NewReader("hello"), nil, http.StatusCreated)
 			resp := mustJSONRequestWithHeaders(t, handler, tc.method, tc.target, tc.body, current, http.StatusPreconditionFailed)
 			assertErrorCode(t, resp, "precondition_failed")

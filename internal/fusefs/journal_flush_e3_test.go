@@ -21,7 +21,7 @@ type flushProbeHub struct {
 }
 
 func (f *flushProbeHub) FlushJournals() {
-	f.record("journal-flush")
+	f.record("journalflush")
 }
 
 // flushFixture mirrors syncDrainFixture but serves a hub exposing
@@ -56,7 +56,7 @@ func flushFixture(t *testing.T, flags uint32) (*Filesystem, *flushProbeHub, *sto
 func assertCommitFlushDrainOrder(t *testing.T, probe *flushProbeHub) {
 	t.Helper()
 	events := probe.eventLog()
-	patch, flush, drain := indexOf(events, "patch"), indexOf(events, "journal-flush"), indexOf(events, "drain")
+	patch, flush, drain := indexOf(events, "patch"), indexOf(events, "journalflush"), indexOf(events, "drain")
 	if patch < 0 || flush < 0 || drain < 0 {
 		t.Fatalf("durability path must commit, flush journals, then drain; got events %v", events)
 	}

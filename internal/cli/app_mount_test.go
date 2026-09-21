@@ -63,11 +63,11 @@ func TestLoggingMiddlewareRedactsTokens(t *testing.T) {
 	handler := app.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	req := httptest.NewRequest("GET", "/shares/sig-capability-token/download?path=/a.txt&sig=secret", nil)
+	req := httptest.NewRequest("GET", "/shares/sigcapabilitytoken/download?path=/a.txt&sig=secret", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	logs := stderr()
-	if strings.Contains(logs, "sig-capability-token") || strings.Contains(logs, "secret") {
+	if strings.Contains(logs, "sigcapabilitytoken") || strings.Contains(logs, "secret") {
 		t.Fatalf("credentials leaked into logs: %q", logs)
 	}
 	if !strings.Contains(logs, "path=/a.txt") && !strings.Contains(logs, "path=%2Fa.txt") {

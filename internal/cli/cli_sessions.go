@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 //
 // One parent, `session`, with one subcommand per manager verb. Every
 // subcommand except `open` threads the handle through the persistent
-// --handle flag; `open` prints the new handle id to stdout (nothing else,
+// --handle flag, falling back to $STORHUB_HANDLE when the flag is absent
+// (export it once per script instead of repeating the flag); `open`
+// prints the new handle id to stdout (nothing else,
 // so scripts can capture it) and every read-like output goes to stdout
 // while status chatter stays on stderr, like cat(1).
 //
@@ -66,7 +69,12 @@ Examples:
 func sessionHandle(cmd *cobra.Command) (string, error) {
 	handle, _ := cmd.Flags().GetString("handle")
 	if strings.TrimSpace(handle) == "" {
-		return "", &usageError{fmt.Errorf("missing --handle: open a session first with session open")}
+		// Script composability: export STORHUB_HANDLE once instead
+		// of repeating --handle on every call. Flag wins over env.
+		handle = strings.TrimSpace(os.Getenv("STORHUB_HANDLE"))
+	}
+	if handle == "" {
+		return "", &usageError{fmt.Errorf("missing --handle (or $STORHUB_HANDLE): open a session first with session open")}
 	}
 	return handle, nil
 }

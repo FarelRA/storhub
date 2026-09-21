@@ -17,8 +17,8 @@ import (
 // TestLoginConstantWorkForUnknownUsers) keep plaintext passwords to pin
 // real hashing and constant-work behavior at DefaultCost.
 const (
-	testHashAlicePass = "bcrypt$$2a$04$oK0pncMkg4EnPa0nse3I8urQlaVrZcrH3HIgdNCh/qkytBD4BWdje" // alice-pass
-	testHashRootPass  = "bcrypt$$2a$04$mrtVKi7Gl1.j/rzPmzP9Hej5D9Gkw3p2MmDezWRfPp1qeNq.rzh3G" // root-pass
+	testHashAlicePass = "bcrypt$$2a$04$FQE58irvHSDCIupeKUP8Wec2y0tj2Mc4EcLxoBQBrJeF7hStZgquS" // alicepass
+	testHashRootPass  = "bcrypt$$2a$04$aGgOS2NPN9oBzaeExIN8cOWkwq.hrjmSJBj8PPGZl/gUz8inKVOHe" // rootpass
 	testHashPass      = "bcrypt$$2a$04$vfwkqGAcEhulvtmkfrwca.mHwrURLYpraw1GUL.B9St9ke/wOlGwm" // pass
 )
 
@@ -28,7 +28,7 @@ func TestRESTAuthLoginAndPermissions(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "alice", Password: "alice-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "alice", Password: "alicepass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 	if login.Token == "" || login.Principal.Username != "alice" {
@@ -61,7 +61,7 @@ func TestRESTAuthAdminAndInvalidBearer(t *testing.T) {
 	unauth := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo", nil, nil, http.StatusUnauthorized)
 	assertErrorCode(t, unauth, "unauthorized")
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -81,7 +81,7 @@ func TestRESTShareBearerRootDirectoryReadOnly(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -110,7 +110,7 @@ func TestRESTShareBearerCannotEscapeSharedPath(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -131,7 +131,7 @@ func TestRESTShareBearerCannotCreateNestedShares(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -172,7 +172,7 @@ func newAuthedTestHandler(t *testing.T, client *fakeRESTClient) http.Handler {
 	opts := DefaultOptions()
 	opts.ShareSigningKey = []byte("abcdef0123456789abcdef0123456789")
 	opts.Auth = &AuthOptions{
-		TokenSigningKey: []byte("test-signing-key-0123456789abcdef"),
+		TokenSigningKey: []byte("testsigningkey0123456789abcdef0000"),
 		Users: []User{
 			{Username: "alice", PasswordHash: testHashAlicePass, UID: 1001, PrimaryGID: 2001},
 			{Username: "root", PasswordHash: testHashRootPass, UID: 0, PrimaryGID: 0, Admin: true},

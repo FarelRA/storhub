@@ -26,7 +26,7 @@ func TestCloneVsOverwrite(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-vs-overwrite"
+	project := "projectclonevsoverwrite"
 
 	const size = 32
 	before := bytes.Repeat([]byte("A"), size)
@@ -153,7 +153,7 @@ func TestCloneOfOverlaySeesCommitted(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-overlay-committed"
+	project := "projectcloneoverlaycommitted"
 
 	committed := bytes.Repeat([]byte("C"), 32)
 	staged := bytes.Repeat([]byte("S"), 32)

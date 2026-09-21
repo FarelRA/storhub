@@ -125,7 +125,7 @@ func (c *fakeRESTClient) RevisionContext(context.Context, string) (string, error
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.revision == "" {
-		return "rev-0", nil
+		return "rev0", nil
 	}
 	return c.revision, nil
 }

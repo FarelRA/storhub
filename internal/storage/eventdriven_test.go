@@ -89,7 +89,7 @@ func TestMetadataCommitsOnTriggerWithoutTicker(t *testing.T) {
 		}
 		return false
 	})
-	if err := hub.MkdirContext(context.Background(), "project-event-commit", "docs"); err != nil {
+	if err := hub.MkdirContext(context.Background(), "projecteventcommit", "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	pollUntil(t, time.Second, "triggered metadata commit", func() bool { return puts.Load() >= 1 })
@@ -110,7 +110,7 @@ func TestFailedMetadataCommitRetainsDirtyUntilRetrigger(t *testing.T) {
 	}
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
-	project := "project-failed-push"
+	project := "projectfailedpush"
 
 	var attempts atomic.Int32
 	var fail atomic.Bool
@@ -197,7 +197,7 @@ func TestQueueAtimeUpdatePokesCommitLoop(t *testing.T) {
 	cfg.AtimePolicy = storcfg.AtimeStrict
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
-	project := "project-atime-poke"
+	project := "projectatimepoke"
 
 	seed := writeTempFile(t, t.TempDir(), "watched.txt", []byte("read me"))
 	if _, err := hub.UploadFileContext(ctx, project, "watched.txt", seed); err != nil {
@@ -227,7 +227,7 @@ func TestInvalidateRepoMetadataStopsCommitLoop(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
 	ctx := context.Background()
-	project := "project-invalidate"
+	project := "projectinvalidate"
 
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)

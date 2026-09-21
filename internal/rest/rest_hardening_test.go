@@ -64,7 +64,7 @@ func TestUpstreamErrorsAreSanitized(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.writeMappedError(rec, err)
 	body := rec.Body.String()
-	if strings.Contains(body, "srv-9") || strings.Contains(body, "secret") {
+	if strings.Contains(body, "srv9") || strings.Contains(body, "secret") {
 		t.Fatalf("upstream details leaked to client: %s", body)
 	}
 	if !strings.Contains(body, "upstream GitHub request failed") {
@@ -158,7 +158,7 @@ func TestShareRedemptionIsStateless(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 	auth := map[string]string{"Authorization": "Bearer " + login.Token, "Content-Type": "application/json"}

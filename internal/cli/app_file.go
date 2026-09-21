@@ -16,13 +16,13 @@ import (
 // Long. One factory so the two can never drift apart on wording.
 func (a *App) newUploadOrReplaceCmd(name, short, long string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   name + " [flags] <project> <remote-path> <local-path>",
+		Use:   name + " [flags] <project> <remotepath> <localpath>",
 		Short: short,
 		Long:  long,
 		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
-	cmd.Flags().Int64("chunk-size", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
+	cmd.Flags().Int64("chunksize", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	addSyncFlag(cmd)
 	return cmd
@@ -50,7 +50,7 @@ Examples:
 
 func (a *App) newDownloadCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "download [flags] <project> <remote-path> <local-path>",
+		Use:   "download [flags] <project> <remotepath> <localpath>",
 		Short: "Download a file",
 		Long: `Download reassembles a stored file's chunks into a local file.
 
@@ -145,7 +145,7 @@ Examples:
 
 func (a *App) newMoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "mv [flags] <project> <old-path> <new-path>",
+		Use:   "mv [flags] <project> <oldpath> <newpath>",
 		Short: "Move or rename a file/directory",
 		Long: `Mv renames or moves a path within the project, like mv(1).
 
@@ -154,7 +154,7 @@ Examples:
 		Args: usageArgs(cobra.ExactArgs(3)),
 		RunE: a.runMove,
 	}
-	cmd.Flags().Bool("no-replace", false, "Fail if the destination already exists (RENAME_NOREPLACE, atomic)")
+	cmd.Flags().Bool("noreplace", false, "Fail if the destination already exists (RENAME_NOREPLACE, atomic)")
 	addSyncFlag(cmd)
 	addRevisionFlag(cmd)
 	return cmd
@@ -197,9 +197,9 @@ Examples:
 
 func (a *App) newPatchCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "patch [flags] <project> <path> <offset> <delete-size> <text>",
+		Use:   "patch [flags] <project> <path> <offset> <deletesize> <text>",
 		Short: "Delete and insert at an offset",
-		Long: `Patch deletes delete-size bytes at offset and inserts the new
+		Long: `Patch deletes deletesize bytes at offset and inserts the new
 bytes (or stdin with "-") in one atomic step.
 
 Examples:
@@ -213,9 +213,9 @@ Examples:
 }
 
 func (a *App) runUploadOrReplace(cmd *cobra.Command, args []string) error {
-	chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
+	chunkSize, _ := cmd.Flags().GetInt64("chunksize")
 	if chunkSize < 0 {
-		return &usageError{fmt.Errorf("--chunk-size must be positive, got %d", chunkSize)}
+		return &usageError{fmt.Errorf("--chunksize must be positive, got %d", chunkSize)}
 	}
 	public, _ := cmd.Flags().GetBool("public")
 
@@ -448,7 +448,7 @@ func (a *App) runPatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	deleteSize, err := parseNonNegativeArg(args[3], "delete-size")
+	deleteSize, err := parseNonNegativeArg(args[3], "deletesize")
 	if err != nil {
 		return err
 	}

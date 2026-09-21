@@ -23,23 +23,23 @@ package cli
 //   Append          -> `append` (missing path stays ErrNotFound, like real)
 //   Truncate        -> `truncate` (zero-filling growth in the backend)
 //   Chmod/Chown     -> `chmod` / `chown` (-1 keeps an id)
-//   Utimens         -> `touch --mtime-ns/--atime-ns` (ns precision through
+//   Utimens         -> `touch --mtimens/--atimens` (ns precision through
 //                      the fake; the real backend stores seconds)
-//   Unlink/Rename   -> `rm` / `mv` with --no-replace for RENAME_NOREPLACE
+//   Unlink/Rename   -> `rm` / `mv` with --noreplace for RENAME_NOREPLACE
 //                      (atomic in the storage transaction)
 //   Mkdir/Rmdir     -> `mkdir` / `rm -r`
 //   Symlink         -> `symlink`; Readlink -> `readlink` (ErrInvalid on
 //                      non-links, ELOOP past the hop cap)
 //   Sync            -> `sync` (project drain, the --sync flag standalone)
 //   Revision        -> `stat --json` ChangedAt token;
-//                      CompareAndWrite -> `write --expected-revision`
+//                      CompareAndWrite -> `write --expectedrevision`
 //                      (stale tokens answer ErrPrecondition with Actual)
 //
-// Backend: the package-global one-shot hub seam (newHubFromFlagsFn, the same
-// seam app_test.go swaps) is pointed at an in-memory fake for the duration
-// of the test. Every byte the adapter sees still travels through a real
-// cobra command RunE path; the fake only stands in for the networked
-// GitHub storage behind the CLI.
+// Backend: the per-App one-shot hub seam (app.seams.newHub, the same
+// seam app_test.go sets) is pointed at an in-memory fake on every fresh
+// App the surface creates. Every byte the adapter sees still travels
+// through a real cobra command RunE path; the fake only stands in for
+// the networked GitHub storage behind the CLI.
 //
 // Refused (fail loudly, documented cause): unlink-while-open and
 // rename-while-open need open-file descriptions that keep serving an
@@ -565,7 +565,7 @@ func (h *pcFakeHub) LinkContext(_ context.Context, _, existingPath, newPath stri
 	return &storhub.FileMetadata{Size: int64(len(src.data)), Mode: src.mode, Inode: lf.ino}, nil
 }
 
-// WriteFileAtContext enforces --expected-revision against the file's
+// WriteFileAtContext enforces --expectedrevision against the file's
 // ChangedAt token (the adapter's Revision source): a token from before
 // any intervening mutation fails with ErrPreconditionFailed.
 func (h *pcFakeHub) WriteFileAtContext(_ context.Context, _, filePath string, offset int64, data []byte, opts ...shfs.MutateOption) (*storhub.FileMetadata, error) {

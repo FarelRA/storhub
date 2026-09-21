@@ -70,7 +70,7 @@ func TestCloneRangeWholeFileByteExactFreshIDs(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-whole"
+	project := "projectclonewhole"
 
 	srcData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd")
 	srcMeta := cloneSeedFile(t, hub, project, "src.bin", srcData)
@@ -138,7 +138,7 @@ func TestCloneRangePartialEdgeNarrowing(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-edge"
+	project := "projectcloneedge"
 
 	// Chunk size is 8: [5,27) spans a partial first chunk, two full
 	// chunks, and a partial last chunk.
@@ -183,7 +183,7 @@ func TestCloneRangeIntraFileOverlapForward(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-fwd"
+	project := "projectclonefwd"
 
 	srcData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 	cloneSeedFile(t, hub, project, "f.bin", srcData)
@@ -205,7 +205,7 @@ func TestCloneRangeIntraFileOverlapBackward(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-bwd"
+	project := "projectclonebwd"
 
 	srcData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 	cloneSeedFile(t, hub, project, "f.bin", srcData)
@@ -227,7 +227,7 @@ func TestCloneRangeRejectsBeyondEOF(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-eof"
+	project := "projectcloneeof"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEF"))
 
@@ -264,7 +264,7 @@ func TestCloneRangeHoleOnlyYieldsHole(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-hole"
+	project := "projectclonehole"
 
 	srcData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 	cloneSeedFile(t, hub, project, "src.bin", srcData)
@@ -351,7 +351,7 @@ func TestCloneRangeDestinationGapZeroFills(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-gap"
+	project := "projectclonegap"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEFGH"))
 	cloneSeedFile(t, hub, project, "dst.bin", []byte("abcdefgh"))
@@ -391,7 +391,7 @@ func TestCloneRangeSelfCloneIsAtomicNoOp(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-self"
+	project := "projectcloneself"
 
 	srcData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 	cloneSeedFile(t, hub, project, "f.bin", srcData)
@@ -413,7 +413,7 @@ func TestCloneRangeZeroLengthNoOp(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-zero"
+	project := "projectclonezero"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEF"))
 	cloneSeedFile(t, hub, project, "dst.bin", []byte("xy"))
@@ -441,7 +441,7 @@ func TestCloneRangeTimestamps(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-time"
+	project := "projectclonetime"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEF"))
 	const fixedNow = int64(1700000000000000000)
@@ -482,7 +482,7 @@ func TestCloneRangePermissions(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-dac"
+	project := "projectclonedac"
 	adminCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0})
 	userCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 1001, GID: 1002})
 	// Setup alone needs admin powers (project root is owned by the
@@ -549,7 +549,7 @@ func TestCloneRangeExpectedRevisionCAS(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-cas"
+	project := "projectclonecas"
 
 	cloneSeedFile(t, hub, project, "src.bin", []byte("0123456789ABCDEF"))
 	if err := hub.FlushProjectContext(ctx, project); err != nil {
@@ -579,7 +579,7 @@ func TestCloneRangePurgeSafety(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-purge"
+	project := "projectclonepurge"
 
 	// One asset: content fits in the 8-byte test chunk.
 	seedMeta := cloneSeedFile(t, hub, project, "orig.bin", []byte("hello"))
@@ -671,7 +671,7 @@ func TestCloneRangePropertySeeded(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-prop"
+	project := "projectcloneprop"
 
 	rng := rand.New(rand.NewSource(0xC10E4B))
 	pattern := func(n int) []byte {

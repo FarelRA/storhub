@@ -14,23 +14,23 @@ func TestDeleteReleaseHidesCatalogOnly(t *testing.T) {
 	hub := backend.newClient(t, smallRetryDisabledTestConfig())
 
 	input := writeTempFile(t, t.TempDir(), "release.txt", []byte("release payload"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-release", "release.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectrelease", "release.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-release")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectrelease")
 	firstRelease := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
-	if err := hub.DeleteRelease("project-release", firstRelease); err != nil {
+	if err := hub.DeleteRelease("projectrelease", firstRelease); err != nil {
 		t.Fatalf("delete release: %v", err)
 	}
-	releases, err := hub.ListReleasesContext(context.Background(), "project-release")
+	releases, err := hub.ListReleasesContext(context.Background(), "projectrelease")
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
 	if len(releases) != 0 {
 		t.Fatalf("expected no catalog releases, got %+v", releases)
 	}
-	repo := backend.repo("project-release")
+	repo := backend.repo("projectrelease")
 	if repo == nil || repo.releasesByTag[firstRelease] == nil {
 		t.Fatalf("expected immutable release to remain")
 	}
@@ -41,13 +41,13 @@ func TestDeleteProject(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
 	input := writeTempFile(t, t.TempDir(), "file.txt", []byte("payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-delete", "file.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectdelete", "file.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	if err := hub.DeleteProject("project-delete"); err != nil {
+	if err := hub.DeleteProject("projectdelete"); err != nil {
 		t.Fatalf("delete project: %v", err)
 	}
-	if backend.repo("project-delete") != nil {
+	if backend.repo("projectdelete") != nil {
 		t.Fatal("expected repo to be deleted")
 	}
 }
@@ -94,7 +94,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputA := writeTempFile(t, t.TempDir(), "tracked.txt", []byte("tracked payload"))
-	tracked, err := hub.UploadFileContext(context.Background(), "project-purge", "tracked.txt", inputA)
+	tracked, err := hub.UploadFileContext(context.Background(), "projectpurge", "tracked.txt", inputA)
 	if err != nil {
 		t.Fatalf("upload tracked file: %v", err)
 	}
@@ -104,18 +104,18 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	}
 
 	inputB := writeTempFile(t, t.TempDir(), "orphan.txt", []byte("orphan payload"))
-	orphan, err := hub.UploadFileContext(context.Background(), "project-purge", "orphan.txt", inputB)
+	orphan, err := hub.UploadFileContext(context.Background(), "projectpurge", "orphan.txt", inputB)
 	if err != nil {
 		t.Fatalf("upload orphan file: %v", err)
 	}
 
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectpurge")
 	trackedRelease := repoMeta.Chunks()[tracked.Chunks[0]].Release
 	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush metadata after second upload: %v", err)
 	}
 
-	if err := hub.DeleteFile("project-purge", "orphan.txt"); err != nil {
+	if err := hub.DeleteFile("projectpurge", "orphan.txt"); err != nil {
 		t.Fatalf("hide orphan file: %v", err)
 	}
 
@@ -123,15 +123,15 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("flush metadata after delete: %v", err)
 	}
 
-	repo := backend.repo("project-purge")
+	repo := backend.repo("projectpurge")
 	if repo == nil {
 		t.Fatal("expected repo to exist")
 	}
-	manualRelease := backend.addRelease(t, "project-purge", "v999")
-	backend.addAssetToRelease(t, "project-purge", manualRelease.tag, "manual.bin", []byte("manual orphan"))
-	backend.addAssetToRelease(t, "project-purge", trackedRelease, "extra.bin", []byte("extra orphan"))
+	manualRelease := backend.addRelease(t, "projectpurge", "v999")
+	backend.addAssetToRelease(t, "projectpurge", manualRelease.tag, "manual.bin", []byte("manual orphan"))
+	backend.addAssetToRelease(t, "projectpurge", trackedRelease, "extra.bin", []byte("extra orphan"))
 
-	result, err := hub.PruneProject("project-purge", "assets", 0, false)
+	result, err := hub.PruneProject("projectpurge", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 		t.Fatalf("expected hidden-file assets plus one explicitly orphaned tracked-release asset to be deleted, got %+v", result)
 	}
 
-	repo = backend.repo("project-purge")
+	repo = backend.repo("projectpurge")
 	if repo.releasesByTag[manualRelease.tag] != nil {
 		t.Fatalf("expected manual release %s to be deleted", manualRelease.tag)
 	}
@@ -156,13 +156,13 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	}
 	// Find a revision that still contained orphan.txt (whose assets the
 	// purge destroyed) to prove rollback after purge fails destructively.
-	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "project-purge")
+	revisions, err := hub.ListMetadataRevisionsContext(context.Background(), "projectpurge")
 	if err != nil {
 		t.Fatalf("list metadata revisions: %v", err)
 	}
 	var orphanRevision string
 	for _, rev := range revisions {
-		snap, err := hub.getMetadataRevision(context.Background(), "project-purge", rev.CommitSHA)
+		snap, err := hub.getMetadataRevision(context.Background(), "projectpurge", rev.CommitSHA)
 		if err != nil {
 			t.Fatalf("fetch revision %s: %v", rev.CommitSHA, err)
 		}
@@ -174,7 +174,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	if orphanRevision == "" {
 		t.Fatal("expected a metadata revision containing orphan.txt")
 	}
-	if err := hub.RollbackMetadataContext(context.Background(), "project-purge", orphanRevision); err == nil {
+	if err := hub.RollbackMetadataContext(context.Background(), "projectpurge", orphanRevision); err == nil {
 		t.Fatal("expected rollback after purge to fail because purge is destructive")
 	}
 }
@@ -184,17 +184,17 @@ func TestCleanupProjectSkipsNoopCommit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cleanup.txt", []byte("cleanup payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-cleanup", "cleanup.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcleanup", "cleanup.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush metadata: %v", err)
 	}
 	backend.mu.Lock()
-	repo := backend.repos["project-cleanup"]
+	repo := backend.repos["projectcleanup"]
 	before := len(repo.commitsByPath[metadataFilePath])
 	backend.mu.Unlock()
-	if err := hub.CleanupProject("project-cleanup"); err != nil {
+	if err := hub.CleanupProject("projectcleanup"); err != nil {
 		t.Fatalf("cleanup project: %v", err)
 	}
 	backend.mu.Lock()
@@ -213,16 +213,16 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "spill.txt", []byte("abcdefghijklmno"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-purge-spill", "spill.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectpurgespill", "spill.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "project-purge-spill")
+	metaState, _, _ := hub.loadRepoMetadata(context.Background(), "projectpurgespill")
 	firstRelease := metaState.Chunks()[fileMeta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-purge-spill", firstRelease, 999)
-	hub.invalidateReleaseCache("project-purge-spill")
+	backend.addAssetsToRelease(t, "projectpurgespill", firstRelease, 999)
+	hub.invalidateReleaseCache("projectpurgespill")
 
-	patched, err := hub.PatchFileContext(context.Background(), "project-purge-spill", "spill.txt", 4, 4, []byte("ZZZZ"))
+	patched, err := hub.PatchFileContext(context.Background(), "projectpurgespill", "spill.txt", 4, 4, []byte("ZZZZ"))
 	if err != nil {
 		t.Fatalf("patch file: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	metaState, _, err = hub.loadRepoMetadata(context.Background(), "project-purge-spill")
+	metaState, _, err = hub.loadRepoMetadata(context.Background(), "projectpurgespill")
 	if err != nil {
 		t.Fatalf("load metadata: %v", err)
 	}
@@ -244,19 +244,19 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatal("expected patch to spill into a second release")
 	}
 
-	result, err := hub.PruneProject("project-purge-spill", "assets", 0, false)
+	result, err := hub.PruneProject("projectpurgespill", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
 	if result.DeletedReleases != 0 {
 		t.Fatalf("purge deleted live releases: %+v", result)
 	}
-	repo := backend.repo("project-purge-spill")
+	repo := backend.repo("projectpurgespill")
 	if repo == nil || repo.releasesByTag[spillTag] == nil {
 		t.Fatalf("spill release %s was deleted by purge", spillTag)
 	}
 	output := filepath.Join(t.TempDir(), "spill.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-purge-spill", "spill.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectpurgespill", "spill.txt", output); err != nil {
 		t.Fatalf("download after purge: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdZZZZijklmno"))
@@ -269,7 +269,7 @@ func TestDeleteFileWorksOnColdCache(t *testing.T) {
 	backend := newMockGitHub(t)
 	seedHub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cold.txt", []byte("cold payload"))
-	if _, err := seedHub.UploadFileContext(context.Background(), "project-cold-delete", "cold.txt", input); err != nil {
+	if _, err := seedHub.UploadFileContext(context.Background(), "projectcolddelete", "cold.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if err := seedHub.FlushMetadata(context.Background()); err != nil {
@@ -277,7 +277,7 @@ func TestDeleteFileWorksOnColdCache(t *testing.T) {
 	}
 
 	coldHub := backend.newClient(t, smallTransferTestConfig())
-	if err := coldHub.DeleteFile("project-cold-delete", "cold.txt"); err != nil {
+	if err := coldHub.DeleteFile("projectcolddelete", "cold.txt"); err != nil {
 		t.Fatalf("cold-cache delete of existing file failed: %v", err)
 	}
 }
@@ -288,28 +288,28 @@ func TestPruneAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 
 	inputV1 := writeTempFile(t, t.TempDir(), "v1.txt", []byte("version one payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-prune", "file.txt", inputV1); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectprune", "file.txt", inputV1); err != nil {
 		t.Fatalf("upload v1: %v", err)
 	}
 	inputV2 := writeTempFile(t, t.TempDir(), "v2.txt", []byte("completely different version two"))
-	if _, err := hub.ReplaceFileContext(context.Background(), "project-prune", "file.txt", inputV2); err != nil {
+	if _, err := hub.ReplaceFileContext(context.Background(), "projectprune", "file.txt", inputV2); err != nil {
 		t.Fatalf("replace with v2: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	before, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
+	before, _, _ := hub.loadRepoMetadataFresh(context.Background(), "projectprune")
 	totalBefore := len(before.Chunks())
 	if totalBefore < 2 {
 		t.Fatalf("expected stale chunk records before purge, got %d", totalBefore)
 	}
 
-	if _, err := hub.PruneProject("project-prune", "assets", 0, false); err != nil {
+	if _, err := hub.PruneProject("projectprune", "assets", 0, false); err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
 
-	after, _, _ := hub.loadRepoMetadataFresh(context.Background(), "project-prune")
+	after, _, _ := hub.loadRepoMetadataFresh(context.Background(), "projectprune")
 	referenced := make(map[int64]bool)
 	for _, file := range after.Files() {
 		for _, id := range file.Chunks {
@@ -326,7 +326,7 @@ func TestPruneAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "out.txt")
-	if err := hub.DownloadFileContext(context.Background(), "project-prune", "file.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectprune", "file.txt", output); err != nil {
 		t.Fatalf("download after prune: %v", err)
 	}
 	assertFileContent(t, output, []byte("completely different version two"))
@@ -346,7 +346,7 @@ func TestMarkProjectDirtyRevivesEvictedMetadata(t *testing.T) {
 		DisableGitBackend: true,
 	})
 	ctx := context.Background()
-	project := "project-revive"
+	project := "projectrevive"
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestColdCacheMutationDoesNotClobberRemote(t *testing.T) {
 	}
 	writer := backend.newClient(t, cfg)
 	ctx := context.Background()
-	project := "project-cold-cache"
+	project := "projectcoldcache"
 
 	if err := writer.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)

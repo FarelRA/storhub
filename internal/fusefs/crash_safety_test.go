@@ -17,10 +17,10 @@ import (
 func TestStartupSweepQuarantinesLeftovers(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cacheDir, "inode-aaa"), []byte("dirty-inode"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cacheDir, "inodeaaa"), []byte("dirtyinode"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheDir, "handle-bbb"), []byte("dirty-handle"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cacheDir, "handlebbb"), []byte("dirtyhandle"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fsys, err := New(&stubHub{}, "demo", Options{CacheDir: cacheDir})
@@ -51,7 +51,7 @@ func TestStartupSweepQuarantinesLeftovers(t *testing.T) {
 		}
 		found[string(data)] = true
 	}
-	if !found["dirty-inode"] || !found["dirty-handle"] {
+	if !found["dirtyinode"] || !found["dirtyhandle"] {
 		t.Fatalf("quarantined data lost: %v", found)
 	}
 	rootEntries, err := os.ReadDir(cacheDir)
@@ -80,7 +80,7 @@ func TestCommitDeletedHandleKeepsPosixSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
-	if n, errno := h.Write(context.Background(), []byte("unlinked-data"), 0); errno != 0 || n != 13 {
+	if n, errno := h.Write(context.Background(), []byte("unlinkedbytes"), 0); errno != 0 || n != 13 {
 		t.Fatalf("write: n=%d errno=%v", n, errno)
 	}
 	// Simulate unlink-after-open.
@@ -110,7 +110,7 @@ func TestReadOnlyOpenDoesNotAttachWriteState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new writer handle: %v", err)
 	}
-	if n, errno := w.Write(context.Background(), []byte("writer-data"), 0); errno != 0 || n != 11 {
+	if n, errno := w.Write(context.Background(), []byte("writerbytes"), 0); errno != 0 || n != 11 {
 		t.Fatalf("write: n=%d errno=%v", n, errno)
 	}
 	r, err := fsys.newHandle(context.Background(), 9, "shared.bin", syscall.O_RDONLY, nil)

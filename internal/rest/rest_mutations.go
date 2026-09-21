@@ -229,7 +229,7 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.NoReplace {
 		// Enforced inside the storage transaction (no TOCTOU), like the
-		// CLI's mv --no-replace.
+		// CLI's mv --noreplace.
 		revOpts = append(revOpts, shfs.WithNoReplace())
 	}
 	client, err := h.clientFor(r)

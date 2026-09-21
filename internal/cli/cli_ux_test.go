@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -63,13 +64,15 @@ func (runtimeErr) Error() string { return "runtime failure" }
 func errRuntimeShape() error { return runtimeErr{} }
 
 func TestJSONOutputContracts(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-		return &fakeHub{t: t}, nil
+	newSeededApp := func() (*App, func() string, func() string) {
+		app, stdout, stderr := newTestApp(t)
+		app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+			return &fakeHub{t: t}, nil
+		}
+		return app, stdout, stderr
 	}
 	// stat --json: stable object with the documented keys.
-	app, stdout, _ := newTestApp(t)
+	app, stdout, _ := newSeededApp()
 	if err := app.Run([]string{"stat", "--json", "demo", "docs"}); err != nil {
 		t.Fatalf("stat --json: %v", err)
 	}
@@ -84,7 +87,7 @@ func TestJSONOutputContracts(t *testing.T) {
 	}
 
 	// ls --json: array (never null); entries expose name.
-	app, stdout, _ = newTestApp(t)
+	app, stdout, _ = newSeededApp()
 	if err := app.Run([]string{"ls", "--json", "demo"}); err != nil {
 		t.Fatalf("ls --json: %v", err)
 	}
@@ -100,7 +103,7 @@ func TestJSONOutputContracts(t *testing.T) {
 	}
 
 	// revisions --json: array shape.
-	app, stdout, _ = newTestApp(t)
+	app, stdout, _ = newSeededApp()
 	if err := app.Run([]string{"project", "revisions", "--json", "demo"}); err != nil {
 		t.Fatalf("revisions --json: %v", err)
 	}

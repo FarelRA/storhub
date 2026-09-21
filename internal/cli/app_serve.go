@@ -24,10 +24,10 @@ func (a *App) newRestCmd() *cobra.Command {
 		Use:   "rest [flags]",
 		Short: "Start the REST API server",
 		Long: `Rest serves the project's data over HTTP for the web console
-and API clients. Serving without an auth file needs --allow-anonymous.
+and API clients. Serving without an auth file needs --allowanonymous.
 
 Examples:
-  storhub rest --listen :8080 --allow-anonymous`,
+  storhub rest --listen :8080 --allowanonymous`,
 		Args: usageArgs(cobra.NoArgs),
 		RunE: a.runServeREST,
 	}
@@ -90,7 +90,7 @@ func (d flexDuration) Duration() time.Duration { return time.Duration(d) }
 func (a *App) runServeREST(cmd *cobra.Command, _ []string) error {
 	token, apiBase := cmdAuth(cmd)
 	listen, _ := cmd.Flags().GetString("listen")
-	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdRESTHub(cmd.Context(), resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}
@@ -112,18 +112,18 @@ func (a *App) runServeREST(cmd *cobra.Command, _ []string) error {
 // require the explicit opt-in flag so an open server never happens by
 // accident.
 func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
-	basePath, _ := cmd.Flags().GetString("base-path")
-	authFile, _ := cmd.Flags().GetString("auth-file")
+	basePath, _ := cmd.Flags().GetString("basepath")
+	authFile, _ := cmd.Flags().GetString("authfile")
 	opts := storhub.DefaultRESTOptions()
 	opts.BasePath = basePath
 	if authFile == "" {
 		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
 	}
 	if strings.TrimSpace(authFile) != "" {
-		if noAuth, _ := cmd.Flags().GetBool("allow-anonymous"); noAuth {
-			// --allow-anonymous would be silently ignored here; contradictory
+		if noAuth, _ := cmd.Flags().GetBool("allowanonymous"); noAuth {
+			// --allowanonymous would be silently ignored here; contradictory
 			// auth intent is a command-line mistake, not a runtime failure.
-			return opts, &usageError{errors.New("--allow-anonymous has no effect when an auth file is supplied; drop one of them")}
+			return opts, &usageError{errors.New("--allowanonymous has no effect when an auth file is supplied; drop one of them")}
 		}
 		auth, err := loadRESTAuthOptions(authFile)
 		if err != nil {
@@ -131,12 +131,12 @@ func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
 		}
 		opts.Auth = auth
 	} else {
-		noAuth, _ := cmd.Flags().GetBool("allow-anonymous")
+		noAuth, _ := cmd.Flags().GetBool("allowanonymous")
 		if !noAuth {
 			// Same misuse class as the contradictory-flags case above:
 			// serving wide open without the explicit opt-in flag is a
 			// command-line mistake, so usageError (exit 2), not exit 1.
-			return opts, &usageError{fmt.Errorf("refusing to serve unauthenticated REST API; provide --auth-file or pass --allow-anonymous")}
+			return opts, &usageError{fmt.Errorf("refusing to serve unauthenticated REST API; provide --authfile or pass --allowanonymous")}
 		}
 		opts.AllowAnonymous = true
 	}
@@ -150,7 +150,7 @@ func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
 // shareSigningKey resolves the explicit share key: flag first, then env. An
 // empty result lets the server derive one from the auth signing key.
 func shareSigningKey(cmd *cobra.Command) string {
-	if key, _ := cmd.Flags().GetString("share-key"); strings.TrimSpace(key) != "" {
+	if key, _ := cmd.Flags().GetString("sharekey"); strings.TrimSpace(key) != "" {
 		return key
 	}
 	return os.Getenv("STORHUB_SHARE_SIGNING_KEY")
@@ -200,7 +200,7 @@ func newRESTServer(listen string, handler http.Handler) *http.Server {
 // metadata.
 func (a *App) newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "serve <project> <mount-point>",
+		Use:   "serve <project> <mountpoint>",
 		Short: "Mount FUSE and serve the REST API together",
 		Long: `Serve mounts the project over FUSE and exposes the same data through
 the REST API, from one process over one shared hub: writes through the
@@ -218,13 +218,13 @@ before pending metadata is flushed.`,
 
 func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
-	allowOther, _ := cmd.Flags().GetBool("allow-other")
+	allowOther, _ := cmd.Flags().GetBool("allowother")
 	debug, _ := cmd.Flags().GetBool("debug")
-	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	cacheDir, _ := cmd.Flags().GetString("cachedir")
 	umaskRaw, _ := cmd.Flags().GetString("umask")
 	listen, _ := cmd.Flags().GetString("listen")
 
-	hub, err := a.newCmdRESTHub(resolveToken(token), apiBase, 0, false)
+	hub, err := a.newCmdRESTHub(cmd.Context(), resolveToken(token), apiBase, 0, false)
 	if err != nil {
 		return err
 	}

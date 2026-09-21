@@ -23,20 +23,20 @@ func TestHardeningValidateSnapshotRejectsMissingChunk(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-snap-missing", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectsnapmissing", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-snap-missing"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectsnapmissing"); err != nil {
 		t.Fatalf("flush seed: %v", err)
 	}
-	meta := NewRepoMetadata("project-snap-missing")
+	meta := NewRepoMetadata("projectsnapmissing")
 	meta.Files()["ghost.txt"] = FileMeta{
 		Size:   1,
 		Mode:   0o644,
 		Inode:  meta.AllocateInode(),
 		Chunks: []int64{424242},
 	}
-	if err := hub.validateMetadataSnapshot(ctx, "project-snap-missing", meta); err == nil {
+	if err := hub.validateMetadataSnapshot(ctx, "projectsnapmissing", meta); err == nil {
 		t.Fatal("a snapshot referencing a missing chunk must be rejected")
 	} else if !strings.Contains(err.Error(), "424242") {
 		t.Fatalf("unexpected error (want missing-chunk detail): %v", err)
@@ -52,13 +52,13 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed-data"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-snap-toctou", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectsnaptoctou", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-snap-toctou"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectsnaptoctou"); err != nil {
 		t.Fatalf("flush seed: %v", err)
 	}
-	repoMeta, _, err := hub.loadRepoMetadata(ctx, "project-snap-toctou")
+	repoMeta, _, err := hub.loadRepoMetadata(ctx, "projectsnaptoctou")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -67,15 +67,15 @@ func TestHardeningRollbackRechecksSnapshotAtCommit(t *testing.T) {
 		t.Fatalf("seed file has no chunks: %+v", file)
 	}
 	assetID := repoMeta.Chunks()[file.Chunks[0]].AssetID
-	revisions, err := hub.ListMetadataRevisionsContext(ctx, "project-snap-toctou")
+	revisions, err := hub.ListMetadataRevisionsContext(ctx, "projectsnaptoctou")
 	if err != nil || len(revisions) == 0 {
 		t.Fatalf("revisions: %v %d", err, len(revisions))
 	}
 	backend.onContentsPUT(t, func(_ http.ResponseWriter, _ *http.Request) bool {
-		backend.removeAsset(t, "project-snap-toctou", assetID)
+		backend.removeAsset(t, "projectsnaptoctou", assetID)
 		return false
 	})
-	err = hub.RollbackMetadataContext(ctx, "project-snap-toctou", revisions[0].CommitSHA)
+	err = hub.RollbackMetadataContext(ctx, "projectsnaptoctou", revisions[0].CommitSHA)
 	if err == nil {
 		t.Fatal("rollback must fail after its asset is deleted mid-commit")
 	}
@@ -102,7 +102,7 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	pm := hub.getOrCreateProjectMeta("project-commit-purity")
+	pm := hub.getOrCreateProjectMeta("projectcommitpurity")
 	pm.mu.Lock()
 	pm.meta.UpsertFile("tiny.txt", FileMeta{Size: 0, Mode: 0o644}, 1700000000)
 	pm.meta.LastMod = 12345
@@ -115,7 +115,7 @@ func TestHardeningFailedCommitLeavesSharedStateUntouched(t *testing.T) {
 	}
 	markProjectDirtyLocked(pm)
 	pm.mu.Unlock()
-	err := hub.FlushProjectContext(ctx, "project-commit-purity")
+	err := hub.FlushProjectContext(ctx, "projectcommitpurity")
 	if err == nil || !strings.Contains(err.Error(), "metadata too large") {
 		t.Fatalf("expected oversize commit failure, got: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestHardeningFlushMetadataRecoversFromConflict(t *testing.T) {
 	backend := newMockGitHub(t)
 	hubA := backend.newClient(t, smallTransferTestConfig())
 	hubB := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-flush-conflict"
+	proj := "projectflushconflict"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
 	if _, err := hubA.UploadFileContext(context.Background(), proj, "f1.txt", first); err != nil {
 		t.Fatalf("upload f1: %v", err)
@@ -200,17 +200,17 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "seed.txt", []byte("seed"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-rollback-rev", "seed.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectrollbackrev", "seed.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-rollback-rev"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectrollbackrev"); err != nil {
 		t.Fatalf("flush seed: %v", err)
 	}
-	revisions, err := hub.ListMetadataRevisionsContext(ctx, "project-rollback-rev")
+	revisions, err := hub.ListMetadataRevisionsContext(ctx, "projectrollbackrev")
 	if err != nil || len(revisions) == 0 {
 		t.Fatalf("revisions: %v %d", err, len(revisions))
 	}
-	err = hub.RollbackMetadataContext(ctx, "project-rollback-rev", "main")
+	err = hub.RollbackMetadataContext(ctx, "projectrollbackrev", "main")
 	if err == nil {
 		t.Fatal("rollback must reject a branch name as a revision")
 	}
@@ -218,7 +218,7 @@ func TestHardeningRollbackRejectsBranchName(t *testing.T) {
 		t.Fatalf("error should name the rejected revision: %v", err)
 	}
 	// Positive control: a genuine revision still rolls back.
-	if err := hub.RollbackMetadataContext(ctx, "project-rollback-rev", revisions[len(revisions)-1].CommitSHA); err != nil {
+	if err := hub.RollbackMetadataContext(ctx, "projectrollbackrev", revisions[len(revisions)-1].CommitSHA); err != nil {
 		t.Fatalf("valid revision rollback failed: %v", err)
 	}
 }
@@ -231,7 +231,7 @@ func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-shutdown-drain", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectshutdowndrain", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	// No flush: Shutdown alone must persist the mutation.
@@ -239,7 +239,7 @@ func TestHardeningShutdownCommitsDirtyWithoutFlush(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 	probe := backend.newClient(t, smallTransferTestConfig())
-	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "project-shutdown-drain")
+	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "projectshutdowndrain")
 	if err != nil {
 		t.Fatalf("fresh load: %v", err)
 	}
@@ -256,17 +256,17 @@ func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("hello"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-shutdown-gap", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectshutdowngap", "a.txt", input); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-shutdown-gap"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectshutdowngap"); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 	// All commit loops are now dead; the trigger below wakes nobody.
 	if err := hub.Shutdown(ctx); err != nil {
 		t.Fatalf("first shutdown: %v", err)
 	}
-	if _, err := hub.UpdateRepoMetadataContext(ctx, "project-shutdown-gap", func(meta *RepoMetadata) error {
+	if _, err := hub.UpdateRepoMetadataContext(ctx, "projectshutdowngap", func(meta *RepoMetadata) error {
 		meta.EnsureDirectory("d", 1700000000)
 		meta.UpsertFile("d/stranded.txt", FileMeta{Size: 0, Mode: 0o644}, 1700000000)
 		return nil
@@ -277,7 +277,7 @@ func TestHardeningShutdownSweepCoversStrandedDirty(t *testing.T) {
 		t.Fatalf("second shutdown: %v", err)
 	}
 	probe := backend.newClient(t, smallTransferTestConfig())
-	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "project-shutdown-gap")
+	fresh, _, err := probe.loadRepoMetadataFresh(ctx, "projectshutdowngap")
 	if err != nil {
 		t.Fatalf("fresh load: %v", err)
 	}
@@ -294,13 +294,13 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "p.txt", []byte("12345678"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-patch-tag", "p.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectpatchtag", "p.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	if err := hub.FlushProjectContext(ctx, "project-patch-tag"); err != nil {
+	if err := hub.FlushProjectContext(ctx, "projectpatchtag"); err != nil {
 		t.Fatalf("flush seed: %v", err)
 	}
-	repoMeta, _, err := hub.loadRepoMetadata(ctx, "project-patch-tag")
+	repoMeta, _, err := hub.loadRepoMetadata(ctx, "projectpatchtag")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -309,8 +309,8 @@ func TestHardeningPatchBuildersReturnActualRelease(t *testing.T) {
 		t.Fatalf("seed file has no chunks: %+v", fileMeta)
 	}
 	initialTag := repoMeta.Chunks()[fileMeta.Chunks[0]].Release
-	backend.addAssetsToRelease(t, "project-patch-tag", initialTag, 999)
-	newChunks, actualTag, err := hub.buildPatchedChunks(ctx, "project-patch-tag", repoMeta, *fileMeta, "p.txt", 0, 1, []byte("Z"))
+	backend.addAssetsToRelease(t, "projectpatchtag", initialTag, 999)
+	newChunks, actualTag, err := hub.buildPatchedChunks(ctx, "projectpatchtag", repoMeta, *fileMeta, "p.txt", 0, 1, []byte("Z"))
 	if err != nil {
 		t.Fatalf("buildPatchedChunks: %v", err)
 	}
@@ -343,17 +343,17 @@ func TestHardeningReleaseCacheDeepCopy(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "a.txt", []byte("a"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-cache-copy", "a.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcachecopy", "a.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
 	_ = ctx
-	first, ok := hub.getCachedReleases("project-cache-copy")
+	first, ok := hub.getCachedReleases("projectcachecopy")
 	if !ok || len(first) == 0 || len(first[0].Assets) == 0 {
 		t.Fatalf("expected cached release with assets, got %+v %v", first, ok)
 	}
 	wantID := first[0].Assets[0].ID
 	first[0].Assets[0].ID = -999999
-	again, ok := hub.getCachedReleases("project-cache-copy")
+	again, ok := hub.getCachedReleases("projectcachecopy")
 	if !ok || len(again) == 0 || len(again[0].Assets) == 0 {
 		t.Fatalf("expected cached release on refetch, got %+v %v", again, ok)
 	}
@@ -372,7 +372,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	backend.faults.embedCap = 2
 	backend.mu.Unlock()
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-placeholder-count"
+	proj := "projectplaceholdercount"
 	first := writeTempFile(t, t.TempDir(), "f1.txt", []byte("one"))
 	meta1, err := hub.UploadFileContext(context.Background(), proj, "f1.txt", first)
 	if err != nil {
@@ -423,7 +423,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	pad := strings.Repeat("y", 600)
 	firstName := "bulk-0-" + pad
-	_, err := hub.UpdateRepoMetadataContext(ctx, "project-ceiling", func(meta *RepoMetadata) error {
+	_, err := hub.UpdateRepoMetadataContext(ctx, "projectceiling", func(meta *RepoMetadata) error {
 		for i := 0; i < oversizePaddedTestEntries; i++ {
 			meta.UpsertFile("bulk-"+itoa(i)+"-"+pad, FileMeta{Size: 1, Mode: 0o644}, 1700000000)
 		}
@@ -435,7 +435,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 	if !strings.Contains(err.Error(), "purge") {
 		t.Fatalf("rejection must point at remediation (purge): %v", err)
 	}
-	pm := hub.getOrCreateProjectMeta("project-ceiling")
+	pm := hub.getOrCreateProjectMeta("projectceiling")
 	pm.mu.RLock()
 	stillDirty := pm.dirty
 	ghost := pm.meta.FindFile(firstName)
@@ -447,7 +447,7 @@ func TestHardeningOversizeAdmissionFailsFast(t *testing.T) {
 		t.Fatal("rejected mutation must not mark the project dirty")
 	}
 	// The project must remain usable afterwards.
-	if _, err := hub.UpdateRepoMetadataContext(ctx, "project-ceiling", func(meta *RepoMetadata) error {
+	if _, err := hub.UpdateRepoMetadataContext(ctx, "projectceiling", func(meta *RepoMetadata) error {
 		meta.UpsertFile("small.txt", FileMeta{Size: 0, Mode: 0o644}, 1700000000)
 		return nil
 	}, "small follow-up"); err != nil {

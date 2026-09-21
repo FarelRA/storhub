@@ -86,10 +86,10 @@ func TestSleepWithContext(t *testing.T) {
 
 func TestNewStorHubAndFUSEDefaults(t *testing.T) {
 	t.Parallel()
-	if _, err := NewStorHub(""); err == nil {
+	if _, err := NewStorHubWithContext(context.Background(), "", DefaultConfig()); err == nil {
 		t.Fatal("expected empty token error")
 	}
-	hub, err := NewStorHub("token")
+	hub, err := NewStorHubWithContext(context.Background(), "token", DefaultConfig())
 	if err != nil {
 		t.Fatalf("new hub: %v", err)
 	}

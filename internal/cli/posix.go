@@ -14,30 +14,30 @@ import (
 )
 
 // posix.go: the POSIX verb commands (truncate, chmod, chown, touch,
-// symlink, readlink, link, sync) plus the create-exclusive, no-replace,
-// and expected-revision modifiers on the create/write paths.
+// symlink, readlink, link, sync) plus the create-exclusive, noreplace,
+// and expectedrevision modifiers on the create/write paths.
 //
 // Flag-to-verb routing rule: every verb is Context-first and every helper
 // below threads the command context straight into it. Modifier flags
-// (--expected-revision, --no-replace) become MutateOptions on the same
+// (--expectedrevision, --noreplace) become MutateOptions on the same
 // call, so a set guard can never be silently dropped: there is no
 // plain-method fallback path.
 
-// addRevisionFlag registers the --expected-revision opt-in shared by every
+// addRevisionFlag registers the --expectedrevision opt-in shared by every
 // write-path command whose storage verb accepts it: the mutation applies
 // only while the project metadata revision still matches, failing with a
 // precondition error otherwise (compare-and-swap; refetch and retry).
 func addRevisionFlag(cmd *cobra.Command) {
-	cmd.Flags().String("expected-revision", "", "Only apply when the project metadata revision still matches (compare-and-swap)")
+	cmd.Flags().String("expectedrevision", "", "Only apply when the project metadata revision still matches (compare-and-swap)")
 }
 
-// revisionFlag reads --expected-revision ("" when unset).
+// revisionFlag reads --expectedrevision ("" when unset).
 func revisionFlag(cmd *cobra.Command) string {
-	rev, _ := cmd.Flags().GetString("expected-revision")
+	rev, _ := cmd.Flags().GetString("expectedrevision")
 	return strings.TrimSpace(rev)
 }
 
-// revisionOpts converts a set --expected-revision flag into storage
+// revisionOpts converts a set --expectedrevision flag into storage
 // options (nil when unset, so callers can branch on its presence).
 func revisionOpts(cmd *cobra.Command) []storhub.MutateOption {
 	if rev := revisionFlag(cmd); rev != "" {
@@ -66,11 +66,11 @@ func truncateWithFlags(ctx context.Context, hub hubClient, project, path string,
 	return hub.TruncateFileContext(ctx, project, path, size, revisionOpts(cmd)...)
 }
 
-// renameWithFlags routes mv past --no-replace/--expected-revision when set.
+// renameWithFlags routes mv past --noreplace/--expectedrevision when set.
 // NoReplace is enforced inside the storage transaction (no TOCTOU); the
 // plain path stays the default.
 func renameWithFlags(ctx context.Context, hub hubClient, project, oldPath, newPath string, cmd *cobra.Command) error {
-	noReplace, _ := cmd.Flags().GetBool("no-replace")
+	noReplace, _ := cmd.Flags().GetBool("noreplace")
 	opts := revisionOpts(cmd)
 	if noReplace {
 		opts = append(opts, shfs.WithNoReplace())
@@ -98,7 +98,7 @@ func replaceWithFlags(ctx context.Context, hub hubClient, project, remotePath, l
 // the storage transaction when the path exists, so exactly one concurrent
 // exclusive uploader wins. The content fill afterwards is a plain upload
 // over the just-created empty file. Upload has no revision plumbing
-// (create paths declare no expected revision), so --expected-revision is
+// (create paths declare no expected revision), so --expectedrevision is
 // a replace/write/append/patch/truncate/mv/rm facility; upload offers no
 // such flag.
 func uploadWithFlags(ctx context.Context, hub hubClient, project, remotePath, localPath string, cmd *cobra.Command) (*storhub.FileMetadata, error) {
@@ -166,7 +166,7 @@ func (a *App) newChmodCmd() *cobra.Command {
 		Long: `Chmod replaces a path's permission bits (octal 000-7777),
 like chmod(1).
 
-There is deliberately no --expected-revision flag here: the storage
+There is deliberately no --expectedrevision flag here: the storage
 Chmod verb takes no revision options, so a revision token could only be
 a start-of-request check, never apply-time compare-and-swap. Failing
 loud by documentation instead of offering a guard that does not guard.
@@ -223,7 +223,7 @@ func (a *App) newChownCmd() *cobra.Command {
 		Long: `Chown replaces a path's owner and group like chown(1); -1
 keeps the corresponding id (prefix with -- so -1 is not read as a flag).
 
-There is deliberately no --expected-revision flag here: the storage
+There is deliberately no --expectedrevision flag here: the storage
 Chown verb takes no revision options, so a revision token could only be
 a start-of-request check, never apply-time compare-and-swap. Failing
 loud by documentation instead of offering a guard that does not guard.
@@ -268,10 +268,10 @@ func (a *App) newTouchCmd() *cobra.Command {
 		Use:   "touch [flags] <project> <path>",
 		Short: "Set file timestamps, creating when missing",
 		Long: `Touch sets a path's access and modification times to now
-(or to --atime-ns/--mtime-ns nanoseconds since the epoch), creating an
-empty file when missing unless --no-create is given, like touch(1).
+(or to --atimens/--mtimens nanoseconds since the epoch), creating an
+empty file when missing unless --nocreate is given, like touch(1).
 
-There is deliberately no --expected-revision flag here: touch is a
+There is deliberately no --expectedrevision flag here: touch is a
 create-plus-chtimes composition and neither storage verb takes revision
 options, so a revision token could only be a start-of-request check,
 never apply-time compare-and-swap. Failing loud by documentation
@@ -279,25 +279,25 @@ instead of offering a guard that does not guard.
 
 Examples:
   storhub touch docs-project docs/f.txt
-  storhub touch docs-project docs/f.txt --mtime-ns 1700000000123456789`,
+  storhub touch docs-project docs/f.txt --mtimens 1700000000123456789`,
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: a.runTouch,
 	}
-	cmd.Flags().Bool("no-create", false, "Do not create the file when missing")
-	cmd.Flags().Int64("atime-ns", -1, "Access time as nanoseconds since the epoch (-1 means now)")
-	cmd.Flags().Int64("mtime-ns", -1, "Modification time as nanoseconds since the epoch (-1 means now)")
+	cmd.Flags().Bool("nocreate", false, "Do not create the file when missing")
+	cmd.Flags().Int64("atimens", -1, "Access time as nanoseconds since the epoch (-1 means now)")
+	cmd.Flags().Int64("mtimens", -1, "Modification time as nanoseconds since the epoch (-1 means now)")
 	cmd.Flags().Bool("exclusive", false, "Fail if the path already exists instead of updating it (atomic create gate)")
 	addSyncFlag(cmd)
 	return cmd
 }
 
 func (a *App) runTouch(cmd *cobra.Command, args []string) error {
-	noCreate, _ := cmd.Flags().GetBool("no-create")
-	atimeFlag, _ := cmd.Flags().GetInt64("atime-ns")
-	mtimeFlag, _ := cmd.Flags().GetInt64("mtime-ns")
+	noCreate, _ := cmd.Flags().GetBool("nocreate")
+	atimeFlag, _ := cmd.Flags().GetInt64("atimens")
+	mtimeFlag, _ := cmd.Flags().GetInt64("mtimens")
 	exclusive, _ := cmd.Flags().GetBool("exclusive")
 	if atimeFlag < -1 || mtimeFlag < -1 {
-		return &usageError{fmt.Errorf("--atime-ns/--mtime-ns must be >= 0 or -1 for now")}
+		return &usageError{fmt.Errorf("--atimens/--mtimens must be >= 0 or -1 for now")}
 	}
 	hub, err := a.mustCmdHub(cmd, 0, false)
 	if err != nil {
@@ -328,7 +328,7 @@ func (a *App) runTouch(cmd *cobra.Command, args []string) error {
 	}
 	if noCreate {
 		// No creation allowed: a read-only existence check decides. A
-		// missing path is the touch(1) --no-create silent no-op; a live
+		// missing path is the touch(1) --nocreate silent no-op; a live
 		// path is stamped, tolerating NotFound when it vanishes under
 		// us. The stat is read-only (no mutation TOCTOU); either race
 		// outcome stamps or skips correctly.
@@ -381,12 +381,12 @@ func isIsDirErr(err error) bool {
 
 func (a *App) newSymlinkCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "symlink [flags] <project> <target> <link-path>",
+		Use:   "symlink [flags] <project> <target> <linkpath>",
 		Short: "Create a symbolic link",
-		Long: `Symlink creates link-path pointing at target (dangling
+		Long: `Symlink creates linkpath pointing at target (dangling
 targets allowed), like ln -s.
 
-There is deliberately no --expected-revision flag here: the storage
+There is deliberately no --expectedrevision flag here: the storage
 Symlink verb takes no revision options, so a revision token could only
 be a start-of-request check, never apply-time compare-and-swap. Failing
 loud by documentation instead of offering a guard that does not guard.
@@ -422,7 +422,7 @@ func (a *App) newReadlinkCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "readlink <project> <path>",
 		Short: "Print a symlink's target",
-		Long: `Readlink prints link-path's target to stdout, like readlink(1).
+		Long: `Readlink prints linkpath's target to stdout, like readlink(1).
 
 Examples:
   storhub readlink docs-project docs/alias.txt`,
@@ -446,12 +446,12 @@ func (a *App) runReadlink(cmd *cobra.Command, args []string) error {
 
 func (a *App) newLinkCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "link [flags] <project> <existing-path> <new-path>",
+		Use:   "link [flags] <project> <existingpath> <newpath>",
 		Short: "Create a hard link",
-		Long: `Link creates new-path as a hard link to existing-path
+		Long: `Link creates newpath as a hard link to existingpath
 (regular files only), like ln(1) without -s.
 
-There is deliberately no --expected-revision flag here: the storage
+There is deliberately no --expectedrevision flag here: the storage
 Link verb takes no revision options, so a revision token could only be
 a start-of-request check, never apply-time compare-and-swap. Failing
 loud by documentation instead of offering a guard that does not guard.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,13 +16,11 @@ import (
 // TestCLISyncDrainsAfterMkdir pins the core contract: --sync drains once
 // for the project after a successful mutation.
 func TestCLISyncDrainsAfterMkdir(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run([]string{"mkdir", "--token", "x", "--sync", "demo", "docs"}); err != nil {
 		t.Fatalf("mkdir --sync: %v", err)
 	}
@@ -33,13 +32,11 @@ func TestCLISyncDrainsAfterMkdir(t *testing.T) {
 // TestCLIDefaultSkipsDrain pins the no-behavior-change half: without --sync
 // no drain runs.
 func TestCLIDefaultSkipsDrain(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	if err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"}); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -51,13 +48,11 @@ func TestCLIDefaultSkipsDrain(t *testing.T) {
 // TestCLISyncDrainFailureLoud pins the failure contract: a failed drain is
 // a failed command (non-nil error) naming the project.
 func TestCLISyncDrainFailureLoud(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := &fakeHub{t: t, drainErr: errors.New("drain demo: commit failed")}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
-	app, _, _ := newTestApp(t)
 	err := app.Run([]string{"mkdir", "--token", "x", "--sync", "demo", "docs"})
 	if err == nil {
 		t.Fatal("drain failure must fail the command")
@@ -83,8 +78,8 @@ func TestCLISyncCoversEveryMutation(t *testing.T) {
 		{name: "upload", args: []string{"upload", "--token", "x", "--sync", "demo", "docs/readme.txt", localFile}},
 		{name: "replace", args: []string{"replace", "--token", "x", "--sync", "demo", "docs/readme.txt", localFile}},
 		{name: "mkdir", args: []string{"mkdir", "--token", "x", "--sync", "demo", "docs"}},
-		{name: "rm-file", args: []string{"rm", "--token", "x", "--sync", "demo", "docs/readme.txt"}},
-		{name: "rm-dir", args: []string{"rm", "--token", "x", "--sync", "-r", "demo", "docs"}},
+		{name: "rmfile", args: []string{"rm", "--token", "x", "--sync", "demo", "docs/readme.txt"}},
+		{name: "rmdir", args: []string{"rm", "--token", "x", "--sync", "-r", "demo", "docs"}},
 		{name: "mv", args: []string{"mv", "--token", "x", "--sync", "demo", "docs/a.txt", "docs/b.txt"}},
 		{name: "append", args: []string{"append", "--token", "x", "--sync", "demo", "docs/log.txt", "tail"}},
 		{name: "write", args: []string{"write", "--token", "x", "--sync", "demo", "docs/f.txt", "1", "x"}},
@@ -92,19 +87,17 @@ func TestCLISyncCoversEveryMutation(t *testing.T) {
 		{name: "rollback", args: []string{"project", "rollback", "--token", "x", "--sync", "demo", "deadbeef"}},
 		{name: "purge", args: []string{"project", "prune", "--token", "x", "--sync", "demo"}},
 		{name: "prune", args: []string{"project", "prune", "--token", "x", "--sync", "demo", "objects"}},
-		{name: "delete-project", args: []string{"project", "delete", "--token", "x", "--sync", "--yes", "demo"}},
+		{name: "deleteproject", args: []string{"project", "delete", "--token", "x", "--sync", "--yes", "demo"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			oldFactory := newHubFromFlagsFn
-			t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 			fake := &fakeHub{t: t}
-			newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-				return fake, nil
-			}
 			// A fresh App per case keeps cobra flag state isolated:
 			// --sync must not leak between invocations.
 			app, _, _ := newTestApp(t)
+			app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+				return fake, nil
+			}
 			if err := app.Run(tc.args); err != nil {
 				t.Fatalf("%s --sync: %v", tc.name, err)
 			}

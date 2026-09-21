@@ -110,7 +110,7 @@ func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 0, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "batch.txt", []byte("0123456789"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-batch", "batch.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectbatch", "batch.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
 		return false
 	})
 
-	patched, err := hub.PatchFileRangesContext(context.Background(), "project-batch", "batch.txt", []shfs.RangeEdit{
+	patched, err := hub.PatchFileRangesContext(context.Background(), "projectbatch", "batch.txt", []shfs.RangeEdit{
 		{Start: 1, DeleteSize: 2, Data: []byte("XY")},
 		{Start: 5, DeleteSize: 0, Data: []byte("!!")},
 		{Start: 7, DeleteSize: 1},
@@ -134,14 +134,14 @@ func TestPatchFileRangesBatchUsesOneReleaseResolution(t *testing.T) {
 		t.Fatalf("final size must be 11 (10 -3 +4), got %d", patched.Size)
 	}
 	output := filepath.Join(t.TempDir(), "out.txt")
-	if err := hub.DownloadFileContext(context.Background(), "project-batch", "batch.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectbatch", "batch.txt", output); err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	assertFileContent(t, output, []byte("0XY34!!5689"))
 	if listCalls.Load() > 2 {
 		t.Fatalf("batch must resolve releases once, saw %d listing calls", listCalls.Load())
 	}
-	repo := backend.repo("project-batch")
+	repo := backend.repo("projectbatch")
 	if len(repo.assets) != 3 {
 		t.Fatalf("expected 1 original + 2 edit assets (delete-only needs none), got %d", len(repo.assets))
 	}

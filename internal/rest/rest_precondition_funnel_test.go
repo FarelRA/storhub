@@ -14,7 +14,7 @@ import (
 // revision, so 412 is the only honest answer everywhere below.
 func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 	t.Parallel()
-	stale := map[string]string{"If-Match": `"stale-token"`}
+	stale := map[string]string{"If-Match": `"staletoken"`}
 	cases := []struct {
 		name   string
 		method string
@@ -22,12 +22,12 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 		body   any
 		seed   func(t *testing.T, handler http.Handler)
 	}{
-		{name: "delete-node", method: http.MethodDelete, target: "/api/v1/projects/demo/nodes?path=docs/f.txt"},
-		{name: "put-content", method: http.MethodPut, target: "/api/v1/projects/demo/content?path=docs/f.txt", body: "hello"},
-		{name: "patch-append", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=append", body: "!"},
-		{name: "patch-write", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=write&offset=0", body: "!"},
-		{name: "patch-patch", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=patch&offset=0&delete_size=0", body: "!"},
-		{name: "patch-truncate", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=truncate&size=1"},
+		{name: "deletenode", method: http.MethodDelete, target: "/api/v1/projects/demo/nodes?path=docs/f.txt"},
+		{name: "putcontent", method: http.MethodPut, target: "/api/v1/projects/demo/content?path=docs/f.txt", body: "hello"},
+		{name: "patchappend", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=append", body: "!"},
+		{name: "patchwrite", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=write&offset=0", body: "!"},
+		{name: "patchpatch", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=patch&offset=0&delete_size=0", body: "!"},
+		{name: "patchtruncate", method: http.MethodPatch, target: "/api/v1/projects/demo/content?path=docs/f.txt&op=truncate&size=1"},
 		{name: "create", method: http.MethodPost, target: "/api/v1/projects/demo/ops/create", body: pathRequest{Path: "docs/fresh.txt"}},
 		{name: "mkdir", method: http.MethodPost, target: "/api/v1/projects/demo/ops/mkdir", body: pathRequest{Path: "docs/sub"}},
 		{
@@ -50,16 +50,16 @@ func TestPreconditionFunnelCoversMutatingOps(t *testing.T) {
 		{name: "purge", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune"},
 		{name: "prune", method: http.MethodPost, target: "/api/v1/projects/demo/ops/prune", body: pruneRequest{Scope: "all"}},
 		{
-			name: "xattr-put", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
+			name: "xattrput", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
 			body: "value",
 		},
 		{
-			name: "xattr-delete", method: http.MethodDelete, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
+			name: "xattrdelete", method: http.MethodDelete, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key",
 			seed: func(t *testing.T, handler http.Handler) {
 				mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key", strings.NewReader("value"), nil, http.StatusNoContent)
 			},
 		},
-		{name: "project-delete", method: http.MethodDelete, target: "/api/v1/projects/demo"},
+		{name: "projectdelete", method: http.MethodDelete, target: "/api/v1/projects/demo"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

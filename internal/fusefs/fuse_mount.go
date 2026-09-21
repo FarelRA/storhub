@@ -192,7 +192,7 @@ func resolveCacheDir(cacheDir, project string) (string, error) {
 }
 
 // sweepCacheDir quarantines leftover overlay temps from a crashed previous
-// mount into recovery/ instead of deleting them: handle-* and inode-*
+// mount into recovery/ instead of deleting them: handle* and inode*
 // flat files may hold the only copy of SIGKILL-before-commit data.
 // Nothing can reference them (no file is open yet), but the bytes survive
 // for manual recovery. The recovery/ directory itself is preserved.
@@ -206,7 +206,7 @@ func sweepCacheDir(cacheDir string, logger *slog.Logger) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == "recovery" || (!strings.HasPrefix(name, "inode-") && !strings.HasPrefix(name, "handle-")) {
+		if name == "recovery" || (!strings.HasPrefix(name, "inode") && !strings.HasPrefix(name, "handle")) {
 			continue
 		}
 		quarantinePath(path.Join(cacheDir, name), logger)

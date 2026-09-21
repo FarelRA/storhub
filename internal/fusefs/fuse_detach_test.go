@@ -76,7 +76,7 @@ func mountDetachTest(t *testing.T) (*Filesystem, string) {
 
 func TestDetachedHandleReadWriteStatChmod(t *testing.T) {
 	_, mount := mountDetachTest(t)
-	full := filepath.Join(mount, "detach-rw")
+	full := filepath.Join(mount, "detachrw")
 	f, err := os.OpenFile(full, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -133,7 +133,7 @@ func TestDetachedHandleReadWriteStatChmod(t *testing.T) {
 
 func TestDetachedHandleReadOnlyStat(t *testing.T) {
 	_, mount := mountDetachTest(t)
-	full := filepath.Join(mount, "detach-ro")
+	full := filepath.Join(mount, "detachro")
 	if err := os.WriteFile(full, []byte("data"), 0o644); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestDetachedHandleReadOnlyStat(t *testing.T) {
 // delete-recreate cycles must always read the fresh content.
 func TestRecreateNeverServesStalePin(t *testing.T) {
 	_, mount := mountDetachTest(t)
-	full := filepath.Join(mount, "pin-storm")
+	full := filepath.Join(mount, "pinstorm")
 	for i := 0; i < 50; i++ {
 		want := []byte{byte(i), byte(i >> 8), 'x', 'x'}
 		if err := os.WriteFile(full, want, 0o644); err != nil {

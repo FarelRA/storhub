@@ -1,6 +1,6 @@
 {
   "realm": "storhub",
-  "token_signing_key": "replace-me",
+  "token_signing_key": "replaceme",
   "users": [
     {
       "username": "admin",

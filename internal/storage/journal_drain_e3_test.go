@@ -18,7 +18,7 @@ func TestDrainProjectFlushesJournalsSynchronously(t *testing.T) {
 	cfg := smallTransferTestConfig()
 	cfg.JournalDir = t.TempDir()
 	hub := backend.newClient(t, cfg)
-	project := "project-drain-flush"
+	project := "projectdrainflush"
 
 	hub.journalAppend(project, Op{Seq: 1, Type: OpPutFile, Paths: []string{"a.txt"}, Cause: "upload", Timestamp: 1})
 	if err := hub.DrainProjectContext(context.Background(), project); err != nil {

@@ -36,8 +36,8 @@ func TestAppRunHelpUnknownAndUsageErrors(t *testing.T) {
 	if err := app.Run([]string{"write", "--token", "x", "project", "file", "nope", "data"}); err == nil || !strings.Contains(err.Error(), "invalid offset") {
 		t.Fatalf("expected invalid offset error, got %v", err)
 	}
-	if err := app.Run([]string{"patch", "--token", "x", "project", "file", "1", "bad", "data"}); err == nil || !strings.Contains(err.Error(), "invalid delete-size") {
-		t.Fatalf("expected invalid delete-size error, got %v", err)
+	if err := app.Run([]string{"patch", "--token", "x", "project", "file", "1", "bad", "data"}); err == nil || !strings.Contains(err.Error(), "invalid deletesize") {
+		t.Fatalf("expected invalid deletesize error, got %v", err)
 	}
 	if err := app.Run([]string{"download"}); err == nil || !strings.Contains(err.Error(), "accepts") {
 		t.Fatalf("expected download arg error, got %v", err)
@@ -51,10 +51,10 @@ func TestHelpersAndRendering(t *testing.T) {
 	if formatTime(0) != "-" || !strings.Contains(formatTime(1), "1970") {
 		t.Fatal("unexpected formatted time")
 	}
-	if _, err := newHubFromFlags("", "", 0, false, logSettings{}); err == nil {
+	if _, err := newHubFromFlags(context.Background(), "", "", 0, false, logSettings{}); err == nil {
 		t.Fatal("expected missing token error")
 	}
-	hub, err := newHubFromFlags("token", "https://example.test/api/", 64, true, logSettings{})
+	hub, err := newHubFromFlags(context.Background(), "token", "https://example.test/api/", 64, true, logSettings{})
 	if err != nil || hub == nil {
 		t.Fatalf("newHubFromFlags: %v", err)
 	}
@@ -151,17 +151,7 @@ func TestPrintRootHelp(t *testing.T) {
 }
 
 func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	oldMountFactory := newMountHubFromFlagsFn
-	oldRESTFactory := newRESTHubFromFlagsFn
-	oldRESTHandler := newRESTHandlerFn
-	oldRESTListen := restListenAndServeFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	t.Cleanup(func() { newMountHubFromFlagsFn = oldMountFactory })
 	t.Cleanup(func() {
-		newRESTHubFromFlagsFn = oldRESTFactory
-		newRESTHandlerFn = oldRESTHandler
-		restListenAndServeFn = oldRESTListen
 	})
 	app, stdout, stderr := newTestApp(t)
 	localFile := filepath.Join(t.TempDir(), "upload.txt")
@@ -170,19 +160,19 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	}
 	downloadFile := filepath.Join(t.TempDir(), "download.txt")
 	mountDir := t.TempDir()
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newMountHubFromFlagsFn = func(_, _ string, _ logSettings) (hubClient, error) {
+	app.seams.newMountHub = func(_ context.Context, _, _ string, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
+	app.seams.newRESTHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(_ *storhub.StorHub, _ storhub.RESTOptions) (http.Handler, error) {
+	app.seams.newREST = func(_ *storhub.StorHub, _ storhub.RESTOptions) (http.Handler, error) {
 		return http.NewServeMux(), nil
 	}
-	restListenAndServeFn = func(_ *http.Server) error {
+	app.seams.listenServe = func(_ *http.Server) error {
 		return nil
 	}
 	checks := [][]string{
@@ -209,10 +199,10 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"project", "sync", "--token", "x", "demo"},
 		{"project", "revisions", "--token", "x", "demo"},
 		{"project", "rollback", "--token", "x", "demo", "deadbeef"},
-		{"project", "prune", "--token", "x", "demo", "objects", "--dry-run"},
-		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allow-anonymous"},
+		{"project", "prune", "--token", "x", "demo", "objects", "--dryrun"},
+		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allowanonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
-		{"serve", "--token", "x", "demo", mountDir, "--allow-anonymous"},
+		{"serve", "--token", "x", "demo", mountDir, "--allowanonymous"},
 	}
 	for _, args := range checks {
 		if err := app.Run(args); err != nil {
@@ -240,11 +230,9 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 // metadata writer, so mutations never reached GitHub. Every command that
 // creates a hub must be followed by exactly one Shutdown from Run.
 func TestRunDrainsHubOncePerCommand(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	if err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"}); err != nil {
@@ -264,19 +252,17 @@ func TestRunDrainsHubOncePerCommand(t *testing.T) {
 // TestRunWithoutHubSkipsShutdown pins the flip side: paths that never
 // create a hub (help, usage errors) must not invent one to drain.
 func TestRunWithoutHubSkipsShutdown(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, stdout, _ := newTestApp(t)
 	fake := &fakeHub{t: t}
 	var created int
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		created++
 		return fake, nil
 	}
 	if err := app.Run(nil); err != nil {
 		t.Fatalf("root help: %v", err)
 	}
-	if err := app.Run([]string{"no-such-command"}); err == nil {
+	if err := app.Run([]string{"nosuchcommand"}); err == nil {
 		t.Fatal("expected unknown command error")
 	}
 	if created != 0 || fake.shutdowns != 0 {
@@ -288,11 +274,9 @@ func TestRunWithoutHubSkipsShutdown(t *testing.T) {
 }
 
 func TestDeleteProjectRequiresYes(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, stderr := newTestApp(t)
 	fake := &fakeHub{t: t}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	err := app.Run([]string{"project", "delete", "demo"})
@@ -314,31 +298,23 @@ func TestDeleteProjectRequiresYes(t *testing.T) {
 }
 
 func TestServeRESTLoadsAuthFile(t *testing.T) {
-	oldHubFactory := newRESTHubFromFlagsFn
-	oldMountFactory := newMountHubFromFlagsFn
-	oldHandlerFactory := newRESTHandlerFn
-	oldListen := restListenAndServeFn
 	t.Cleanup(func() {
-		newRESTHubFromFlagsFn = oldHubFactory
-		newMountHubFromFlagsFn = oldMountFactory
-		newRESTHandlerFn = oldHandlerFactory
-		restListenAndServeFn = oldListen
 	})
 	app, _, stderr := newTestApp(t)
 	authFile := filepath.Join(t.TempDir(), "auth.json")
-	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secret-key","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
+	if err := os.WriteFile(authFile, []byte(`{"realm":"demo","token_signing_key":"secretkey","users":[{"username":"admin","password":"pass","uid":0,"primary_gid":0,"admin":true}]}`), 0o644); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
-	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
+	app.seams.newRESTHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	newRESTHandlerFn = func(_ *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
+	app.seams.newREST = func(_ *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 		if opts.Auth == nil || opts.Auth.Realm != "demo" || len(opts.Auth.Users) != 1 || opts.Auth.Users[0].Username != "admin" {
 			t.Fatalf("unexpected auth opts: %+v", opts.Auth)
 		}
 		return http.NewServeMux(), nil
 	}
-	restListenAndServeFn = func(server *http.Server) error {
+	app.seams.listenServe = func(server *http.Server) error {
 		if server.Addr != "127.0.0.1:9090" || server.Handler == nil {
 			return fmt.Errorf("unexpected serve args: addr=%q handler=%v", server.Addr, server.Handler)
 		}
@@ -350,7 +326,7 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 		}
 		return errors.New("stop")
 	}
-	err := app.Run([]string{"rest", "--token", "x", "--listen", "127.0.0.1:9090", "--auth-file", authFile})
+	err := app.Run([]string{"rest", "--token", "x", "--listen", "127.0.0.1:9090", "--authfile", authFile})
 	if err == nil || err.Error() != "stop" {
 		t.Fatalf("expected stop error, got %v", err)
 	}
@@ -375,7 +351,7 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 	}
 }
 
-// TestNormalizeCLIChunkSizeCeilingClamp pins the ceiling contract: a --chunk-size
+// TestNormalizeCLIChunkSizeCeilingClamp pins the ceiling contract: a --chunksize
 // above the GitHub release-asset ceiling must clamp DOWN, so the chunker's
 // plan and the uploader's windows agree instead of failing mid-upload.
 func TestNormalizeCLIChunkSizeCeilingClamp(t *testing.T) {
@@ -401,7 +377,7 @@ func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
 	if cfg.ChunkSize != minCLIChunkSize {
 		t.Fatalf("expected floor clamp, got %d", cfg.ChunkSize)
 	}
-	if !strings.Contains(buf.String(), "warning") || !strings.Contains(buf.String(), "--chunk-size") {
+	if !strings.Contains(buf.String(), "warning") || !strings.Contains(buf.String(), "--chunksize") {
 		t.Fatalf("expected clamp warning on warnOutput, got %q", buf.String())
 	}
 	buf.Reset()
@@ -409,7 +385,7 @@ func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
 	if cfg.ChunkSize != chunking.MaxReleaseAssetSize {
 		t.Fatalf("expected ceiling clamp, got %d", cfg.ChunkSize)
 	}
-	if !strings.Contains(buf.String(), "--chunk-size") {
+	if !strings.Contains(buf.String(), "--chunksize") {
 		t.Fatalf("expected ceiling clamp warning, got %q", buf.String())
 	}
 }
@@ -429,22 +405,16 @@ func TestHubConfigRatePolicyWiring(t *testing.T) {
 // TestRatePolicyCommandRouting pins which commands reach which constructor:
 // download is one-shot (standard hub), mount is long-running (mount hub).
 func TestRatePolicyCommandRouting(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	oldMountFactory := newMountHubFromFlagsFn
-	t.Cleanup(func() {
-		newHubFromFlagsFn = oldFactory
-		newMountHubFromFlagsFn = oldMountFactory
-	})
 	var oneShot, longRunning int
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		oneShot++
 		return &fakeHub{t: t}, nil
 	}
-	newMountHubFromFlagsFn = func(_, _ string, _ logSettings) (hubClient, error) {
+	app.seams.newMountHub = func(_ context.Context, _, _ string, _ logSettings) (hubClient, error) {
 		longRunning++
 		return &fakeHub{t: t}, nil
 	}
-	app, _, _ := newTestApp(t)
 	downloadFile := filepath.Join(t.TempDir(), "out.bin")
 	if err := app.Run([]string{"download", "--token", "x", "demo", "f", downloadFile}); err != nil {
 		t.Fatalf("download: %v", err)
@@ -477,7 +447,7 @@ func TestHubConfigAppliesLogSettingsAndJournal(t *testing.T) {
 	}
 }
 
-// TestNegativeChunkSizeIsUsageError pins that --chunk-size -1 must exit as
+// TestNegativeChunkSizeIsUsageError pins that --chunksize -1 must exit as
 // a usage error (class 2), not silently run with defaults.
 func TestNegativeChunkSizeIsUsageError(t *testing.T) {
 	app, _, _ := newTestApp(t)
@@ -485,23 +455,21 @@ func TestNegativeChunkSizeIsUsageError(t *testing.T) {
 	if err := os.WriteFile(localFile, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := app.Run([]string{"upload", "--token", "x", "--chunk-size", "-1", "demo", "f", localFile})
-	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--chunk-size") {
-		t.Fatalf("negative --chunk-size must be a usage error naming the flag, got %v", err)
+	err := app.Run([]string{"upload", "--token", "x", "--chunksize", "-1", "demo", "f", localFile})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--chunksize") {
+		t.Fatalf("negative --chunksize must be a usage error naming the flag, got %v", err)
 	}
 }
 
 // TestPruneScopeAndKeepAreUsageErrors pins that bad scope and keep < 1 must
 // be rejected by the CLI as usage errors (exit 2) before any hub exists.
 func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	var created int
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		created++
 		return &fakeHub{t: t}, nil
 	}
-	app, _, _ := newTestApp(t)
 	err := app.Run([]string{"project", "prune", "--token", "x", "demo", "bogus"})
 	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "prune scope") {
 		t.Fatalf("bad scope must be a usage error, got %v", err)
@@ -523,7 +491,7 @@ func TestPruneScopeAndKeepAreUsageErrors(t *testing.T) {
 }
 
 // TestWritePatchNegativeArgsAreUsageErrors pins that negative offsets and
-// delete-sizes are command-line mistakes (exit 2), not storage failures.
+// deletesizes are command-line mistakes (exit 2), not storage failures.
 func TestWritePatchNegativeArgsAreUsageErrors(t *testing.T) {
 	app, _, _ := newTestApp(t)
 	cases := [][]string{
@@ -548,11 +516,9 @@ func TestWritePatchNegativeArgsAreUsageErrors(t *testing.T) {
 // metadata flush is a failed commit point and must surface as an error
 // from Run (main exits non-zero), never as a warning with exit 0.
 func TestRunPropagatesFlushFailure(t *testing.T) {
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	app, _, _ := newTestApp(t)
 	fake := &fakeHub{t: t, shutdownErr: errors.New("flush boom")}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake, nil
 	}
 	err := app.Run([]string{"mkdir", "--token", "x", "demo", "docs"})
@@ -565,10 +531,13 @@ func TestRunPropagatesFlushFailure(t *testing.T) {
 	// A command that already failed keeps its own error primary, but the
 	// flush failure must still be visible, not swallowed.
 	fake2 := &fakeHub{t: t, shutdownErr: errors.New("flush boom"), readDirErr: errors.New("ls boom")}
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return fake2, nil
 	}
 	app2, _, stderr2 := newTestApp(t)
+	app2.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return fake2, nil
+	}
 	err = app2.Run([]string{"ls", "--token", "x", "demo"})
 	if err == nil || !strings.Contains(err.Error(), "ls boom") {
 		t.Fatalf("command error must stay primary, got %v", err)
@@ -598,21 +567,19 @@ func TestFlexDurationRejectsNonFinite(t *testing.T) {
 }
 
 // TestServeRejectsAnonymousWithAuthFile pins the contradictory-flags nit:
-// --allow-anonymous alongside an auth file must fail as a usage error
+// --allowanonymous alongside an auth file must fail as a usage error
 // instead of being silently ignored.
 func TestServeRejectsAnonymousWithAuthFile(t *testing.T) {
-	oldFactory := newRESTHubFromFlagsFn
-	t.Cleanup(func() { newRESTHubFromFlagsFn = oldFactory })
-	newRESTHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
+	app, _, _ := newTestApp(t)
+	app.seams.newRESTHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
 		return &storhub.StorHub{}, nil
 	}
-	app, _, _ := newTestApp(t)
 	authFile := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(authFile, []byte(`{"token_signing_key":"k"}`), 0o600); err != nil {
 		t.Fatalf("write auth: %v", err)
 	}
-	err := app.Run([]string{"rest", "--token", "x", "--auth-file", authFile, "--allow-anonymous"})
-	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--allow-anonymous") {
+	err := app.Run([]string{"rest", "--token", "x", "--authfile", authFile, "--allowanonymous"})
+	if err == nil || !IsUsageError(err) || !strings.Contains(err.Error(), "--allowanonymous") {
 		t.Fatalf("contradictory auth flags must be a usage error, got %v", err)
 	}
 }
@@ -640,9 +607,7 @@ func TestAuthFileRejectsUnknownFields(t *testing.T) {
 
 func TestListAcceptsAbsolutePath(t *testing.T) {
 	app, _, _ := newTestApp(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t, assertReadDirPath: "docs/readme.txt"}, nil
 	}
 	if err := app.Run([]string{"ls", "--token", "x", "demo", "/docs/readme.txt"}); err != nil {
@@ -694,16 +659,14 @@ func TestHelpAndCompletionWorkWithoutToken(t *testing.T) {
 
 func TestFlagParsingAcrossCommands(t *testing.T) {
 	t.Run("flags before subcommand", func(t *testing.T) {
-		t.Setenv("GITHUB_TOKEN", "env-token")
+		t.Setenv("GITHUB_TOKEN", "envtoken")
 		app, _, _ := newTestApp(t)
-		oldFactory := newHubFromFlagsFn
-		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, apiBase string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-			if token != "env-token" {
-				t.Fatalf("expected token env-token, got %q", token)
+		app.seams.newHub = func(_ context.Context, token, apiBase string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+			if token != "envtoken" {
+				t.Fatalf("expected token envtoken, got %q", token)
 			}
 			if apiBase != "" {
-				t.Fatalf("expected empty api-base, got %q", apiBase)
+				t.Fatalf("expected empty apibase, got %q", apiBase)
 			}
 			return &fakeHub{t: t}, nil
 		}
@@ -714,15 +677,13 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 
 	t.Run("persistent flag overrides env", func(t *testing.T) {
 		app, _, _ := newTestApp(t)
-		oldFactory := newHubFromFlagsFn
-		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(token, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		app.seams.newHub = func(_ context.Context, token, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 			if token != "override" {
 				t.Fatalf("expected token override, got %q", token)
 			}
 			return &fakeHub{t: t}, nil
 		}
-		t.Setenv("GITHUB_TOKEN", "env-token")
+		t.Setenv("GITHUB_TOKEN", "envtoken")
 		if err := app.Run([]string{"ls", "--token", "override", "demo"}); err != nil {
 			t.Fatalf("ls with override token: %v", err)
 		}
@@ -730,9 +691,7 @@ func TestFlagParsingAcrossCommands(t *testing.T) {
 
 	t.Run("local flags", func(t *testing.T) {
 		app, stdout, _ := newTestApp(t)
-		oldFactory := newHubFromFlagsFn
-		t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
-		newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 			return &fakeHub{t: t}, nil
 		}
 		if err := app.Run([]string{"ls", "--token", "x", "-l", "demo"}); err != nil {

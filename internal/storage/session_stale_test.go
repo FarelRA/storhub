@@ -14,7 +14,7 @@ func TestSessionStatStaleFreshThenRival(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-stale-rival"
+	proj := "projectsessionstalerival"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("version-one"))
 
 	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadOnly)
@@ -65,7 +65,7 @@ func TestSessionStatStaleClearsOnSync(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-session-stale-sync"
+	proj := "projectsessionstalesync"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("base"))
 
 	id := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)

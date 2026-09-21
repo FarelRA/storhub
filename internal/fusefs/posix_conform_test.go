@@ -724,7 +724,7 @@ func (h *pcHub) ReplaceFileContext(_ context.Context, _ string, target, inputPat
 func (h *pcHub) LoadRepoMetadataReadonlyContext(_ context.Context, project string) (*meta.RepoMetadata, string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.buildRepoLocked(project), "pc-static", nil
+	return h.buildRepoLocked(project), "pcstatic", nil
 }
 
 func (h *pcHub) ReadPinnedFileContext(_ context.Context, _ string, file *meta.FileMeta, _ map[int64]meta.ChunkInfo, offset, length int64) ([]byte, error) {

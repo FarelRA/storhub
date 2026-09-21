@@ -21,7 +21,7 @@ import (
 //	         own create/404 outcome (PUT creates, the rest 404).
 func TestIfNoneMatchStarOnUpdates(t *testing.T) {
 	t.Parallel()
-	const rev0 = `"rev-0"` // fake RevisionContext default, quoted on the wire.
+	const rev0 = `"rev0"` // fake RevisionContext default, quoted on the wire.
 	cases := []struct {
 		name       string
 		method     string
@@ -33,35 +33,35 @@ func TestIfNoneMatchStarOnUpdates(t *testing.T) {
 		missBody   any
 	}{
 		{
-			name: "put-replace", method: http.MethodPut,
+			name: "putreplace", method: http.MethodPut,
 			target: "/api/v1/projects/demo/content?path=docs/f.txt", body: "hello",
 			wantPlain:  http.StatusOK,
 			missTarget: "/api/v1/projects/demo/content?path=docs/fresh.txt", missBody: "hello",
 			wantMiss: http.StatusCreated,
 		},
 		{
-			name: "patch-append", method: http.MethodPatch,
+			name: "patchappend", method: http.MethodPatch,
 			target: "/api/v1/projects/demo/content?path=docs/f.txt&op=append", body: "!",
 			wantPlain:  http.StatusOK,
 			missTarget: "/api/v1/projects/demo/content?path=docs/fresh.txt&op=append", missBody: "!",
 			wantMiss: http.StatusNotFound,
 		},
 		{
-			name: "patch-write", method: http.MethodPatch,
+			name: "patchwrite", method: http.MethodPatch,
 			target: "/api/v1/projects/demo/content?path=docs/f.txt&op=write&offset=0", body: "!",
 			wantPlain:  http.StatusOK,
 			missTarget: "/api/v1/projects/demo/content?path=docs/fresh.txt&op=write&offset=0", missBody: "!",
 			wantMiss: http.StatusNotFound,
 		},
 		{
-			name: "patch-truncate", method: http.MethodPatch,
+			name: "patchtruncate", method: http.MethodPatch,
 			target: "/api/v1/projects/demo/content?path=docs/f.txt&op=truncate&size=1", body: nil,
 			wantPlain:  http.StatusOK,
 			missTarget: "/api/v1/projects/demo/content?path=docs/fresh.txt&op=truncate&size=1", missBody: nil,
 			wantMiss: http.StatusNotFound,
 		},
 		{
-			name: "delete-node", method: http.MethodDelete,
+			name: "deletenode", method: http.MethodDelete,
 			target: "/api/v1/projects/demo/nodes?path=docs/f.txt", body: nil,
 			wantPlain:  http.StatusNoContent,
 			missTarget: "/api/v1/projects/demo/nodes?path=docs/fresh.txt", missBody: nil,

@@ -18,7 +18,7 @@ func TestPruneSeesFreshlyCommittedFiles(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-purge-fresh"
+	project := "projectpurgefresh"
 
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
 	if _, err := hub.UploadFileContext(context.Background(), project, "kept.txt", input); err != nil {
@@ -59,7 +59,7 @@ func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-purge-count-err"
+	project := "projectpurgecounterr"
 
 	input := writeTempFile(t, t.TempDir(), "kept.txt", []byte("kept payload"))
 	if _, err := hub.UploadFileContext(context.Background(), project, "kept.txt", input); err != nil {
@@ -101,7 +101,7 @@ func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-purge-dirty"
+	project := "projectpurgedirty"
 
 	input := writeTempFile(t, t.TempDir(), "pending.txt", []byte("pending payload"))
 	if _, err := hub.UploadFileContext(context.Background(), project, "pending.txt", input); err != nil {
@@ -134,7 +134,7 @@ func TestPruneReverifyDropsNewlyTrackedTasks(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	const project = "project-purge-race"
+	const project = "projectpurgerace"
 
 	input := writeTempFile(t, t.TempDir(), "doomed.txt", []byte("doomed payload"))
 	meta, err := hub.UploadFileContext(context.Background(), project, "doomed.txt", input)

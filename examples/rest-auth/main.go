@@ -27,7 +27,7 @@ func main() {
 	if key == "" {
 		log.Fatal("STORHUB_REST_SIGNING_KEY environment variable not set")
 	}
-	hub, err := storhub.NewStorHub(token)
+	hub, err := storhub.NewStorHubWithContext(context.Background(), token, storhub.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}

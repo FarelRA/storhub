@@ -9,7 +9,7 @@ import (
 
 func (a *App) newMountCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "mount [flags] <project> <mount-point>",
+		Use:   "mount [flags] <project> <mountpoint>",
 		Short: "FUSE mount a project",
 		Long: `Mount exposes the project as a local filesystem over FUSE.
 Press Ctrl+C to unmount; the unmount is retried while files stay open.
@@ -25,9 +25,9 @@ Examples:
 
 func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
-	allowOther, _ := cmd.Flags().GetBool("allow-other")
+	allowOther, _ := cmd.Flags().GetBool("allowother")
 	debug, _ := cmd.Flags().GetBool("debug")
-	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	cacheDir, _ := cmd.Flags().GetString("cachedir")
 	umaskRaw, _ := cmd.Flags().GetString("umask")
 	umask, err := parseMountUmask(umaskRaw)
 	if err != nil {
@@ -35,7 +35,7 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 	}
 	// mount is a long-running interactive surface: it must get the
 	// pause-to-reset rate policy, not the one-shot fail-fast default.
-	hub, err := a.newCmdMountHub(resolveToken(token), apiBase)
+	hub, err := a.newCmdMountHub(cmd.Context(), resolveToken(token), apiBase)
 	if err != nil {
 		return err
 	}

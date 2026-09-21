@@ -18,7 +18,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
 	fsys := mustMount(t, &stubHub{chunkSize: 4}, cacheDir, Options{OverlayBufferSize: 4})
-	temp, err := os.CreateTemp(cacheDir, "inode-*")
+	temp, err := os.CreateTemp(cacheDir, "inode*")
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	if got := state.dirtyBytesLocked(); got != 6 {
 		t.Fatalf("unexpected dirty bytes: %d", got)
 	}
-	baseTemp, err := os.CreateTemp(cacheDir, "inode-base-*")
+	baseTemp, err := os.CreateTemp(cacheDir, "inodebase*")
 	if err != nil {
 		t.Fatalf("create base temp file: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create working temp: %v", err)
 	}
-	base, err := os.CreateTemp(cacheDir, "inode-base-*")
+	base, err := os.CreateTemp(cacheDir, "inodebase*")
 	if err != nil {
 		t.Fatalf("create base temp: %v", err)
 	}

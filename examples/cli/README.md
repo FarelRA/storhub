@@ -35,4 +35,4 @@ Notes:
 - the script expects one positional argument: the project name
 - if `STORHUB_MOUNT_POINT` is set, it will also show the mount command to run
 - the script uses `go run ./cmd/storhub` directly so it stays in sync with the current source tree
-- `examples/cli/rest-auth.json` is a starter auth file for `storhub rest --auth-file` and `storhub serve --auth-file`
+- `examples/cli/rest-auth.json` is a starter auth file for `storhub rest --authfile` and `storhub serve --authfile`

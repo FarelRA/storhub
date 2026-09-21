@@ -55,7 +55,7 @@ func TestReadVisSecondHandleSeesUncommittedWrites(t *testing.T) {
 		t.Fatalf("new writer handle: %v", err)
 	}
 	defer func() { _ = w.Release(ctx) }()
-	want := []byte("data-should-match")
+	want := []byte("datashouldmatch")
 	if n, errno := w.Write(ctx, want, 0); errno != 0 || int(n) != len(want) {
 		t.Fatalf("write: n=%d errno=%v", n, errno)
 	}

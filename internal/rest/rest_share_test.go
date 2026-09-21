@@ -45,7 +45,7 @@ func TestShareTTLDefaultClamp(t *testing.T) {
 }
 
 // TestShareKeyDerivedFromAuthSigningKey pins the zero-config behavior an
-// auth-file deployment relies on: with no explicit ShareSigningKey, one is
+// authfile deployment relies on: with no explicit ShareSigningKey, one is
 // derived deterministically from the auth token signing key, so share
 // creation works immediately AND existing links keep verifying after a
 // restart or across handler instances.
@@ -142,7 +142,7 @@ func seedShareEscapeTree(t *testing.T) (*fakeRESTClient, *restrictedClient) {
 	if _, err := client.CreateFileContext(ctx, "demo", "private/keys.txt"); err != nil {
 		t.Fatalf("seed keys: %v", err)
 	}
-	if _, err := client.WriteFileAtContext(ctx, "demo", "private/keys.txt", 0, []byte("top-secret")); err != nil {
+	if _, err := client.WriteFileAtContext(ctx, "demo", "private/keys.txt", 0, []byte("topsecret")); err != nil {
 		t.Fatalf("write keys: %v", err)
 	}
 	if _, err := client.CreateFileContext(ctx, "demo", "public/doc.txt"); err != nil {

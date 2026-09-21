@@ -87,7 +87,7 @@ func TestClientForWrongTypeServes500(t *testing.T) {
 		t.Fatalf("new handler: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo", nil)
-	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "not-a-client"))
+	req = req.WithContext(context.WithValue(req.Context(), clientCtxKey, "notaclient"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	resp := rec.Result()

@@ -98,7 +98,7 @@ func TestSessionEmptyReadOmitsRange(t *testing.T) {
 // clone, PATCH write) still enforce the same token and succeed.
 func TestRevisionTokenFailsLoudOnNoCASVerbs(t *testing.T) {
 	t.Parallel()
-	const rev0 = `"rev-0"` // fake RevisionContext default, quoted on the wire.
+	const rev0 = `"rev0"` // fake RevisionContext default, quoted on the wire.
 	loud := []struct {
 		name   string
 		method string
@@ -110,7 +110,7 @@ func TestRevisionTokenFailsLoudOnNoCASVerbs(t *testing.T) {
 		{name: "chmod", method: http.MethodPost, target: "/api/v1/projects/demo/ops/chmod", body: chmodRequest{Path: "docs/f.txt", Mode: 0o640}},
 		{name: "chown", method: http.MethodPost, target: "/api/v1/projects/demo/ops/chown", body: chownRequest{Path: "docs/f.txt", UID: 1000, GID: 1000}},
 		{name: "utimes", method: http.MethodPost, target: "/api/v1/projects/demo/ops/utimes", body: utimesRequest{Path: "docs/f.txt", Atime: nowForUtimes(), Mtime: nowForUtimes()}},
-		{name: "xattr-put", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key", body: "value"},
+		{name: "xattrput", method: http.MethodPut, target: "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key", body: "value"},
 	}
 	for _, tc := range loud {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestRevisionTokenFailsLoudOnNoCASVerbs(t *testing.T) {
 			assertErrorCode(t, resp, "precondition_failed")
 		})
 	}
-	t.Run("xattr-delete", func(t *testing.T) {
+	t.Run("xattrdelete", func(t *testing.T) {
 		t.Parallel()
 		_, handler := seedIfNoneMatch(t)
 		mustRequest(t, handler, http.MethodPut, "/api/v1/projects/demo/xattrs/value?path=docs/f.txt&name=key", strings.NewReader("value"), nil, http.StatusNoContent)
@@ -134,14 +134,14 @@ func TestRevisionTokenFailsLoudOnNoCASVerbs(t *testing.T) {
 			map[string]string{"If-Match": rev0}, http.StatusPreconditionFailed)
 		assertErrorCode(t, resp, "precondition_failed")
 	})
-	t.Run("range-clone-keeps-cas", func(t *testing.T) {
+	t.Run("rangeclonekeepscas", func(t *testing.T) {
 		t.Parallel()
 		_, handler := seedIfNoneMatch(t)
 		body := copyRequest{SrcPath: "docs/f.txt", DstPath: "docs/h.txt", SrcOff: int64ptr(0)}
 		mustJSONRequestWithHeaders(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/copy", body,
 			map[string]string{"If-Match": rev0}, http.StatusCreated)
 	})
-	t.Run("patch-write-keeps-cas", func(t *testing.T) {
+	t.Run("patchwritekeepscas", func(t *testing.T) {
 		t.Parallel()
 		_, handler := seedIfNoneMatch(t)
 		mustRequest(t, handler, http.MethodPatch, "/api/v1/projects/demo/content?path=docs/f.txt&op=write&offset=0",

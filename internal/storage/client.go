@@ -274,21 +274,9 @@ func isReadOnlyOp(op string) bool {
 	}
 }
 
-// NewStorHub returns a hub with default config for token.
-func NewStorHub(token string) (*StorHub, error) {
-	return NewStorHubWithConfig(token, DefaultConfig())
-}
-
-// NewStorHubWithConfig is the single compat constructor that injects
-// context.Background: use it only for single-call scripts and embedders
-// without a request scope. The hub lifetime cannot be cancelled through
-// this path, so long-running callers must prefer NewStorHubWithContext.
-func NewStorHubWithConfig(token string, cfg Config) (*StorHub, error) {
-	return NewStorHubWithContext(context.Background(), token, cfg)
-}
-
 // NewStorHubWithContext returns a hub bound to ctx: cancelling ctx shuts
-// down hub background work.
+// down hub background work. It is the only constructor: hub lifetime
+// always binds to a caller scope, never a hidden Background.
 func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*StorHub, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("token is required")

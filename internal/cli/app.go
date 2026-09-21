@@ -46,14 +46,13 @@ func defaultLogSettings() logSettings {
 }
 
 // cliSeams injects every external constructor the CLI shells out to.
-// Per-App state (not package globals) so parallel tests can drive isolated
-// Apps without racing on shared seam vars. The package-level
-// newHubFromFlagsFn et al. below remain as deprecated shims forwarding to
-// defaultSeams for backward compatibility with existing tests.
+// Per-App state (not package globals) so parallel tests drive isolated
+// Apps without racing on shared seam vars. Hub constructors take ctx
+// first: hub lifetime binds to the caller's scope.
 type cliSeams struct {
-	newHub      func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error)
-	newRESTHub  func(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error)
-	newMountHub func(token, apiBase string, log logSettings) (hubClient, error)
+	newHub      func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error)
+	newRESTHub  func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error)
+	newMountHub func(ctx context.Context, token, apiBase string, log logSettings) (hubClient, error)
 	newFUSE     func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error)
 	newREST     func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error)
 	listenServe func(server *http.Server) error
@@ -61,16 +60,16 @@ type cliSeams struct {
 
 func defaultCliSeams() cliSeams {
 	return cliSeams{
-		newHub: func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
-			hub, err := newHubFromFlags(token, apiBase, chunkSize, public, log)
+		newHub: func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+			hub, err := newHubFromFlags(ctx, token, apiBase, chunkSize, public, log)
 			if err != nil {
 				return nil, err
 			}
 			return storhubClient{StorHub: hub}, nil
 		},
 		newRESTHub: newRESTHubFromFlags,
-		newMountHub: func(token, apiBase string, log logSettings) (hubClient, error) {
-			hub, err := newMountHubFromFlags(token, apiBase, log)
+		newMountHub: func(ctx context.Context, token, apiBase string, log logSettings) (hubClient, error) {
+			hub, err := newMountHubFromFlags(ctx, token, apiBase, log)
 			if err != nil {
 				return nil, err
 			}
@@ -235,45 +234,19 @@ func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMo
 	return c.StorHub.NewFUSE(project, opts)
 }
 
-// Deprecated seam shims: kept so existing tests (which swap these globals)
-// keep compiling. New code uses App.seams injected per-App.
-var newHubFromFlagsFn = func(token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
-	return defaultCliSeams().newHub(token, apiBase, chunkSize, public, log)
-}
-
 // newRESTHubFromFlags builds the hub for rest/serve: long-running
 // surfaces, so it gets the pause-to-reset rate policy (see applyRateEnv).
-func newRESTHubFromFlags(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+func newRESTHubFromFlags(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 	token = resolveToken(token)
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, chunkSize, public, log, true))
-}
-
-var newRESTHubFromFlagsFn = newRESTHubFromFlags
-
-// newMountHubFromFlagsFn builds the hub for mount: a long-running
-// interactive surface, so it gets the pause-to-reset rate policy.
-// Deprecated shim: new code uses App.seams.newMountHub.
-var newMountHubFromFlagsFn = func(token, apiBase string, log logSettings) (hubClient, error) {
-	return defaultCliSeams().newMountHub(token, apiBase, log)
-}
-
-// Deprecated seam shims: kept so existing tests keep compiling.
-var newFUSEFn = func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error) {
-	return defaultCliSeams().newFUSE(hub, project, opts)
-}
-var newRESTHandlerFn = func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
-	return defaultCliSeams().newREST(hub, opts)
-}
-var restListenAndServeFn = func(server *http.Server) error {
-	return defaultCliSeams().listenServe(server)
+	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, chunkSize, public, log, true))
 }
 
 const minCLIChunkSize int64 = 32 * 1024 * 1024
 
-// normalizeCLIChunkSize maps a --chunk-size flag value to the size actually
+// normalizeCLIChunkSize maps a --chunksize flag value to the size actually
 // used. Non-positive values pass through untouched (0 means "unset"; the
 // command layer rejects negatives as usage errors before they get here).
 // Values below the 32 MiB floor clamp up, and values above the GitHub
@@ -301,28 +274,30 @@ func New() *App {
 // the deprecated package globals. Until wave 2 migrates tests to set
 // a.seams per-test, the globals win so existing stub-swapping tests keep
 // working; new code should set a.seams explicitly for isolation.
-func (a *App) seamHub() func(string, string, int64, bool, logSettings) (hubClient, error) {
-	return newHubFromFlagsFn
+// Seam accessors: per-App injection point (parallel-safe). Tests set
+// a.seams fields directly for isolation; there are no package globals.
+func (a *App) seamHub() func(context.Context, string, string, int64, bool, logSettings) (hubClient, error) {
+	return a.seams.newHub
 }
 
-func (a *App) seamRESTHub() func(string, string, int64, bool, logSettings) (*storhub.StorHub, error) {
-	return newRESTHubFromFlagsFn
+func (a *App) seamRESTHub() func(context.Context, string, string, int64, bool, logSettings) (*storhub.StorHub, error) {
+	return a.seams.newRESTHub
 }
 
-func (a *App) seamMountHub() func(string, string, logSettings) (hubClient, error) {
-	return newMountHubFromFlagsFn
+func (a *App) seamMountHub() func(context.Context, string, string, logSettings) (hubClient, error) {
+	return a.seams.newMountHub
 }
 
 func (a *App) seamFUSE() func(*storhub.StorHub, string, storhub.FUSEOptions) (fuseMount, error) {
-	return newFUSEFn
+	return a.seams.newFUSE
 }
 
 func (a *App) seamRESTHandler() func(*storhub.StorHub, storhub.RESTOptions) (http.Handler, error) {
-	return newRESTHandlerFn
+	return a.seams.newREST
 }
 
 func (a *App) seamListen() func(*http.Server) error {
-	return restListenAndServeFn
+	return a.seams.listenServe
 }
 
 func (a *App) buildRootCmd() {
@@ -355,10 +330,10 @@ Examples:
 	})
 
 	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
-	rootCmd.PersistentFlags().String("api-base", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
-	rootCmd.PersistentFlags().StringVar(&a.log.level, "log-level", a.log.level, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
-	rootCmd.PersistentFlags().StringVar(&a.log.format, "log-format", a.log.format, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
-	rootCmd.PersistentFlags().BoolVar(&a.log.color, "log-color", a.log.color, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
+	rootCmd.PersistentFlags().String("apibase", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
+	rootCmd.PersistentFlags().StringVar(&a.log.level, "loglevel", a.log.level, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
+	rootCmd.PersistentFlags().StringVar(&a.log.format, "logformat", a.log.format, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
+	rootCmd.PersistentFlags().BoolVar(&a.log.color, "logcolor", a.log.color, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
 	rootCmd.PersistentFlags().StringVar(&a.configFile, "config", "", "Path to a JSON config file with client defaults (flags and $STORHUB_* override file values)")
 
 	rootCmd.AddCommand(a.newUploadCmd())
@@ -440,19 +415,19 @@ func (a *App) drainIfSyncRequested(ctx context.Context, cmd *cobra.Command, proj
 // One definition: mount and serve must not drift apart on wording or
 // defaults, because serve is mount plus REST over the same hub.
 func addFUSEFlags(cmd *cobra.Command) {
-	cmd.Flags().Bool("allow-other", false, "Enable allow_other on the FUSE mount")
+	cmd.Flags().Bool("allowother", false, "Enable allow_other on the FUSE mount")
 	cmd.Flags().Bool("debug", false, "Enable FUSE debug logging")
-	cmd.Flags().String("cache-dir", "", "Optional cache directory")
+	cmd.Flags().String("cachedir", "", "Optional cache directory")
 	cmd.Flags().String("umask", "022", "Umask applied to created files and directories (octal 000-777); the FUSE protocol does not transmit the caller umask")
 }
 
 // addRESTFlags registers the flags every REST-serving command shares.
 func addRESTFlags(cmd *cobra.Command) {
 	cmd.Flags().String("listen", ":8080", "Listen address")
-	cmd.Flags().String("base-path", "/api/v1", "REST API base path")
-	cmd.Flags().String("auth-file", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
-	cmd.Flags().String("share-key", "", "Share signing key; defaults to one derived from the auth file's token_signing_key (falls back to $STORHUB_SHARE_SIGNING_KEY)")
-	cmd.Flags().Bool("allow-anonymous", false, "Explicitly serve the API without authentication (insecure)")
+	cmd.Flags().String("basepath", "/api/v1", "REST API base path")
+	cmd.Flags().String("authfile", "", "Optional JSON auth config file (falls back to $STORHUB_REST_AUTH_FILE)")
+	cmd.Flags().String("sharekey", "", "Share signing key; defaults to one derived from the auth file's token_signing_key (falls back to $STORHUB_SHARE_SIGNING_KEY)")
+	cmd.Flags().Bool("allowanonymous", false, "Explicitly serve the API without authentication (insecure)")
 }
 
 // Run executes args against the App: usage errors (exit 2 shapes) stay
@@ -515,7 +490,7 @@ func withSignalContext() (context.Context, context.CancelFunc) {
 // lines at each run* call site: hub, err := a.mustCmdHub(cmd, 0, false).
 func (a *App) mustCmdHub(cmd *cobra.Command, chunkSize int64, public bool) (hubClient, error) {
 	token, apiBase := cmdAuth(cmd)
-	return a.newCmdHub(resolveToken(token), apiBase, chunkSize, public)
+	return a.newCmdHub(cmd.Context(), resolveToken(token), apiBase, chunkSize, public)
 }
 
 // mustCmdHubCtx is mustCmdHub plus a signal context for the long one-shot
@@ -575,13 +550,13 @@ func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (stri
 	if fc.CreatePublicRepo != nil {
 		public = public || *fc.CreatePublicRepo
 	}
-	if fc.LogLevel != nil && !a.flagChanged("log-level") && envUnset("STORHUB_LOG_LEVEL") {
+	if fc.LogLevel != nil && !a.flagChanged("loglevel") && envUnset("STORHUB_LOG_LEVEL") {
 		log.level = *fc.LogLevel
 	}
-	if fc.LogFormat != nil && !a.flagChanged("log-format") && envUnset("STORHUB_LOG_FORMAT") {
+	if fc.LogFormat != nil && !a.flagChanged("logformat") && envUnset("STORHUB_LOG_FORMAT") {
 		log.format = *fc.LogFormat
 	}
-	if fc.LogColor != nil && !a.flagChanged("log-color") && envUnset("STORHUB_LOG_COLOR") {
+	if fc.LogColor != nil && !a.flagChanged("logcolor") && envUnset("STORHUB_LOG_COLOR") {
 		log.color = *fc.LogColor
 	}
 	return apiBase, chunkSize, public, log, nil
@@ -602,12 +577,12 @@ func envUnset(key string) bool {
 	return strings.TrimSpace(os.Getenv(key)) == ""
 }
 
-func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
 	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
 	if err != nil {
 		return nil, err
 	}
-	hub, err := a.seamHub()(token, apiBase, chunkSize, public, log)
+	hub, err := a.seamHub()(ctx, token, apiBase, chunkSize, public, log)
 	if err == nil {
 		a.hub = hub
 	}
@@ -617,24 +592,24 @@ func (a *App) newCmdHub(token, apiBase string, chunkSize int64, public bool) (hu
 // newCmdMountHub builds the hub for long-running interactive surfaces
 // (mount): it records the client for Run's flush and uses the
 // pause-to-reset rate policy.
-func (a *App) newCmdMountHub(token, apiBase string) (hubClient, error) {
+func (a *App) newCmdMountHub(ctx context.Context, token, apiBase string) (hubClient, error) {
 	apiBase, _, _, log, err := a.withFileConfig(apiBase, 0, false)
 	if err != nil {
 		return nil, err
 	}
-	hub, err := a.seamMountHub()(token, apiBase, log)
+	hub, err := a.seamMountHub()(ctx, token, apiBase, log)
 	if err == nil {
 		a.hub = hub
 	}
 	return hub, err
 }
 
-func (a *App) newCmdRESTHub(token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
+func (a *App) newCmdRESTHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
 	if err != nil {
 		return nil, err
 	}
-	hub, err := a.seamRESTHub()(token, apiBase, chunkSize, public, log)
+	hub, err := a.seamRESTHub()(ctx, token, apiBase, chunkSize, public, log)
 	if err == nil {
 		// rest/serve need the raw *StorHub for storhub.NewRESTHandler; track the
 		// wrapped form so Run can still flush pending metadata.
@@ -801,8 +776,8 @@ func (a *App) setupServeMount(ctx context.Context, project, mountPoint string, f
 // longRunning selects the rate-limit policy documented on applyRateEnv:
 // interactive/daemon surfaces (mount, rest, serve) pause up to the reset,
 // one-shot commands fail fast. Log knobs, the journal location, and the
-// chunk-size clamps are applied for ALL commands - a surface that silently
-// ignores --log-level is a bug waiting to be filed.
+// chunksize clamps are applied for ALL commands - a surface that silently
+// ignores --loglevel is a bug waiting to be filed.
 func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings, longRunning bool) storcfg.Config {
 	cfg := storhub.DefaultConfig()
 	if strings.TrimSpace(apiBase) != "" {
@@ -810,7 +785,7 @@ func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings,
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
 		if normalized != chunkSize {
-			warnf("--chunk-size %d outside [%d, %d]; using %d",
+			warnf("--chunksize %d outside [%d, %d]; using %d",
 				chunkSize, minCLIChunkSize, chunking.MaxReleaseAssetSize, normalized)
 		}
 		cfg.ChunkSize = normalized
@@ -828,24 +803,24 @@ func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings,
 }
 
 // newHubFromFlags builds the hub for one-shot commands: fail-fast rate
-// policy, chunk-size and public-repo flags honored.
-func newHubFromFlags(token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
+// policy, chunksize and public-repo flags honored.
+func newHubFromFlags(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 	token = resolveToken(token)
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, chunkSize, public, log, false))
+	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, chunkSize, public, log, false))
 }
 
 // newMountHubFromFlags builds the hub for the long-running mount surface:
 // pause-to-reset rate policy so an interactive session rides out a
 // secondary rate limit instead of dying instantly.
-func newMountHubFromFlags(token, apiBase string, log logSettings) (*storhub.StorHub, error) {
+func newMountHubFromFlags(ctx context.Context, token, apiBase string, log logSettings) (*storhub.StorHub, error) {
 	token = resolveToken(token)
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	return storhub.NewStorHubWithConfig(token, newHubConfig(apiBase, 0, false, log, true))
+	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, 0, false, log, true))
 }
 
 // applyRateEnv layers the rate-governor environment variables onto a hub
@@ -932,10 +907,10 @@ func warnEnvParse(key, value string, err error) {
 }
 
 // cmdAuth extracts the auth flags every command shares: explicit --token
-// (resolved against $GITHUB_TOKEN) plus --api-base.
+// (resolved against $GITHUB_TOKEN) plus --apibase.
 func cmdAuth(cmd *cobra.Command) (token, apiBase string) {
 	token, _ = cmd.Flags().GetString("token")
-	apiBase, _ = cmd.Flags().GetString("api-base")
+	apiBase, _ = cmd.Flags().GetString("apibase")
 	return token, apiBase
 }
 

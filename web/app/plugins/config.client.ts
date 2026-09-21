@@ -13,7 +13,7 @@ declare global {
 
 /**
  * The Go server injects `/config.js` (window.STORHUB_UI_CONFIG) so the same
- * static bundle works under any --base-path. In `nuxt dev` there is no such
+ * static bundle works under any --basepath. In `nuxt dev` there is no such
  * script, so fall back to the default REST prefix.
  */
 export default defineNuxtPlugin(() => {

@@ -619,13 +619,13 @@ func TestRenameNoReplaceInTransaction(t *testing.T) {
 		t.Fatalf("create dst: %v", err)
 	}
 	if err := svc.RenameContext(ctx, "demo", "src.txt", "dst.txt", WithNoReplace()); !errors.Is(err, ErrAlreadyExists) {
-		t.Fatalf("expected EEXIST from in-transaction no-replace, got %v", err)
+		t.Fatalf("expected EEXIST from in-transaction noreplace, got %v", err)
 	}
 	if backend.repo.FindFile("src.txt") == nil || backend.repo.FindFile("dst.txt") == nil {
-		t.Fatal("failed no-replace rename must not mutate the tree")
+		t.Fatal("failed noreplace rename must not mutate the tree")
 	}
 	if err := svc.RenameContext(ctx, "demo", "src.txt", "fresh.txt", WithNoReplace()); err != nil {
-		t.Fatalf("no-replace onto free name: %v", err)
+		t.Fatalf("noreplace onto free name: %v", err)
 	}
 	// Without the option, replacement stays unconditional.
 	if _, err := svc.CreateFileContext(ctx, "demo", "src.txt"); err != nil {

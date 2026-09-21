@@ -19,6 +19,28 @@ import (
 // mount point using only os and syscall operations.
 type pcSurface struct {
 	mount string
+	// umask masks CreateFile modes (see test.UmaskSurface; zero
+	// disables masking). Guarded by mu alongside casMu users: scenarios
+	// run sequentially, but concurrent workers inside one scenario read
+	// it.
+	mu sync.Mutex
+	// umask is read under mu.
+	umask uint32
+	// casMu serializes the check-then-write in CompareAndWrite so two
+	// adapter-side CAS attempts cannot interleave between the revision
+	// read and the write. It narrows (never closes) the
+	// non-atomicity documented on pcRevision: the server still applies
+	// no atomic CAS, which only production can fix.
+	casMu sync.Mutex
+}
+
+var _ test.UmaskSurface = (*pcSurface)(nil)
+
+// SetUmask implements test.UmaskSurface.SetUmask.
+func (s *pcSurface) SetUmask(mask uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.umask = mask & 0o777
 }
 
 // join validates a Surface path and maps it under the mount point.
@@ -29,33 +51,15 @@ func (s *pcSurface) join(p string) (string, error) {
 	return filepath.Join(s.mount, strings.TrimPrefix(p, "/")), nil
 }
 
-// pcTranslate maps syscall failures onto the posixconform sentinels. A
-// permission failure that is not about handle modes (for example chown by
-// a non-privileged caller) has no sentinel and is returned raw so the
-// scenario fails loudly instead of being misclassified.
+// pcTranslate maps syscall failures onto the posixconform sentinels. The
+// shared errno-to-sentinel knowledge lives in test.Translate (nil wrap
+// keeps the bare sentinels this adapter always returned); only the
+// permission-failure note below stays local. A permission failure that
+// is not about handle modes (for example chown by a non-privileged
+// caller) has no sentinel and is returned raw so the scenario fails
+// loudly instead of being misclassified.
 func pcTranslate(err error) error {
-	if err == nil {
-		return nil
-	}
-	switch {
-	case errors.Is(err, syscall.ENOENT):
-		return test.ErrNotFound
-	case errors.Is(err, syscall.EEXIST):
-		return test.ErrExists
-	case errors.Is(err, syscall.EISDIR):
-		return test.ErrIsDir
-	case errors.Is(err, syscall.ENOTDIR):
-		return test.ErrNotDir
-	case errors.Is(err, syscall.ENOTEMPTY):
-		return test.ErrNotEmpty
-	case errors.Is(err, syscall.ELOOP):
-		return test.ErrLoop
-	case errors.Is(err, syscall.EINVAL):
-		return test.ErrInvalid
-	case errors.Is(err, syscall.EBADF):
-		return test.ErrClosed
-	}
-	return err
+	return test.Translate(err, nil)
 }
 
 func (s *pcSurface) CreateFile(p string, perm uint32, exclusive bool) error {
@@ -84,10 +88,24 @@ func (s *pcSurface) CreateFile(p string, perm uint32, exclusive bool) error {
 	if err != nil {
 		return pcTranslate(err)
 	}
-	return pcTranslate(f.Close())
+	if err := pcTranslate(f.Close()); err != nil {
+		return err
+	}
+	// Apply the configured umask with an explicit chmod, but only when
+	// a mask is set, keeping the unmasked path byte-identical.
+	s.mu.Lock()
+	umask := s.umask
+	s.mu.Unlock()
+	if umask != 0 {
+		target := (perm & 0o7777) &^ (umask & 0o777)
+		if st, err := s.Stat(p); err == nil && st.Mode&0o7777 != target {
+			return s.Chmod(p, target)
+		}
+	}
+	return nil
 }
 
-func (s *pcSurface) Open(p string, mode test.OpenMode) (test.Handle, error) {
+func (s *pcSurface) Open(p string, mode test.OpenMode, disp test.CreateDisposition) (test.Handle, error) {
 	full, err := s.join(p)
 	if err != nil {
 		return nil, err
@@ -109,15 +127,27 @@ func (s *pcSurface) Open(p string, mode test.OpenMode) (test.Handle, error) {
 	case test.OpenReadOnly:
 		flags = os.O_RDONLY
 	case test.OpenWriteOnly:
-		flags = os.O_WRONLY | os.O_CREATE
+		flags = os.O_WRONLY
 	case test.OpenReadWrite:
-		flags = os.O_RDWR | os.O_CREATE
+		flags = os.O_RDWR
 	case test.OpenAppend:
-		flags = os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		flags = os.O_WRONLY | os.O_APPEND
 	case test.OpenTruncate:
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		flags = os.O_WRONLY | os.O_TRUNC
 	default:
 		return nil, test.ErrInvalid
+	}
+	// Creation intent travels in disp, like O_CREAT: write modes no
+	// longer imply creation. OpenReadOnly never creates (O_CREAT
+	// without write access is meaningless here); every other mode
+	// creates only under CreateIfMissing.
+	switch disp {
+	case test.CreateNever, test.CreateIfMissing:
+	default:
+		return nil, test.ErrInvalid
+	}
+	if mode != test.OpenReadOnly && disp == test.CreateIfMissing {
+		flags |= os.O_CREATE
 	}
 	f, err := os.OpenFile(full, flags, 0o644)
 	if err != nil {
@@ -258,7 +288,7 @@ func (s *pcSurface) Rename(oldPath, newPath string, noReplace bool) error {
 	if !noReplace {
 		return pcTranslate(os.Rename(oldFull, newFull))
 	}
-	// Atomic no-replace rename via renameat2 (Linux-only syscall; the
+	// Atomic noreplace rename via renameat2 (Linux-only syscall; the
 	// build-tagged pcRenameNoReplace helper reports ENOSYS elsewhere so
 	// darwin vet still compiles and the scenario fails loudly off-Linux).
 	if err := pcRenameNoReplace(oldFull, newFull); err != nil {
@@ -416,6 +446,10 @@ func (s *pcSurface) Revision(p string) (uint64, error) {
 }
 
 func (s *pcSurface) CompareAndWrite(p string, offset int64, data []byte, token uint64) error {
+	// Adapter-side serialization only (see casMu): the server still
+	// applies no atomic CAS.
+	s.casMu.Lock()
+	defer s.casMu.Unlock()
 	full, err := s.join(p)
 	if err != nil {
 		return err

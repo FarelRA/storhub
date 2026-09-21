@@ -19,7 +19,7 @@ func TestCloneRangeRechecksParentInTransaction(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	project := "project-clone-parent-recheck"
+	project := "projectcloneparentrecheck"
 
 	if err := hub.MkdirContext(ctx, project, "src"); err != nil {
 		t.Fatalf("mkdir src: %v", err)

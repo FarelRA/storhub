@@ -26,15 +26,15 @@ func TestUploadUsesCallerOwnershipForNewFiles(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	adminCtx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 0, GID: 0, Admin: true})
-	if err := hub.MkdirContext(adminCtx, "project-owner-upload", "docs"); err != nil {
+	if err := hub.MkdirContext(adminCtx, "projectownerupload", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
-	if err := hub.ChmodContext(adminCtx, "project-owner-upload", "docs", 0o777); err != nil {
+	if err := hub.ChmodContext(adminCtx, "projectownerupload", "docs", 0o777); err != nil {
 		t.Fatalf("chmod docs: %v", err)
 	}
 	ctx := shfs.WithIdentity(context.Background(), shfs.Identity{UID: 986, GID: 986, Groups: []uint32{986}})
 	input := writeTempFile(t, t.TempDir(), "owner.txt", []byte("owner"))
-	file, err := hub.UploadFileContext(ctx, "project-owner-upload", "docs/file.txt", input)
+	file, err := hub.UploadFileContext(ctx, "projectownerupload", "docs/file.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	hub := backend.newClient(t, singleChunkTestConfig())
 
 	input := writeTempFile(t, t.TempDir(), "single.txt", []byte("hello streaming world"))
-	meta, err := hub.UploadFileContext(context.Background(), "project-a", "single.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projecta", "single.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 		t.Fatalf("flush metadata: %v", err)
 	}
 
-	files, err := hub.ListFilesContext(context.Background(), "project-a")
+	files, err := hub.ListFilesContext(context.Background(), "projecta")
 	if err != nil {
 		t.Fatalf("list files: %v", err)
 	}
@@ -70,12 +70,12 @@ func TestUploadListDownloadSingleChunk(t *testing.T) {
 	}
 
 	output := filepath.Join(t.TempDir(), "downloaded.txt")
-	if err := hub.DownloadFileContext(context.Background(), "project-a", "single.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projecta", "single.txt", output); err != nil {
 		t.Fatalf("download file: %v", err)
 	}
 	assertFileContent(t, output, []byte("hello streaming world"))
-	backend.assertRepoStats(t, "project-a", 1, int64(len("hello streaming world")))
-	if repo := backend.repo("project-a"); repo == nil || !repo.private {
+	backend.assertRepoStats(t, "projecta", 1, int64(len("hello streaming world")))
+	if repo := backend.repo("projecta"); repo == nil || !repo.private {
 		t.Fatal("expected repositories to be private by default")
 	}
 }
@@ -112,10 +112,10 @@ func TestReadFileAtContextDownloadsChunksSequentially(t *testing.T) {
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("z"), 3*(1<<20)+12345)
 	input := writeTempFile(t, t.TempDir(), "video.bin", data)
-	if _, err := hub.UploadFileContext(ctx, "project-sequential-read", "video.bin", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectsequentialread", "video.bin", input); err != nil {
 		t.Fatalf("upload large file: %v", err)
 	}
-	got, err := hub.ReadFileAtContext(ctx, "project-sequential-read", "video.bin", 0, int64(len(data)))
+	got, err := hub.ReadFileAtContext(ctx, "projectsequentialread", "video.bin", 0, int64(len(data)))
 	if err != nil {
 		t.Fatalf("read file at: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestUploadMissingFile(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
-	_, err := hub.UploadFileContext(context.Background(), "project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
+	_, err := hub.UploadFileContext(context.Background(), "projectmissing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
 	if err == nil || !strings.Contains(err.Error(), "stat input file") {
 		t.Fatalf("expected stat error, got %v", err)
 	}
@@ -142,7 +142,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "empty-upload.txt", nil)
-	meta, err := hub.UploadFileContext(context.Background(), "project-empty-upload-file", "empty-upload.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectemptyuploadfile", "empty-upload.txt", input)
 	if err != nil {
 		t.Fatalf("upload empty file: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestUploadEmptyFileUsesMetadataOnly(t *testing.T) {
 		t.Fatalf("unexpected empty upload metadata: %+v", meta)
 	}
 	output := filepath.Join(t.TempDir(), "empty-upload.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-empty-upload-file", "empty-upload.txt", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectemptyuploadfile", "empty-upload.txt", output); err != nil {
 		t.Fatalf("download empty file: %v", err)
 	}
 	assertFileContent(t, output, []byte{})
@@ -160,9 +160,9 @@ func TestDownloadMissingFile(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, defaultTestConfig())
-	err := hub.DownloadFileContext(context.Background(), "project-missing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
+	err := hub.DownloadFileContext(context.Background(), "projectmissing", "missing.txt", filepath.Join(t.TempDir(), "missing.txt"))
 	if err == nil || !strings.Contains(err.Error(), shfs.ErrNotFound.Error()) {
-		t.Fatalf("expected project-not-found error, got %v", err)
+		t.Fatalf("expected projectnotfound error, got %v", err)
 	}
 }
 
@@ -171,7 +171,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	backend := newMockGitHub(t)
 	uploader := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "offsets.bin", []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
-	meta, err := uploader.UploadFileContext(context.Background(), "project-offsets", "offsets.bin", input)
+	meta, err := uploader.UploadFileContext(context.Background(), "projectoffsets", "offsets.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDownloadUsesPersistedChunkOffsets(t *testing.T) {
 	}
 	downloader := backend.newClient(t, singleChunkTestConfig())
 	output := filepath.Join(t.TempDir(), "offsets.out")
-	if err := downloader.DownloadFileContext(context.Background(), "project-offsets", "offsets.bin", output); err != nil {
+	if err := downloader.DownloadFileContext(context.Background(), "projectoffsets", "offsets.bin", output); err != nil {
 		t.Fatalf("download file with different chunk size config: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
@@ -194,17 +194,17 @@ func TestReadFileAtHandlesEOFAndPartialRanges(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "partial.txt", []byte("abcdefghij"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-read-partial", "partial.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectreadpartial", "partial.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	data, err := hub.ReadFileAtContext(context.Background(), "project-read-partial", "partial.txt", 7, 10)
+	data, err := hub.ReadFileAtContext(context.Background(), "projectreadpartial", "partial.txt", 7, 10)
 	if err != nil {
 		t.Fatalf("partial read: %v", err)
 	}
 	if string(data) != "hij" {
 		t.Fatalf("unexpected partial range: %q", data)
 	}
-	endData, err := hub.ReadFileAtContext(context.Background(), "project-read-partial", "partial.txt", 10, 1)
+	endData, err := hub.ReadFileAtContext(context.Background(), "projectreadpartial", "partial.txt", 10, 1)
 	if err != nil {
 		t.Fatalf("read at end should be empty success, got %v", err)
 	}
@@ -218,11 +218,11 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallRetryTestConfig())
 	input := writeTempFile(t, t.TempDir(), "retry-download.bin", []byte("download retry payload"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-download-retry", "retry-download.bin", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectdownloadretry", "retry-download.bin", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-download-retry")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectdownloadretry")
 	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -246,7 +246,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 		return true
 	})
 	output := filepath.Join(t.TempDir(), "retry-download.out")
-	if err := hub.DownloadFileContext(context.Background(), "project-download-retry", "retry-download.bin", output); err != nil {
+	if err := hub.DownloadFileContext(context.Background(), "projectdownloadretry", "retry-download.bin", output); err != nil {
 		t.Fatalf("download with retry: %v", err)
 	}
 	if failures.Load() != 1 {
@@ -278,7 +278,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	hub := backend.newClient(t, smallRetryTestConfig())
 	payload := bytes.Repeat([]byte("r"), int(testSmallChunkSize)) // exactly one chunk
 	input := writeTempFile(t, t.TempDir(), "upload-retry.txt", payload)
-	meta, err := hub.UploadFileContext(context.Background(), "project-upload-retry", "upload-retry.txt", input)
+	meta, err := hub.UploadFileContext(context.Background(), "projectuploadretry", "upload-retry.txt", input)
 	if err != nil {
 		t.Fatalf("transient upload failure must be retried: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestUploadChunkRetriesTransientFailure(t *testing.T) {
 	hub2 := persistent.newClient(t, smallRetryTestConfig())
 	payload2 := bytes.Repeat([]byte("d"), int(testSmallChunkSize))
 	input2 := writeTempFile(t, t.TempDir(), "upload-broken.txt", payload2)
-	if _, err := hub2.UploadFileContext(context.Background(), "project-upload-doomed", "upload-broken.txt", input2); err == nil {
+	if _, err := hub2.UploadFileContext(context.Background(), "projectuploaddoomed", "upload-broken.txt", input2); err == nil {
 		t.Fatal("persistent upload failure must surface")
 	}
 	// initial attempt + MaxRetries(2) retries
@@ -317,11 +317,11 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, Config{ChunkSize: 64, BufferSize: testSingleBufferSize, MaxRetries: 1, BaseRetryDelay: time.Millisecond, MaxRetryDelay: time.Millisecond, DisableGitBackend: true})
 	input := writeTempFile(t, t.TempDir(), "range-read.txt", []byte("abcdefghijklmnopqrstuvwxyz"))
-	fileMeta, err := hub.UploadFileContext(context.Background(), "project-range-read", "range-read.txt", input)
+	fileMeta, err := hub.UploadFileContext(context.Background(), "projectrangeread", "range-read.txt", input)
 	if err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "project-range-read")
+	repoMeta, _, _ := hub.loadRepoMetadata(context.Background(), "projectrangeread")
 	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
@@ -344,7 +344,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 		_ = rw.Flush()
 		return true
 	})
-	data, err := hub.ReadFileAtContext(context.Background(), "project-range-read", "range-read.txt", 2, 6)
+	data, err := hub.ReadFileAtContext(context.Background(), "projectrangeread", "range-read.txt", 2, 6)
 	if err != nil {
 		t.Fatalf("read file at with retry: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestUploadHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := hub.UploadFileContext(ctx, "project-upload-cancel", "upload-cancel.txt", input)
+		_, err := hub.UploadFileContext(ctx, "projectuploadcancel", "upload-cancel.txt", input)
 		errCh <- err
 	}()
 	<-uploadStarted
@@ -412,13 +412,13 @@ func TestDownloadHonorsContextCancellation(t *testing.T) {
 	})
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "cancel.txt", []byte("cancel payload"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-cancel", "cancel.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectcancel", "cancel.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	output := filepath.Join(t.TempDir(), "cancel.out")
 	errCh := make(chan error, 1)
-	go func() { errCh <- hub.DownloadFileContext(ctx, "project-cancel", "cancel.txt", output) }()
+	go func() { errCh <- hub.DownloadFileContext(ctx, "projectcancel", "cancel.txt", output) }()
 	<-assetStarted
 	cancel()
 	err := <-errCh

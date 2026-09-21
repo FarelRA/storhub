@@ -88,42 +88,42 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 	t.Parallel()
 	cases := []syncCase{
 		{
-			name: "put-replace", method: http.MethodPut,
+			name: "putreplace", method: http.MethodPut,
 			target: "/api/v1/projects/demo/content?path=a.txt", body: "x",
 			wantStatus: http.StatusCreated,
 		},
 		{
-			name: "patch-append", method: http.MethodPatch,
+			name: "patchappend", method: http.MethodPatch,
 			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/content?path=a.txt&op=append", body: "y",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "patch-write", method: http.MethodPatch,
+			name: "patchwrite", method: http.MethodPatch,
 			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/content?path=a.txt&op=write&offset=0", body: "y",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "patch-patch", method: http.MethodPatch,
+			name: "patchpatch", method: http.MethodPatch,
 			setup:  putFile("a.txt", "xy"),
 			target: "/api/v1/projects/demo/content?path=a.txt&op=patch&offset=0&delete_size=1", body: "z",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "patch-truncate", method: http.MethodPatch,
+			name: "patchtruncate", method: http.MethodPatch,
 			setup:      putFile("a.txt", "xy"),
 			target:     "/api/v1/projects/demo/content?path=a.txt&op=truncate&size=1",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "node-delete-file", method: http.MethodDelete,
+			name: "nodedeletefile", method: http.MethodDelete,
 			setup:      putFile("gone.txt", "x"),
 			target:     "/api/v1/projects/demo/nodes?path=gone.txt",
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name: "node-delete-dir", method: http.MethodDelete,
+			name: "nodedeletedir", method: http.MethodDelete,
 			setup: func(t *testing.T, handler http.Handler) {
 				t.Helper()
 				mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "emptyd"}, http.StatusCreated)
@@ -132,13 +132,13 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name: "xattr-put", method: http.MethodPut,
+			name: "xattrput", method: http.MethodPut,
 			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/xattrs/value?path=a.txt&name=k", body: "v",
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name: "xattr-delete", method: http.MethodDelete,
+			name: "xattrdelete", method: http.MethodDelete,
 			setup: func(t *testing.T, handler http.Handler) {
 				t.Helper()
 				putFile("a.txt", "x")(t, handler)
@@ -148,7 +148,7 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name: "create-file", method: http.MethodPost,
+			name: "createfile", method: http.MethodPost,
 			target: "/api/v1/projects/demo/ops/create", json: pathRequest{Path: "c.txt"},
 			wantStatus: http.StatusCreated,
 		},
@@ -214,7 +214,7 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "revert-path", method: http.MethodPost,
+			name: "revertpath", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/ops/revert", json: revertPathRequest{Path: "a.txt", CommitSHA: "deadbeef"},
 			wantStatus: http.StatusOK,
@@ -226,13 +226,13 @@ func TestRESTSyncCoversEveryMutation(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "purge-scoped", method: http.MethodPost,
+			name: "purgescoped", method: http.MethodPost,
 			setup:  putFile("a.txt", "x"),
 			target: "/api/v1/projects/demo/ops/prune", json: map[string]any{"scope": "objects", "dry_run": true},
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "delete-project", method: http.MethodDelete,
+			name: "deleteproject", method: http.MethodDelete,
 			setup: func(t *testing.T, handler http.Handler) {
 				t.Helper()
 				mustRequest(t, handler, http.MethodPut, "/api/v1/projects/gone/content?path=a.txt", strings.NewReader("x"), nil, http.StatusCreated)

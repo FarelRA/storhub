@@ -112,7 +112,7 @@ func TestOpsCopyRangePreconditionAndSync(t *testing.T) {
 		}
 		mustJSONRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/mkdir", pathRequest{Path: "docs"}, http.StatusCreated)
 		seedCloneFile(t, handler, "docs/src.txt", "hello")
-		stale := map[string]string{"If-Match": `"stale-token"`}
+		stale := map[string]string{"If-Match": `"staletoken"`}
 		resp := mustJSONRequestWithHeaders(t, handler, http.MethodPost, "/api/v1/projects/demo/ops/copy",
 			copyRequest{SrcPath: "docs/src.txt", DstPath: "docs/dst.txt", Length: int64Ptr(5)}, stale, http.StatusPreconditionFailed)
 		assertErrorCode(t, resp, "precondition_failed")

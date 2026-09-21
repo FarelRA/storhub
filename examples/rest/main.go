@@ -19,7 +19,7 @@ func main() {
 	if token == "" {
 		log.Fatal("GITHUB_TOKEN environment variable not set")
 	}
-	hub, err := storhub.NewStorHub(token)
+	hub, err := storhub.NewStorHubWithContext(context.Background(), token, storhub.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}

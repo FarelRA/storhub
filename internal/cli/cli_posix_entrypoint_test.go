@@ -8,14 +8,8 @@ import (
 
 func TestPosixConformCLI(t *testing.T) {
 	test.RequireConformance(t)
-	oldFactory := newHubFromFlagsFn
-	t.Cleanup(func() { newHubFromFlagsFn = oldFactory })
 	fake := newPCFakeHub()
-	newHubFromFlagsFn = func(_, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
-		return fake, nil
-	}
-
-	adapter := &cliPOSIXSurface{project: "pc"}
+	adapter := &cliPOSIXSurface{project: "pc", hub: fake}
 	results := test.Run(adapter, test.Filter(test.Table, test.SurfaceCLI))
 
 	t.Logf("POSIX conformance via CLI: %d scenarios", len(results))

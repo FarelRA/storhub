@@ -51,7 +51,7 @@ func posixBenchFixture(b *testing.B, benchPath string, inode uint64, size int64,
 				ChangedAt:  posixBenchNow,
 			}, posixBenchNow)
 			repo.RebuildIndexes()
-			return repo, "sha-bench", nil
+			return repo, "shabench", nil
 		},
 		readFileAt: func(_ context.Context, _ string, _ string, off, length int64) ([]byte, error) {
 			if off >= int64(len(payload)) {

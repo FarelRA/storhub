@@ -20,7 +20,7 @@ func TestNewAppliesDefaultsAndCreatesCacheDir(t *testing.T) {
 	t.Parallel()
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	fake := &stubHub{}
-	fsys, err := New(fake, "demo-project", Options{CacheDir: cacheDir})
+	fsys, err := New(fake, "demoproject", Options{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}
@@ -177,7 +177,7 @@ func newMountedStubFS(t *testing.T, cacheDir string, hub Hub) *Filesystem {
 	return fsys
 }
 
-// Owner contract for handle-* temps: displacing an open readonly handle
+// Owner contract for handle* temps: displacing an open readonly handle
 // (unlink) materializes a private snapshot that the handle itself removes
 // on Release.
 func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
@@ -189,7 +189,7 @@ func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
 		repo := meta.NewRepoMetadata("demo")
 		repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 6}, now)
 		repo.RebuildIndexes()
-		return repo, "sha-1", nil
+		return repo, "sha1", nil
 	}
 	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 		if target == "docs/file.txt" {
@@ -211,8 +211,8 @@ func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
 	if errno := docsNode.Unlink(context.Background(), "file.txt"); errno != 0 {
 		t.Fatalf("unlink: %v", errno)
 	}
-	if h.temp == nil || !strings.HasPrefix(filepath.Base(h.tempPath), "handle-") {
-		t.Fatalf("displaced handle must materialize a handle-* snapshot, got %q", h.tempPath)
+	if h.temp == nil || !strings.HasPrefix(filepath.Base(h.tempPath), "handle") {
+		t.Fatalf("displaced handle must materialize a handle* snapshot, got %q", h.tempPath)
 	}
 	buf := make([]byte, 6)
 	res, errno := h.Read(context.Background(), buf, 0)
@@ -229,7 +229,7 @@ func TestDisplacedReadHandleCleansUpSnapshotOnRelease(t *testing.T) {
 	assertCacheDirClean(t, cacheDir)
 }
 
-// Owner contract for inode-base-* temps: materializing a base snapshot for
+// Owner contract for inodebase* temps: materializing a base snapshot for
 // a displaced write handle is owned by the write state and removed when
 // the last reference releases.
 func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
@@ -241,7 +241,7 @@ func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
 		repo := meta.NewRepoMetadata("demo")
 		repo.UpsertFile("docs/file.txt", meta.FileMeta{Inode: 7, Size: 6}, now)
 		repo.RebuildIndexes()
-		return repo, "sha-1", nil
+		return repo, "sha1", nil
 	}
 	hub.statPath = func(_ context.Context, _ string, target string) (*shfs.EntryInfo, error) {
 		if target == "docs/file.txt" {
@@ -263,8 +263,8 @@ func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
 	if errno := docsNode.Unlink(context.Background(), "file.txt"); errno != 0 {
 		t.Fatalf("unlink: %v", errno)
 	}
-	if h.writeState.baseTemp == nil || !strings.HasPrefix(filepath.Base(h.writeState.baseTempPath), "inode-base-") {
-		t.Fatalf("unlink must materialize an inode-base-* snapshot, got %q", h.writeState.baseTempPath)
+	if h.writeState.baseTemp == nil || !strings.HasPrefix(filepath.Base(h.writeState.baseTempPath), "inodebase") {
+		t.Fatalf("unlink must materialize an inodebase* snapshot, got %q", h.writeState.baseTempPath)
 	}
 	if errno := h.Release(context.Background()); errno != 0 {
 		t.Fatalf("release: %v", errno)
@@ -272,7 +272,7 @@ func TestUnlinkMaterializedBaseSnapshotIsCleanedByOwner(t *testing.T) {
 	assertCacheDirClean(t, cacheDir)
 }
 
-// Owner contract for inode-commit-* temps: a replace commit whose working
+// Owner contract for inodecommit* temps: a replace commit whose working
 // temp does not cover the whole file stages a commit snapshot, uploads it,
 // and removes it on every exit path of the commit frame.
 func TestPartialReplaceCommitCleansCommitSnapshot(t *testing.T) {
@@ -315,7 +315,7 @@ func TestPartialReplaceCommitCleansCommitSnapshot(t *testing.T) {
 	assertCacheDirClean(t, cacheDir)
 }
 
-// Owner contract for inode-ranges-* temps: a chunk-rewrite commit stages a
+// Owner contract for inoderanges* temps: a chunk-rewrite commit stages a
 // range snapshot, hands it to the backend, and removes it even though the
 // commit frame released state.mu in between.
 func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
@@ -327,7 +327,7 @@ func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
 		repo := meta.NewRepoMetadata("demo")
 		repo.UpsertFile("ranges.bin", meta.FileMeta{Inode: 31, Size: 32}, 62)
 		repo.RebuildIndexes()
-		return repo, "sha-1", nil
+		return repo, "sha1", nil
 	}
 	hub.rewriteFn = func(_ context.Context, _, _, inputPath string) (*meta.FileMeta, error) {
 		mu.Lock()
@@ -369,8 +369,8 @@ func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.HasPrefix(filepath.Base(rewrittenInput), "inode-ranges-") {
-		t.Fatalf("backend must receive an inode-ranges-* snapshot, got %q", rewrittenInput)
+	if !strings.HasPrefix(filepath.Base(rewrittenInput), "inoderanges") {
+		t.Fatalf("backend must receive an inoderanges* snapshot, got %q", rewrittenInput)
 	}
 	state.closeTemp()
 	assertCacheDirClean(t, cacheDir)
@@ -449,20 +449,20 @@ func TestLastHandleReleaseDropsInodeLocks(t *testing.T) {
 }
 
 // TestNewSweepsStaleOverlayTemps pins the mount-start sweep: every flat
-// handle-* / inode-* temp family left by a crashed previous mount is
+// handle* / inode* temp family left by a crashed previous mount is
 // garbage (construction owns all future temps), while recovery/ holds
 // quarantined data and must survive untouched.
 func TestNewSweepsStaleOverlayTemps(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
 	stale := []string{
-		filepath.Join(cacheDir, "handle-1234"),
-		filepath.Join(cacheDir, "inode-1234"),
-		filepath.Join(cacheDir, "inode-base-99"),
-		filepath.Join(cacheDir, "inode-commit-7"),
-		filepath.Join(cacheDir, "inode-ranges-11"),
+		filepath.Join(cacheDir, "handle1234"),
+		filepath.Join(cacheDir, "inode1234"),
+		filepath.Join(cacheDir, "inodebase99"),
+		filepath.Join(cacheDir, "inodecommit7"),
+		filepath.Join(cacheDir, "inoderanges11"),
 	}
-	recoveryFile := filepath.Join(cacheDir, "recovery", "keep-me")
+	recoveryFile := filepath.Join(cacheDir, "recovery", "keepme")
 	for _, p := range append(stale, recoveryFile) {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)

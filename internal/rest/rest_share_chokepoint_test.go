@@ -26,7 +26,7 @@ type panickingClient struct {
 // scope likewise trips the panicking underlying.
 func TestRestrictedClientDeniesEverything(t *testing.T) {
 	t.Parallel()
-	client := newRestrictedClient(panickingClient{}, "unshared-project", "shared")
+	client := newRestrictedClient(panickingClient{}, "unsharedproject", "shared")
 	if client.allowedPath == "" {
 		t.Fatal("test expects a non-root allowed path so zero args cannot match")
 	}
@@ -74,7 +74,7 @@ func TestShareCreateLocationHeader(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -106,7 +106,7 @@ func TestRevisionPreconditionEndToEnd(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 	auth := map[string]string{"Authorization": "Bearer " + login.Token}
@@ -120,7 +120,7 @@ func TestRevisionPreconditionEndToEnd(t *testing.T) {
 
 	// Advance the remote behind the client's back; the old revision token
 	// is now stale.
-	client.SetRevision("rev-advanced")
+	client.SetRevision("revadvanced")
 
 	mustRequest(t, handler, http.MethodDelete,
 		"/api/v1/projects/demo/nodes?path=shared/readme.txt",
@@ -129,7 +129,7 @@ func TestRevisionPreconditionEndToEnd(t *testing.T) {
 	// A CURRENT revision token enforces CAS at the backend and succeeds.
 	fresh := mustRequest(t, handler, http.MethodGet, "/api/v1/projects/demo/nodes?path=shared", nil, auth, http.StatusOK)
 	currentRev := fresh.Header.Get("X-StorHub-Revision")
-	if currentRev != "rev-advanced" {
+	if currentRev != "revadvanced" {
 		t.Fatalf("stale revision header: %q", currentRev)
 	}
 	mustRequest(t, handler, http.MethodDelete,
@@ -171,7 +171,7 @@ func TestRevisionCASOnPatchFamily(t *testing.T) {
 	seedProjectForAuth(t, client)
 	handler := newAuthedTestHandler(t, client)
 
-	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "root-pass"}, http.StatusOK)
+	loginResp := mustJSONRequest(t, handler, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "root", Password: "rootpass"}, http.StatusOK)
 	var login restLoginResponse
 	decodeJSONBody(t, loginResp, &login)
 
@@ -194,9 +194,9 @@ func TestRevisionCASOnPatchFamily(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+"/stale", func(t *testing.T) {
-			client.SetRevision("rev-stale-marker")
+			client.SetRevision("revstalemarker")
 			mustRequest(t, handler, tc.method, tc.target, strings.NewReader(tc.body),
-				map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": quote("rev-older")}, http.StatusPreconditionFailed)
+				map[string]string{"Authorization": "Bearer " + login.Token, "If-Match": quote("revolder")}, http.StatusPreconditionFailed)
 		})
 		t.Run(tc.name+"/current", func(t *testing.T) {
 			rev := currentRev()

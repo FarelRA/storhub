@@ -16,7 +16,7 @@ func TestPhase5JournalRewriteKeepsConcurrentAppends(t *testing.T) {
 	cfg := smallTransferTestConfig()
 	cfg.JournalDir = t.TempDir()
 	hub := backend.newClient(t, cfg)
-	project := "project-phase5-journal"
+	project := "projectphase5journal"
 	survivors := []Op{
 		{Seq: 1, Type: OpPutFile, Paths: []string{"a.txt"}, Cause: "upload", Timestamp: 100},
 	}
@@ -58,7 +58,7 @@ func TestPhase5HydrateSetsBaseTree(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-phase5-basetree"
+	proj := "projectphase5basetree"
 	seed := writeTempFile(t, t.TempDir(), "seed.bin", []byte("hi"))
 	if _, err := hub.UploadFileContext(ctx, proj, "a.txt", seed); err != nil {
 		t.Fatalf("upload: %v", err)
@@ -82,7 +82,7 @@ func TestPhase5SlowCommitDoesNotStallOtherSessions(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	proj := "project-phase5-sessions"
+	proj := "projectphase5sessions"
 	setupSessionFile(ctx, t, hub, proj, "data.txt", []byte("hello"))
 
 	idA := mustOpenSession(ctx, t, hub, proj, "data.txt", SessionReadWrite)

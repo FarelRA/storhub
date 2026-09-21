@@ -228,7 +228,7 @@ func (w *inodeWriteState) ensureTempLocked() error {
 	if w.temp != nil {
 		return nil
 	}
-	temp, err := w.fs.newOverlayTemp("inode-*")
+	temp, err := w.fs.newOverlayTemp("inode*")
 	if err != nil {
 		return err
 	}

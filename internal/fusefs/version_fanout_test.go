@@ -191,7 +191,7 @@ func TestVersionFanoutMountFreshness(t *testing.T) {
 		inner.mu.Unlock()
 		t.Fatal("seeded file missing from backend")
 	}
-	f.data = append([]byte(nil), []byte("v2-longer")...)
+	f.data = append([]byte(nil), []byte("v2longer")...)
 	inner.touchLocked(f)
 	inner.mu.Unlock()
 	hub.bumpVersion()
@@ -221,7 +221,7 @@ func TestVersionFanoutMountFreshness(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		fi, err := os.Stat(full)
-		if err == nil && fi.Size() == int64(len("v2-longer")) {
+		if err == nil && fi.Size() == int64(len("v2longer")) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -232,7 +232,7 @@ func TestVersionFanoutMountFreshness(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		got, err := os.ReadFile(full)
-		if err == nil && string(got) == "v2-longer" {
+		if err == nil && string(got) == "v2longer" {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -522,7 +522,7 @@ func TestPushFanoutMountFreshness(t *testing.T) {
 		inner.mu.Unlock()
 		t.Fatal("seeded file missing from backend")
 	}
-	f.data = append([]byte(nil), []byte("v2-longer")...)
+	f.data = append([]byte(nil), []byte("v2longer")...)
 	inner.touchLocked(f)
 	inner.mu.Unlock()
 	start := time.Now()
@@ -537,7 +537,7 @@ func TestPushFanoutMountFreshness(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		fi, err := os.Stat(full)
-		if err == nil && fi.Size() == int64(len("v2-longer")) {
+		if err == nil && fi.Size() == int64(len("v2longer")) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -548,7 +548,7 @@ func TestPushFanoutMountFreshness(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		got, err := os.ReadFile(full)
-		if err == nil && string(got) == "v2-longer" {
+		if err == nil && string(got) == "v2longer" {
 			return
 		}
 		if time.Now().After(deadline) {

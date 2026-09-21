@@ -174,7 +174,7 @@ func expectedChunkCount(size, chunkSize int64) int {
 
 func newLiveHub(t *testing.T, token string, cfg Config) *StorHub {
 	t.Helper()
-	hub, err := NewStorHubWithConfig(token, cfg)
+	hub, err := NewStorHubWithContext(context.Background(), token, cfg)
 	if err != nil {
 		t.Fatalf("new storhub client: %v", err)
 	}

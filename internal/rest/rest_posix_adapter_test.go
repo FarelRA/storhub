@@ -23,6 +23,18 @@ type restConformAdapter struct {
 	project string
 	mu      sync.Mutex
 	etagBy  map[uint64]string
+	// umask masks CreateFile modes (see test.UmaskSurface; zero
+	// disables masking). Guarded by mu alongside etagBy.
+	umask uint32
+}
+
+var _ test.UmaskSurface = (*restConformAdapter)(nil)
+
+// SetUmask implements test.UmaskSurface.SetUmask.
+func (a *restConformAdapter) SetUmask(mask uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.umask = mask & 0o777
 }
 
 type restConformHandle struct {
@@ -210,35 +222,20 @@ func mapPCStatus(status int, data []byte, what string) error {
 	if msg != "" {
 		detail = msg
 	}
-	lower := strings.ToLower(detail + " " + code)
-	switch status {
-	case http.StatusNotFound:
-		return fmt.Errorf("%s: %w: %s", what, test.ErrNotFound, detail)
-	case http.StatusGone:
-		return fmt.Errorf("%s: %w: %s", what, test.ErrStale, detail)
-	case http.StatusConflict:
-		switch {
-		case strings.Contains(lower, "not empty"):
-			return fmt.Errorf("%s: %w: %s", what, test.ErrNotEmpty, detail)
-		case strings.Contains(lower, "is a directory"):
-			return fmt.Errorf("%s: %w: %s", what, test.ErrIsDir, detail)
-		case strings.Contains(lower, "not a directory"):
-			return fmt.Errorf("%s: %w: %s", what, test.ErrNotDir, detail)
-		default:
-			return fmt.Errorf("%s: %w: %s", what, test.ErrExists, detail)
-		}
-	case http.StatusBadRequest:
-		return fmt.Errorf("%s: %w: %s", what, test.ErrInvalid, detail)
-	case http.StatusRequestedRangeNotSatisfiable:
-		return fmt.Errorf("%s: %w: %s", what, test.ErrUnsatisfiableRange, detail)
-	case http.StatusPreconditionFailed:
+	// The status-to-sentinel knowledge lives in test.SentinelForStatus;
+	// this delegate only adds the operation context. Precondition
+	// failures stay local (they carry no test sentinel), as does the
+	// loud unknown-status report with the code attached.
+	if status == http.StatusPreconditionFailed {
 		return fmt.Errorf("%s: precondition failed: %s", what, detail)
-	default:
-		if status >= 200 && status < 300 {
-			return nil
-		}
-		return fmt.Errorf("%s: %w: status %d: %s", what, test.ErrInvalid, status, detail)
 	}
+	if status >= 200 && status < 300 {
+		return nil
+	}
+	if sentinel := test.SentinelForStatus(status, detail+" "+code); sentinel != nil {
+		return fmt.Errorf("%s: %w: %s", what, sentinel, detail)
+	}
+	return fmt.Errorf("%s: %w: status %d: %s", what, test.ErrInvalid, status, detail)
 }
 
 func (a *restConformAdapter) statEntry(pcPath string) (*EntryInfo, string, error) {
@@ -291,12 +288,11 @@ func (a *restConformAdapter) resolve(pcPath string) (string, *EntryInfo, string,
 }
 
 func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool) error {
-	_ = perm
 	rp := trimPCPath(path)
 	target := pcBase(a.project) + "/ops/create"
 	status, _, data := a.doJSON(http.MethodPost, target, pathRequest{Path: rp}, nil)
 	if status == http.StatusCreated || status == http.StatusOK {
-		return nil
+		return a.applyCreateMask(path, perm)
 	}
 	if status == http.StatusConflict {
 		// Idempotence emulation lives HERE in the harness, not in the
@@ -316,13 +312,51 @@ func (a *restConformAdapter) CreateFile(path string, perm uint32, exclusive bool
 	return mapPCStatus(status, data, "create "+path)
 }
 
-func (a *restConformAdapter) Open(path string, mode test.OpenMode) (test.Handle, error) {
+// applyCreateMask enforces the configured umask after a create: the
+// product create path carries no mode, so the fake always records
+// 0o644, and the adapter chmods to the masked mode when (and only
+// when) a mask is configured, leaving the unmasked path byte-identical.
+func (a *restConformAdapter) applyCreateMask(path string, perm uint32) error {
+	a.mu.Lock()
+	umask := a.umask
+	a.mu.Unlock()
+	if umask == 0 {
+		return nil
+	}
+	target := (perm & 0o7777) &^ (umask & 0o777)
+	if target == 0o644 {
+		return nil
+	}
+	entry, _, err := a.statEntry(path)
+	if err != nil {
+		return err
+	}
+	if entry.Mode&0o7777 == target {
+		return nil
+	}
+	return a.Chmod(path, target)
+}
+
+func (a *restConformAdapter) Open(path string, mode test.OpenMode, disp test.CreateDisposition) (test.Handle, error) {
+	switch mode {
+	case test.OpenReadOnly, test.OpenWriteOnly, test.OpenReadWrite, test.OpenAppend, test.OpenTruncate:
+	default:
+		return nil, fmt.Errorf("open %s: %w: unknown mode", path, test.ErrInvalid)
+	}
+	switch disp {
+	case test.CreateNever, test.CreateIfMissing:
+	default:
+		return nil, fmt.Errorf("open %s: %w: unknown create disposition", path, test.ErrInvalid)
+	}
 	resolved, entry, _, statErr := a.resolve(path)
 	if statErr != nil {
 		if !errors.Is(statErr, test.ErrNotFound) {
 			return nil, statErr
 		}
-		if mode == test.OpenReadOnly {
+		// Creation intent travels in disp, like O_CREAT: CreateNever
+		// reports the missing path, while CreateIfMissing creates it
+		// before opening. OpenReadOnly never creates.
+		if disp == test.CreateNever || mode == test.OpenReadOnly {
 			return nil, fmt.Errorf("open %s: %w", path, test.ErrNotFound)
 		}
 		if err := a.CreateFile(path, 0o644, false); err != nil {
@@ -522,7 +556,7 @@ func (a *restConformAdapter) Append(path string, data []byte) error {
 }
 
 func (a *restConformAdapter) Sync(path string) error {
-	// No standalone flush endpoint exists; a dry-run prune with ?sync=1
+	// No standalone flush endpoint exists; a dryrun prune with ?sync=1
 	// drains the project journal without mutating anything, which is
 	// exactly the durability the scenario pins.
 	target := pcBase(a.project) + "/ops/prune?sync=1"

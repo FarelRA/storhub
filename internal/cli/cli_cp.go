@@ -21,7 +21,7 @@ import (
 // error; nothing is streamed, so always proves the clone path.
 // auto (default): try CloneRange, fall back to a windowed
 // download-plus-upload streaming copy when the clone fails. With
-// --expected-revision set there is no fallback: the streaming path cannot
+// --expectedrevision set there is no fallback: the streaming path cannot
 // honor the compare-and-swap, so a failed clone fails the command instead
 // of applying without its guard.
 // never: streaming copy only (the historical behavior, kept for testing
@@ -127,7 +127,7 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		// The streaming path cannot honor compare-and-swap (plain
 		// WriteFileAt with no revision plumbing): accepting the flag
 		// would silently drop the guard, so fail loud as a usage error.
-		return &usageError{fmt.Errorf("--reflink=never cannot be combined with --expected-revision: streaming copy cannot enforce compare-and-swap; use --reflink=auto or --reflink=always")}
+		return &usageError{fmt.Errorf("--reflink=never cannot be combined with --expectedrevision: streaming copy cannot enforce compare-and-swap; use --reflink=auto or --reflink=always")}
 	}
 	switch mode {
 	case "always":

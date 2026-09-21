@@ -23,14 +23,14 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 
-	if err := hub.MkdirContext(ctx, "project-fuse", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectfuse", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
 	input := writeTempFile(t, t.TempDir(), "fuse.txt", []byte("hello world"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse", "docs/file.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfuse", "docs/file.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfuse", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("lookup docs failed: %v", errno)
 	}
-	docsEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs")
+	docsEntry, err := hub.StatPathContext(ctx, "projectfuse", "docs")
 	if err != nil {
 		t.Fatalf("stat docs: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("lookup file failed: %v", errno)
 	}
-	fileEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs/file.txt")
+	fileEntry, err := hub.StatPathContext(ctx, "projectfuse", "docs/file.txt")
 	if err != nil {
 		t.Fatalf("stat file: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	// overlay. The remote file is therefore already updated here; Fsync
 	// below is an idempotent second commit.
 	postFlush := filepath.Join(t.TempDir(), "fuse-postflush.out")
-	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", postFlush); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfuse", "docs/file.txt", postFlush); err != nil {
 		t.Fatalf("download after flush: %v", err)
 	}
 	assertFileContent(t, postFlush, []byte("hello FUSEd"))
@@ -107,7 +107,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 		t.Fatalf("fsync failed: %v", errno)
 	}
 	output := filepath.Join(t.TempDir(), "fuse.out")
-	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfuse", "docs/file.txt", output); err != nil {
 		t.Fatalf("download after fuse write: %v", err)
 	}
 	assertFileContent(t, output, []byte("hello FUSEd"))
@@ -173,7 +173,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("lookup symlink failed: %v", errno)
 	}
-	linkEntry, err := hub.StatPathContext(ctx, "project-fuse", "docs/link.txt")
+	linkEntry, err := hub.StatPathContext(ctx, "projectfuse", "docs/link.txt")
 	if err != nil {
 		t.Fatalf("stat link: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestFUSEAdapterCallbacksAndHandles(t *testing.T) {
 		t.Fatalf("rename with replace failed: %v", errno)
 	}
 	replaced := filepath.Join(t.TempDir(), "replaced.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse", "docs/file.txt", replaced); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfuse", "docs/file.txt", replaced); err != nil {
 		t.Fatalf("download replaced file: %v", err)
 	}
 	assertFileContent(t, replaced, []byte("created"))
@@ -229,10 +229,10 @@ func TestFUSEOptionalMountLifecycle(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	input := writeTempFile(t, t.TempDir(), "mount.txt", []byte("mounted"))
-	if _, err := hub.UploadFileContext(context.Background(), "project-fuse-mount", "mount.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(context.Background(), "projectfusemount", "mount.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-mount", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusemount", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestFUSECloseIdempotent(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
-	fsys, err := hub.NewFUSE("project-fuse-close", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfuseclose", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
@@ -344,22 +344,22 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-fuse-semantics", "dir"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectfusesemantics", "dir"); err != nil {
 		t.Fatalf("mkdir dir: %v", err)
 	}
-	if err := hub.MkdirContext(ctx, "project-fuse-semantics", "dir/sub"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectfusesemantics", "dir/sub"); err != nil {
 		t.Fatalf("mkdir dir/sub: %v", err)
 	}
 	input := writeTempFile(t, t.TempDir(), "semantics.txt", []byte("payload"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-semantics", "dir/sub/file.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusesemantics", "dir/sub/file.txt", input); err != nil {
 		t.Fatalf("upload file: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-semantics", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusesemantics", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	dirEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir")
+	dirEntry, err := hub.StatPathContext(ctx, "projectfusesemantics", "dir")
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("lookup sub: %v", errno)
 	}
-	fileEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir/sub/file.txt")
+	fileEntry, err := hub.StatPathContext(ctx, "projectfusesemantics", "dir/sub/file.txt")
 	if err != nil {
 		t.Fatalf("stat file: %v", err)
 	}
@@ -389,17 +389,17 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 		t.Fatalf("fsync after rename: %v", errno)
 	}
 	output := filepath.Join(t.TempDir(), "renamed-semantic.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusesemantics", "renamed/sub/file.txt", output); err != nil {
 		t.Fatalf("download renamed path: %v", err)
 	}
 	assertFileContent(t, output, []byte("Rayload"))
-	if _, err := hub.StatPathContext(ctx, "project-fuse-semantics", "dir/sub/file.txt"); err == nil {
+	if _, err := hub.StatPathContext(ctx, "projectfusesemantics", "dir/sub/file.txt"); err == nil {
 		t.Fatal("expected old path to be gone after rename")
 	}
 	if errno := h.Release(ctx); errno != 0 {
 		t.Fatalf("release renamed handle: %v", errno)
 	}
-	unlinkEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt")
+	unlinkEntry, err := hub.StatPathContext(ctx, "projectfusesemantics", "renamed/sub/file.txt")
 	if err != nil {
 		t.Fatalf("stat unlink file: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 		t.Fatalf("open unlink file: %v", errno)
 	}
 	h = hAny.(*fusefs.TestHandle)
-	parentEntry, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub")
+	parentEntry, err := hub.StatPathContext(ctx, "projectfusesemantics", "renamed/sub")
 	if err != nil {
 		t.Fatalf("stat parent dir: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestFUSEHandleRenameAndUnlinkSemantics(t *testing.T) {
 	if errno := h.Release(ctx); errno != 0 {
 		t.Fatalf("release unlinked handle: %v", errno)
 	}
-	if _, err := hub.StatPathContext(ctx, "project-fuse-semantics", "renamed/sub/file.txt"); err == nil {
+	if _, err := hub.StatPathContext(ctx, "projectfusesemantics", "renamed/sub/file.txt"); err == nil {
 		t.Fatal("expected unlinked file to remain absent after release")
 	}
 }
@@ -448,23 +448,23 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-fuse-readonly-loss", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectfusereadonlyloss", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
 	oldPath := writeTempFile(t, t.TempDir(), "old.txt", []byte("old-data"))
 	newPath := writeTempFile(t, t.TempDir(), "new.txt", []byte("new-data"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", oldPath); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusereadonlyloss", "docs/victim.txt", oldPath); err != nil {
 		t.Fatalf("upload victim: %v", err)
 	}
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/replacement.txt", newPath); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusereadonlyloss", "docs/replacement.txt", newPath); err != nil {
 		t.Fatalf("upload replacement: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-readonly-loss", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusereadonlyloss", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	victimEntry, err := hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt")
+	victimEntry, err := hub.StatPathContext(ctx, "projectfusereadonlyloss", "docs/victim.txt")
 	if err != nil {
 		t.Fatalf("stat victim: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 		t.Fatalf("open readonly victim: %v", errno)
 	}
 	ro := roAny.(*fusefs.TestHandle)
-	docsEntry, err := hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs")
+	docsEntry, err := hub.StatPathContext(ctx, "projectfusereadonlyloss", "docs")
 	if err != nil {
 		t.Fatalf("stat docs: %v", err)
 	}
@@ -498,10 +498,10 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 		t.Fatalf("release readonly unlinked handle: %v", errno)
 	}
 
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", oldPath); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusereadonlyloss", "docs/victim.txt", oldPath); err != nil {
 		t.Fatalf("re-upload victim: %v", err)
 	}
-	victimEntry, err = hub.StatPathContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt")
+	victimEntry, err = hub.StatPathContext(ctx, "projectfusereadonlyloss", "docs/victim.txt")
 	if err != nil {
 		t.Fatalf("restat victim: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestFUSEReadOnlyHandleSurvivesPathLoss(t *testing.T) {
 		t.Fatalf("release readonly replaced handle: %v", errno)
 	}
 	output := filepath.Join(t.TempDir(), "replaced-readonly.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-readonly-loss", "docs/victim.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusereadonlyloss", "docs/victim.txt", output); err != nil {
 		t.Fatalf("download replaced victim: %v", err)
 	}
 	assertFileContent(t, output, []byte("new-data"))
@@ -545,15 +545,15 @@ func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "shared.txt", []byte("abcdefghij"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-shared-writes", "shared.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusesharedwrites", "shared.txt", input); err != nil {
 		t.Fatalf("upload shared file: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-shared-writes", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusesharedwrites", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-shared-writes", "shared.txt")
+	entry, err := hub.StatPathContext(ctx, "projectfusesharedwrites", "shared.txt")
 	if err != nil {
 		t.Fatalf("stat shared file: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestFUSEConcurrentWritableHandlesShareState(t *testing.T) {
 		t.Fatalf("fsync handle1: %v", errno)
 	}
 	output := filepath.Join(t.TempDir(), "shared-writes.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-shared-writes", "shared.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusesharedwrites", "shared.txt", output); err != nil {
 		t.Fatalf("download shared file: %v", err)
 	}
 	assertFileContent(t, output, []byte("HELLOWORLD"))
@@ -607,16 +607,16 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "large.txt", []byte("abcdefghijklmnopqrstuvwx"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-partial-writeback", "large.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusepartialwriteback", "large.txt", input); err != nil {
 		t.Fatalf("upload large file: %v", err)
 	}
 	baselineUploads := uploadCalls.Load()
-	fsys, err := hub.NewFUSE("project-fuse-partial-writeback", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusepartialwriteback", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-partial-writeback", "large.txt")
+	entry, err := hub.StatPathContext(ctx, "projectfusepartialwriteback", "large.txt")
 	if err != nil {
 		t.Fatalf("stat large file: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestFUSEPartialWritebackAvoidsFullMaterializeAndReupload(t *testing.T) {
 		t.Fatalf("expected one uploaded patch chunk, got %d", delta)
 	}
 	output := filepath.Join(t.TempDir(), "partial-writeback.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-partial-writeback", "large.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusepartialwriteback", "large.txt", output); err != nil {
 		t.Fatalf("download partially updated file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdefghijZlmnopqrstuvwx"))
@@ -665,16 +665,16 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "append.txt", []byte("abcdefgh"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-append-writeback", "append.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfuseappendwriteback", "append.txt", input); err != nil {
 		t.Fatalf("upload append file: %v", err)
 	}
 	baselineUploads := uploadCalls.Load()
-	fsys, err := hub.NewFUSE("project-fuse-append-writeback", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfuseappendwriteback", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-append-writeback", "append.txt")
+	entry, err := hub.StatPathContext(ctx, "projectfuseappendwriteback", "append.txt")
 	if err != nil {
 		t.Fatalf("stat append file: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestFUSEAppendWritebackUsesPatchPath(t *testing.T) {
 		t.Fatalf("expected one uploaded append chunk, got %d", delta)
 	}
 	output := filepath.Join(t.TempDir(), "append-writeback.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-append-writeback", "append.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfuseappendwriteback", "append.txt", output); err != nil {
 		t.Fatalf("download appended file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcdefghXYZ"))
@@ -725,16 +725,16 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "truncate.txt", []byte("abcdefghijklmnop"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-truncate-writeback", "truncate.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusetruncatewriteback", "truncate.txt", input); err != nil {
 		t.Fatalf("upload truncate file: %v", err)
 	}
 	baselineUploads := uploadCalls.Load()
-	fsys, err := hub.NewFUSE("project-fuse-truncate-writeback", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusetruncatewriteback", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-truncate-writeback", "truncate.txt")
+	entry, err := hub.StatPathContext(ctx, "projectfusetruncatewriteback", "truncate.txt")
 	if err != nil {
 		t.Fatalf("stat truncate file: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestFUSETruncateWritebackAvoidsUploads(t *testing.T) {
 		t.Fatalf("expected truncate to avoid uploads, got %d", delta)
 	}
 	output := filepath.Join(t.TempDir(), "truncate-writeback.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-truncate-writeback", "truncate.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusetruncatewriteback", "truncate.txt", output); err != nil {
 		t.Fatalf("download truncated file: %v", err)
 	}
 	assertFileContent(t, output, []byte("abcde"))
@@ -934,7 +934,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	})
 	ctx := context.Background()
 	input := writeTempFile(t, t.TempDir(), "fragmented.txt", []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", input); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfusefragmentedwriteback", "fragmented.txt", input); err != nil {
 		t.Fatalf("upload fragmented file: %v", err)
 	}
 	if err := hub.FlushMetadata(context.Background()); err != nil {
@@ -942,12 +942,12 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 	}
 	baselineUploads := uploadCalls.Load()
 	baselineMetadataWrites := metadataWrites.Load()
-	fsys, err := hub.NewFUSE("project-fuse-fragmented-writeback", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfusefragmentedwriteback", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	entry, err := hub.StatPathContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt")
+	entry, err := hub.StatPathContext(ctx, "projectfusefragmentedwriteback", "fragmented.txt")
 	if err != nil {
 		t.Fatalf("stat fragmented file: %v", err)
 	}
@@ -978,7 +978,7 @@ func TestFUSEFragmentedWritebackUploadsTouchedChunks(t *testing.T) {
 		t.Fatalf("expected bounded base reads during fragmented write commit, got %d", got)
 	}
 	output := filepath.Join(t.TempDir(), "fragmented-writeback.txt")
-	if err := hub.DownloadFileContext(ctx, "project-fuse-fragmented-writeback", "fragmented.txt", output); err != nil {
+	if err := hub.DownloadFileContext(ctx, "projectfusefragmentedwriteback", "fragmented.txt", output); err != nil {
 		t.Fatalf("download fragmented file: %v", err)
 	}
 	data, err := os.ReadFile(output)
@@ -1000,23 +1000,23 @@ func TestFUSEFlagsAndLocks(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	ctx := context.Background()
-	if err := hub.MkdirContext(ctx, "project-fuse-flags", "docs"); err != nil {
+	if err := hub.MkdirContext(ctx, "projectfuseflags", "docs"); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
 	first := writeTempFile(t, t.TempDir(), "first.txt", []byte("first"))
 	second := writeTempFile(t, t.TempDir(), "second.txt", []byte("second"))
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-flags", "docs/a.txt", first); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfuseflags", "docs/a.txt", first); err != nil {
 		t.Fatalf("upload a: %v", err)
 	}
-	if _, err := hub.UploadFileContext(ctx, "project-fuse-flags", "docs/b.txt", second); err != nil {
+	if _, err := hub.UploadFileContext(ctx, "projectfuseflags", "docs/b.txt", second); err != nil {
 		t.Fatalf("upload b: %v", err)
 	}
-	fsys, err := hub.NewFUSE("project-fuse-flags", fusefs.DefaultOptions())
+	fsys, err := hub.NewFUSE("projectfuseflags", fusefs.DefaultOptions())
 	if err != nil {
 		t.Fatalf("new fuse fs: %v", err)
 	}
 	defer func() { _ = fsys.Close() }()
-	docsEntry, err := hub.StatPathContext(ctx, "project-fuse-flags", "docs")
+	docsEntry, err := hub.StatPathContext(ctx, "projectfuseflags", "docs")
 	if err != nil {
 		t.Fatalf("stat docs: %v", err)
 	}
@@ -1027,7 +1027,7 @@ func TestFUSEFlagsAndLocks(t *testing.T) {
 	if errno := docsNode.Rename(ctx, "a.txt", docsNode, "b.txt", 0x2); errno != syscall.EINVAL {
 		t.Fatalf("expected rename exchange to fail with EINVAL, got %v", errno)
 	}
-	aEntry, err := hub.StatPathContext(ctx, "project-fuse-flags", "docs/a.txt")
+	aEntry, err := hub.StatPathContext(ctx, "projectfuseflags", "docs/a.txt")
 	if err != nil {
 		t.Fatalf("stat a: %v", err)
 	}

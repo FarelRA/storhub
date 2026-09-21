@@ -169,7 +169,7 @@ type restHandler struct {
 
 type contextKey string
 
-const clientCtxKey contextKey = "rest-client"
+const clientCtxKey contextKey = "restclient"
 
 // clientFor resolves the per-request Client placed in the context by the
 // auth middleware. A foreign value under clientCtxKey is a middleware bug:
@@ -667,7 +667,7 @@ func (h *restHandler) serveConfigJS(w http.ResponseWriter, _ *http.Request) {
 // A handle* route (JSON document), not a serve* byte stream.
 func (h *restHandler) handleAPIInfo(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"service":   "storhub-rest",
+		"service":   "storhubrest",
 		"version":   "v1",
 		"base_path": h.opts.BasePath,
 		// Set by `storhub serve <project>`: the console auto-loads this and
@@ -997,7 +997,7 @@ func errForbidden(message string) error {
 }
 
 var weakShareKeys = [][]byte{
-	[]byte("replace-me"),
+	[]byte("replaceme"),
 	[]byte("0123456789abcdef0123456789abcdef"),
 }
 

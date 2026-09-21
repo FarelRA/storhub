@@ -134,7 +134,7 @@ Common commands:
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
 - inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
 - filesystem: `mkdir`, `mv`, `rm`
-- recovery and cleanup under `project`: `status` (degraded latch, streaks, pressure), `sync` (drain), `revisions`, `rollback`, `prune <project> [objects|assets|history|chunks|all]` (orphaned objects, untracked assets, chunk orphans, history checkpoint; `--dry-run`, `--keep`), `enable` (clear the degraded latch), `delete` (destroy the project) (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dry-run` and `--keep`)
+- recovery and cleanup under `project`: `status` (degraded latch, streaks, pressure), `sync` (drain), `revisions`, `rollback`, `prune <project> [objects|assets|history|chunks|all]` (orphaned objects, untracked assets, chunk orphans, history checkpoint; `--dryrun`, `--keep`), `enable` (clear the degraded latch), `delete` (destroy the project) (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dryrun` and `--keep`)
 - admin under `project`: `status`, `sync`, `revisions`, `rollback`, `prune`, `enable`, `delete` (removes the project repository outright; `--yes` is mandatory)
 - local cache: `cache purge` (reclaims cache directories left by crashed processes; offline, no token needed)
 - web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
@@ -165,7 +165,7 @@ command fails at runtime, and `2` when the command line itself is wrong
 Environment variables: `GITHUB_TOKEN` (authentication),
 `STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
 (default level is `info`, colors on), `STORHUB_API_BASE_URL`, and
-`STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--auth-file`).
+`STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--authfile`).
 
 ### Rate limiting
 
@@ -222,13 +222,13 @@ REST serving from the CLI:
 
 ```bash
 # With authentication (recommended):
-GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --auth-file ./rest-auth.json
+GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --authfile ./rest-auth.json
 
 # Deliberately unauthenticated (insecure; requires the explicit flag):
-GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --allow-anonymous
+GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --allowanonymous
 
 # REST API and FUSE mount together, one shared hub:
-GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --auth-file ./rest-auth.json
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --authfile ./rest-auth.json
 ```
 
 Open `http://localhost:8080/` for the built-in web console (the REST API stays under `/api/v1`).

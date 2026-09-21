@@ -34,7 +34,7 @@ func TestExpectedRevisionCAS(t *testing.T) {
 	}
 	hub := backend.newClient(t, cfg)
 	ctx := context.Background()
-	project := "project-cas"
+	project := "projectcas"
 
 	if err := hub.MkdirContext(ctx, project, "docs"); err != nil {
 		t.Fatalf("mkdir: %v", err)

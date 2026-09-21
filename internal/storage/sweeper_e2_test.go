@@ -17,7 +17,7 @@ func TestOverCapAppendPokesCommitTrigger(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, singleChunkTestConfig())
-	project := "project-overcap-poke"
+	project := "projectovercappoke"
 
 	pm := &projectMetadata{
 		meta:      NewRepoMetadata(project),
