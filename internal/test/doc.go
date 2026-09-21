@@ -9,6 +9,9 @@
 //
 //	contract  (surface.go)   - Surface/Handle/SessionSurface capability
 //	  interfaces plus the Err* sentinels shared by every adapter.
+//	  Open carries a CreateDisposition (O_CREAT spelling); UmaskSurface
+//	  expresses the creation mask; ScratchSession stages a pending name
+//	  set published atomically at close.
 //	table     (scenario.go)  - the shared POSIX + session scenario table.
 //	runner    (runner.go)    - Filter/Run/RunWithBudget execution with
 //	  per-scenario budgets.
@@ -16,6 +19,11 @@
 //	  scratch oracle; the expected behavior every adapter is held to.
 //	session   (session.go)   - TTL clamp + expiry check shared by the
 //	  oracle and the CLI/REST fakes.
+//	fake core (session_fake.go) - handle-table mechanics plus the
+//	  PendingNames multi-name stage shared by the oracle and (once the
+//	  prod worker wires it) the CLI/REST fakes.
+//	errormap  (map_error.go) - backend-to-sentinel translation shared by
+//	  the CLI, REST, and FUSE adapter delegates.
 //	budgets   (budgets_test.go) - benchmark ceilings enforced in CI.
 //
 // Naming convention for test files repo-wide: foo_test.go tests foo.go

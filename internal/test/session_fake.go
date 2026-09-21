@@ -94,3 +94,44 @@ func SweepExpiredSessions[S any](table map[string]*S, expires func(*S) time.Time
 func MissingSessionParent(parent string) error {
 	return fmt.Errorf("%w: parent directory does not exist: %s", shfs.ErrNotFound, parent)
 }
+
+// PendingNames is the multi-name stage for one scratch description.
+// Link appends (an already-pending name fails with ErrExists, like
+// linking onto an occupied name); Relink replaces the whole set with
+// one path; Close publishes to List after the caller pre-validates
+// every name. The oracle uses it directly; the CLI and REST fakes wire
+// it into their session tables with the hunks reported alongside this
+// change, so all three share one append/replace/list semantic.
+type PendingNames struct {
+	names []string
+}
+
+// Add appends path to the pending set, failing with ErrExists when path
+// is already pending. Absence validation against the store (taken names,
+// missing parents) stays with the caller, which owns its file layout.
+func (p *PendingNames) Add(path string) error {
+	for _, pending := range p.names {
+		if pending == path {
+			return ErrExists
+		}
+	}
+	p.names = append(p.names, path)
+	return nil
+}
+
+// Replace discards the whole pending set in favor of one path, the
+// rescue for a close wedged on a taken name.
+func (p *PendingNames) Replace(path string) {
+	p.names = []string{path}
+}
+
+// List returns the pending names in link order. The caller must
+// pre-validate every name before publishing any of them.
+func (p *PendingNames) List() []string {
+	return p.names
+}
+
+// Empty reports whether no name is staged (close discards).
+func (p *PendingNames) Empty() bool {
+	return len(p.names) == 0
+}

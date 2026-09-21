@@ -5,6 +5,22 @@ import (
 	"time"
 )
 
+// CreateDisposition selects whether Open may create a missing file,
+// like O_CREAT on open(2).
+type CreateDisposition int
+
+const (
+	// CreateNever opens only existing files: a missing path in any mode
+	// fails with ErrNotFound (POSIX ENOENT without O_CREAT).
+	CreateNever CreateDisposition = iota + 1
+	// CreateIfMissing creates a missing file like O_CREAT (never
+	// exclusive: an existing file opens normally). Creation applies to
+	// write modes only; OpenReadOnly and OpenPath never create. The
+	// oracle creates with mode 0o644 subject to its umask; adapters
+	// create through their usual write-mode paths.
+	CreateIfMissing
+)
+
 // OpenMode selects the access mode of a Handle returned by Open.
 type OpenMode int
 
@@ -118,6 +134,15 @@ type SeekHandle interface {
 // punch by zero-filling, which reads back identically on dense bytes;
 // surfaces whose backend cannot express it fail with ErrUnsupported
 // instead of faking success.
+//
+// Why dense backends cannot punch real holes: files here are
+// content-addressed chunk runs, not block maps, so there are no sparse
+// blocks to deallocate. A real hole (size preserved, storage released,
+// reads observe zeros) has no representation in a chunk list that only
+// models present bytes; expressing one would require rewriting chunk
+// coverage the CAS store does not model. Zero-filling is therefore the
+// honest emulation (observably identical on reads), and ErrUnsupported
+// is the honest refusal.
 type PunchHoler interface {
 	// PunchHole deallocates [off, off+length) like
 	// fallocate(PUNCH_HOLE|KEEP_SIZE), or zero-fills it on dense-byte
@@ -127,18 +152,22 @@ type PunchHoler interface {
 
 // ScratchSession is an open file description bound to no path, like
 // O_TMPFILE: reads, writes, truncate, and sync all work on staged
-// bytes, Link names the staged image (staging the creation, so the
-// name appears only at Close), and Close without a link discards.
-// Linking an occupied path fails with ErrExists; linking twice fails
-// the same way, since the second link is also onto an occupied name.
-// Relink retargets a linked-but-uncommitted handle, the rescue for a
-// close that failed because a concurrent writer took the linked name.
+// bytes, Link stages a name (the name appears only at Close), and Close
+// without a link discards. Link APPENDS to a pending name set: linking
+// an already-pending name fails with ErrExists, and linking an occupied
+// path fails with ErrExists the same way. Close publishes the staged
+// image to ALL pending names, each with create semantics, after
+// pre-validating every name first: any taken name fails the whole close
+// with ErrExists, publishing nothing, and the handle stays open for
+// Relink. Relink REPLACES the whole pending set with one path, the
+// rescue for a close wedged on a taken name.
 type ScratchSession interface {
 	Handle
-	// Link names the staged image like linkat on an O_TMPFILE fd.
+	// Link appends path to the pending name set like linkat on an
+	// O_TMPFILE fd.
 	Link(path string) error
-	// Relink retargets a linked handle like a second linkat after
-	// the first name was taken.
+	// Relink replaces the pending name set with path like a second
+	// linkat after the first name was taken.
 	Relink(path string) error
 }
 
@@ -153,6 +182,18 @@ type ScratchSession interface {
 type SessionSurface interface {
 	// OpenScratch opens a pathless read-write description.
 	OpenScratch(ttl time.Duration) (ScratchSession, error)
+}
+
+// UmaskSurface is an optional Surface capability for configuring the
+// creation mask applied to CreateFile (and to files created by Open
+// with CreateIfMissing), like umask(2). It stays optional (rather than
+// growing Surface) so surfaces that cannot express masks simply do not
+// implement it and the umask scenario never runs there (see Filter).
+// A zero mask disables masking. Chmod sets exact modes and is never
+// masked.
+type UmaskSurface interface {
+	// SetUmask replaces the creation mask (only the low 9 bits apply).
+	SetUmask(mask uint32)
 }
 
 // ErrPrecondition reports a stale CAS token from CompareAndWrite; match it with errors.As.
@@ -172,13 +213,19 @@ func (e ErrPrecondition) Error() string {
 // and Rmdir act on the link or directory name itself.
 type Surface interface {
 	// CreateFile creates a file like O_CREAT; exclusive adds O_EXCL so a duplicate fails with ErrExists.
+	// The requested mode is masked by the surface umask (see
+	// UmaskSurface; zero when unconfigured).
 	CreateFile(path string, perm uint32, exclusive bool) error
-	// Open returns a handle with an independent cursor. The interface has
-	// no O_CREAT flag: opening a missing path in any mode fails with
-	// ErrNotFound (POSIX ENOENT without O_CREAT); creation is CreateFile.
-	// The FUSE/REST/CLI adapters bake O_CREATE into write-mode opens and
-	// therefore diverge from the oracle on missing paths by design.
-	Open(path string, mode OpenMode) (Handle, error)
+	// Open returns a handle with an independent cursor. Creation intent
+	// travels in disp, like O_CREAT on open(2): CreateNever opens only
+	// existing files (a missing path in any mode fails with ErrNotFound,
+	// POSIX ENOENT without O_CREAT), while CreateIfMissing creates a
+	// missing file in write modes before opening (never exclusive: an
+	// existing file opens normally; OpenReadOnly and OpenPath never
+	// create). The FUSE, REST and CLI adapters honor disp through their
+	// write-mode create paths, so the oracle and the adapters now spell
+	// creation the same way.
+	Open(path string, mode OpenMode, disp CreateDisposition) (Handle, error)
 	// Stat reports size, mode, ownership, and mtime of the resolved path like stat().
 	Stat(path string) (Stat, error)
 	// Truncate resizes by path like truncate(), zero-filling any extension.

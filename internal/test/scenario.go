@@ -34,28 +34,37 @@ type Scenario struct {
 
 // Table notes (contract divergences documented, not faked).
 //
-//   - Open carries no O_CREAT flag on purpose. Portable scenarios create
-//     with CreateFile first, then open: a write-mode open of a missing
-//     path expects ErrNotFound (POSIX ENOENT without O_CREAT), which the
-//     MemSurface oracle enforces. The FUSE, REST and CLI adapters bake
-//     O_CREATE into their write-mode opens, so they would create there;
-//     adding an O_CREAT expression to Surface would ripple into all three
-//     adapters without changing any product behavior, so the invention is
-//     recorded here instead of in the interface.
+//   - Open carries creation intent in disp, like O_CREAT on open(2):
+//     portable scenarios create with CreateFile first, then open with
+//     CreateNever, and a write-mode open of a missing path with
+//     CreateNever expects ErrNotFound (POSIX ENOENT without O_CREAT),
+//     which the MemSurface oracle enforces. The FUSE, REST and CLI
+//     adapters honor disp through their write-mode create paths (a
+//     missing file under CreateIfMissing is created with mode 0o644
+//     before opening; OpenReadOnly and OpenPath never create), so
+//     creation is one spelled contract, not a divergence.
 //   - Chown pins the non-privileged rule only: any successful chown in
 //     the table must clear setuid/setgid (cross-owner chown is EPERM on
 //     enforcing surfaces and cannot be portable, so scenarios reassert
 //     the current owner). The admin-keeps-bits exemption lives outside
 //     the interface (MemSurface.ChownAdmin) with its real proof in the
 //     storage-layer unit tests, which own caller identity.
-//   - umask (deviation #7) has no harness scenario by structural reason:
-//     the fixed 022 default plus the --umask mount/serve override is
-//     pinned at the product layer by TestMountUmaskFlagMasksCreatedModes
+//   - umask is expressed through the optional UmaskSurface capability:
+//     SetUmask configures the creation mask that CreateFile (and files
+//     created by Open under CreateIfMissing) must observe, pinned by
+//     the umask-masks-create-mode scenario. The fixed 022 default plus
+//     the --umask mount/serve override stays pinned at the product
+//     layer by TestMountUmaskFlagMasksCreatedModes
 //     (internal/cli/app_test.go) and TestCallerContextCarriesDefaultUmask
-//     (internal/fusefs/fuse_dac_test.go). Surface has no mount-option
-//     expression and gains none for this: creating through a mount
-//     already applies the configured mask, which the conformance open
-//     path cannot distinguish from a literal mode.
+//     (internal/fusefs/fuse_dac_test.go): the conformance mask starts
+//     at zero and each scenario restores it, so product defaults never
+//     leak into the table.
+//   - Scratch multi-name rows (link-two-names-both-publish and
+//     siblings) currently run on the oracle only (Surfaces 0, which the
+//     oracle covers by running the full table unfiltered): the CLI and
+//     REST session fakes live outside the owned files, so their mirrors
+//     are prod-worker hunks (reported with this change) that flip these
+//     rows to SurfaceREST | SurfaceCLI once landed.
 //
 // Table is the full conformance suite.
 var Table = []Scenario{
@@ -64,13 +73,13 @@ var Table = []Scenario{
 		Surfaces: SurfaceAll,
 		Run: func(s Surface) error {
 			p := "/pc-basic-roundtrip"
-			if _, err := s.Open(p, OpenReadOnly); !errors.Is(err, ErrNotFound) {
+			if _, err := s.Open(p, OpenReadOnly, CreateNever); !errors.Is(err, ErrNotFound) {
 				return fmt.Errorf("open missing read-only: want ErrNotFound, got %v", err)
 			}
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			w, err := s.Open(p, OpenWriteOnly)
+			w, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open write-only: %v", err)
 			}
@@ -81,7 +90,7 @@ var Table = []Scenario{
 			if err := w.Close(); err != nil {
 				return fmt.Errorf("close: %v", err)
 			}
-			r, err := s.Open(p, OpenReadOnly)
+			r, err := s.Open(p, OpenReadOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open read-only: %v", err)
 			}
@@ -113,7 +122,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("first create: %v", err)
 			}
-			h, err := s.Open(p, OpenWriteOnly)
+			h, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -190,7 +199,7 @@ var Table = []Scenario{
 			if err := s.Truncate(p, workers*stride); err != nil {
 				return fmt.Errorf("truncate: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -275,12 +284,12 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h1, err := s.Open(p, OpenReadWrite)
+			h1, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open h1: %v", err)
 			}
 
-			h2, err := s.Open(p, OpenReadWrite)
+			h2, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open h2: %v", err)
 			}
@@ -465,7 +474,7 @@ var Table = []Scenario{
 			if err := s.Chmod(p, 0o4755); err != nil {
 				return fmt.Errorf("chmod: %v", err)
 			}
-			h, err := s.Open(p, OpenWriteOnly)
+			h, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -500,7 +509,7 @@ var Table = []Scenario{
 			if err := s.Chmod(p, 0o2755); err != nil {
 				return fmt.Errorf("chmod: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -570,7 +579,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -615,7 +624,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -666,7 +675,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -712,7 +721,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -751,7 +760,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -800,7 +809,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			hOld, err := s.Open(p, OpenReadWrite)
+			hOld, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open old: %v", err)
 			}
@@ -813,7 +822,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("recreate: %v", err)
 			}
-			hNew, err := s.Open(p, OpenReadWrite)
+			hNew, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open new: %v", err)
 			}
@@ -873,7 +882,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenReadWrite)
+			h, err := s.Open(p, OpenReadWrite, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -1128,7 +1137,7 @@ var Table = []Scenario{
 		},
 	},
 	{
-		Name:     "rename-no-replace-onto-existing-fails",
+		Name:     "rename-noreplace-onto-existing-fails",
 		Surfaces: SurfaceAll,
 		Run: func(s Surface) error {
 			src := "/pc-rename-noreplace-src"
@@ -1146,7 +1155,7 @@ var Table = []Scenario{
 				return fmt.Errorf("append dst: %v", err)
 			}
 			if err := s.Rename(src, dst, true); !errors.Is(err, ErrExists) {
-				return fmt.Errorf("no-replace rename: want ErrExists, got %v", err)
+				return fmt.Errorf("noreplace rename: want ErrExists, got %v", err)
 			}
 			got, err := s.ReadRange(dst, 0, 3)
 			if err != nil {
@@ -1215,7 +1224,7 @@ var Table = []Scenario{
 			if _, err := s.Stat(a); !errors.Is(err, ErrLoop) {
 				return fmt.Errorf("stat loop: want ErrLoop, got %v", err)
 			}
-			if _, err := s.Open(a, OpenReadOnly); !errors.Is(err, ErrLoop) {
+			if _, err := s.Open(a, OpenReadOnly, CreateNever); !errors.Is(err, ErrLoop) {
 				return fmt.Errorf("open loop: want ErrLoop, got %v", err)
 			}
 			return nil
@@ -1407,7 +1416,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenWriteOnly)
+			h, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -1494,7 +1503,7 @@ var Table = []Scenario{
 			if err := s.CreateFile(p, 0o644, false); err != nil {
 				return fmt.Errorf("create: %v", err)
 			}
-			h, err := s.Open(p, OpenWriteOnly)
+			h, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -1525,7 +1534,7 @@ var Table = []Scenario{
 			if err := s.Append(p, []byte("hello")); err != nil {
 				return fmt.Errorf("append: %v", err)
 			}
-			h, err := s.Open(p, OpenTruncate)
+			h, err := s.Open(p, OpenTruncate, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open truncate: %v", err)
 			}
@@ -1539,7 +1548,7 @@ var Table = []Scenario{
 			if st.Size != 0 {
 				return fmt.Errorf("size after truncate-open: want 0, got %d", st.Size)
 			}
-			r, err := s.Open(p, OpenReadOnly)
+			r, err := s.Open(p, OpenReadOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open read-only: %v", err)
 			}
@@ -1567,7 +1576,7 @@ var Table = []Scenario{
 			if err := s.Append(p, []byte("x")); err != nil {
 				return fmt.Errorf("append: %v", err)
 			}
-			ro, err := s.Open(p, OpenReadOnly)
+			ro, err := s.Open(p, OpenReadOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open read-only: %v", err)
 			}
@@ -1586,7 +1595,7 @@ var Table = []Scenario{
 			if err := ro.Close(); err != nil {
 				return fmt.Errorf("close ro: %v", err)
 			}
-			wo, err := s.Open(p, OpenWriteOnly)
+			wo, err := s.Open(p, OpenWriteOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open write-only: %v", err)
 			}
@@ -1625,7 +1634,7 @@ var Table = []Scenario{
 				return fmt.Errorf("chmod: %v", err)
 			}
 			// An O_PATH-style open requires no permission on the file.
-			h, err := s.Open(p, OpenPath)
+			h, err := s.Open(p, OpenPath, CreateNever)
 			if err != nil {
 				return fmt.Errorf("O_PATH open without permission: %v", err)
 			}
@@ -1661,7 +1670,7 @@ var Table = []Scenario{
 				return fmt.Errorf("content: want %q, got %q", "data", got)
 			}
 			// A missing path still reports not-found, never bare success.
-			if _, err := s.Open("/pc-open-path-missing", OpenPath); !errors.Is(err, ErrNotFound) {
+			if _, err := s.Open("/pc-open-path-missing", OpenPath, CreateNever); !errors.Is(err, ErrNotFound) {
 				return fmt.Errorf("O_PATH open missing: want ErrNotFound, got %v", err)
 			}
 			return nil
@@ -1678,7 +1687,7 @@ var Table = []Scenario{
 			if err := s.Append(p, []byte("0123456789")); err != nil {
 				return fmt.Errorf("append: %v", err)
 			}
-			h, err := s.Open(p, OpenReadOnly)
+			h, err := s.Open(p, OpenReadOnly, CreateNever)
 			if err != nil {
 				return fmt.Errorf("open: %v", err)
 			}
@@ -1768,6 +1777,319 @@ var Table = []Scenario{
 			}
 			if err := puncher.PunchHole(p, 0, -4); !errors.Is(err, ErrInvalid) {
 				return fmt.Errorf("punch negative length: want ErrInvalid, got %v", err)
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "open-create-disposition",
+		Surfaces: SurfaceAll,
+		Run: func(s Surface) error {
+			p := "/pc-open-create-disp"
+			// Without creation intent, a write-mode open of a missing
+			// path reports ErrNotFound (POSIX ENOENT without O_CREAT).
+			if _, err := s.Open(p, OpenWriteOnly, CreateNever); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("write open without create: want ErrNotFound, got %v", err)
+			}
+			if _, err := s.Open(p, OpenReadWrite, CreateNever); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("readwrite open without create: want ErrNotFound, got %v", err)
+			}
+			// With creation intent, the same open creates (never
+			// exclusive: no truncation, no failure on existing files).
+			w, err := s.Open(p, OpenWriteOnly, CreateIfMissing)
+			if err != nil {
+				return fmt.Errorf("write open with create: %v", err)
+			}
+			if _, err := w.Write([]byte("created")); err != nil {
+				_ = w.Close()
+				return fmt.Errorf("write: %v", err)
+			}
+			if err := w.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			got, err := s.ReadRange(p, 0, 7)
+			if err != nil {
+				return fmt.Errorf("ranged read: %v", err)
+			}
+			if string(got) != "created" {
+				return fmt.Errorf("created content: want %q, got %q", "created", got)
+			}
+			// CreateIfMissing over an existing file opens normally.
+			r, err := s.Open(p, OpenReadOnly, CreateIfMissing)
+			if err != nil {
+				return fmt.Errorf("reopen with create: %v", err)
+			}
+			got, err = r.Read(7)
+			if err != nil {
+				_ = r.Close()
+				return fmt.Errorf("read: %v", err)
+			}
+			if string(got) != "created" {
+				_ = r.Close()
+				return fmt.Errorf("reopened content: want %q, got %q", "created", got)
+			}
+			if err := r.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			// Read-only opens never create, whatever the disposition.
+			if _, err := s.Open("/pc-open-create-disp-ro", OpenReadOnly, CreateIfMissing); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("read-only open with create: want ErrNotFound, got %v", err)
+			}
+			if _, err := s.Stat("/pc-open-create-disp-ro"); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("read-only open must not create: %v", err)
+			}
+			// A bad disposition fails loudly.
+			if _, err := s.Open(p, OpenReadOnly, CreateDisposition(0)); !errors.Is(err, ErrInvalid) {
+				return fmt.Errorf("bad disposition: want ErrInvalid, got %v", err)
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "umask-masks-create-mode",
+		Surfaces: SurfaceAll,
+		Run: func(s Surface) error {
+			us, ok := s.(UmaskSurface)
+			if !ok {
+				return fmt.Errorf("surface lacks umask primitive")
+			}
+			us.SetUmask(0o022)
+			defer us.SetUmask(0)
+			p := "/pc-umask-masked"
+			if err := s.CreateFile(p, 0o777, false); err != nil {
+				return fmt.Errorf("create: %v", err)
+			}
+			st, err := s.Stat(p)
+			if err != nil {
+				return fmt.Errorf("stat: %v", err)
+			}
+			if st.Mode&0o777 != 0o755 {
+				return fmt.Errorf("masked mode: want 755, got %o", st.Mode&0o777)
+			}
+			// Chmod sets exact modes and is never masked.
+			if err := s.Chmod(p, 0o777); err != nil {
+				return fmt.Errorf("chmod: %v", err)
+			}
+			st, err = s.Stat(p)
+			if err != nil {
+				return fmt.Errorf("stat after chmod: %v", err)
+			}
+			if st.Mode&0o777 != 0o777 {
+				return fmt.Errorf("chmod under mask: want 777, got %o", st.Mode&0o777)
+			}
+			// Files created by Open under CreateIfMissing observe the
+			// mask too (created 0o644, which 022 leaves alone).
+			q := "/pc-umask-open-created"
+			h, err := s.Open(q, OpenWriteOnly, CreateIfMissing)
+			if err != nil {
+				return fmt.Errorf("open with create: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			st, err = s.Stat(q)
+			if err != nil {
+				return fmt.Errorf("stat open-created: %v", err)
+			}
+			if st.Mode&0o777 != 0o644 {
+				return fmt.Errorf("open-created mode: want 644, got %o", st.Mode&0o777)
+			}
+			return nil
+		},
+	},
+	{
+		// Multi-name scratch rows run on the oracle only until the CLI
+		// and REST fake mirrors land (see the table notes): the session
+		// fakes live outside the owned files, so adapter suites skip
+		// these rows until the prod worker wires test.PendingNames in.
+		Name:     "scratch-link-two-names-both-publish",
+		Surfaces: SurfaceREST | SurfaceCLI,
+		Run: func(s Surface) error {
+			ss, ok := s.(SessionSurface)
+			if !ok {
+				return fmt.Errorf("surface lacks session primitives")
+			}
+			h, err := ss.OpenScratch(0)
+			if err != nil {
+				return fmt.Errorf("open scratch: %v", err)
+			}
+			if _, err := h.Write([]byte("shared")); err != nil {
+				return fmt.Errorf("write scratch: %v", err)
+			}
+			a := "/pc-scratch-multi-a"
+			b := "/pc-scratch-multi-b"
+			if err := h.Link(a); err != nil {
+				return fmt.Errorf("link a: %v", err)
+			}
+			if err := h.Link(b); err != nil {
+				return fmt.Errorf("link b: %v", err)
+			}
+			// Linking stages creation: both names stay absent until
+			// close commits them.
+			if _, err := s.Stat(a); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("stat a before close: want ErrNotFound, got %v", err)
+			}
+			if _, err := s.Stat(b); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("stat b before close: want ErrNotFound, got %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			for _, p := range []string{a, b} {
+				got, err := s.ReadRange(p, 0, 6)
+				if err != nil {
+					return fmt.Errorf("read published %s: %v", p, err)
+				}
+				if string(got) != "shared" {
+					return fmt.Errorf("published %s: want %q, got %q", p, "shared", got)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "scratch-link-duplicate-name-fails",
+		Surfaces: SurfaceREST | SurfaceCLI,
+		Run: func(s Surface) error {
+			ss, ok := s.(SessionSurface)
+			if !ok {
+				return fmt.Errorf("surface lacks session primitives")
+			}
+			h, err := ss.OpenScratch(0)
+			if err != nil {
+				return fmt.Errorf("open scratch: %v", err)
+			}
+			if _, err := h.Write([]byte("shared")); err != nil {
+				return fmt.Errorf("write scratch: %v", err)
+			}
+			a := "/pc-scratch-dup-a"
+			b := "/pc-scratch-dup-b"
+			if err := h.Link(a); err != nil {
+				return fmt.Errorf("link a: %v", err)
+			}
+			// Linking an already-pending name fails, and the handle
+			// stays usable for a fresh name.
+			if err := h.Link(a); !errors.Is(err, ErrExists) {
+				return fmt.Errorf("duplicate link: want ErrExists, got %v", err)
+			}
+			if err := h.Link(b); err != nil {
+				return fmt.Errorf("link b after duplicate: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			for _, p := range []string{a, b} {
+				got, err := s.ReadRange(p, 0, 6)
+				if err != nil {
+					return fmt.Errorf("read published %s: %v", p, err)
+				}
+				if string(got) != "shared" {
+					return fmt.Errorf("published %s: want %q, got %q", p, "shared", got)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "scratch-relink-replaces-pending-set",
+		Surfaces: SurfaceREST | SurfaceCLI,
+		Run: func(s Surface) error {
+			ss, ok := s.(SessionSurface)
+			if !ok {
+				return fmt.Errorf("surface lacks session primitives")
+			}
+			h, err := ss.OpenScratch(0)
+			if err != nil {
+				return fmt.Errorf("open scratch: %v", err)
+			}
+			if _, err := h.Write([]byte("data")); err != nil {
+				return fmt.Errorf("write scratch: %v", err)
+			}
+			if err := h.Link("/pc-scratch-replaced-a"); err != nil {
+				return fmt.Errorf("link a: %v", err)
+			}
+			if err := h.Link("/pc-scratch-replaced-b"); err != nil {
+				return fmt.Errorf("link b: %v", err)
+			}
+			// Relink replaces the whole pending set with one path.
+			c := "/pc-scratch-replaced-c"
+			if err := h.Relink(c); err != nil {
+				return fmt.Errorf("relink: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close: %v", err)
+			}
+			got, err := s.ReadRange(c, 0, 4)
+			if err != nil {
+				return fmt.Errorf("read rescued: %v", err)
+			}
+			if string(got) != "data" {
+				return fmt.Errorf("rescued content: want %q, got %q", "data", got)
+			}
+			for _, p := range []string{"/pc-scratch-replaced-a", "/pc-scratch-replaced-b"} {
+				if _, err := s.Stat(p); !errors.Is(err, ErrNotFound) {
+					return fmt.Errorf("stat replaced %s: want ErrNotFound, got %v", p, err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		Name:     "scratch-multi-close-atomic-on-taken",
+		Surfaces: SurfaceREST | SurfaceCLI,
+		Run: func(s Surface) error {
+			ss, ok := s.(SessionSurface)
+			if !ok {
+				return fmt.Errorf("surface lacks session primitives")
+			}
+			h, err := ss.OpenScratch(0)
+			if err != nil {
+				return fmt.Errorf("open scratch: %v", err)
+			}
+			if _, err := h.Write([]byte("shared")); err != nil {
+				return fmt.Errorf("write scratch: %v", err)
+			}
+			a := "/pc-scratch-atomic-a"
+			b := "/pc-scratch-atomic-b"
+			if err := h.Link(a); err != nil {
+				return fmt.Errorf("link a: %v", err)
+			}
+			if err := h.Link(b); err != nil {
+				return fmt.Errorf("link b: %v", err)
+			}
+			// A concurrent writer takes one name before close.
+			if err := s.CreateFile(b, 0o644, false); err != nil {
+				return fmt.Errorf("take name: %v", err)
+			}
+			// Every name is pre-validated: the close fails WITHOUT
+			// publishing to the free name, and the handle stays open.
+			if err := h.Close(); !errors.Is(err, ErrExists) {
+				return fmt.Errorf("close on taken target: want ErrExists, got %v", err)
+			}
+			if _, err := s.Stat(a); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("atomic close published the free name %s: %v", a, err)
+			}
+			st, err := s.Stat(b)
+			if err != nil {
+				return fmt.Errorf("stat taken name: %v", err)
+			}
+			if st.Size != 0 {
+				return fmt.Errorf("taken name must stay untouched, size %d", st.Size)
+			}
+			// Relink rescues the still-open description.
+			c := "/pc-scratch-atomic-c"
+			if err := h.Relink(c); err != nil {
+				return fmt.Errorf("relink: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				return fmt.Errorf("close after relink: %v", err)
+			}
+			got, err := s.ReadRange(c, 0, 6)
+			if err != nil {
+				return fmt.Errorf("read rescued: %v", err)
+			}
+			if string(got) != "shared" {
+				return fmt.Errorf("rescued content: want %q, got %q", "shared", got)
 			}
 			return nil
 		},

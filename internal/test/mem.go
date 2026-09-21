@@ -1,6 +1,7 @@
 package test
 
 import (
+	"errors"
 	"strings"
 	"sync"
 )
@@ -14,6 +15,9 @@ type MemSurface struct {
 	dirs  map[string]uint32
 	links map[string]string
 	clock int64 // logical mtime clock, advanced on every mutation
+	// umask masks CreateFile modes and files created by Open with
+	// CreateIfMissing (see UmaskSurface; zero disables masking).
+	umask uint32
 }
 
 // Compile-time conformance checks.
@@ -21,6 +25,7 @@ var (
 	_ Surface        = (*MemSurface)(nil)
 	_ PunchHoler     = (*MemSurface)(nil)
 	_ SessionSurface = (*MemSurface)(nil)
+	_ UmaskSurface   = (*MemSurface)(nil)
 	_ Handle         = (*memHandle)(nil)
 	_ SeekHandle     = (*memHandle)(nil)
 )
@@ -123,6 +128,14 @@ func growForWrite(data []byte, offset int64, chunk []byte) []byte {
 	return data
 }
 
+// SetUmask implements UmaskSurface.SetUmask: later file creates observe
+// the mask (only the low 9 bits apply); zero disables masking.
+func (m *MemSurface) SetUmask(mask uint32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.umask = mask & 0o777
+}
+
 // CreateFile implements Surface.CreateFile.
 func (m *MemSurface) CreateFile(path string, perm uint32, exclusive bool) error {
 	m.mu.Lock()
@@ -145,26 +158,30 @@ func (m *MemSurface) CreateFile(path string, perm uint32, exclusive bool) error 
 	if _, ok := m.dirs[parentOf(path)]; !ok {
 		return ErrNotFound
 	}
-	m.files[path] = &memFile{mode: perm & 0o7777, mtime: m.tick(), version: 1}
+	m.files[path] = &memFile{mode: (perm & 0o7777) &^ (m.umask & 0o777), mtime: m.tick(), version: 1}
 	return nil
 }
 
-// Open implements Surface.Open. There is no O_CREAT flag on the Surface
-// interface: creation is expressed only through CreateFile, so opening a
-// missing path in ANY mode (including write modes) reports ErrNotFound,
-// matching open(2) without O_CREAT. The FUSE, REST and CLI adapters bake
-// O_CREATE into their write-mode opens (they cannot distinguish create
-// from open), which is their documented divergence from this oracle, not
-// a second contract: portable scenarios create first, then open.
+// Open implements Surface.Open. Creation intent travels in disp, like
+// O_CREAT on open(2): CreateNever reports ErrNotFound on a missing path
+// in any mode, while CreateIfMissing creates first in write modes
+// (OpenReadOnly and OpenPath never create) with mode 0o644 subject to
+// the umask, then opens normally (never exclusive, never truncating
+// except under OpenTruncate).
 // OpenPath is the perm-free open: like the oracle having no permission
 // checks at all, it succeeds on any existing path (and reports ErrNotFound
 // on a missing one without creating it), while the handle itself carries
 // no I/O rights.
-func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
+func (m *MemSurface) Open(path string, mode OpenMode, disp CreateDisposition) (Handle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	switch mode {
 	case OpenReadOnly, OpenWriteOnly, OpenReadWrite, OpenAppend, OpenTruncate, OpenPath:
+	default:
+		return nil, ErrInvalid
+	}
+	switch disp {
+	case CreateNever, CreateIfMissing:
 	default:
 		return nil, ErrInvalid
 	}
@@ -173,7 +190,26 @@ func (m *MemSurface) Open(path string, mode OpenMode) (Handle, error) {
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if disp == CreateNever || mode == OpenReadOnly || mode == OpenPath {
+			return nil, err
+		}
+		if _, ok := m.links[path]; ok {
+			return nil, ErrExists
+		}
+		if _, ok := m.dirs[path]; ok {
+			return nil, ErrExists
+		}
+		if _, ok := m.dirs[parentOf(path)]; !ok {
+			return nil, ErrNotFound
+		}
+		m.files[path] = &memFile{mode: uint32(0o644) &^ (m.umask & 0o777), mtime: m.tick(), version: 1}
+		f, err = m.resolveLocked(path)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if mode == OpenTruncate {
 		f.data = nil

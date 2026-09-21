@@ -5,16 +5,19 @@ import (
 )
 
 // memScratch is a pathless open file description over private bytes,
-// the oracle half of ScratchSession. Writes stage privately; Link binds
-// a pending name (validating absence like create); Close publishes the
-// staged image at the pending name with create semantics (a name taken
-// since link fails instead of overwriting) or discards when unlinked.
-// Expiry is checked lazily on every operation like the product's
+// the oracle half of ScratchSession. Writes stage privately; Link
+// appends a pending name (validating absence like create, and rejecting
+// already-pending names); Close publishes the staged image to ALL
+// pending names, each with create semantics (every name pre-validated
+// first, so a name taken since link fails the whole close instead of
+// overwriting, leaving the handle open) or discards when unlinked.
+// Relink replaces the whole pending set with one path. Expiry is
+// checked lazily on every operation like the product's
 // action-triggered sweep: no goroutines, no timers.
 type memScratch struct {
 	mem      *MemSurface
 	data     []byte
-	name     string
+	pending  PendingNames
 	cursor   int64
 	closed   bool
 	deadline time.Time
@@ -131,9 +134,25 @@ func (h *memScratch) Sync() error {
 	return h.checkUsable()
 }
 
+// nameTakenLocked reports whether path is occupied by a file, link, or
+// directory. Caller holds h.mem.mu.
+func (h *memScratch) nameTakenLocked(path string) bool {
+	if _, ok := h.mem.files[path]; ok {
+		return true
+	}
+	if _, ok := h.mem.links[path]; ok {
+		return true
+	}
+	if _, ok := h.mem.dirs[path]; ok {
+		return true
+	}
+	return false
+}
+
 // Link implements ScratchSession.Link: validates absence now (like
-// create) and stages the name for close. Linking an occupied path, a
-// second link, or a bad path fails without touching the staged bytes.
+// create) and appends the name to the pending set for close. Linking an
+// occupied path, an already-pending name, or a bad path fails without
+// touching the staged bytes.
 func (h *memScratch) Link(path string) error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
@@ -144,28 +163,18 @@ func (h *memScratch) Link(path string) error {
 	if err != nil {
 		return err
 	}
-	if h.name != "" {
-		return ErrExists
-	}
-	if _, ok := m.files[path]; ok {
-		return ErrExists
-	}
-	if _, ok := m.links[path]; ok {
-		return ErrExists
-	}
-	if _, ok := m.dirs[path]; ok {
+	if h.nameTakenLocked(path) {
 		return ErrExists
 	}
 	if _, ok := m.dirs[parentOf(path)]; !ok {
 		return ErrNotFound
 	}
-	h.name = path
-	return nil
+	return h.pending.Add(path)
 }
 
 // Relink implements ScratchSession.Relink: same validation as Link,
-// rebinding the pending name so a close wedged on a taken target can
-// be rescued.
+// replacing the whole pending set with one path so a close wedged on a
+// taken target can be rescued.
 func (h *memScratch) Relink(path string) error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
@@ -175,26 +184,22 @@ func (h *memScratch) Relink(path string) error {
 	if _, err := h.linkTarget(path); err != nil {
 		return err
 	}
-	if _, ok := h.mem.files[path]; ok {
-		return ErrExists
-	}
-	if _, ok := h.mem.links[path]; ok {
-		return ErrExists
-	}
-	if _, ok := h.mem.dirs[path]; ok {
+	if h.nameTakenLocked(path) {
 		return ErrExists
 	}
 	if _, ok := h.mem.dirs[parentOf(path)]; !ok {
 		return ErrNotFound
 	}
-	h.name = path
+	h.pending.Replace(path)
 	return nil
 }
 
-// Close implements Handle.Close: a linked name taken since link fails
-// with ErrExists WITHOUT consuming the description (relink can still
-// rescue it); a free name publishes the staged image; no name
-// discards. A second close fails with ErrClosed.
+// Close implements Handle.Close: every pending name is pre-validated
+// first, so a name taken since link fails the whole close with
+// ErrExists WITHOUT consuming the description (relink can still rescue
+// it) and publishes nothing; free names all publish the staged image,
+// each with create semantics; no name discards. A second close fails
+// with ErrClosed.
 func (h *memScratch) Close() error {
 	h.mem.mu.Lock()
 	defer h.mem.mu.Unlock()
@@ -204,20 +209,18 @@ func (h *memScratch) Close() error {
 	if err := h.checkUsable(); err != nil {
 		return err
 	}
-	if h.name == "" {
+	if h.pending.Empty() {
 		h.closed = true
 		return nil
 	}
-	if _, ok := h.mem.files[h.name]; ok {
-		return ErrExists
+	for _, name := range h.pending.List() {
+		if h.nameTakenLocked(name) {
+			return ErrExists
+		}
 	}
-	if _, ok := h.mem.links[h.name]; ok {
-		return ErrExists
+	for _, name := range h.pending.List() {
+		h.mem.files[name] = &memFile{mode: 0o644, mtime: h.mem.tick(), version: 1, data: append([]byte(nil), h.data...)}
 	}
-	if _, ok := h.mem.dirs[h.name]; ok {
-		return ErrExists
-	}
-	h.mem.files[h.name] = &memFile{mode: 0o644, mtime: h.mem.tick(), version: 1, data: append([]byte(nil), h.data...)}
 	h.closed = true
 	return nil
 }
