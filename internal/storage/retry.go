@@ -13,6 +13,7 @@ import (
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	ghapi "github.com/FarelRA/storhub/internal/github"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration {
@@ -107,7 +108,7 @@ func (h *StorHub) withRetry(ctx context.Context, op string, maxAttempts int, isR
 		if delay < 0 {
 			delay = 0
 		}
-		h.debugf("%s retry project op=%s attempt=%d delay=%s err=%v", op, op, attempt+1, delay, err)
+		logging.Warn(h.logger, "operation retry scheduled", "op", op, "attempt", attempt+1, "max_attempts", maxAttempts, "delay", delay, "err", err)
 		if sleepErr := h.config.Sleep(ctx, delay); sleepErr != nil {
 			return sleepErr
 		}

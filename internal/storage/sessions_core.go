@@ -66,6 +66,7 @@ import (
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // Session capacity and lifetime policy. All bounds are documented here so a
@@ -436,7 +437,20 @@ func newSessionID() (string, error) {
 // using the same Check functions the fs layer uses. The content layout is
 // pinned as the revision SHA plus the file entry and chunk descriptors
 // needed to re-read the snapshot via ReadPinnedFileContext.
-func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode OpenMode, opts ...SessionOption) (string, error) {
+func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode OpenMode, opts ...SessionOption) (handleID string, err error) {
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(project), "session open start", "project", project, "path", path, "mode", mode.String())
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		switch {
+		case err == nil:
+			logging.Debug(h.projectLogger(project), "session open complete", "project", project, "path", path, "mode", mode.String(), "handle", shortSHA(handleID), "elapsed", elapsed)
+		case errors.Is(err, ErrSessionProjectBusy) || errors.Is(err, ErrSessionUserBusy):
+			logging.Warn(h.projectLogger(project), "session open refused: handle cap reached", "project", project, "path", path, "mode", mode.String(), "elapsed", elapsed, "err", err)
+		default:
+			logging.Error(h.projectLogger(project), "session open failed", "project", project, "path", path, "mode", mode.String(), "elapsed", elapsed, "err", err)
+		}
+	}()
 	if err := validateProject(project); err != nil {
 		return "", err
 	}
@@ -542,10 +556,11 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		s.mu.Unlock()
 	}
 
-	handleID, err := newSessionID()
-	if err != nil {
+	handleID, herr := newSessionID()
+	if herr != nil {
 		_ = tmp.File.Close()
 		_ = os.Remove(tmp.Name)
+		err = herr
 		return "", err
 	}
 	s.id = handleID

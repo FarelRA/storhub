@@ -17,7 +17,17 @@ import (
 
 // FlushMetadata forces an immediate commit of all dirty metadata for all projects
 // This is useful for testing or when you need to ensure metadata is persisted immediately
-func (h *StorHub) FlushMetadata(ctx context.Context) error {
+func (h *StorHub) FlushMetadata(ctx context.Context) (err error) {
+	started := h.config.Now().UTC()
+	logging.Debug(h.logger, "flush-metadata start")
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.logger, "flush-metadata failed", "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.logger, "flush-metadata complete", "elapsed", elapsed)
+	}()
 	h.metaMu.RLock()
 	type projectWithName struct {
 		name string
@@ -52,11 +62,14 @@ func (h *StorHub) FlushMetadata(ctx context.Context) error {
 // traffic). It is the per-project counterpart of FlushMetadata and the
 // remedy after a failed push: healing requires a later operation on that
 // project, this call, or Shutdown.
-func (h *StorHub) FlushProjectContext(ctx context.Context, project string) error {
+func (h *StorHub) FlushProjectContext(ctx context.Context, project string) (err error) {
+	started := h.logOpStart(project, "flush-project")
+	defer func() { h.logOpFinish(project, "flush-project", started, err) }()
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	return h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
+	err = h.commitProjectMetadata(ctx, project, h.getOrCreateProjectMeta(project))
+	return err
 }
 
 // ListFilesContext returns every stored file in project.
@@ -290,8 +303,11 @@ func (h *StorHub) validateMetadataRevision(ctx context.Context, project, revisio
 }
 
 // LoadRepoMetadataReadonlyContext loads project metadata plus its revision without tracking.
-func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*metadata.RepoMetadata, string, error) {
-	return h.loadRepoMetadataReadonly(ctx, project)
+func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (meta *metadata.RepoMetadata, sha string, err error) {
+	started := h.logOpStart(project, "load-repo-metadata-readonly")
+	defer func() { h.logOpFinish(project, "load-repo-metadata-readonly", started, err) }()
+	meta, sha, err = h.loadRepoMetadataReadonly(ctx, project)
+	return meta, sha, err
 }
 
 // UpdateRepoMetadataContext applies fn as a transaction against the project's
@@ -577,13 +593,19 @@ func (h *StorHub) ValidateProjectName(project string) error {
 }
 
 // EnsureRepoContext creates the project repo when absent.
-func (h *StorHub) EnsureRepoContext(ctx context.Context, project string) error {
-	return h.ensureRepo(ctx, project)
+func (h *StorHub) EnsureRepoContext(ctx context.Context, project string) (err error) {
+	started := h.logOpStart(project, "ensure-repo")
+	defer func() { h.logOpFinish(project, "ensure-repo", started, err) }()
+	err = h.ensureRepo(ctx, project)
+	return err
 }
 
 // LoadRepoMetadataContext loads tracked project metadata plus its revision.
-func (h *StorHub) LoadRepoMetadataContext(ctx context.Context, project string) (*metadata.RepoMetadata, string, error) {
-	return h.loadRepoMetadata(ctx, project)
+func (h *StorHub) LoadRepoMetadataContext(ctx context.Context, project string) (meta *metadata.RepoMetadata, sha string, err error) {
+	started := h.logOpStart(project, "load-repo-metadata")
+	defer func() { h.logOpFinish(project, "load-repo-metadata", started, err) }()
+	meta, sha, err = h.loadRepoMetadata(ctx, project)
+	return meta, sha, err
 }
 
 // FileNotFound returns the not-found error for path.

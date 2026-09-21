@@ -10,6 +10,7 @@ import (
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	implposix "github.com/FarelRA/storhub/internal/posix"
 )
@@ -246,6 +247,14 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	if !hasSize {
 		return nil, fmt.Errorf("upload size unknown: pass fs.WithSize(n) (REST callers: Content-Length)")
 	}
+	started := h.logOpStart(project, "replace-file-reader", "path", filePath, "size", size)
+	defer func() {
+		resultSize := int64(0)
+		if result != nil {
+			resultSize = result.Size
+		}
+		h.logOpFinish(project, "replace-file-reader", started, err, "path", filePath, "size", size, "result_size", resultSize)
+	}()
 	chunkSize := chunking.NormalizedSize(h.ChunkSize())
 	requiredSlots := 0
 	if size > 0 {
@@ -621,7 +630,7 @@ func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[int64]metad
 func (h *StorHub) compensateDeleteAssets(ctx context.Context, project string, chunks []ChunkInfo) {
 	for _, c := range chunks {
 		if err := h.deleteAssetByID(ctx, project, c.AssetID); err != nil {
-			h.debugf("compensating delete failed project=%s asset=%d err=%v", project, c.AssetID, err)
+			logging.Warn(h.projectLogger(project), "compensating asset delete failed; orphan retained for purge", "project", project, "asset", c.AssetID, "err", err)
 		}
 	}
 }

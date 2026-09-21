@@ -8,6 +8,7 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // sessions_link.go: link, relink, and unlinked-scratch quarantine.
@@ -45,7 +46,17 @@ func quarantineSessionTemp(name, id string) error {
 // auto-redriven. Call it at startup after a restart: live handles are
 // younger than their idle TTL, so with maxAge at or above the max TTL only
 // orphaned temps move. Returns how many files were quarantined.
-func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (int, error) {
+func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, err error) {
+	started := h.config.Now().UTC()
+	logging.Debug(h.logger, "session quarantine start", "max_age", maxAge)
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.logger, "session quarantine failed", "max_age", maxAge, "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.logger, "session quarantine complete", "max_age", maxAge, "moved", moved, "elapsed", elapsed)
+	}()
 	base, err := spoolBase()
 	if err != nil {
 		return 0, err
@@ -55,7 +66,7 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (int, error)
 		return 0, fmt.Errorf("list spool base: %w", err)
 	}
 	cutoff := time.Now().Add(-maxAge)
-	moved := 0
+	moved = 0
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -130,19 +141,31 @@ func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path st
 // to retarget it). Close and Sync publish the staged bytes to every
 // pending name. Table lock covers lookup only; the metadata checks run
 // under the per-session lock.
-func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error {
+func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) (err error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	s, err := sh.getLiveLocked(handleID, sh.now())
-	if err != nil {
+	s, lerr := sh.getLiveLocked(handleID, sh.now())
+	if lerr != nil {
 		sh.mu.Unlock()
-		return err
+		logging.Error(h.logger, "session link lookup failed", "handle", shortSHA(handleID), "op", "link", "err", lerr)
+		return lerr
 	}
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
-	if err := s.authorize(ctx); err != nil {
-		return err
+	if aerr := s.authorize(ctx); aerr != nil {
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "link", "err", aerr)
+		return aerr
 	}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(s.project), "session link start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.projectLogger(s.project), "session link failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.projectLogger(s.project), "session link complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "pending", len(s.pending), "elapsed", elapsed)
+	}()
 	if s.path != "" && len(s.pending) == 0 {
 		return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
 	}
@@ -171,19 +194,31 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) error 
 // new path publishes. Same checks as LinkSession; the new target must be
 // absent. Marks the handle dirty so the staged bytes commit at the new
 // path on close.
-func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) error {
+func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) (err error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	s, err := sh.getLiveLocked(handleID, sh.now())
-	if err != nil {
+	s, lerr := sh.getLiveLocked(handleID, sh.now())
+	if lerr != nil {
 		sh.mu.Unlock()
-		return err
+		logging.Error(h.logger, "session relink lookup failed", "handle", shortSHA(handleID), "op", "relink", "err", lerr)
+		return lerr
 	}
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
-	if err := s.authorize(ctx); err != nil {
-		return err
+	if aerr := s.authorize(ctx); aerr != nil {
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "relink", "err", aerr)
+		return aerr
 	}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(s.project), "session relink start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.projectLogger(s.project), "session relink failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.projectLogger(s.project), "session relink complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed)
+	}()
 	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {
 		return err

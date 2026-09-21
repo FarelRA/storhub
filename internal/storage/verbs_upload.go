@@ -16,17 +16,34 @@ import (
 // verbs_upload.go: transfer verbs: upload, replace, patch, download.
 
 // UploadFileContext stores a local file as new project content.
-func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (*FileMeta, error) {
+func (h *StorHub) UploadFileContext(ctx context.Context, project, fileName, inputPath string) (result *FileMeta, err error) {
+	started := h.logOpStart(project, "upload-file", "path", fileName, "input", inputPath)
+	defer func() {
+		size := int64(0)
+		if result != nil {
+			size = result.Size
+		}
+		h.logOpFinish(project, "upload-file", started, err, "path", fileName, "input", inputPath, "size", size)
+	}()
 	// Degraded-mode admission first: refuse before any upload work mints
 	// assets that could never commit.
 	if err := h.admitMutation(project); err != nil {
 		return nil, err
 	}
-	return h.uploadFileContext(ctx, project, fileName, inputPath)
+	result, err = h.uploadFileContext(ctx, project, fileName, inputPath)
+	return result, err
 }
 
 // ReplaceFileContext swaps a stored file for new local content.
-func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string, opts ...shfs.MutateOption) (*FileMeta, error) {
+func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inputPath string, opts ...shfs.MutateOption) (result *FileMeta, err error) {
+	started := h.logOpStart(project, "replace-file", "path", fileName, "input", inputPath)
+	defer func() {
+		size := int64(0)
+		if result != nil {
+			size = result.Size
+		}
+		h.logOpFinish(project, "replace-file", started, err, "path", fileName, "input", inputPath, "size", size)
+	}()
 	// Degraded-mode admission first: refuse before the revision check pays
 	// for a remote load.
 	if err := h.admitMutation(project); err != nil {
@@ -36,7 +53,8 @@ func (h *StorHub) ReplaceFileContext(ctx context.Context, project, fileName, inp
 		return nil, err
 	}
 	ctx = gateRevisionFromOpts(ctx, opts)
-	return h.replaceFileContext(ctx, project, fileName, inputPath)
+	result, err = h.replaceFileContext(ctx, project, fileName, inputPath)
+	return result, err
 }
 
 // PatchFileContext splices one edit into a stored file at offset.
@@ -495,7 +513,15 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 }
 
 // RewriteFileRangesWithMetadataContext rewrites dirty ranges against loaded metadata.
-func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (*metadata.FileMeta, error) {
+func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, project, cleanName, snapshotPath string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, finalSize int64, dirtyRanges []fusefs.ByteRange) (result *metadata.FileMeta, err error) {
+	started := h.logOpStart(project, "rewrite-file-ranges", "path", cleanName, "size", finalSize, "ranges", len(dirtyRanges))
+	defer func() {
+		resultSize := int64(0)
+		if result != nil {
+			resultSize = result.Size
+		}
+		h.logOpFinish(project, "rewrite-file-ranges", started, err, "path", cleanName, "size", finalSize, "ranges", len(dirtyRanges), "result_size", resultSize)
+	}()
 	// Degraded-mode admission: a rewrite mints chunks like any mutation.
 	if err := h.admitMutation(project); err != nil {
 		return nil, err
@@ -504,7 +530,8 @@ func (h *StorHub) RewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	for i, dirty := range dirtyRanges {
 		ranges[i] = byteRange{start: dirty.Start, end: dirty.End}
 	}
-	return h.rewriteFileRangesWithMetadataContext(ctx, project, cleanName, snapshotPath, repoMeta, fileMeta, finalSize, ranges)
+	result, err = h.rewriteFileRangesWithMetadataContext(ctx, project, cleanName, snapshotPath, repoMeta, fileMeta, finalSize, ranges)
+	return result, err
 }
 
 // GetOrCreateUploadReleaseContext returns a release with room for requiredSize bytes.
@@ -513,8 +540,17 @@ func (h *StorHub) GetOrCreateUploadReleaseContext(ctx context.Context, project s
 }
 
 // PatchFileWithMetadataContext splices one edit using caller-loaded metadata.
-func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, offset, deleteSize int64, edit []byte) (*metadata.FileMeta, error) {
-	return h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
+func (h *StorHub) PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *metadata.RepoMetadata, fileMeta *metadata.FileMeta, offset, deleteSize int64, edit []byte) (result *metadata.FileMeta, err error) {
+	started := h.logOpStart(project, "patch-file-with-metadata", "path", cleanName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit))
+	defer func() {
+		resultSize := int64(0)
+		if result != nil {
+			resultSize = result.Size
+		}
+		h.logOpFinish(project, "patch-file-with-metadata", started, err, "path", cleanName, "offset", offset, "delete_size", deleteSize, "edit_bytes", len(edit), "result_size", resultSize)
+	}()
+	result, err = h.patchFileWithMetadataContext(ctx, project, cleanName, repoMeta, fileMeta, offset, deleteSize, edit)
+	return result, err
 }
 
 // FillAssetRangeContext downloads one chunk segment into dst.

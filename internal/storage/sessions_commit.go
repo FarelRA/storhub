@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // sessions_commit.go: session commit path: resolve, commit, recheck, sync, close.
@@ -101,6 +102,9 @@ func (h *StorHub) commitSessionLocked(ctx context.Context, sh *sessionHubState, 
 	}
 	if commitPath == "" {
 		return fmt.Errorf("commit session %s: %w", shortSHA(s.id), ErrSessionPathGone)
+	}
+	if commitPath != s.path {
+		logging.Warn(h.projectLogger(s.project), "session commit followed rename", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "commit_path", commitPath)
 	}
 	// Commit as the opener (see the opener field): ownership and
 	// privilege decisions follow whoever staged the bytes. The closer's
@@ -352,36 +356,49 @@ func (h *StorHub) repinSessionLocked(ctx context.Context, s *openSession) error 
 // staged state for retry. Sync with no staged state is a no-op success.
 // Table lock covers lookup only; commit plus repin run under the
 // per-session lock.
-func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
+func (h *StorHub) SyncSession(ctx context.Context, handleID string) (err error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	s, err := sh.getLiveLocked(handleID, sh.now())
-	if err != nil {
+	s, lerr := sh.getLiveLocked(handleID, sh.now())
+	if lerr != nil {
 		sh.mu.Unlock()
-		return err
+		logging.Error(h.logger, "session sync lookup failed", "handle", shortSHA(handleID), "op", "sync", "err", lerr)
+		return lerr
 	}
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
-	if err := s.authorize(ctx); err != nil {
-		return err
+	if aerr := s.authorize(ctx); aerr != nil {
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "sync", "err", aerr)
+		return aerr
 	}
+	started := h.config.Now().UTC()
+	logging.Debug(h.projectLogger(s.project), "session sync start", "handle", shortSHA(s.id), "project", s.project, "path", s.path)
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.projectLogger(s.project), "session sync failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.projectLogger(s.project), "session sync complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed)
+	}()
 	if !s.dirty {
 		s.lastUse = sh.now()
 		return nil
 	}
-	if err := h.commitSessionLocked(ctx, sh, s); err != nil {
-		if errors.Is(err, ErrSessionPathGone) {
+	if cerr := h.commitSessionLocked(ctx, sh, s); cerr != nil {
+		if errors.Is(cerr, ErrSessionPathGone) {
 			// Pinned inode unlinked after open: the fsync
 			// equivalent succeeds with nothing to publish, and
 			// the staged bytes stay readable until close. There
 			// is no live entry to repin to, so keep the pin.
+			logging.Warn(h.projectLogger(s.project), "session sync on unlinked path; retaining staged state", "handle", shortSHA(s.id), "project", s.project, "path", s.path)
 			s.lastUse = sh.now()
 			return nil
 		}
-		return err
+		return cerr
 	}
-	if err := h.repinSessionLocked(ctx, s); err != nil {
-		return err
+	if rerr := h.repinSessionLocked(ctx, s); rerr != nil {
+		return rerr
 	}
 	s.lastUse = sh.now()
 	return nil
@@ -394,22 +411,36 @@ func (h *StorHub) SyncSession(ctx context.Context, handleID string) error {
 // discards the temp with no commit. A failed commit retains the handle and
 // its staged state for retry. Table lock covers lookup and final destroy
 // only; the commit runs under the per-session lock.
-func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
+func (h *StorHub) CloseSession(ctx context.Context, handleID string) (err error) {
 	sh := h.sessionHub()
 	sh.mu.Lock()
-	s, err := sh.getLiveLocked(handleID, sh.now())
-	if err != nil {
+	s, lerr := sh.getLiveLocked(handleID, sh.now())
+	if lerr != nil {
 		sh.mu.Unlock()
-		return err
+		logging.Error(h.logger, "session close lookup failed", "handle", shortSHA(handleID), "op", "close", "err", lerr)
+		return lerr
 	}
 	sh.mu.Unlock()
 	// getLiveLocked returns with the per-session lock held across the
 	// commit so two closes of the same ID still serialize; distinct
 	// handles hold different locks.
-	if err := s.authorize(ctx); err != nil {
+	if aerr := s.authorize(ctx); aerr != nil {
+		aproject, apath, ahandle := s.project, s.path, shortSHA(s.id)
 		s.mu.Unlock()
-		return err
+		logging.Error(h.projectLogger(aproject), "session auth failed", "handle", ahandle, "project", aproject, "path", apath, "op", "close", "err", aerr)
+		return aerr
 	}
+	started := h.config.Now().UTC()
+	sproject, spath, shandle := s.project, s.path, shortSHA(s.id)
+	logging.Debug(h.projectLogger(sproject), "session close start", "handle", shandle, "project", sproject, "path", spath)
+	defer func() {
+		elapsed := h.config.Now().UTC().Sub(started)
+		if err != nil {
+			logging.Error(h.projectLogger(sproject), "session close failed", "handle", shandle, "project", sproject, "path", spath, "elapsed", elapsed, "err", err)
+			return
+		}
+		logging.Debug(h.projectLogger(sproject), "session close complete", "handle", shandle, "project", sproject, "path", spath, "elapsed", elapsed)
+	}()
 	if s.destroyed {
 		s.mu.Unlock()
 		return newStaleSessionError(handleID, "unknown handle")
@@ -437,7 +468,12 @@ func (h *StorHub) CloseSession(ctx context.Context, handleID string) error {
 		if errors.Is(err, ErrSessionPathGone) {
 			// Pinned inode unlinked after open: POSIX close
 			// discards the staged state with success.
-			return destroy()
+			dproject, dpath, dhandle := s.project, s.path, shortSHA(s.id)
+			if derr := destroy(); derr != nil {
+				return derr
+			}
+			logging.Warn(h.projectLogger(dproject), "session close-after-unlink discard", "handle", dhandle, "project", dproject, "path", dpath)
+			return nil
 		}
 		s.mu.Unlock()
 		return err

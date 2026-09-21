@@ -1,6 +1,10 @@
 package storage
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/FarelRA/storhub/internal/logging"
+)
 
 // Pressure counters (item A1): a hub-level registry of commit
 // pipeline pressure events for operators and degraded-mode
@@ -197,6 +201,8 @@ func (h *StorHub) PressurePendingDepth(project string) int {
 		return 0
 	}
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	return len(pm.opStack.ops)
+	depth := len(pm.opStack.ops)
+	pm.mu.RUnlock()
+	logging.Debug(h.projectLogger(project), "pressure depth check", "project", project, "depth", depth)
+	return depth
 }
