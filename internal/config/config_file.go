@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // FileConfig is the sparse subset of Config a JSON config file may set.
@@ -72,6 +74,10 @@ func LoadFile(path string) (Config, error) {
 	if err := applyFileEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	// Load milestone at Debug, never Info: file loads are routine and the
+	// logger is not built yet (WithDefaults runs later), so the
+	// process-default logger carries it.
+	logging.Debug(cfg.Logger, "config file loaded", "path", path)
 	return cfg, nil
 }
 

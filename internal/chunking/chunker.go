@@ -17,6 +17,9 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
+
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 const (
@@ -97,9 +100,14 @@ type StreamingChunker struct {
 // through this single definition so the ceiling cannot drift.
 func NormalizedSize(chunkSize int64) int64 {
 	if chunkSize <= 0 {
+		logging.Debug(nil, "chunk size default", "requested", chunkSize, "used", DefaultChunkSize)
 		return DefaultChunkSize
 	}
 	if chunkSize > MaxReleaseAssetSize {
+		// Genuine clamp of an explicit value: warn with requested and used.
+		// No logger is in scope for this pure helper, so the
+		// process-default logger carries it (stderr only, via slog).
+		logging.Warn(nil, "chunk size clamped", "requested", chunkSize, "used", MaxReleaseAssetSize)
 		return MaxReleaseAssetSize
 	}
 	return chunkSize
@@ -108,6 +116,7 @@ func NormalizedSize(chunkSize int64) int64 {
 // NewStreamingChunker opens filePath and plans chunk windows for it.
 // chunkSize is clamped through NormalizedSize.
 func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*StreamingChunker, error) {
+	started := time.Now()
 	chunkSize = NormalizedSize(chunkSize)
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -126,6 +135,10 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 		_ = file.Close()
 		return nil, fmt.Errorf("file needs %d chunks; the maximum supported count is %d", count, math.MaxInt32)
 	}
+	// Plan summary at Debug, never Info: chunk planning runs per upload and
+	// only sizes and counts are logged, never file bytes or names beyond
+	// the asset base name already chosen by the caller.
+	logging.Debug(nil, "chunk plan", "size", info.Size(), "chunk_size", chunkSize, "chunks", int(count), "elapsed", time.Since(started))
 	return &StreamingChunker{
 		file:      file,
 		fileSize:  info.Size(),

@@ -156,7 +156,16 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 // unlike ChtimesContext whose omit-on-zero contract maps zero to "now".
 // Provided values are marked authoritative in metadata.
 func (s *Service) ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) (err error) {
-	err = s.withOp(project, "chtimes-explicit", []any{"path", targetPath, "has_atime", atime != nil, "has_mtime", mtime != nil}, func() error {
+	// Log the resolved timestamp values (unix nanos, -1 when omitted), not
+	// just presence flags, so the debug line carries the full op surface.
+	atimeNs, mtimeNs := int64(-1), int64(-1)
+	if atime != nil {
+		atimeNs = atime.UnixNano()
+	}
+	if mtime != nil {
+		mtimeNs = mtime.UnixNano()
+	}
+	err = s.withOp(project, "chtimes-explicit", []any{"path", targetPath, "has_atime", atime != nil, "has_mtime", mtime != nil, "atime", atimeNs, "mtime", mtimeNs}, func() error {
 		entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
 		if err != nil {
 			return err

@@ -258,68 +258,138 @@ func Default() Config {
 //     disable path unreachable. Default() still enables the warning.
 func (c Config) WithDefaults() Config {
 	defaults := Default()
+	// supplied is the caller-provided logger, if any. Default fills are
+	// warned about only through it: a fully defaulted library run stays
+	// quiet, while an embedder that bothered to supply a logger is told
+	// what was defaulted on its behalf.
+	supplied := c.Logger
+	type defaultEvent struct {
+		key      string
+		fallback any
+	}
+	var defaulted []defaultEvent
+	mark := func(key string, fallback any) {
+		defaulted = append(defaulted, defaultEvent{key: key, fallback: fallback})
+	}
 	if c.APIBaseURL == "" {
 		c.APIBaseURL = defaults.APIBaseURL
+		mark("api_base_url", defaults.APIBaseURL)
 	}
 	if c.APIVersion == "" {
 		c.APIVersion = defaults.APIVersion
+		mark("api_version", defaults.APIVersion)
 	}
 	if c.HTTPClient == nil {
 		c.HTTPClient = defaults.HTTPClient
+		mark("http_client", "default")
 	}
 	if c.ChunkSize == 0 {
 		c.ChunkSize = defaults.ChunkSize
+		mark("chunk_size", defaults.ChunkSize)
 	}
 	if c.BufferSize == 0 {
 		c.BufferSize = defaults.BufferSize
+		mark("buffer_size", defaults.BufferSize)
 	}
 	if c.RepoDescription == "" {
 		c.RepoDescription = defaults.RepoDescription
+		mark("repo_description", defaults.RepoDescription)
 	}
 	if c.BaseRetryDelay == 0 {
 		c.BaseRetryDelay = defaults.BaseRetryDelay
+		mark("base_retry_delay", defaults.BaseRetryDelay)
 	}
 	if c.MaxRetryDelay == 0 {
 		c.MaxRetryDelay = defaults.MaxRetryDelay
+		mark("max_retry_delay", defaults.MaxRetryDelay)
 	}
 	if c.LogOutput == nil {
 		c.LogOutput = defaults.LogOutput
+		mark("log_output", "default")
 	}
 	// Normalize case/whitespace but never map unknown values to something
 	// else: Validate rejects them loudly.
+	rawLevel, rawFormat := c.LogLevel, c.LogFormat
 	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
 	if c.LogLevel == "" {
 		c.LogLevel = defaults.LogLevel
+		mark("log_level", defaults.LogLevel)
 	}
 	c.LogFormat = strings.ToLower(strings.TrimSpace(c.LogFormat))
 	if c.LogFormat == "" {
 		c.LogFormat = defaults.LogFormat
+		mark("log_format", defaults.LogFormat)
 	}
+	// Capture the normalized knobs before resolveLogger consumes and clears
+	// them, so the fallback warning below can still name the applied value.
+	normLevel, normFormat := c.LogLevel, c.LogFormat
 	if c.Logger == nil {
 		c = c.resolveLogger()
 	}
+	// A normalization that rewrote an explicitly set knob is a recoverable
+	// fallback worth one warning: the value still works, but the operator
+	// should spell it canonically.
+	if rawLevel != "" && strings.ToLower(strings.TrimSpace(rawLevel)) != normLevel {
+		logging.Warn(c.Logger, "config value normalized", "key", "log_level", "value", rawLevel, "fallback", normLevel)
+	}
+	if rawFormat != "" && strings.ToLower(strings.TrimSpace(rawFormat)) != normFormat {
+		logging.Warn(c.Logger, "config value normalized", "key", "log_format", "value", rawFormat, "fallback", normFormat)
+	}
 	if c.AtimePolicy == "" {
 		c.AtimePolicy = defaults.AtimePolicy
+		mark("atime_policy", string(defaults.AtimePolicy))
 	}
 	if c.MaxTrackedProjects == 0 {
 		c.MaxTrackedProjects = defaults.MaxTrackedProjects
+		mark("max_tracked_projects", defaults.MaxTrackedProjects)
 	}
 	if c.GitCacheDir == "" {
 		c.GitCacheDir = defaults.GitCacheDir
+		mark("git_cache_dir", defaults.GitCacheDir)
 	}
 	if c.ObjectCacheMaxEntries == 0 {
 		c.ObjectCacheMaxEntries = defaults.ObjectCacheMaxEntries
+		mark("object_cache_max_entries", defaults.ObjectCacheMaxEntries)
 	}
 	if c.MaxConsecutiveCommitFailures == 0 {
 		c.MaxConsecutiveCommitFailures = defaults.MaxConsecutiveCommitFailures
+		mark("max_consecutive_commit_failures", defaults.MaxConsecutiveCommitFailures)
 	}
 	// HistoryWarnObjects: see the WithDefaults godoc — zero disables.
 	if c.Now == nil {
 		c.Now = defaults.Now
+		mark("now", "default")
 	}
 	if c.Sleep == nil {
 		c.Sleep = defaults.Sleep
+		mark("sleep", "default")
 	}
+	if supplied != nil {
+		for _, d := range defaulted {
+			logging.Warn(supplied, "config default applied", "key", d.key, "value", "unset", "fallback", d.fallback)
+		}
+	} else if len(defaulted) > 0 {
+		keys := make([]string, 0, len(defaulted))
+		for _, d := range defaulted {
+			keys = append(keys, d.key)
+		}
+		logging.Debug(c.Logger, "config defaults applied", "keys", strings.Join(keys, ","))
+	}
+	// Resolved summary at Debug, never Info: config resolution runs on hot
+	// paths (every client build) and Info would spam the default level.
+	// No secrets here: Config carries no tokens, and the HTTP client (which
+	// may hold transports with credentials) is deliberately omitted.
+	logging.Debug(c.Logger, "config resolved",
+		"api_base_url", c.APIBaseURL,
+		"chunk_size", c.ChunkSize,
+		"buffer_size", c.BufferSize,
+		"max_retries", c.MaxRetries,
+		"atime", string(c.AtimePolicy),
+		"max_tracked_projects", c.MaxTrackedProjects,
+		"object_cache_max_entries", c.ObjectCacheMaxEntries,
+		"history_warn_objects", c.HistoryWarnObjects,
+		"max_consecutive_commit_failures", c.MaxConsecutiveCommitFailures,
+	)
 	return c
 }
 
@@ -363,10 +433,16 @@ func cacheBaseFromEnv() string {
 // available. Split out of CacheBase so the env override and the platform
 // default read as separate steps.
 func defaultCacheBase() string {
-	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
+	userCache, err := os.UserCacheDir()
+	if err == nil && userCache != "" {
 		return filepath.Join(userCache, "storhub")
 	}
-	return filepath.Join(os.TempDir(), "storhub")
+	// Recoverable fallback: warn once with the key, the unusable value,
+	// and the fallback in use. No logger is in scope here, so the
+	// process-default logger carries it (stderr only, via slog).
+	fallback := filepath.Join(os.TempDir(), "storhub")
+	logging.Warn(nil, "cache base fallback", "key", "cache_base", "value", userCache, "fallback", fallback, "err", err)
+	return fallback
 }
 
 // defaultGitCacheDir returns the git backend's cache root beneath
