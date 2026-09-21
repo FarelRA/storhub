@@ -487,6 +487,25 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 	h.writeError(w, status, code, message)
 }
 
+// traceOp logs symmetric Debug start/complete for one handler invocation:
+// per-handler noise stays at Debug while the top-level request lines in
+// requestLogging keep Info. Handlers defer the returned closure so every
+// invocation completes its pair; failures stay visible through the
+// requestLogging complete line (status) and the Error logs in
+// writeMappedError (5xx). targetPath is a project-relative path from the
+// request (never a token or secret); extra carries endpoint-specific
+// attrs such as scope or op.
+func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func() {
+	started := time.Now().UTC()
+	startArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
+	logging.Debug(h.logger, "rest "+op+" start", startArgs...)
+	return func() {
+		doneArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
+		doneArgs = append(doneArgs, "elapsed", time.Since(started))
+		logging.Debug(h.logger, "rest "+op+" complete", doneArgs...)
+	}
+}
+
 // maybeDrain honors the ?sync=1 opt-in (mirroring the POSIX write/fsync
 // split: async by default, durable on request). Call it after a mutation
 // completes and before responding. It returns false when the handler

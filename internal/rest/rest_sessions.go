@@ -176,6 +176,7 @@ func (h *restHandler) handleSessionOpen(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-open", req.Project, req.Path, "mode", req.Mode)()
 	id, err := client.OpenSession(r.Context(), req.Project, req.Path, mode, opts...)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -306,6 +307,7 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-write", "", handle)()
 	wrote, err := client.WriteSession(r.Context(), handle, req.Offset, data)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -336,6 +338,7 @@ func (h *restHandler) handleSessionTruncate(w http.ResponseWriter, r *http.Reque
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-truncate", "", handle)()
 	if err := client.TruncateSession(r.Context(), handle, req.Size); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -356,6 +359,7 @@ func (h *restHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-sync", "", handle)()
 	if err := client.SyncSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -382,6 +386,7 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-link", "", handle)()
 	if err := client.LinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -411,6 +416,7 @@ func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "session-relink", "", handle)()
 	if err := client.RelinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -452,6 +458,7 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 		h.writeMappedError(w, err)
 		return false
 	}
+	defer h.traceOp(r, "session-close", "", handle)()
 	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)

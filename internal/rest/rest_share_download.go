@@ -166,6 +166,7 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "share-derive", claims.Project, sharePath)()
 	// A derived share is a sub-capability of its parent: ownership follows
 	// the parent record when it is still in the registry, so the original
 	// sharer keeps management rights. Unknown parents (e.g. after a
@@ -206,6 +207,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "share-download", project, targetPath)()
 	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)

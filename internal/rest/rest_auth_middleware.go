@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 	"github.com/go-chi/chi/v5"
 	"net/http"
 	"strings"
@@ -19,6 +20,9 @@ func (h *restHandler) handleLogin(auth *restAuthenticator) http.HandlerFunc {
 		}
 		principal, token, ttl, err := auth.login(req.Username, req.Password)
 		if err != nil {
+			// No username, password, or token is ever logged: the reason
+			// is a fixed string, and the path carries no credentials.
+			logging.Warn(h.logger, "auth login rejected", "path", logging.RedactSensitivePath(r.URL.Path), "reason", "invalid credentials")
 			h.writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
 			return
 		}
@@ -42,7 +46,7 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token, fromQuery := bearerOrQueryToken(r)
 			if token == "" {
-				h.writeUnauthorized(w, auth, "missing bearer token")
+				h.writeUnauthorized(w, r, auth, "missing bearer token")
 				return
 			}
 			// authPrincipal rejects auth-JWT-via-query explicitly so the
@@ -57,7 +61,7 @@ func (h *restHandler) authMiddleware(auth *restAuthenticator, basePath string) f
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-			h.writeUnauthorized(w, auth, "invalid bearer token")
+			h.writeUnauthorized(w, r, auth, "invalid bearer token")
 		})
 	}
 }
@@ -120,7 +124,7 @@ func (h *restHandler) sharePrincipal(r *http.Request, auth *restAuthenticator, b
 		return nil, false, false
 	}
 	if h.isRevoked(claims.ID) {
-		h.writeUnauthorized(w, auth, "invalid bearer token")
+		h.writeUnauthorized(w, r, auth, "invalid bearer token")
 		return nil, false, true
 	}
 	project := chi.URLParam(r, "project")
@@ -133,7 +137,12 @@ func (h *restHandler) sharePrincipal(r *http.Request, auth *restAuthenticator, b
 	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path)), true, false
 }
 
-func (h *restHandler) writeUnauthorized(w http.ResponseWriter, auth *restAuthenticator, message string) {
+func (h *restHandler) writeUnauthorized(w http.ResponseWriter, r *http.Request, auth *restAuthenticator, message string) {
+	// Auth rejections log at Warn with project-scoped context only: the
+	// message is a fixed reason string, the path is redacted, and the
+	// bearer token itself is never logged (it may arrive via query on
+	// the share lane).
+	logging.Warn(h.logger, "auth rejected", "path", logging.RedactSensitivePath(r.URL.Path), "reason", message)
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q`, auth.realm))
 	h.writeError(w, http.StatusUnauthorized, "unauthorized", message)
 }

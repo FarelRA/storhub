@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	shfs "github.com/FarelRA/storhub/internal/fs"
+	"github.com/FarelRA/storhub/internal/logging"
 	"github.com/go-chi/chi/v5"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "serve-content", project, filePath)()
 	// User-stored bytes share the API origin with the console: never let a
 	// browser sniff an uploaded file into an executable representation.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -98,6 +100,7 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "replace", project, filePath)()
 	entry, exists, revOpts, ok := h.checkReplacePreconditions(w, r, project, filePath)
 	if !ok {
 		return
@@ -130,7 +133,7 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	if _, err := client.ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
 			if cleanupErr := client.DeleteFileContext(uploadCtx, project, filePath); cleanupErr != nil {
-				h.logger.Error("failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
+				logging.Error(h.logger, "failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
 			}
 		}
 		h.writeMappedError(w, err)
@@ -234,6 +237,7 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	op := strings.TrimSpace(r.URL.Query().Get("op"))
+	defer h.traceOp(r, "patch", project, filePath, "op", op)()
 	var err error
 	switch op {
 	case "append":

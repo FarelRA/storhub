@@ -36,6 +36,7 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "rollback", project, "")()
 	// Rollback republishes history without a target node: the guard is the
 	// project revision (412 when the caller decided on a moved HEAD).
 	if !h.preconditionForProjectOp(w, r, project) {
@@ -105,6 +106,7 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, errBadRequest("keep must be <= 1: history compaction retains exactly one checkpoint"))
 		return
 	}
+	defer h.traceOp(r, "prune", project, "", "scope", string(scope), "dry_run", req.DryRun)()
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
@@ -142,6 +144,7 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	defer h.traceOp(r, "enable", project, "")()
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}
@@ -176,6 +179,7 @@ type statusResponse struct {
 
 func (h *restHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	defer h.traceOp(r, "status", project, "")()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -237,6 +241,7 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "revert", project, req.Path)()
 	if !h.preconditionForProjectOp(w, r, project) {
 		return
 	}

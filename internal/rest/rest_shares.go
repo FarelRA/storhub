@@ -408,6 +408,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, err)
 		return
 	}
+	defer h.traceOp(r, "share-create", project, sharePath)()
 	entry, err := client.StatPathContext(r.Context(), project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -447,6 +448,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
+	defer h.traceOp(r, "share-list", project, "")()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -468,6 +470,7 @@ func canManageShare(record *shareRecord, callerUID uint32, callerAdmin bool) boo
 }
 
 func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	defer h.traceOp(r, "share-get", project, "", "share", shareID)()
 	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
@@ -495,6 +498,7 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
+	defer h.traceOp(r, "share-delete", project, "", "share", shareID)()
 	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")

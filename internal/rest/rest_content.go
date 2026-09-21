@@ -131,6 +131,7 @@ func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok b
 func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "node-get", project, targetPath)()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -160,6 +161,7 @@ func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "node-delete", project, targetPath)()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -204,6 +206,7 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	dirPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "children", project, dirPath)()
 	// Unbounded by design: no limit/offset parameters. Directory reads
 	// resolve against the published tree in one storage call and the
 	// response is one JSON document; adding pagination would need a
@@ -375,6 +378,7 @@ func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath s
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "xattrs", project, targetPath)()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -399,6 +403,7 @@ func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "xattr-get", project, targetPath)()
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		return
@@ -425,6 +430,7 @@ func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "xattr-put", project, targetPath)()
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		return
@@ -463,6 +469,7 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
+	defer h.traceOp(r, "xattr-delete", project, targetPath)()
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		return
@@ -505,6 +512,7 @@ func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (
 
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	defer h.traceOp(r, "revisions", project, "")()
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
