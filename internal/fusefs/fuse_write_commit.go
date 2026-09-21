@@ -37,6 +37,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if writeState.poisoned {
 		writeState.mu.Unlock()
 		unlockOpMu(&writeState.opMu)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "errno", syscall.EIO)
+		}
 		return 0, syscall.EIO
 	}
 	if h.flags&syscall.O_APPEND != 0 && off >= writeState.logicalSize {
@@ -54,6 +57,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
 			unlockOpMu(&writeState.opMu)
+			if h.fs.debugEnabled() {
+				h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
+			}
 			return 0, errno
 		}
 	}
@@ -63,6 +69,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
 			unlockOpMu(&writeState.opMu)
+			if h.fs.debugEnabled() {
+				h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
+			}
 			return 0, errno
 		}
 		writeState.logicalSize = off
@@ -72,6 +81,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
 		unlockOpMu(&writeState.opMu)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
+		}
 		return uint32(n), errno
 	}
 	end := off + int64(n)
@@ -81,6 +93,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
 			unlockOpMu(&writeState.opMu)
+			if h.fs.debugEnabled() {
+				h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
+			}
 			return uint32(n), errno
 		}
 	}
@@ -92,6 +107,9 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
 		unlockOpMu(&writeState.opMu)
+		if h.fs.debugEnabled() {
+			h.fs.debugOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
+		}
 		return uint32(n), errno
 	}
 	// POSIX privilege clearing is overlay-immediate, not commit-deferred:

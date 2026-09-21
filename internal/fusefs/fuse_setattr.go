@@ -503,6 +503,9 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, state *inodeWriteState, usedLocalSize bool, localSize int64, out *fuse.AttrOut, valid uint32) syscall.Errno {
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "finish", "errno", errnoFromError(err))
+		}
 		return errnoFromError(err)
 	}
 	if usedLocalSize {

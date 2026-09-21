@@ -336,6 +336,9 @@ func (s *Filesystem) Close() error {
 	s.mu.Lock()
 	if s.closing {
 		s.mu.Unlock()
+		if s.debugEnabled() {
+			s.debugOp("close complete", "project", s.project)
+		}
 		return nil
 	}
 	s.closing = true

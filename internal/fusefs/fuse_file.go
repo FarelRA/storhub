@@ -160,12 +160,21 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
+		}
 		return nil, 0, errnoFromError(err)
 	}
 	if entry.IsDir {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.EISDIR)
+		}
 		return nil, 0, syscall.EISDIR
 	}
 	if entry.IsSymlink {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ELOOP)
+		}
 		return nil, 0, syscall.ELOOP
 	}
 	// Pin the content layout at open time, shared across handles that
@@ -177,10 +186,16 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	// rename-over race this pin prevents.
 	repoMeta, _, metaErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
 	if metaErr != nil {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaErr)
+		}
 		return nil, 0, errnoFromError(metaErr)
 	}
 	file := repoMeta.FindFile(targetPath)
 	if file == nil {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+		}
 		return nil, 0, syscall.ENOENT
 	}
 	// Close the stat-then-pin window: a REST rename, replace, or unlink
@@ -192,17 +207,29 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if file.Inode != entry.Inode {
 		entryRetry, errRetry := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 		if errRetry != nil {
+			if n.fs.debugEnabled() {
+				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", errRetry)
+			}
 			return nil, 0, errnoFromError(errRetry)
 		}
 		repoRetry, _, metaRetryErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
 		if metaRetryErr != nil {
+			if n.fs.debugEnabled() {
+				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaRetryErr)
+			}
 			return nil, 0, errnoFromError(metaRetryErr)
 		}
 		fileRetry := repoRetry.FindFile(targetPath)
 		if fileRetry == nil {
+			if n.fs.debugEnabled() {
+				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+			}
 			return nil, 0, syscall.ENOENT
 		}
 		if fileRetry.Inode != entryRetry.Inode {
+			if n.fs.debugEnabled() {
+				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+			}
 			return nil, 0, syscall.ENOENT
 		}
 		entry = entryRetry
@@ -269,6 +296,9 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	}
 	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
 	if err != nil {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
+		}
 		return nil, 0, errnoFromError(err)
 	}
 	h.pinned = pin
@@ -523,6 +553,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (resul
 		// Reading a poisoned overlay would serve zeros for ranges
 		// whose bytes are in recovery/ - fail instead of lying.
 		if writeState.poisoned {
+			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", syscall.EIO)
 			return nil, syscall.EIO
 		}
 		// Fill the kernel's own payload buffer directly: dest is the
@@ -595,6 +626,7 @@ func (h *storhubHandle) readLiveOverlay(ctx context.Context, dest []byte, off in
 	state.mu.Lock()
 	if state.poisoned {
 		state.mu.Unlock()
+		h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", syscall.EIO)
 		return nil, syscall.EIO, true
 	}
 	if state.closed || state.temp == nil {
