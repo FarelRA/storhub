@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -350,7 +351,9 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	logging.Debug(h.projectLogger(project), "metadata writer acquired", "message", message, "wait", h.config.Now().UTC().Sub(lockStarted))
 
 	started := h.config.Now().UTC()
-	h.debugf("metadata update start project=%s message=%q", project, message)
+	if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+		logging.Debug(h.projectLogger(project), "metadata update start", "project", project, "message", message)
+	}
 
 	if err := h.hydrateProjectForTx(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
@@ -365,8 +368,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// CAS on the same token admit exactly one winner.
 	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
 		pm.mu.Unlock()
-		h.debugf("metadata update rejected project=%s step=revision-gate err=%v", project, err)
-		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "revision-gate", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
 
@@ -401,8 +403,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	}
 	if err := fn(candidate); err != nil {
 		pm.mu.Unlock()
-		h.debugf("metadata update failed project=%s step=apply elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
-		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "apply", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
 	// Op synthesis is deferred until after admission passes: appending
@@ -424,8 +425,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	afterSize, err := candidate.SerializedSize()
 	if err != nil {
 		pm.mu.Unlock()
-		h.debugf("metadata update failed project=%s step=size elapsed=%s err=%v", project, h.config.Now().UTC().Sub(started), err)
-		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "size", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, fmt.Errorf("size metadata: %w", err)
 	}
 	admitVersion := pm.version
@@ -444,8 +444,9 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	default:
 	}
 
-	h.debugf("metadata update complete project=%s elapsed=%s", project, h.config.Now().UTC().Sub(started))
-	logging.Debug(h.projectLogger(project), "metadata update complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started))
+	if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+		logging.Debug(h.projectLogger(project), "metadata update complete", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started))
+	}
 
 	// Shared read-only pointer under the COW discipline (see the doc
 	// comment above): no Clone, no RebuildIndexes — publishTreeLocked
@@ -517,8 +518,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 	// BuildTree + publish cycle on every trigger. Shrinks stay open so
 	// the project can always fold back under the ceiling.
 	if pm.sizeCapped && !shrinking {
-		h.debugf("metadata update rejected project=%s step=admission-capped bytes=%d elapsed=%s", project, afterSize, h.config.Now().UTC().Sub(started))
-		logging.Error(h.projectLogger(project), "metadata update rejected: project is over the size ceiling; growth mutations fail fast", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
+		logging.Error(h.projectLogger(project), "metadata update rejected: project is over the size ceiling; growth mutations fail fast", "project", project, "step", "admission-capped", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
 		return fmt.Errorf("metadata over size ceiling (%d bytes, max %d): growth is rejected until the tree fits again; delete entries or run `storhub prune`", afterSize, maxMetadataBytes)
 	}
 	if shrinking {
@@ -533,7 +533,9 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 		// probe still measures only our private candidate, so the
 		// oversize verdict below stands; the flags it feeds into are
 		// re-read fresh (sizeCapped below), never the pre-probe copy.
-		h.debugf("metadata admission raced a concurrent publish project=%s", project)
+		if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+			logging.Debug(h.projectLogger(project), "metadata admission raced a concurrent publish", "project", project)
+		}
 	}
 	oversizeObject := false
 	if berr == nil {
@@ -546,8 +548,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 	}
 	if oversizeObject {
 		pm.sizeCapped = true
-		h.debugf("metadata update rejected project=%s step=admission bytes=%d elapsed=%s", project, afterSize, h.config.Now().UTC().Sub(started))
-		logging.Error(h.projectLogger(project), "metadata update rejected: single index object over ceiling", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
+		logging.Error(h.projectLogger(project), "metadata update rejected: single index object over ceiling", "project", project, "step", "admission", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
 		return fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run purge to shrink", maxMetadataBytes)
 	}
 	// The tree exceeds the old blob ceiling but splits into small

@@ -218,17 +218,6 @@ func isReleaseFull(err error) bool {
 	return isValidation422(err, "", "file_count", "file_count", "1000", "too many")
 }
 
-func (h *StorHub) debugf(format string, args ...any) {
-	// Background is correct here, not a dropped cancel: slog-level
-	// gating is context-independent for our handlers (no contextual
-	// verbosity values), and debugf has no request scope by design.
-	// Callers with a scope log through projectLogger + logOpStart.
-	if !h.logger.Enabled(context.Background(), slog.LevelDebug) {
-		return
-	}
-	logging.Debug(h.logger, fmt.Sprintf(format, args...))
-}
-
 func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
 	// Hot read paths (list/download/stat) stay silent at Debug: logging
 	// every list-files/list-releases/read at Debug turned an idle mount's
@@ -238,27 +227,32 @@ func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
 	if isReadOnlyOp(op) {
 		return time.Time{}
 	}
-	logging.Debug(h.projectLogger(project), op+" start", args...)
+	logging.Start(h.projectLogger(project), op, args...)
 	return time.Now().UTC()
 }
 
 func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
-	// Demoted read ops pass a zero start (logOpStart skipped them);
-	// report a zero elapsed instead of time.Since(zero).
-	elapsed := time.Duration(0)
-	if !started.IsZero() {
-		elapsed = time.Since(started)
-	}
-	if err != nil {
-		args = append(args, "elapsed", elapsed, "err", err)
-		logging.Error(h.projectLogger(project), op+" failed", args...)
+	// Demoted read ops pass a zero start (logOpStart skipped them), and
+	// logging.Finish measures elapsed from started: zero starts route
+	// around it and report a zero elapsed instead of time.Since(zero).
+	// Key order matches Finish: elapsed before err.
+	if started.IsZero() {
+		if err != nil {
+			args = append(args, "elapsed", time.Duration(0), "err", err)
+			logging.Error(h.projectLogger(project), op+" failed", args...)
+			return
+		}
+		if isReadOnlyOp(op) {
+			return
+		}
+		args = append(args, "elapsed", time.Duration(0))
+		logging.Debug(h.projectLogger(project), op+" complete", args...)
 		return
 	}
-	if isReadOnlyOp(op) {
+	if err == nil && isReadOnlyOp(op) {
 		return
 	}
-	args = append(args, "elapsed", elapsed)
-	logging.Debug(h.projectLogger(project), op+" complete", args...)
+	logging.Finish(h.projectLogger(project), op, started, err, args...)
 }
 
 // isReadOnlyOp reports the ops whose per-call Debug start/complete logs are

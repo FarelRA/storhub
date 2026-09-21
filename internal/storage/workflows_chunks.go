@@ -3,7 +3,10 @@ package storage
 import (
 	"context"
 	"fmt"
+	"log/slog"
+
 	chunking "github.com/FarelRA/storhub/internal/chunking"
+	"github.com/FarelRA/storhub/internal/logging"
 	"io"
 )
 
@@ -110,7 +113,9 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 			if rotations > maxReleaseRotations {
 				return fmt.Errorf("upload chunk (offset %d): release %s full after %d rotations; concurrent writers hold every release at the %d-asset ceiling, retry the upload", offset, s.releaseTag, maxReleaseRotations, releaseAssetCap)
 			}
-			s.hub.debugf("upload release full, rotating release=%s uploaded=%d/%d rotation=%d", s.releaseTag, len(s.results), s.total, rotations)
+			if s.hub.logger.Enabled(context.Background(), slog.LevelDebug) {
+				logging.Debug(s.hub.projectLogger(s.project), "upload release full, rotating", "project", s.project, "release", s.releaseTag, "uploaded", len(s.results), "total", s.total, "rotation", rotations)
+			}
 			s.hub.invalidateReleaseCache(s.project)
 			tag, url, err := s.prepare(s.total - len(s.results))
 			if err != nil {
@@ -120,7 +125,9 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 			continue
 		}
 		if isAlreadyExists(err) {
-			s.hub.debugf("upload chunk asset name collision, retry asset=%s", assetName)
+			if s.hub.logger.Enabled(context.Background(), slog.LevelDebug) {
+				logging.Debug(s.hub.projectLogger(s.project), "upload chunk asset name collision, retry", "project", s.project, "asset", assetName, "release", s.releaseTag)
+			}
 			nameRetries++
 			if nameRetries >= maxNameRetries {
 				return fmt.Errorf("upload chunk failed after %d name retries", maxNameRetries)
