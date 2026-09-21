@@ -166,7 +166,7 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "share-derive", claims.Project, sharePath)()
+	defer h.traceOp(r, "share-derive", claims.Project, sharePath)(&err)
 	// A derived share is a sub-capability of its parent: ownership follows
 	// the parent record when it is still in the registry, so the original
 	// sharer keeps management rights. Unknown parents (e.g. after a
@@ -207,13 +207,14 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "share-download", project, targetPath)()
+	defer h.traceOp(r, "share-download", project, targetPath)(&err)
 	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if entry.IsDir {
+		err = &restStatusError{status: http.StatusNotImplemented, message: "directory download not yet implemented"}
 		h.writeError(w, http.StatusNotImplemented, "not_implemented", "directory download not yet implemented")
 		return
 	}
@@ -222,6 +223,7 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	if entry.IsSymlink {
 		target, readErr := client.ReadlinkContext(r.Context(), project, targetPath)
 		if readErr != nil {
+			err = readErr
 			h.writeMappedError(w, readErr)
 			return
 		}
@@ -242,7 +244,8 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	if rangeErr != nil {
 		if strings.TrimSpace(r.Header.Get("Range")) != "" {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
-			h.writeMappedError(w, &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rangeErr.Error()})
+			err = &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rangeErr.Error()}
+			h.writeMappedError(w, err)
 			return
 		}
 		start, end = 0, entry.Size

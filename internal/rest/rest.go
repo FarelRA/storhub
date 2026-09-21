@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"slices"
@@ -487,29 +488,41 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 	h.writeError(w, status, code, message)
 }
 
-// traceOp logs symmetric Debug start/complete for one handler invocation:
-// per-handler noise stays at Debug while the top-level request lines in
-// requestLogging keep Info. Handlers defer the returned closure so every
+// traceOpNoop is the package-level no-op finish func returned when Debug
+// is off. Returning a shared value (instead of a fresh closure) keeps the
+// disabled path allocation-free for the alloc-parity benchmark budgets.
+var traceOpNoop = func(*error) {}
+
+// traceOp logs a symmetric Debug start plus a finish that reports failure
+// when the handler saw an error: per-handler noise stays at Debug while
+// the top-level request lines in requestLogging keep Info. Handlers defer
+// the returned closure with a pointer to their err variable so every
 // invocation completes its pair; failures stay visible through the
 // requestLogging complete line (status) and the Error logs in
 // writeMappedError (5xx). targetPath is a project-relative path from the
 // request (never a token or secret); extra carries endpoint-specific
 // attrs such as scope or op.
-func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func() {
+func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func(*error) {
 	// Zero-cost when Debug is off: the alloc-parity benchmark budgets
 	// fail on any per-request heap work, so skip the slice builds,
 	// redaction, and clock read entirely instead of discarding them
-	// inside logging.Debug.
+	// inside the span helpers.
 	if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug) {
-		return func() {}
+		return traceOpNoop
 	}
+	opName := "rest " + op
+	method := r.Method
+	route := logging.RedactSensitivePath(r.URL.Path)
 	started := time.Now().UTC()
-	startArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
-	logging.Debug(h.logger, "rest "+op+" start", startArgs...)
-	return func() {
-		doneArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
-		doneArgs = append(doneArgs, "elapsed", time.Since(started))
-		logging.Debug(h.logger, "rest "+op+" complete", doneArgs...)
+	startArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
+	logging.Start(h.logger, opName, startArgs...)
+	return func(perr *error) {
+		var finishErr error
+		if perr != nil {
+			finishErr = *perr
+		}
+		finishArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
+		logging.Finish(h.logger, opName, started, finishErr, finishArgs...)
 	}
 }
 
@@ -647,6 +660,51 @@ func requireNonEmptyPath(field, value string) error {
 		return errBadRequest(field + " is required")
 	}
 	return nil
+}
+
+// maxQueryParams mirrors net/url's default parameter cap: parseQuery
+// rejects the whole query past it, so a first-match lookup must too. The
+// GODEBUG urlmaxqueryparams override is operator-only and intentionally
+// not mirrored here.
+const maxQueryParams = 10000
+
+// queryFirstParam returns the first value for key in raw exactly as
+// url.Values.Get would after ParseQuery: pairs split on "&", segments
+// containing a literal ";" skipped, empty segments skipped, split on the
+// first "=", key and value QueryUnescaped (pairs with decoding errors
+// skipped), first match wins. Unlike r.URL.Query().Get it builds no map
+// or slices, so it costs zero heap on escape-free input. Only the
+// alloc-parity benchmark paths (serve-content, replace, node-get) use it:
+// traceOp's handler err pointer costs one alloc per traced request, and
+// this lookup pays it back so the REST budgets still hold.
+func queryFirstParam(raw, key string) string {
+	if strings.Count(raw, "&")+1 > maxQueryParams {
+		return ""
+	}
+	for raw != "" {
+		var pair string
+		pair, raw, _ = strings.Cut(raw, "&")
+		if strings.Contains(pair, ";") {
+			continue
+		}
+		if pair == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(pair, "=")
+		kk, err := url.QueryUnescape(k)
+		if err != nil {
+			continue
+		}
+		if kk != key {
+			continue
+		}
+		vv, err := url.QueryUnescape(v)
+		if err != nil {
+			continue
+		}
+		return vv
+	}
+	return ""
 }
 
 // parseNonNegativeInt parses a required non-negative int64 query/body value.

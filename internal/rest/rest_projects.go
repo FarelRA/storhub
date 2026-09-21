@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"errors"
 	"net/http"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -15,7 +16,8 @@ type projectResponse struct {
 // handleProjectGet serves GET /projects/{project}: filesystem stats.
 func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	defer h.traceOp(r, "project-get", project, "")()
+	var err error
+	defer h.traceOp(r, "project-get", project, "")(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -33,10 +35,12 @@ func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 // handleProjectDelete serves DELETE /projects/{project}.
 func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	defer h.traceOp(r, "project-delete", project, "")()
+	var err error
+	defer h.traceOp(r, "project-delete", project, "")(&err)
 	// Deleting the whole project has no target node: the guard is the
 	// project revision (412 when the caller decided on a moved HEAD).
 	if !h.preconditionForProjectOp(w, r, project) {
+		err = errors.New("project precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -44,13 +48,16 @@ func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.DeleteProjectContext(r.Context(), project); err != nil {
+	if err = client.DeleteProjectContext(r.Context(), project); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	// Draining a deleted project is a cheap no-op on a clean (fresh) cache
 	// entry, kept here so every mutating route shares one uniform pattern.
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "deleted"})

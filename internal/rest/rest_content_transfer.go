@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/logging"
@@ -22,8 +23,9 @@ import (
 // layers, not this handler.
 func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	filePath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "serve-content", project, filePath)()
+	filePath := queryFirstParam(r.URL.RawQuery, "path")
+	var err error
+	defer h.traceOp(r, "serve-content", project, filePath)(&err)
 	// User-stored bytes share the API origin with the console: never let a
 	// browser sniff an uploaded file into an executable representation.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -38,12 +40,14 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entry.IsDir {
-		h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)})
+		err = &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)}
+		h.writeMappedError(w, err)
 		return
 	}
 	if entry.IsSymlink {
 		target, readErr := client.ReadlinkContext(r.Context(), project, filePath)
 		if readErr != nil {
+			err = readErr
 			h.writeMappedError(w, readErr)
 			return
 		}
@@ -72,7 +76,8 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 		// the caller asked for bytes that do not exist. The conformance
 		// getRange helper treats 416 as an empty read at that offset.
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
-		h.writeMappedError(w, &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rerr.Error()})
+		err = &restStatusError{status: http.StatusRequestedRangeNotSatisfiable, message: rerr.Error()}
+		h.writeMappedError(w, err)
 		return
 	}
 	contentLength := end - start
@@ -95,18 +100,23 @@ func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	filePath := r.URL.Query().Get("path")
+	filePath := queryFirstParam(r.URL.RawQuery, "path")
 	if err := requireNonEmptyPath("path", filePath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "replace", project, filePath)()
+	var err error
+	defer h.traceOp(r, "replace", project, filePath)(&err)
 	entry, exists, revOpts, ok := h.checkReplacePreconditions(w, r, project, filePath)
 	if !ok {
+		err = errors.New("replace precondition failed")
 		return
 	}
 	created, ok := h.createReplacePlaceholder(w, r, project, filePath, entry, exists)
 	if !ok {
+		if err == nil {
+			err = errors.New("replace placeholder failed")
+		}
 		return
 	}
 	// The create call above leaves an empty placeholder behind when the path
@@ -130,7 +140,7 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := client.ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
+	if _, err = client.ReplaceFileFromReaderContext(uploadCtx, project, filePath, r.Body, replaceOpts...); err != nil {
 		if created || (exists && entry.IsSymlink) {
 			if cleanupErr := client.DeleteFileContext(uploadCtx, project, filePath); cleanupErr != nil {
 				logging.Error(h.logger, "failed to clean up placeholder after failed replace", "project", project, "path", filePath, "err", cleanupErr)
@@ -140,6 +150,9 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	status := http.StatusOK
@@ -237,8 +250,8 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	op := strings.TrimSpace(r.URL.Query().Get("op"))
-	defer h.traceOp(r, "patch", project, filePath, "op", op)()
 	var err error
+	defer h.traceOp(r, "patch", project, filePath, "op", op)(&err)
 	switch op {
 	case "append":
 		err = h.patchOpAppend(r, project, filePath)
@@ -249,7 +262,8 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	case "truncate":
 		err = h.patchOpTruncate(r, project, filePath)
 	default:
-		h.writeMappedError(w, errBadRequest("query parameter op must be one of append, write, patch, truncate"))
+		err = errBadRequest("query parameter op must be one of append, write, patch, truncate")
+		h.writeMappedError(w, err)
 		return
 	}
 	if err != nil {
@@ -259,6 +273,9 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 	// Same contract as every other mutation: answer with the fresh node so
 	// clients can chain If-Match tokens without a separate stat.
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, filePath, http.StatusOK)

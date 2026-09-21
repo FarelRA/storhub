@@ -176,7 +176,7 @@ func (h *restHandler) handleSessionOpen(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-open", req.Project, req.Path, "mode", req.Mode)()
+	defer h.traceOp(r, "session-open", req.Project, req.Path, "mode", req.Mode)(&err)
 	id, err := client.OpenSession(r.Context(), req.Project, req.Path, mode, opts...)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -307,7 +307,7 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-write", "", handle)()
+	defer h.traceOp(r, "session-write", "", handle)(&err)
 	wrote, err := client.WriteSession(r.Context(), handle, req.Offset, data)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -317,6 +317,9 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 	// project (no-op when nothing is published) so callers get one
 	// durability spelling across all session verbs, mirroring closeSession.
 	if !h.drainSessionProject(w, r, handle) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.writeJSON(w, http.StatusOK, sessionWriteResponse{Handle: handle, Written: wrote})
@@ -338,12 +341,15 @@ func (h *restHandler) handleSessionTruncate(w http.ResponseWriter, r *http.Reque
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-truncate", "", handle)()
-	if err := client.TruncateSession(r.Context(), handle, req.Size); err != nil {
+	defer h.traceOp(r, "session-truncate", "", handle)(&err)
+	if err = client.TruncateSession(r.Context(), handle, req.Size); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
 	if !h.drainSessionProject(w, r, handle) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -359,12 +365,15 @@ func (h *restHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-sync", "", handle)()
-	if err := client.SyncSession(r.Context(), handle); err != nil {
+	defer h.traceOp(r, "session-sync", "", handle)(&err)
+	if err = client.SyncSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
 	if !h.drainSessionProject(w, r, handle) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -386,12 +395,15 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-link", "", handle)()
-	if err := client.LinkSession(r.Context(), handle, req.Path); err != nil {
+	defer h.traceOp(r, "session-link", "", handle)(&err)
+	if err = client.LinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
 	if !h.drainSessionProject(w, r, handle) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -416,12 +428,15 @@ func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-relink", "", handle)()
-	if err := client.RelinkSession(r.Context(), handle, req.Path); err != nil {
+	defer h.traceOp(r, "session-relink", "", handle)(&err)
+	if err = client.RelinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
 	}
 	if !h.drainSessionProject(w, r, handle) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithSessionStat(w, r, handle)
@@ -458,17 +473,20 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 		h.writeMappedError(w, err)
 		return false
 	}
-	defer h.traceOp(r, "session-close", "", handle)()
+	defer h.traceOp(r, "session-close", "", handle)(&err)
 	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)
 		return false
 	}
-	if err := client.CloseSession(r.Context(), handle); err != nil {
+	if err = client.CloseSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return false
 	}
 	if !h.maybeDrain(w, r, stat.Project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return false
 	}
 	return true

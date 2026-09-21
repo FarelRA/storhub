@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -36,10 +37,12 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "rollback", project, "")()
+	var err error
+	defer h.traceOp(r, "rollback", project, "")(&err)
 	// Rollback republishes history without a target node: the guard is the
 	// project revision (412 when the caller decided on a moved HEAD).
 	if !h.preconditionForProjectOp(w, r, project) {
+		err = errors.New("project precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -47,11 +50,14 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
+	if err = client.RollbackMetadataContext(r.Context(), project, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
@@ -106,8 +112,10 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, errBadRequest("keep must be <= 1: history compaction retains exactly one checkpoint"))
 		return
 	}
-	defer h.traceOp(r, "prune", project, "", "scope", string(scope), "dry_run", req.DryRun)()
+	var err error
+	defer h.traceOp(r, "prune", project, "", "scope", string(scope), "dry_run", req.DryRun)(&err)
 	if !h.preconditionForProjectOp(w, r, project) {
+		err = errors.New("project precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -122,6 +130,9 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.writeJSON(w, http.StatusOK, pruneResponse{
@@ -144,8 +155,10 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	defer h.traceOp(r, "enable", project, "")()
+	var err error
+	defer h.traceOp(r, "enable", project, "")(&err)
 	if !h.preconditionForProjectOp(w, r, project) {
+		err = errors.New("project precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -153,7 +166,7 @@ func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.ReEnableProject(project); err != nil {
+	if err = client.ReEnableProject(project); err != nil {
 		logging.Error(h.logger, "enable failed", "project", project, "err", err, "status", mappedStatus(err))
 		h.writeMappedError(w, err)
 		return
@@ -179,7 +192,8 @@ type statusResponse struct {
 
 func (h *restHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	defer h.traceOp(r, "status", project, "")()
+	var err error
+	defer h.traceOp(r, "status", project, "")(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -241,8 +255,10 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "revert", project, req.Path)()
+	var err error
+	defer h.traceOp(r, "revert", project, req.Path)(&err)
 	if !h.preconditionForProjectOp(w, r, project) {
+		err = errors.New("project precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -250,11 +266,14 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
+	if err = client.RevertPathContext(r.Context(), project, req.Path, req.CommitSHA); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "reverted"})

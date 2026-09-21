@@ -130,8 +130,9 @@ func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok b
 // handleNodeGet serves GET/HEAD /nodes: stat one node with ETag/304 support.
 func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "node-get", project, targetPath)()
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
+	var err error
+	defer h.traceOp(r, "node-get", project, targetPath)(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -161,7 +162,8 @@ func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "node-delete", project, targetPath)()
+	var err error
+	defer h.traceOp(r, "node-delete", project, targetPath)(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -174,16 +176,19 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	revOpts, perr := h.mutationPrecondition(r, project, targetPath)
 	if perr != nil {
+		err = perr
 		h.writeMappedError(w, perr)
 		return
 	}
 	if entry.IsDir {
 		recursive, berr := parseBoolStrict(r.URL.Query().Get("recursive"), "recursive")
 		if berr != nil {
+			err = berr
 			h.writeMappedError(w, berr)
 			return
 		}
 		if recursive {
+			err = &restStatusError{status: http.StatusNotImplemented, message: "recursive directory deletion is not supported"}
 			h.writeError(w, http.StatusNotImplemented, "not_implemented", "recursive directory deletion is not supported")
 			return
 		}
@@ -198,6 +203,9 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -206,7 +214,8 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	dirPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "children", project, dirPath)()
+	var err error
+	defer h.traceOp(r, "children", project, dirPath)(&err)
 	// Unbounded by design: no limit/offset parameters. Directory reads
 	// resolve against the published tree in one storage call and the
 	// response is one JSON document; adding pagination would need a
@@ -378,7 +387,8 @@ func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath s
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "xattrs", project, targetPath)()
+	var err error
+	defer h.traceOp(r, "xattrs", project, targetPath)(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -403,9 +413,11 @@ func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "xattr-get", project, targetPath)()
+	var err error
+	defer h.traceOp(r, "xattr-get", project, targetPath)(&err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
+		err = errBadRequest("invalid xattr name")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -430,15 +442,18 @@ func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "xattr-put", project, targetPath)()
+	var err error
+	defer h.traceOp(r, "xattr-put", project, targetPath)(&err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
+		err = errBadRequest("invalid xattr name")
 		return
 	}
 	// SetXAttrContext takes no mutate options: a revision token fails loud
 	// with 412 (preconditionForUpdateNoCAS) instead of silently degrading
 	// to a start-of-request check.
 	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrput") {
+		err = errors.New("xattr precondition failed")
 		return
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, h.opts.MaxPatchBodySize+1))
@@ -447,7 +462,8 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if int64(len(payload)) > h.opts.MaxPatchBodySize {
-		h.writeMappedError(w, errPayloadTooLarge("xattr value exceeds the configured limit"))
+		err = errPayloadTooLarge("xattr value exceeds the configured limit")
+		h.writeMappedError(w, err)
 		return
 	}
 	client, err := h.clientFor(r)
@@ -455,11 +471,14 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
+	if err = client.SetXAttrContext(r.Context(), project, targetPath, name, payload); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -469,14 +488,17 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := r.URL.Query().Get("path")
-	defer h.traceOp(r, "xattr-delete", project, targetPath)()
+	var err error
+	defer h.traceOp(r, "xattr-delete", project, targetPath)(&err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
+		err = errBadRequest("invalid xattr name")
 		return
 	}
 	// RemoveXAttrContext takes no mutate options: like xattrput, a
 	// revision token fails loud with 412 (preconditionForUpdateNoCAS).
 	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrdelete") {
+		err = errors.New("xattr precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -484,11 +506,14 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
+	if err = client.RemoveXAttrContext(r.Context(), project, targetPath, name); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -512,7 +537,8 @@ func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (
 
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	defer h.traceOp(r, "revisions", project, "")()
+	var err error
+	defer h.traceOp(r, "revisions", project, "")(&err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)

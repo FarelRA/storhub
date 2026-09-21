@@ -2,6 +2,7 @@ package rest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -113,8 +114,9 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "create", project, filePath)()
+	defer h.traceOp(r, "create", project, filePath)(&err)
 	if _, _, ok := h.preconditionForCreate(w, r, project, filePath); !ok {
+		err = errors.New("create precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -122,11 +124,14 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := client.CreateFileContext(r.Context(), project, filePath); err != nil {
+	if _, err = client.CreateFileContext(r.Context(), project, filePath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, filePath, http.StatusCreated)
@@ -139,8 +144,9 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "mkdir", project, dirPath)()
+	defer h.traceOp(r, "mkdir", project, dirPath)(&err)
 	if _, _, ok := h.preconditionForCreate(w, r, project, dirPath); !ok {
+		err = errors.New("create precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -148,11 +154,14 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.MkdirContext(r.Context(), project, dirPath); err != nil {
+	if err = client.MkdirContext(r.Context(), project, dirPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, dirPath, http.StatusCreated)
@@ -165,9 +174,10 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "rmdir", project, dirPath)()
+	defer h.traceOp(r, "rmdir", project, dirPath)(&err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, dirPath)
 	if !ok {
+		err = errors.New("update precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -175,11 +185,14 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.RmdirContext(r.Context(), project, dirPath, revOpts...); err != nil {
+	if err = client.RmdirContext(r.Context(), project, dirPath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -192,9 +205,10 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "unlink", project, filePath)()
+	defer h.traceOp(r, "unlink", project, filePath)(&err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, filePath)
 	if !ok {
+		err = errors.New("update precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -202,11 +216,14 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.DeleteFileContext(r.Context(), project, filePath, revOpts...); err != nil {
+	if err = client.DeleteFileContext(r.Context(), project, filePath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -227,9 +244,11 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "rename", project, req.OldPath, "dst", req.NewPath)()
+	var err error
+	defer h.traceOp(r, "rename", project, req.OldPath, "dst", req.NewPath)(&err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, req.OldPath)
 	if !ok {
+		err = errors.New("update precondition failed")
 		return
 	}
 	if req.NoReplace {
@@ -242,11 +261,14 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.RenameContext(r.Context(), project, req.OldPath, req.NewPath, revOpts...); err != nil {
+	if err = client.RenameContext(r.Context(), project, req.OldPath, req.NewPath, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
@@ -262,12 +284,13 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.OldPath) != "" || strings.TrimSpace(req.NewPath) != "" {
 		logging.Warn(h.logger, "deprecated request fields", "project", project, "reason", "copy fields old_path/new_path used; send src_path/dst_path")
 	}
-	src, dst, err := copySrcDst(req)
-	if err != nil {
-		h.writeMappedError(w, err)
+	src, dst, cerr := copySrcDst(req)
+	if cerr != nil {
+		h.writeMappedError(w, cerr)
 		return
 	}
-	defer h.traceOp(r, "copy", project, src, "dst", dst)()
+	var err error
+	defer h.traceOp(r, "copy", project, src, "dst", dst)(&err)
 	srcOff, dstOff, length, isRange, err := copyRangeParams(req)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -284,6 +307,7 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 	// start-of-request check. The range variant above keeps true CAS via
 	// CloneRange options.
 	if !h.preconditionForUpdateNoCAS(w, r, project, src, "copy") {
+		err = errors.New("copy precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -291,11 +315,14 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.CopyContext(r.Context(), project, src, dst); err != nil {
+	if err = client.CopyContext(r.Context(), project, src, dst); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, dst, http.StatusCreated)
@@ -315,9 +342,11 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 // compare-and-swap options enforced inside the core transaction (412 when
 // the project moved), any other token keeps start-of-request freshness.
 func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, project, src string, srcOff int64, dst string, dstOff int64, length *int64) {
-	defer h.traceOp(r, "clone-range", project, src, "dst", dst)()
+	var err error
+	defer h.traceOp(r, "clone-range", project, src, "dst", dst)(&err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, src)
 	if !ok {
+		err = errors.New("update precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -327,13 +356,15 @@ func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, p
 	}
 	resolved := length
 	if resolved == nil {
-		entry, err := client.StatPathContext(r.Context(), project, src)
-		if err != nil {
-			h.writeMappedError(w, err)
+		entry, serr := client.StatPathContext(r.Context(), project, src)
+		if serr != nil {
+			err = serr
+			h.writeMappedError(w, serr)
 			return
 		}
 		if entry.IsDir {
-			h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: "clone source is a directory"})
+			err = &restStatusError{status: http.StatusConflict, message: "clone source is a directory"}
+			h.writeMappedError(w, err)
 			return
 		}
 		full := entry.Size - srcOff
@@ -342,11 +373,14 @@ func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, p
 		}
 		resolved = &full
 	}
-	if _, err := client.CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
+	if _, err = client.CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, dst, http.StatusCreated)
@@ -367,12 +401,14 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "link", project, req.NewPath, "src", req.ExistingPath)()
+	var err error
+	defer h.traceOp(r, "link", project, req.NewPath, "src", req.ExistingPath)(&err)
 	// Link reads the existing path and creates the new one; the guard sits
 	// on the source. LinkContext takes no mutate options, so a revision
 	// token fails loud with 412 (preconditionForUpdateNoCAS) instead of
 	// silently degrading to a start-of-request check.
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.ExistingPath, "link") {
+		err = errors.New("link precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -380,11 +416,14 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := client.LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
+	if _, err = client.LinkContext(r.Context(), project, req.ExistingPath, req.NewPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusCreated)
@@ -405,10 +444,12 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "symlink", project, req.LinkPath, "target", req.Target)()
+	var err error
+	defer h.traceOp(r, "symlink", project, req.LinkPath, "target", req.Target)(&err)
 	// Symlink creation follows create-only semantics (SymlinkContext takes
 	// no mutate options: freshness only).
 	if _, _, ok := h.preconditionForCreate(w, r, project, req.LinkPath); !ok {
+		err = errors.New("create precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -416,11 +457,14 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if _, err := client.SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
+	if _, err = client.SymlinkContext(r.Context(), project, req.Target, req.LinkPath); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.LinkPath, http.StatusCreated)
@@ -437,12 +481,14 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "chmod", project, req.Path)()
+	var err error
+	defer h.traceOp(r, "chmod", project, req.Path)(&err)
 	// ChmodContext takes no mutate options: a revision token cannot become
 	// apply-time compare-and-swap, so it fails loud with 412
 	// (preconditionForUpdateNoCAS) instead of silently degrading to a
 	// start-of-request check. Classic ETag tokens keep freshness semantics.
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chmod") {
+		err = errors.New("chmod precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -450,11 +496,14 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
+	if err = client.ChmodContext(r.Context(), project, req.Path, req.Mode); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
@@ -471,11 +520,13 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "chown", project, req.Path)()
+	var err error
+	defer h.traceOp(r, "chown", project, req.Path)(&err)
 	// ChownContext takes no mutate options: like chmod, a revision token
 	// fails loud with 412 (preconditionForUpdateNoCAS) instead of silently
 	// degrading to a start-of-request check.
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "chown") {
+		err = errors.New("chown precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -483,11 +534,14 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
+	if err = client.ChownContext(r.Context(), project, req.Path, req.UID, req.GID); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
@@ -504,11 +558,13 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "utimes", project, req.Path)()
+	var err error
+	defer h.traceOp(r, "utimes", project, req.Path)(&err)
 	// A zero time.Time would silently forward UnixNano() garbage to
 	// storage; require both stamps to be present.
 	if req.Atime.IsZero() || req.Mtime.IsZero() {
-		h.writeMappedError(w, errBadRequest("atime and mtime are required"))
+		err = errBadRequest("atime and mtime are required")
+		h.writeMappedError(w, err)
 		return
 	}
 	// ChtimesContext takes no mutate options: like chmod, a revision token
@@ -519,6 +575,7 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 	// nanoseconds; sub-second fractions survive end to end, matching the
 	// nanosecond storage format (structural: FUSE/REST/CLI share it).
 	if !h.preconditionForUpdateNoCAS(w, r, project, req.Path, "utimes") {
+		err = errors.New("utimes precondition failed")
 		return
 	}
 	client, err := h.clientFor(r)
@@ -526,11 +583,14 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err := client.ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
+	if err = client.ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if !h.maybeDrain(w, r, project) {
+		if err == nil {
+			err = errors.New("drain failed")
+		}
 		return
 	}
 	h.respondWithNode(w, r, project, req.Path, http.StatusOK)
