@@ -43,7 +43,7 @@ jobs:
           # test budgets, never ship). Any other hit is a
           # regression: justify it in 22-event-purity-plan.md or route
           # it through the approved shape.
-          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ fuse/ rest/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/test/' || true)
+          hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/test/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             exit 1
@@ -90,8 +90,8 @@ jobs:
         working-directory: web
         run: bun run build:embed
       - name: verify the embedded bundle is non-empty
-        # The committed internal/rest/static/dist is a convenience so Go-only
-        # checkouts build; the release workflow rebuilds it from source in a
+        # The embed dir is git-ignored (Go-only checkouts carry only
+        # placeholder.txt); the release workflow rebuilds it from source in a
         # pinned environment. A byte-for-byte CI diff against it is NOT
         # meaningful: the bundle is not hermetic (esbuild output varies by CPU
         # arch and bun version), so this only asserts the production build
@@ -146,7 +146,6 @@ jobs:
           ./internal/github/...
           ./internal/fusefs/...
           ./internal/rest/...
-          ./rest/...
           ./internal/cli/...
 
   test-arm64:
@@ -183,7 +182,6 @@ jobs:
           ./internal/github/...
           ./internal/fusefs/...
           ./internal/rest/...
-          ./rest/...
           ./internal/cli/...
 
   benchmark-budgets:

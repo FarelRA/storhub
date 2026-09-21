@@ -2,9 +2,17 @@
 # web/.gitignore for the console toolchain.
 
 # goreleaser output, anchored to the repo root: an unanchored `dist/`
-# would also match internal/rest/static/dist (the committed console
-# embed) and silently ignore newly generated bundle files.
+# would also match internal/rest/static/dist (the console embed dir)
+# and silently ignore newly generated bundle files.
 /dist/
+
+# Console embed bundle: internal/rest/static/dist is rebuilt from source
+# via `bun run build:embed` in web/ (pinned bun in the web job and the
+# release/nightly publish jobs). Ignore the generated bundle so Go-only
+# checkouts never see bundle churn; only the placeholder.txt that keeps
+# `go:embed` compiling on checkouts without the bundle is tracked.
+/internal/rest/static/dist/*
+!/internal/rest/static/dist/placeholder.txt
 
 # Go build/test byproducts
 *.test

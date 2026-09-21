@@ -10,12 +10,17 @@ import (
 
 // The console is a Nuxt SPA built ahead of time (`web/ -> bun run build:embed`)
 // and embedded into the binary: no runtime CDN, no external asset trust, one
-// self-contained artifact. The built dist is committed so Go-only checkouts
-// build without the web toolchain; workflows that release artifacts rebuild
-// it from source first. The bundle is not hermetic (chunk hashes drift by
-// arch and toolchain, index.html embeds a random buildId), so byte-for-byte
-// equality between the committed dist and a fresh rebuild is NOT expected:
-// CI only asserts the rebuilt bundle is non-empty.
+// self-contained artifact. The built dist is git-ignored so Go-only checkouts
+// never see bundle churn; release workflows rebuild it from source first with
+// a pinned bun. The bundle is not hermetic (chunk hashes drift by arch and
+// toolchain, index.html embeds a random buildId), so byte-for-byte equality
+// between a local dist and a fresh rebuild is NOT expected: CI only asserts
+// the rebuilt bundle is non-empty.
+//
+// A committed placeholder.txt keeps `go:embed all:static/dist` compiling on
+// Go-only checkouts (Go refuses to embed an empty directory). It is rejected
+// by isDistFile and never served. Without a real index.html, serveUIRoot
+// keeps its clean ui_not_built 404 path for exactly this case.
 //
 //go:embed all:static/dist
 var uiDist embed.FS
@@ -100,9 +105,11 @@ func (h *restHandler) serveUIPublic(w http.ResponseWriter, r *http.Request) {
 // isDistFile reports whether the URL path names an existing REGULAR file
 // inside the embedded dist: the traversal guard must pass and the target
 // must not be a directory (FileServerFS renders directory listings).
+// placeholder.txt (the committed go:embed placeholder for Go-only
+// checkouts) is never a servable asset.
 func isDistFile(dist fs.FS, urlPath string) bool {
 	name := safeDistName(urlPath)
-	if name == "" {
+	if name == "" || name == "placeholder.txt" {
 		return false
 	}
 	info, err := fs.Stat(dist, name)

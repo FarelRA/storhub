@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Copies `nuxt generate` output (.output/public) into the Go embed directory.
-// The placeholder index.html committed there keeps `go build/test` working on
-// machines without bun; this script replaces it with the real bundle.
+// internal/rest/static/dist is git-ignored: release builds regenerate it from
+// source with a pinned bun, while Go-only checkouts carry only the committed
+// placeholder.txt (which keeps `go:embed` compiling) and serve ui_not_built
+// until a real bundle is built via `bun run build:embed`. This script replaces
+// the placeholder with the real bundle.
 import { cpSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
