@@ -264,9 +264,7 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	options.ExtraCapabilities = fuse.CAP_WRITEBACK_CACHE
 	server, err := gofusefs.Mount(mountPoint, s.root, options)
 	if err != nil {
-		if s.debugEnabled() {
-			s.debugOp("mount failed", "project", s.project, "target", mountPoint, "err", err)
-		}
+		s.errorOp("mount failed", "project", s.project, "target", mountPoint, "err", err)
 		return err
 	}
 	// Publish under mu like every other server access (connected(),
@@ -312,9 +310,7 @@ func (s *Filesystem) Unmount() error {
 		s.mu.Lock()
 		s.unmounted = false
 		s.mu.Unlock()
-		if s.debugEnabled() {
-			s.debugOp("unmount failed", "project", s.project, "err", err)
-		}
+		s.errorOp("unmount failed", "project", s.project, "err", err)
 		return err
 	}
 	s.mu.Lock()

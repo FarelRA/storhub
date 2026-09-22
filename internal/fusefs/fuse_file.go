@@ -160,21 +160,15 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
 		return nil, 0, errnoFromError(err)
 	}
 	if entry.IsDir {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.EISDIR)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.EISDIR)
 		return nil, 0, syscall.EISDIR
 	}
 	if entry.IsSymlink {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ELOOP)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ELOOP)
 		return nil, 0, syscall.ELOOP
 	}
 	// Pin the content layout at open time, shared across handles that
@@ -186,16 +180,12 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	// rename-over race this pin prevents.
 	repoMeta, _, metaErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
 	if metaErr != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaErr)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaErr)
 		return nil, 0, errnoFromError(metaErr)
 	}
 	file := repoMeta.FindFile(targetPath)
 	if file == nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
 		return nil, 0, syscall.ENOENT
 	}
 	// Close the stat-then-pin window: a REST rename, replace, or unlink
@@ -207,29 +197,21 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	if file.Inode != entry.Inode {
 		entryRetry, errRetry := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 		if errRetry != nil {
-			if n.fs.debugEnabled() {
-				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", errRetry)
-			}
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", errRetry)
 			return nil, 0, errnoFromError(errRetry)
 		}
 		repoRetry, _, metaRetryErr := n.fs.hub.LoadRepoMetadataReadonlyContext(ctx, n.fs.project)
 		if metaRetryErr != nil {
-			if n.fs.debugEnabled() {
-				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaRetryErr)
-			}
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", metaRetryErr)
 			return nil, 0, errnoFromError(metaRetryErr)
 		}
 		fileRetry := repoRetry.FindFile(targetPath)
 		if fileRetry == nil {
-			if n.fs.debugEnabled() {
-				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
-			}
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
 			return nil, 0, syscall.ENOENT
 		}
 		if fileRetry.Inode != entryRetry.Inode {
-			if n.fs.debugEnabled() {
-				n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
-			}
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
 			return nil, 0, syscall.ENOENT
 		}
 		entry = entryRetry
@@ -258,17 +240,13 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		const oPathFlag = 0o10000000
 		if flags&syscall.O_ACCMODE != syscall.O_WRONLY && flags&oPathFlag == 0 {
 			if err := shfs.CheckReadAccess(ctx, repoMeta, targetPath); err != nil {
-				if n.fs.debugEnabled() {
-					n.fs.debugOp("open denied", "path", targetPath, "err", err)
-				}
+				n.fs.errorOp("open denied", "path", targetPath, "err", err)
 				return nil, 0, errnoFromError(err)
 			}
 		}
 		if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND) != 0 {
 			if err := shfs.CheckWriteAccess(ctx, repoMeta, targetPath); err != nil {
-				if n.fs.debugEnabled() {
-					n.fs.debugOp("open denied", "path", targetPath, "err", err)
-				}
+				n.fs.errorOp("open denied", "path", targetPath, "err", err)
 				return nil, 0, errnoFromError(err)
 			}
 		}
@@ -296,9 +274,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	}
 	h, err := n.fs.newHandle(ctx, n.inode, targetPath, flags, nil)
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
-		}
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", err)
 		return nil, 0, errnoFromError(err)
 	}
 	h.pinned = pin
@@ -320,9 +296,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	}
 	file, err := n.fs.hub.CreateFileContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("create failed", "path", childPath, "err", err)
-		}
+		n.fs.errorOp("create failed", "path", childPath, "err", err)
 		return nil, nil, 0, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
@@ -330,9 +304,7 @@ func (n *storhubNode) Create(ctx context.Context, name string, flags uint32, mod
 	ino := n.attachEntry(ctx, entry, out)
 	h, err := n.fs.newHandle(ctx, entry.Inode, childPath, flags, &writeBootstrap{baseSize: entry.Size})
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("create failed", "path", childPath, "err", err)
-		}
+		n.fs.errorOp("create failed", "path", childPath, "err", err)
 		// The empty file is already committed remotely; leaving it
 		// behind would orphan an entry the application was told was never
 		// created. Roll it back before reporting the failure.

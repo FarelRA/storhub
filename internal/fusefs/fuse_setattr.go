@@ -32,27 +32,19 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	}
 	usedLocalSize, localSize, errno := n.setattrSize(ctx, targetPath, in, state)
 	if errno != 0 {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "size", "errno", errno)
-		}
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "size", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrMode(ctx, targetPath, in, state); errno != 0 {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "mode", "errno", errno)
-		}
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "mode", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrOwner(ctx, targetPath, in, state); errno != 0 {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "owner", "errno", errno)
-		}
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "owner", "errno", errno)
 		return errno
 	}
 	if errno := n.setattrTimes(ctx, targetPath, in, state); errno != 0 {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "times", "errno", errno)
-		}
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "times", "errno", errno)
 		return errno
 	}
 	return n.finishSetattr(ctx, targetPath, state, usedLocalSize, localSize, out, in.Valid)
@@ -503,9 +495,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, state *inodeWriteState, usedLocalSize bool, localSize int64, out *fuse.AttrOut, valid uint32) syscall.Errno {
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "finish", "errno", errnoFromError(err))
-		}
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "finish", "errno", errnoFromError(err))
 		return errnoFromError(err)
 	}
 	if usedLocalSize {

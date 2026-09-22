@@ -368,7 +368,9 @@ func (s *Filesystem) debugOp(op string, args ...any) {
 	if !s.opts.Debug {
 		return
 	}
-	logging.Debug(s.log(), "fuse "+op, args...)
+	// No "fuse " prefix: the component attr already carries the
+	// namespace, matching every other package's bare op names.
+	logging.Debug(s.log(), op, args...)
 }
 
 // log returns the mount logger, never nil. Operational failures must
@@ -387,7 +389,7 @@ func (s *Filesystem) log() *slog.Logger {
 // the process-default fallback in log). Fields stay structured; never
 // pass file bytes, only sizes, offsets, paths, and errors.
 func (s *Filesystem) errorOp(op string, args ...any) {
-	logging.Error(s.log(), "fuse "+op, args...)
+	logging.Error(s.log(), op, args...)
 }
 
 // quarantine reasons recorded in manifests.

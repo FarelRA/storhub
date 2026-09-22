@@ -4,6 +4,7 @@ import (
 	"context"
 	"path"
 	"syscall"
+	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
@@ -19,11 +20,13 @@ func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]
 	if stale != 0 {
 		return nil, nil, stale
 	}
+	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("readdir", "path", dirPath)
+		n.fs.debugOp("readdir start", "path", dirPath)
 	}
 	entries, err := n.fs.hub.ReadDirContext(ctx, n.fs.project, dirPath)
 	if err != nil {
+		n.fs.errorOp("readdir failed", "path", dirPath, "err", err)
 		return nil, nil, errnoFromError(err)
 	}
 	result := make([]fuse.DirEntry, 0, len(entries)+2)
@@ -46,6 +49,9 @@ func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]
 		}
 		result = append(result, fuse.DirEntry{Name: entry.Name, Ino: entry.Inode, Mode: mode})
 		infos[entry.Name] = shfs.EntryFromDirEntry(entry, path.Join(dirPath, entry.Name))
+	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("readdir complete", "path", dirPath, "elapsed", time.Since(started))
 	}
 	return result, infos, 0
 }
@@ -195,16 +201,12 @@ func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		n.fs.debugOp("mkdir start", "path", childPath, "mode", mode)
 	}
 	if err := n.fs.hub.MkdirContext(ctx, n.fs.project, childPath); err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
-		}
+		n.fs.errorOp("mkdir failed", "path", childPath, "err", err)
 		return nil, errnoFromError(err)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("mkdir failed", "path", childPath, "err", err)
-		}
+		n.fs.errorOp("mkdir failed", "path", childPath, "err", err)
 		return nil, errnoFromError(err)
 	}
 	ino := n.attachEntry(ctx, entry, out)
@@ -222,13 +224,19 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return stale
 	}
 	childPath := path.Join(parentPath, name)
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("unlink start", "path", childPath)
+	}
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if entry != nil {
 		if err := n.fs.materializeHandlesForPath(ctx, entry.Inode, childPath); err != nil {
+			n.fs.errorOp("unlink failed", "path", childPath, "err", err)
 			return errnoFromError(err)
 		}
 	}
 	if err := n.fs.hub.UnlinkContext(ctx, n.fs.project, childPath); err != nil {
+		n.fs.errorOp("unlink failed", "path", childPath, "err", err)
 		return errnoFromError(err)
 	}
 	n.fs.dropPinnedForPath(childPath)
@@ -238,7 +246,7 @@ func (n *storhubNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		n.notifyEntry(name)
 	}
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("unlink", "path", childPath)
+		n.fs.debugOp("unlink complete", "path", childPath, "elapsed", time.Since(started))
 	}
 	return 0
 }
@@ -250,8 +258,13 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return stale
 	}
 	childPath := path.Join(parentPath, name)
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("rmdir start", "path", childPath)
+	}
 	entry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err := n.fs.hub.RmdirContext(ctx, n.fs.project, childPath); err != nil {
+		n.fs.errorOp("rmdir failed", "path", childPath, "err", err)
 		return errnoFromError(err)
 	}
 	n.fs.dropPinnedForPath(childPath)
@@ -261,7 +274,7 @@ func (n *storhubNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		n.notifyEntry(name)
 	}
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("rmdir", "path", childPath)
+		n.fs.debugOp("rmdir complete", "path", childPath, "elapsed", time.Since(started))
 	}
 	return 0
 }
@@ -285,6 +298,10 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	if flags&renameExchange != 0 || flags&renameWhiteout != 0 {
 		return syscall.EINVAL
 	}
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("rename start", "old", oldPath, "new", newPath, "flags", flags)
+	}
 	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
 	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
 	// The pre-stat is only a fast path; the authoritative noreplace
@@ -302,10 +319,12 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	// snapshot: materialize before the metadata swap removes the path.
 	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
 		if err := n.fs.materializeHandlesForPath(ctx, newEntry.Inode, newPath); err != nil {
+			n.fs.errorOp("rename failed", "old", oldPath, "new", newPath, "flags", flags, "err", err)
 			return errnoFromError(err)
 		}
 	}
 	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath, renameOpts...); err != nil {
+		n.fs.errorOp("rename failed", "old", oldPath, "new", newPath, "flags", flags, "err", err)
 		return errnoFromError(err)
 	}
 	// The namespace moved: cached layouts keyed by either path are stale
@@ -336,7 +355,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	// the pre-rename tree until EntryTimeout expires.
 	n.fs.notifyNamespaceChange(oldPath, newPath)
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("rename", "old", oldPath, "new", newPath, "flags", flags)
+		n.fs.debugOp("rename complete", "old", oldPath, "new", newPath, "flags", flags, "elapsed", time.Since(started))
 	}
 	return 0
 }

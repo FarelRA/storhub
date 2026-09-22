@@ -31,9 +31,7 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		if out != nil && errnoFromError(err) == syscall.ENOENT {
 			out.SetEntryTimeout(n.fs.opts.NegativeTimeout)
 		}
-		if n.fs.debugEnabled() {
-			n.fs.debugOp("lookup failed", "path", childPath, "err", err)
-		}
+		n.fs.errorOp("lookup failed", "path", childPath, "err", err)
 		return nil, errnoFromError(err)
 	}
 	n.fs.applyPendingSize(entry)
@@ -62,11 +60,13 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 		}
 		return stale
 	}
+	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("getattr", "path", targetPath, "inode", n.inode)
+		n.fs.debugOp("getattr start", "path", targetPath, "inode", n.inode)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
+		n.fs.errorOp("getattr failed", "path", targetPath, "inode", n.inode, "err", err)
 		return errnoFromError(err)
 	}
 	// Overlay staged mode/owner/times/size exactly as finishSetattr
@@ -75,6 +75,9 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	n.fs.applyOverlayForGetattr(f, n.inode, entry)
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("getattr complete", "path", targetPath, "inode", n.inode, "elapsed", time.Since(started))
+	}
 	return 0
 }
 
@@ -122,11 +125,13 @@ func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	if stale != 0 {
 		return stale
 	}
+	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("access", "path", targetPath, "inode", n.inode, "mask", mask)
+		n.fs.debugOp("access start", "path", targetPath, "inode", n.inode, "mask", mask)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
+		n.fs.errorOp("access failed", "path", targetPath, "inode", n.inode, "mask", mask, "err", err)
 		return errnoFromError(err)
 	}
 	need := 0
@@ -140,11 +145,18 @@ func (n *storhubNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 		need |= shfs.AccessExec
 	}
 	if need == 0 {
+		if n.fs.debugEnabled() {
+			n.fs.debugOp("access complete", "path", targetPath, "inode", n.inode, "mask", mask, "elapsed", time.Since(started))
+		}
 		return 0
 	}
 	id := shfs.IdentityFromContext(ctx)
 	if err := shfs.CanAccessEntry(id, entry, need); err != nil {
+		n.fs.errorOp("access failed", "path", targetPath, "inode", n.inode, "mask", mask, "err", err)
 		return errnoFromError(err)
+	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("access complete", "path", targetPath, "inode", n.inode, "mask", mask, "elapsed", time.Since(started))
 	}
 	return 0
 }
@@ -169,14 +181,22 @@ func (n *storhubNode) Symlink(ctx context.Context, target, name string, out *fus
 		return nil, stale
 	}
 	childPath := path.Join(parentPath, name)
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("symlink start", "path", childPath, "target", target)
+	}
 	file, err := n.fs.hub.SymlinkContext(ctx, n.fs.project, target, childPath)
 	if err != nil {
+		n.fs.errorOp("symlink failed", "path", childPath, "target", target, "err", err)
 		return nil, errnoFromError(err)
 	}
 	nlink := n.fs.nlinkForEntry(ctx, childPath)
 	entry := shfs.EntryFromFile(file, childPath, nlink)
 	ino := n.attachEntry(ctx, entry, out)
 	n.fs.publishEntry(parentPath, name)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("symlink complete", "path", childPath, "target", target, "inode", entry.Inode, "elapsed", time.Since(started))
+	}
 	return ino, 0
 }
 
@@ -186,9 +206,17 @@ func (n *storhubNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	if stale != 0 {
 		return nil, stale
 	}
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("readlink start", "path", targetPath, "inode", n.inode)
+	}
 	target, err := n.fs.hub.ReadlinkContext(ctx, n.fs.project, targetPath)
 	if err != nil {
+		n.fs.errorOp("readlink failed", "path", targetPath, "inode", n.inode, "err", err)
 		return nil, errnoFromError(err)
+	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("readlink complete", "path", targetPath, "target", target, "inode", n.inode, "elapsed", time.Since(started))
 	}
 	return []byte(target), 0
 }
@@ -208,19 +236,28 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 		return nil, stale
 	}
 	linkPath := path.Join(parentPath, name)
+	started := time.Now()
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("link start", "path", linkPath, "target", sourcePath)
+	}
 	linked, err := n.fs.hub.LinkContext(ctx, n.fs.project, sourcePath, linkPath)
 	if err != nil {
+		n.fs.errorOp("link failed", "path", linkPath, "target", sourcePath, "err", err)
 		return nil, errnoFromError(err)
 	}
 	if linked == nil {
 		// A hub that reports success without an entry (e.g. a
 		// directory source) must not be dereferenced by the constructor.
+		n.fs.errorOp("link failed", "path", linkPath, "target", sourcePath, "err", syscall.EPERM)
 		return nil, syscall.EPERM
 	}
 	nlink := n.fs.nlinkForEntry(ctx, linkPath)
 	entry := shfs.EntryFromFile(linked, linkPath, nlink)
 	ino := n.attachEntry(ctx, entry, out)
 	n.fs.publishEntry(parentPath, name)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("link complete", "path", linkPath, "target", sourcePath, "inode", entry.Inode, "elapsed", time.Since(started))
+	}
 	return ino, 0
 }
 
