@@ -163,8 +163,8 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 			// path cannot honor: failing loud beats applying unguarded.
 			return err
 		}
-		a.warnfWithAttrs(nil, "clone unavailable (%v); falling back to streaming copy",
-			[]any{"err", err, "fallback", "streaming copy"}, err)
+		a.warnfWithAttrs(nil, "clone unavailable; falling back to streaming copy",
+			[]any{"err", err, "fallback", "streaming copy"})
 		meta, err := streamingCopy(ctx, hub, project, src, srcOff, dst, dstOff, length)
 		if err != nil {
 			return err

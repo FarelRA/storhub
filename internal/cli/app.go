@@ -209,15 +209,13 @@ func warnSink() io.Writer {
 }
 
 // warnfWithAttrs is the structured warning sink for pre-App callers: it
-// renders the exact storhub-prefixed human text via Sprintf and also
-// attaches key values as structured slog attrs. Message text is unchanged;
-// attrs only add machine-readable fields.
-func warnfWithAttrs(out io.Writer, format string, attrs []any, args ...any) {
+// renders a fixed storhub-prefixed human message with all varying values
+// carried as structured slog attrs, never interpolated into the message.
+func warnfWithAttrs(out io.Writer, msg string, attrs []any) {
 	if out == nil {
 		out = warnSink()
 	}
-	msg := fmt.Sprintf("storhub: warning: "+format, args...)
-	shlog.Warn(cliWarnLogger(out, shlog.FormatPretty, false), msg, attrs...)
+	shlog.Warn(cliWarnLogger(out, shlog.FormatPretty, false), "storhub: warning: "+msg, attrs...)
 }
 
 // cliWarnLogger builds a Warn-level slog logger writing to out.
@@ -241,11 +239,11 @@ func (a *App) logger() *slog.Logger {
 	return shlog.WithComponent(base, "cli")
 }
 
-// warnfWithAttrs is the App structured warning sink: it renders the exact
-// storhub-prefixed human text tests assert on, plus structured attrs,
-// logged with the App log format and color settings. A nil out resolves
-// through the usual App sink chain.
-func (a *App) warnfWithAttrs(out io.Writer, format string, attrs []any, args ...any) {
+// warnfWithAttrs is the App structured warning sink: it renders a fixed
+// storhub-prefixed human message with all varying values as structured
+// attrs, logged with the App log format and color settings. A nil out
+// resolves through the usual App sink chain.
+func (a *App) warnfWithAttrs(out io.Writer, msg string, attrs []any) {
 	if out == nil {
 		out = a.warnOut
 	}
@@ -255,8 +253,7 @@ func (a *App) warnfWithAttrs(out io.Writer, format string, attrs []any, args ...
 	if out == nil {
 		out = warnSink()
 	}
-	msg := fmt.Sprintf("storhub: warning: "+format, args...)
-	shlog.Warn(cliWarnLogger(out, a.log.format, a.log.color), msg, attrs...)
+	shlog.Warn(cliWarnLogger(out, a.log.format, a.log.color), "storhub: warning: "+msg, attrs...)
 }
 
 func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMount, error) {
@@ -487,7 +484,7 @@ func (a *App) Run(args []string) error {
 			// The command already failed; keep its error primary but never
 			// swallow the flush failure alongside it (via the primary
 			// App warning sink).
-			a.warnfWithAttrs(nil, "secondary flush failure: %v", []any{"err", flushErr}, flushErr)
+			a.warnfWithAttrs(nil, "secondary flush failure", []any{"err", flushErr})
 		}
 	}
 	return err
@@ -541,7 +538,7 @@ func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (stri
 		return apiBase, chunkSize, public, log, nil
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		a.warnfWithAttrs(nil, "config file %q not found; continuing without it", []any{"path", path}, path)
+		a.warnfWithAttrs(nil, "config file not found; continuing without it", []any{"path", path})
 		return apiBase, chunkSize, public, log, nil
 	}
 	fc, err := storcfg.ReadFileConfig(path)

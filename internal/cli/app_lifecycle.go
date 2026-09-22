@@ -33,7 +33,7 @@ func (a *App) shutdownHub() error {
 		shlog.Error(a.logger(), "metadata flush failed", "elapsed", time.Since(start), "err", err)
 		return fmt.Errorf("metadata flush failed: %w", err)
 	}
-	shlog.Info(a.logger(), "metadata flush complete", "elapsed", time.Since(start))
+	shlog.Debug(a.logger(), "metadata flush complete", "elapsed", time.Since(start))
 	return nil
 }
 

@@ -60,6 +60,9 @@ func TestUnmountWithRetryGivesUpAfterBudget(t *testing.T) {
 
 func TestLoggingMiddlewareRedactsTokens(t *testing.T) {
 	app, _, stderr := newTestApp(t)
+	// Request lines log at Debug; enable it so this test exercises the
+	// redaction path instead of asserting on silence.
+	app.log.level = "debug"
 	handler := app.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

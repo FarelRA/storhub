@@ -29,9 +29,8 @@ func newHubConfig(apiBase string, chunkSize int64, public bool, log logSettings,
 	}
 	if normalized := normalizeCLIChunkSize(chunkSize); normalized > 0 {
 		if normalized != chunkSize {
-			warnfWithAttrs(warnSink(), "--chunksize %d outside [%d, %d]; using %d",
-				[]any{"key", "chunksize", "value", chunkSize, "fallback", normalized},
-				chunkSize, minCLIChunkSize, chunking.MaxReleaseAssetSize, normalized)
+			warnfWithAttrs(warnSink(), "--chunksize outside range; using fallback",
+				[]any{"key", "chunksize", "value", chunkSize, "min", minCLIChunkSize, "max", chunking.MaxReleaseAssetSize, "fallback", normalized})
 		}
 		cfg.ChunkSize = normalized
 	}
@@ -76,9 +75,8 @@ func applyRateEnv(cfg *storcfg.Config, longRunning bool) {
 		{"STORHUB_MAX_CONCURRENT", cfg.MaxConcurrentRequests},
 	} {
 		if neg.value < 0 {
-			warnfWithAttrs(warnSink(), "%s=%d is negative; the rate governor silently replaces it with the library default",
-				[]any{"key", neg.key, "value", neg.value},
-				neg.key, neg.value)
+			warnfWithAttrs(warnSink(), "rate governor value is negative; using library default",
+				[]any{"key", neg.key, "value", neg.value})
 		}
 	}
 }
@@ -130,7 +128,6 @@ func parseEnvBool(key string, fallback bool) bool {
 // default. The fallback preserves behavior; the warning makes the
 // misconfiguration visible instead of silent.
 func warnEnvParse(key, value string, err error) {
-	warnfWithAttrs(warnSink(), "invalid %s=%q (%v); using default",
-		[]any{"key", key, "value", value},
-		key, value, err)
+	warnfWithAttrs(warnSink(), "invalid env value; using default",
+		[]any{"key", key, "value", value, "err", err})
 }

@@ -80,9 +80,8 @@ func (d *flexDuration) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("token_ttl must not be negative, got %s", raw)
 	}
 	suggested := fmt.Sprintf("%ds", int64(seconds))
-	warnfWithAttrs(warnSink(), "token_ttl as a bare number (%s) is deprecated; use a Go duration string like %q",
-		[]any{"key", "token_ttl", "value", raw, "fallback", suggested},
-		raw, suggested)
+	warnfWithAttrs(warnSink(), "token_ttl as a bare number is deprecated; use a Go duration string",
+		[]any{"key", "token_ttl", "value", raw, "fallback", suggested})
 	*d = flexDuration(time.Duration(seconds * float64(time.Second)))
 	return nil
 }
@@ -454,9 +453,9 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := shlog.NewHTTPRecorder(w)
 		uri := shlog.RedactRequestURI(r.URL.RequestURI())
-		shlog.Debug(a.logger(), "http start", "method", r.Method, "uri", uri, "remote", r.RemoteAddr)
+		shlog.Debug(a.logger(), "http start", "method", r.Method, "path", uri, "remote", r.RemoteAddr)
 		next.ServeHTTP(wrapped, r)
-		shlog.Info(a.logger(), "http done", "method", r.Method, "uri", uri, "remote", r.RemoteAddr, "status", wrapped.Status(), "duration", time.Since(start).Round(time.Millisecond).String())
+		shlog.Debug(a.logger(), "http done", "method", r.Method, "path", uri, "remote", r.RemoteAddr, "status", wrapped.Status(), "elapsed", time.Since(start).Round(time.Millisecond).String())
 	})
 }
 
