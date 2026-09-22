@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -181,7 +182,11 @@ func (h *restHandler) clientFor(r *http.Request) (Client, error) {
 	if value := r.Context().Value(clientCtxKey); value != nil {
 		client, ok := value.(Client)
 		if !ok {
-			logging.Error(h.logger, "rest: context value under clientCtxKey does not implement Client; failing closed", "type", fmt.Sprintf("%T", value))
+			typeName := ""
+			if t := reflect.TypeOf(value); t != nil {
+				typeName = t.String()
+			}
+			logging.Error(h.logger, "rest: context value under clientCtxKey does not implement Client; failing closed", "type", typeName)
 			return nil, &restStatusError{status: http.StatusInternalServerError, message: "rest: context client does not implement Client"}
 		}
 		return client, nil
@@ -374,16 +379,16 @@ func (h *restHandler) recoverPanics(next http.Handler) http.Handler {
 func (h *restHandler) requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Gate BEFORE redacting: RedactSensitivePath+RedactQueryValues run
-		// per request even when Info is dropped at the warn default.
-		if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelInfo) {
+		// per request even when Debug is dropped at the warn default.
+		if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		started := time.Now().UTC()
 		sw := logging.NewHTTPRecorder(w)
-		logging.Info(h.logger, "http request start", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "query", logging.RedactQueryValues(r.URL.RawQuery), "remote", r.RemoteAddr)
+		logging.Debug(h.logger, "http request start", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "query", logging.RedactQueryValues(r.URL.RawQuery), "remote", r.RemoteAddr)
 		next.ServeHTTP(sw, r)
-		logging.Info(h.logger, "http request complete", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "status", sw.Status(), "bytes", sw.Bytes(), "elapsed", time.Since(started))
+		logging.Debug(h.logger, "http request complete", "method", r.Method, "path", logging.RedactSensitivePath(r.URL.Path), "status", sw.Status(), "bytes", sw.Bytes(), "elapsed", time.Since(started))
 	})
 }
 
@@ -493,15 +498,14 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 // disabled path allocation-free for the alloc-parity benchmark budgets.
 var traceOpNoop = func(*error) {}
 
-// traceOp logs a symmetric Debug start plus a finish that reports failure
-// when the handler saw an error: per-handler noise stays at Debug while
-// the top-level request lines in requestLogging keep Info. Handlers defer
-// the returned closure with a pointer to their err variable so every
-// invocation completes its pair; failures stay visible through the
-// requestLogging complete line (status) and the Error logs in
-// writeMappedError (5xx). targetPath is a project-relative path from the
-// request (never a token or secret); extra carries endpoint-specific
-// attrs such as scope or op.
+// traceOp logs the symmetric span for one handler invocation through the
+// canonical logging.Start/Finish core: Debug "<op> start" now, then Error
+// "<op> failed" with err or Debug "<op> complete" when the deferred
+// finish runs. The component attr carries the rest namespace, so the op
+// name stays bare. Handlers defer the returned closure with a pointer to
+// their err variable so every invocation completes its pair. targetPath
+// is a project-relative path from the request (never a token or secret);
+// extra carries endpoint-specific attrs such as scope.
 func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func(*error) {
 	// Zero-cost when Debug is off: the alloc-parity benchmark budgets
 	// fail on any per-request heap work, so skip the slice builds,
@@ -510,19 +514,18 @@ func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, e
 	if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug) {
 		return traceOpNoop
 	}
-	opName := "rest " + op
 	method := r.Method
 	route := logging.RedactSensitivePath(r.URL.Path)
 	started := time.Now().UTC()
 	startArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
-	logging.Start(h.logger, opName, startArgs...)
+	logging.Start(h.logger, op, startArgs...)
 	return func(perr *error) {
 		var finishErr error
 		if perr != nil {
 			finishErr = *perr
 		}
 		finishArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
-		logging.Finish(h.logger, opName, started, finishErr, finishArgs...)
+		logging.Finish(h.logger, op, started, finishErr, finishArgs...)
 	}
 }
 

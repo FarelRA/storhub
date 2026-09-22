@@ -30,12 +30,15 @@ import (
 // handleShareInfo serves GET /shares/{token}: public share metadata.
 func (h *restHandler) handleShareInfo(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	claims, err := h.parseShareToken(token)
-	if err != nil || strings.TrimSpace(claims.Path) == "" || strings.TrimSpace(claims.Project) == "" {
+	claims, cerr := h.parseShareToken(token)
+	if cerr != nil || strings.TrimSpace(claims.Path) == "" || strings.TrimSpace(claims.Project) == "" {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
+	var err error
+	defer h.traceOp(r, "share-info", claims.Project, claims.Path)(&err)
 	if h.isRevoked(claims.ID) {
+		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -72,16 +75,18 @@ func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaim
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
 	// Same single pathway as info: the token (query here) is the credential.
 	// Shares are always download-capable after normalization; no dl flag check.
-	claims, err := h.parseShareToken(r.URL.Query().Get("token"))
-	if err != nil || h.isRevoked(claims.ID) {
+	claims, cerr := h.parseShareToken(r.URL.Query().Get("token"))
+	if cerr != nil || h.isRevoked(claims.ID) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	targetPath, err := h.resolveSharePath(claims, r.URL.Query().Get("path"))
-	if err != nil {
-		h.writeMappedError(w, err)
+	targetPath, rerr := h.resolveSharePath(claims, r.URL.Query().Get("path"))
+	if rerr != nil {
+		h.writeMappedError(w, rerr)
 		return
 	}
+	var err error
+	defer h.traceOp(r, "share-download", claims.Project, targetPath)(&err)
 	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
 }

@@ -194,6 +194,8 @@ func (h *restHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, errBadRequest("handle is required"))
 		return
 	}
+	var err error
+	defer h.traceOp(r, "session-get", "", handle)(&err)
 	query := r.URL.Query()
 	if hasQueryKey(r, "offset") || hasQueryKey(r, "length") {
 		h.serveSessionRead(w, r, handle, query.Get("offset"), query.Get("length"))
@@ -221,11 +223,14 @@ func hasQueryKey(r *http.Request, key string) bool {
 // defaults to EOF (resolved via stat); offset defaults to 0. Partial
 // answers carry Content-Range with a 206, like /content.
 func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, handle, rawOffset, rawLength string) {
+	var err error
+	defer h.traceOp(r, "session-read", "", handle)(&err)
 	var offset int64
 	if strings.TrimSpace(rawOffset) != "" {
-		parsed, err := parseNonNegativeInt(rawOffset, "offset")
-		if err != nil {
-			h.writeMappedError(w, err)
+		parsed, perr := parseNonNegativeInt(rawOffset, "offset")
+		if perr != nil {
+			err = perr
+			h.writeMappedError(w, perr)
 			return
 		}
 		offset = parsed
@@ -245,9 +250,10 @@ func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, h
 		length = 0
 	}
 	if strings.TrimSpace(rawLength) != "" {
-		parsed, err := parseNonNegativeInt(rawLength, "length")
-		if err != nil {
-			h.writeMappedError(w, err)
+		parsed, perr := parseNonNegativeInt(rawLength, "length")
+		if perr != nil {
+			err = perr
+			h.writeMappedError(w, perr)
 			return
 		}
 		length = parsed

@@ -239,12 +239,13 @@ func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 // streamFileRange streams [start,end) in StreamChunkSize windows. Shared by
 // serveContent and share downloads so the short-read comment lives once.
 func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, project, filePath string, start, end int64) {
+	started := time.Now().UTC()
 	client, err := h.clientFor(r)
 	if err != nil {
 		// Headers are already on the wire (the caller wrote the status
 		// before streaming), so no error document can follow: log and
 		// truncate like a mid-response read failure.
-		logging.Error(h.logger, "stream aborted before first byte", "project", project, "path", filePath, "err", err)
+		logging.Error(h.logger, "stream aborted before first byte", "project", project, "path", filePath, "err", err, "elapsed", time.Since(started))
 		return
 	}
 	sent := int64(0)
@@ -255,7 +256,7 @@ func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, pr
 		}
 		chunk, readErr := client.ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr)
+			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr, "elapsed", time.Since(started))
 			return
 		}
 		if len(chunk) == 0 {

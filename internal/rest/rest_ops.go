@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/FarelRA/storhub/internal/logging"
 	"github.com/FarelRA/storhub/internal/storage"
@@ -85,6 +86,7 @@ type pruneResponse struct {
 
 func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	started := time.Now().UTC()
 	var req pruneRequest
 	// A bodyless POST means the old bare purge: assets scope, keep=0,
 	// dry_run=false. A body selects any scope (objects|assets|history|all).
@@ -125,7 +127,7 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := client.PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)
 	if err != nil {
-		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err))
+		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err), "elapsed", time.Since(started))
 		h.writeMappedError(w, err)
 		return
 	}
@@ -155,6 +157,7 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
+	started := time.Now().UTC()
 	var err error
 	defer h.traceOp(r, "enable", project, "")(&err)
 	if !h.preconditionForProjectOp(w, r, project) {
@@ -167,7 +170,7 @@ func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = client.ReEnableProject(project); err != nil {
-		logging.Error(h.logger, "enable failed", "project", project, "err", err, "status", mappedStatus(err))
+		logging.Error(h.logger, "enable failed", "project", project, "err", err, "status", mappedStatus(err), "elapsed", time.Since(started))
 		h.writeMappedError(w, err)
 		return
 	}
