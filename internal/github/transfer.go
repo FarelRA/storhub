@@ -147,12 +147,12 @@ func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, len
 	resp, err := c.cdn.Do(req)
 	if err != nil {
 		cancel()
-		logging.Debug(c.logger, "cdn range fetch failed", "url", c.redactSignedURL(url), "range", rangeHeader, "err", err)
+		logging.Warn(c.logger, "cdn range fetch failed", "url", c.redactSignedURL(url), "range", rangeHeader, "err", err)
 		return nil, 0, 0, fmt.Errorf("cdn request: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		defer func() { _ = resp.Body.Close() }()
-		logging.Debug(c.logger, "cdn range fetch rejected", "url", c.redactSignedURL(url), "range", rangeHeader, "status", resp.StatusCode)
+		logging.Warn(c.logger, "cdn range fetch rejected", "url", c.redactSignedURL(url), "range", rangeHeader, "status", resp.StatusCode)
 		cancel()
 		return nil, 0, resp.StatusCode, &CDNError{StatusCode: resp.StatusCode}
 	}
