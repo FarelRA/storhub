@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"log/slog"
 	"time"
 )
@@ -12,6 +13,12 @@ import (
 // is op attrs, then elapsed, then err. All logs go to stderr via slog,
 // never stdout. Hot paths guard BEFORE building args so disabled levels
 // cost zero heap.
+
+// Enabled reports whether logger enables level. Hot paths call it BEFORE
+// building args so disabled levels cost zero heap.
+func Enabled(logger *slog.Logger, level slog.Level) bool {
+	return resolve(logger).Enabled(context.Background(), level)
+}
 
 // Start logs Debug "<op> start" with the given identifying attrs.
 func Start(logger *slog.Logger, op string, args ...any) {
