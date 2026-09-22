@@ -365,6 +365,18 @@ func (s *Filesystem) endNotify(key notifyKey) {
 // before fn runs (see endNotify) so a mutation landing during the kernel
 // write still enqueues its own invalidation.
 func (s *Filesystem) notifyAsync(key notifyKey, what string, fn func()) {
+	s.notifyAsyncAttempts(key, what, fn, 0)
+}
+
+// maxNotifyAttempts bounds the panic retry: one re-drive after a
+// recovered panic. Without it a recovered upcall panic silently drops
+// its invalidation (the pending mark already cleared) and the kernel
+// keeps stale entries until timeout. The retry re-checks readiness at
+// fire time, so a genuinely forgotten node skips instead of panicking
+// again; a transient check-then-call window gets a second delivery.
+const maxNotifyAttempts = 1
+
+func (s *Filesystem) notifyAsyncAttempts(key notifyKey, what string, fn func(), attempt int) {
 	if !s.beginNotify(key) {
 		return
 	}
@@ -378,6 +390,13 @@ func (s *Filesystem) notifyAsync(key notifyKey, what string, fn func()) {
 					logger = s.log()
 				}
 				logging.Error(logger, "panic in "+what, "panic", r, "stack", string(buf[:n]))
+				if s != nil {
+					<-s.notifySlots
+				}
+				if attempt < maxNotifyAttempts {
+					s.notifyAsyncAttempts(key, what, fn, attempt+1)
+				}
+				return
 			}
 			if s != nil {
 				<-s.notifySlots
