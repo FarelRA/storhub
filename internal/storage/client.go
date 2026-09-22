@@ -219,53 +219,16 @@ func isReleaseFull(err error) bool {
 }
 
 func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
-	// Hot read paths (list/download/stat) stay silent at Debug: logging
-	// every list-files/list-releases/read at Debug turned an idle mount's
-	// thousands-of-ops-per-minute into formatted stderr traffic. Mutating
-	// and commit paths keep their Debug start; read failures still log
-	// via logOpFinish's error branch.
-	if isReadOnlyOp(op) {
-		return time.Time{}
-	}
+	// Full completeness: every op logs, including the high-volume
+	// read-only verbs. At Debug an idle mount is chatty by design;
+	// production stays quiet by running above Debug, not by carving
+	// ops out of the span.
 	logging.Start(h.projectLogger(project), op, args...)
 	return time.Now().UTC()
 }
 
 func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
-	// Demoted read ops pass a zero start (logOpStart skipped them), and
-	// logging.Finish measures elapsed from started: zero starts route
-	// around it and report a zero elapsed instead of time.Since(zero).
-	// Key order matches Finish: elapsed before err.
-	if started.IsZero() {
-		if err != nil {
-			args = append(args, "elapsed", time.Duration(0), "err", err)
-			logging.Error(h.projectLogger(project), op+" failed", args...)
-			return
-		}
-		if isReadOnlyOp(op) {
-			return
-		}
-		args = append(args, "elapsed", time.Duration(0))
-		logging.Debug(h.projectLogger(project), op+" complete", args...)
-		return
-	}
-	if err == nil && isReadOnlyOp(op) {
-		return
-	}
 	logging.Finish(h.projectLogger(project), op, started, err, args...)
-}
-
-// isReadOnlyOp reports the ops whose per-call Debug start/complete logs are
-// demoted away. The set is the read-only verbs (list/stat/download paths);
-// every mutating verb keeps its Debug span. Errors always log regardless.
-func isReadOnlyOp(op string) bool {
-	switch op {
-	case "list-files", "list-releases", "list-metadata-revisions",
-		"download-file":
-		return true
-	default:
-		return false
-	}
 }
 
 // NewStorHubWithContext returns a hub bound to ctx: cancelling ctx shuts
