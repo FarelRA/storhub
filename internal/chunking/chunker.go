@@ -13,6 +13,7 @@ package chunking
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -100,14 +101,16 @@ type StreamingChunker struct {
 // through this single definition so the ceiling cannot drift.
 func NormalizedSize(chunkSize int64) int64 {
 	if chunkSize <= 0 {
-		logging.Debug(nil, "chunk size default", "requested", chunkSize, "used", DefaultChunkSize)
+		if logging.Enabled(slog.Default(), slog.LevelDebug) {
+			logging.Debug(logging.WithComponent(slog.Default(), "chunking"), "chunk size default", "requested", chunkSize, "used", DefaultChunkSize)
+		}
 		return DefaultChunkSize
 	}
 	if chunkSize > MaxReleaseAssetSize {
 		// Genuine clamp of an explicit value: warn with requested and used.
 		// No logger is in scope for this pure helper, so the
 		// process-default logger carries it (stderr only, via slog).
-		logging.Warn(nil, "chunk size clamped", "requested", chunkSize, "used", MaxReleaseAssetSize)
+		logging.Warn(logging.WithComponent(slog.Default(), "chunking"), "chunk size clamped", "requested", chunkSize, "used", MaxReleaseAssetSize)
 		return MaxReleaseAssetSize
 	}
 	return chunkSize
@@ -138,7 +141,9 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 	// Plan summary at Debug, never Info: chunk planning runs per upload and
 	// only sizes and counts are logged, never file bytes or names beyond
 	// the asset base name already chosen by the caller.
-	logging.Debug(nil, "chunk plan", "size", info.Size(), "chunk_size", chunkSize, "chunks", int(count), "elapsed", time.Since(started))
+	if logging.Enabled(slog.Default(), slog.LevelDebug) {
+		logging.Debug(logging.WithComponent(slog.Default(), "chunking"), "chunk plan", "size", info.Size(), "chunk_size", chunkSize, "chunks", int(count), "elapsed", time.Since(started))
+	}
 	return &StreamingChunker{
 		file:      file,
 		fileSize:  info.Size(),

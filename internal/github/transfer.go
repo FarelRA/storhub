@@ -39,14 +39,14 @@ func (c *Client) UploadAsset(ctx context.Context, uploadURL, assetName string, r
 	started := time.Now().UTC()
 	assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
 	if err == nil {
-		logging.Info(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
+		logging.Debug(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
 		return assetID, nil
 	}
 	// Fail loudly: silently reusing a pre-existing asset with the same name
 	// would hand the caller an unverified ID (possibly stale or partial
 	// content) as if the fresh bytes had been stored. Callers that want
 	// name-based reuse can compose FindAssetIDByName themselves.
-	logging.Warn(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "body", uploadErrorBody(err), "err", err)
+	logging.Error(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "err", err)
 	return 0, fmt.Errorf("upload asset: %w", err)
 }
 

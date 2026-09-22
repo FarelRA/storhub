@@ -27,7 +27,7 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 	logging.Debug(metaLog(), "metadata load start", "buckets", buckets)
 	meta, err := loadTree(manifest, getObject)
 	if err != nil {
-		logging.Error(metaLog(), "metadata load failed", "err", err, "elapsed", time.Since(started))
+		logging.Error(metaLog(), "metadata load failed", "elapsed", time.Since(started), "err", err)
 		return nil, err
 	}
 	logging.Debug(metaLog(), "metadata load complete", "files", len(meta.files), "dirs", len(meta.dirs), "chunks", len(meta.chunks), "releases", len(meta.releases), "elapsed", time.Since(started))
@@ -199,7 +199,7 @@ func LoadTreeParallel(manifest *Manifest, getObject func(sha string) ([]byte, er
 	logging.Debug(metaLog(), "metadata parallel load start", "buckets", buckets)
 	meta, err := loadTreeParallel(manifest, getObject)
 	if err != nil {
-		logging.Error(metaLog(), "metadata parallel load failed", "err", err, "elapsed", time.Since(started))
+		logging.Error(metaLog(), "metadata parallel load failed", "elapsed", time.Since(started), "err", err)
 		return nil, err
 	}
 	logging.Debug(metaLog(), "metadata parallel load complete", "files", len(meta.files), "dirs", len(meta.dirs), "chunks", len(meta.chunks), "releases", len(meta.releases), "elapsed", time.Since(started))

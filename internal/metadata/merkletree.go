@@ -168,7 +168,7 @@ func (c *TreeCache) Clone() *TreeCache {
 // package is a pure library with no logger plumbing, so events go through
 // the process-default logger tagged with the metadata component; messages
 // must never be silently dropped, and no payload bytes are ever logged.
-func metaLog() *slog.Logger { return logging.WithComponent(nil, "metadata") }
+func metaLog() *slog.Logger { return logging.WithComponent(slog.Default(), "metadata") }
 
 // ObjectSHA is the content address of an object's canonical bytes.
 func ObjectSHA(data []byte) string {

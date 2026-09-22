@@ -38,7 +38,7 @@ func BuildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 	logging.Debug(metaLog(), "metadata build start")
 	refs, err := buildTreeStream(meta, cache, known, emit)
 	if err != nil {
-		logging.Error(metaLog(), "metadata build failed", "err", err, "elapsed", time.Since(started))
+		logging.Error(metaLog(), "metadata build failed", "elapsed", time.Since(started), "err", err)
 		return nil, err
 	}
 	logging.Debug(metaLog(), "metadata build complete", "objects", objects, "buckets", len(refs.ChunkBuckets), "elapsed", time.Since(started))

@@ -1,13 +1,13 @@
 package fs
 
 import (
-	"log/slog"
 	"os/user"
 	"strconv"
 	"sync"
 	"time"
 
 	storcfg "github.com/FarelRA/storhub/internal/config"
+	"github.com/FarelRA/storhub/internal/logging"
 )
 
 // Supplementary group resolution for multi-user surfaces.
@@ -93,7 +93,7 @@ func LookupUserGroups(uid uint32) ([]uint32, error) {
 		// Fail open with a debug line: the caller proceeds with the
 		// primary gid only, exactly the pre-groups behavior, so a
 		// broken NSS never newly denies access.
-		slog.Debug("supplementary group lookup failed; continuing with primary group only", "uid", uid, "err", err)
+		logging.Debug(nil, "supplementary group lookup failed; continuing with primary group only", "uid", uid, "err", err)
 		return nil, err
 	}
 	return append([]uint32(nil), groups...), nil
