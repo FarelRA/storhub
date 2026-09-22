@@ -398,7 +398,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	beforeSize, err := candidate.SerializedSize()
 	if err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "metadata update failed", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, fmt.Errorf("size metadata: %w", err)
 	}
 	if err := fn(candidate); err != nil {

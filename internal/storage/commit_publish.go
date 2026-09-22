@@ -301,7 +301,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 
 	h.pressure.noteCommitSuccess(project)
 	h.warnHistoryThreshold(project, pm)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "previous_sha", shortSHA(snap.previousSHA), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
+	logging.Debug(h.projectLogger(project), "commit metadata complete", "elapsed", h.config.Now().UTC().Sub(started), "previous_sha", shortSHA(snap.previousSHA), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newObjectCount)
 
 	return nil
 }

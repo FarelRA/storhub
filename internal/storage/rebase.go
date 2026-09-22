@@ -285,18 +285,8 @@ func changedByTime(working *RepoMetadata, op Op) bool {
 // missing from-path is NOT superseding: replay is defensive and applies the
 // payload literally.
 //
-// Contract for the cold-replay owner (workflows.go dropSupersededOps,
-// ~line 1009): timestamp-check renames instead of keeping them
-// unconditionally. Suggested edit (pipeline agent owns that file):
-//
-//	default: // renames + catalog ops reach here today
-//	    if op.Type == OpRename && renameSupersededByUpstream(meta, op) {
-//	        logging.Warn(logger, "op journal rename superseded by newer remote state; skipped",
-//	            "project", project, "op", op.Type, "to", op.Paths[1], ...)
-//	        continue
-//	    }
-//	    kept = append(kept, op)
-//
+// Contract for the cold-replay owner (workflows.go dropSupersededOps):
+// timestamp-check renames instead of keeping them unconditionally.
 // From-liveness needs no check: a rename whose source is gone upstream
 // replays its payload literally (the dir-rename path writes op.Dir at the
 // target even when the source is missing), matching current behavior.

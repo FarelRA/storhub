@@ -223,11 +223,17 @@ func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
 	// read-only verbs. At Debug an idle mount is chatty by design;
 	// production stays quiet by running above Debug, not by carving
 	// ops out of the span.
+	if !logging.Enabled(h.logger, slog.LevelDebug) {
+		return time.Now().UTC()
+	}
 	logging.Start(h.projectLogger(project), op, args...)
 	return time.Now().UTC()
 }
 
 func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
+	if !logging.Enabled(h.logger, slog.LevelDebug) {
+		return
+	}
 	logging.Finish(h.projectLogger(project), op, started, err, args...)
 }
 

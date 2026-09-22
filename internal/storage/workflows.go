@@ -125,7 +125,7 @@ func (h *StorHub) loadRepoMetadataFreshUnshared(ctx context.Context, project str
 	logging.Debug(h.projectLogger(project), "load metadata start")
 	data, sha, found, err := h.readIndexHead(ctx, project)
 	if err != nil {
-		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
 	if !found {
@@ -149,7 +149,7 @@ func (h *StorHub) loadRepoMetadataFreshUnshared(ctx context.Context, project str
 	}
 	m, objectCount, err := h.loadIndexTree(ctx, project, data)
 	if err != nil {
-		logging.Warn(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "load metadata failed", "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, "", err
 	}
 	pendingOps := h.journalReplayForLoad(project, m)
@@ -192,7 +192,7 @@ func (h *StorHub) commitRepoMetadata(ctx context.Context, project string, metada
 	}
 	h.storeRepoMetadata(project, metadata, contentSHA, nil, newCount)
 	h.clearSizeCapped(project)
-	logging.Info(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newCount)
+	logging.Debug(h.projectLogger(project), "commit metadata complete", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "commit_sha", shortSHA(commitSHA), "content_sha", shortSHA(contentSHA), "objects", newCount)
 	return commitSHA, contentSHA, nil
 }
 
@@ -334,13 +334,8 @@ func cloneForWrite(m *RepoMetadata) *RepoMetadata {
 	return m.Clone()
 }
 
-// cowTree is the historical spelling of cloneForWrite, retained for
-// callers outside this slice (commit.go, verbs.go, runtime.go): new code
-// uses cloneForWrite.
-
-// cowTree is the historical spelling of cloneForWrite, retained for
-// callers outside this slice (commit.go, verbs.go, runtime.go): new code
-// uses cloneForWrite.
+// cowTree returns a private, mutable copy of a published metadata tree
+// (historical spelling of cloneForWrite; new code uses cloneForWrite).
 func cowTree(m *RepoMetadata) *RepoMetadata {
 	return cloneForWrite(m)
 }
