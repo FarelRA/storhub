@@ -5,16 +5,19 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/FarelRA/storhub/internal/logging"
 	storage "github.com/FarelRA/storhub/internal/storage"
 	"github.com/go-chi/chi/v5"
 )
 
-// rest_sessions.go: Phase 2B session manager over REST.
+// rest_sessions.go: session manager over REST (stateful open sessions:
+// server-held handles).
 //
 // Routes (all under the same auth middleware as the project routes, so the
 // request context already carries the authenticated identity):
@@ -28,6 +31,13 @@ import (
 //	POST   /handles/{h}/link         {path} -> 200 stat document
 //	POST   /handles/{h}/close        commit and destroy -> 200 {handle, status}
 //	DELETE /handles/{h}              alias of close -> 204
+//
+// Transfer contract: writes carry base64 data inside a JSON body capped at
+// 32 KiB (see decodeJSON), so one write stages roughly 24 KiB decoded;
+// clients stage large sessions with successive small writes. Reads page
+// with ?offset= and ?length= (length defaults to EOF) and the server
+// streams each read back in StreamChunkSize windows, so reads carry no
+// length cap while never buffering a whole session in RAM.
 //
 // Read choice: offset-only positional reads (pread style). No cursor state
 // is kept server side: every GET read names its range explicitly, so two
@@ -176,7 +186,8 @@ func (h *restHandler) handleSessionOpen(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-open", req.Project, req.Path, "mode", req.Mode)(&err)
+	spanStarted := h.traceStart(r, "session-open", req.Project, req.Path, "mode", req.Mode)
+	defer h.traceFinish(r, "session-open", req.Project, req.Path, spanStarted, &err, "mode", req.Mode)
 	id, err := client.OpenSession(r.Context(), req.Project, req.Path, mode, opts...)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -195,10 +206,11 @@ func (h *restHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "session-get", "", handle)(&err)
-	query := r.URL.Query()
+	spanStarted := h.traceStart(r, "session-get", "", handle)
+	defer h.traceFinish(r, "session-get", "", handle, spanStarted, &err)
+	rawQuery := r.URL.RawQuery
 	if hasQueryKey(r, "offset") || hasQueryKey(r, "length") {
-		h.serveSessionRead(w, r, handle, query.Get("offset"), query.Get("length"))
+		h.serveSessionRead(w, r, handle, queryFirstParam(rawQuery, "offset"), queryFirstParam(rawQuery, "length"))
 		return
 	}
 	client, err := h.clientFor(r)
@@ -214,17 +226,47 @@ func (h *restHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, statSessionResponse(handle, stat))
 }
 
+// hasQueryKey reports whether key is present in the request query without
+// building the full query map: it scans RawQuery with the same pair rules
+// as queryFirstParam (separator and unescape failures skipped), so
+// presence checks on the session-get path cost zero heap on escape-free
+// input like the value lookups do.
 func hasQueryKey(r *http.Request, key string) bool {
-	_, ok := r.URL.Query()[key]
-	return ok
+	raw := r.URL.RawQuery
+	if strings.Count(raw, "&")+1 > maxQueryParams {
+		return false
+	}
+	for raw != "" {
+		var pair string
+		pair, raw, _ = strings.Cut(raw, "&")
+		if strings.Contains(pair, ";") {
+			continue
+		}
+		if pair == "" {
+			continue
+		}
+		k, _, _ := strings.Cut(pair, "=")
+		kk, kerr := url.QueryUnescape(k)
+		if kerr != nil {
+			continue
+		}
+		if kk == key {
+			return true
+		}
+	}
+	return false
 }
 
-// serveSessionRead streams [offset, offset+length) as raw bytes. Length
-// defaults to EOF (resolved via stat); offset defaults to 0. Partial
-// answers carry Content-Range with a 206, like /content.
+// serveSessionRead streams [offset, offset+length) as raw bytes in
+// StreamChunkSize windows through repeated ReadSession calls, so a bare
+// GET with no length (length defaults to EOF, resolved via stat) never
+// buffers the whole session in RAM. Length defaults to EOF; offset
+// defaults to 0. Partial answers carry Content-Range with a 206, like
+// /content.
 func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, handle, rawOffset, rawLength string) {
 	var err error
-	defer h.traceOp(r, "session-read", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-read", "", handle)
+	defer h.traceFinish(r, "session-read", "", handle, spanStarted, &err)
 	var offset int64
 	if strings.TrimSpace(rawOffset) != "" {
 		parsed, perr := parseNonNegativeInt(rawOffset, "offset")
@@ -258,34 +300,64 @@ func (h *restHandler) serveSessionRead(w http.ResponseWriter, r *http.Request, h
 		}
 		length = parsed
 	}
-	data, err := client.ReadSession(r.Context(), handle, offset, length)
-	if err != nil {
-		h.writeSessionError(w, err)
-		return
+	// Clamp to the bytes actually available: the manager answers
+	// past-EOF windows empty (offset past EOF reads as zero bytes), so
+	// Content-Length always names bytes the stream below will send.
+	if available := stat.Size - offset; available < 0 {
+		length = 0
+	} else if length > available {
+		length = available
 	}
 	// An empty read never carries a range: offset-at-EOF or an empty file
 	// would otherwise emit 206 with an invalid "bytes N-(N-1)/M"
 	// Content-Range. Answer plain 200 with no Content-Range instead (416
 	// stays reserved for the byte-range endpoint, which fails loud there).
-	if len(data) == 0 {
+	if length == 0 {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	end := offset + int64(len(data))
+	end := offset + length
 	partial := offset != 0 || end < stat.Size
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	status := http.StatusOK
 	if partial {
 		status = http.StatusPartialContent
 		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(end-1, 10)+"/"+strconv.FormatInt(stat.Size, 10))
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(data)
+	// Headers are on the wire from here: a read failure can no longer
+	// become an error document, so log and truncate like a mid-response
+	// stream failure (the streamFileRange contract).
+	window := h.opts.StreamChunkSize
+	if window <= 0 {
+		window = defaultRESTStreamChunk
+	}
+	for off := offset; off < end; {
+		want := window
+		if remaining := end - off; remaining < want {
+			want = remaining
+		}
+		chunk, readErr := client.ReadSession(r.Context(), handle, off, want)
+		if readErr != nil {
+			err = readErr
+			logging.Error(h.logger, "session stream aborted mid-response", "path", handle, "offset", off, "expected", length, "err", readErr)
+			return
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		if _, writeErr := w.Write(chunk); writeErr != nil {
+			return
+		}
+		// Advance by the bytes actually read: short reads must not skip
+		// data (a concurrent truncate clamps the window to live size).
+		off += int64(len(chunk))
+	}
 }
 
 func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request) {
@@ -313,7 +385,8 @@ func (h *restHandler) handleSessionWrite(w http.ResponseWriter, r *http.Request)
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-write", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-write", "", handle)
+	defer h.traceFinish(r, "session-write", "", handle, spanStarted, &err)
 	wrote, err := client.WriteSession(r.Context(), handle, req.Offset, data)
 	if err != nil {
 		h.writeSessionError(w, err)
@@ -347,7 +420,8 @@ func (h *restHandler) handleSessionTruncate(w http.ResponseWriter, r *http.Reque
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-truncate", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-truncate", "", handle)
+	defer h.traceFinish(r, "session-truncate", "", handle, spanStarted, &err)
 	if err = client.TruncateSession(r.Context(), handle, req.Size); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -371,7 +445,8 @@ func (h *restHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-sync", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-sync", "", handle)
+	defer h.traceFinish(r, "session-sync", "", handle, spanStarted, &err)
 	if err = client.SyncSession(r.Context(), handle); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -401,7 +476,8 @@ func (h *restHandler) handleSessionLink(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-link", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-link", "", handle)
+	defer h.traceFinish(r, "session-link", "", handle, spanStarted, &err)
 	if err = client.LinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -434,7 +510,8 @@ func (h *restHandler) handleSessionRelink(w http.ResponseWriter, r *http.Request
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "session-relink", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-relink", "", handle)
+	defer h.traceFinish(r, "session-relink", "", handle, spanStarted, &err)
 	if err = client.RelinkSession(r.Context(), handle, req.Path); err != nil {
 		h.writeSessionError(w, err)
 		return
@@ -479,7 +556,8 @@ func (h *restHandler) closeSession(w http.ResponseWriter, r *http.Request, handl
 		h.writeMappedError(w, err)
 		return false
 	}
-	defer h.traceOp(r, "session-close", "", handle)(&err)
+	spanStarted := h.traceStart(r, "session-close", "", handle)
+	defer h.traceFinish(r, "session-close", "", handle, spanStarted, &err)
 	stat, err := client.StatSession(r.Context(), handle)
 	if err != nil {
 		h.writeSessionError(w, err)

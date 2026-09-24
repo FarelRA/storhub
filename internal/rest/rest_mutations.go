@@ -114,7 +114,8 @@ func (h *restHandler) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "create", project, filePath)(&err)
+	spanStarted := h.traceStart(r, "create", project, filePath)
+	defer h.traceFinish(r, "create", project, filePath, spanStarted, &err)
 	if _, _, ok := h.preconditionForCreate(w, r, project, filePath); !ok {
 		err = errors.New("create precondition failed")
 		return
@@ -144,7 +145,8 @@ func (h *restHandler) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "mkdir", project, dirPath)(&err)
+	spanStarted := h.traceStart(r, "mkdir", project, dirPath)
+	defer h.traceFinish(r, "mkdir", project, dirPath, spanStarted, &err)
 	if _, _, ok := h.preconditionForCreate(w, r, project, dirPath); !ok {
 		err = errors.New("create precondition failed")
 		return
@@ -174,7 +176,8 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "rmdir", project, dirPath)(&err)
+	spanStarted := h.traceStart(r, "rmdir", project, dirPath)
+	defer h.traceFinish(r, "rmdir", project, dirPath, spanStarted, &err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, dirPath)
 	if !ok {
 		err = errors.New("update precondition failed")
@@ -205,7 +208,8 @@ func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "unlink", project, filePath)(&err)
+	spanStarted := h.traceStart(r, "unlink", project, filePath)
+	defer h.traceFinish(r, "unlink", project, filePath, spanStarted, &err)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, filePath)
 	if !ok {
 		err = errors.New("update precondition failed")
@@ -245,7 +249,8 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "rename", project, req.OldPath, "dst", req.NewPath)(&err)
+	spanStarted := h.traceStart(r, "rename", project, req.OldPath, "dst", req.NewPath)
+	defer h.traceFinish(r, "rename", project, req.OldPath, spanStarted, &err, "dst", req.NewPath)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, req.OldPath)
 	if !ok {
 		err = errors.New("update precondition failed")
@@ -253,8 +258,9 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.NoReplace {
 		// Enforced inside the storage transaction (no TOCTOU), like the
-		// CLI's mv --noreplace.
-		revOpts = append(revOpts, shfs.WithNoReplace())
+		// CLI's mv --noreplace. Copied onto a fresh slice: revOpts is
+		// owned by the precondition funnel.
+		revOpts = append(append([]shfs.MutateOption{}, revOpts...), shfs.WithNoReplace())
 	}
 	client, err := h.clientFor(r)
 	if err != nil {
@@ -290,7 +296,8 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "copy", project, src, "dst", dst)(&err)
+	spanStarted := h.traceStart(r, "copy", project, src, "dst", dst)
+	defer h.traceFinish(r, "copy", project, src, spanStarted, &err, "dst", dst)
 	srcOff, dstOff, length, isRange, err := copyRangeParams(req)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -329,7 +336,9 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCloneRange serves the range variant of POST /ops/copy: one
-// server-side CloneRange, zero bytes uploaded. Outcome matrix:
+// server-side CloneRange, zero bytes uploaded. The span name is
+// intentionally clone-range, not copy: it distinguishes range-clone spans
+// from whole-file copy spans on the same route. Outcome matrix:
 // full clone: absent length resolves to the source size from src_off
 // (src_off 0 covers the whole file) and creates dst when missing;
 // range: an explicit [src_off, src_off+length) overwrites the dst span
@@ -343,7 +352,8 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 // the project moved), any other token keeps start-of-request freshness.
 func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, project, src string, srcOff int64, dst string, dstOff int64, length *int64) {
 	var err error
-	defer h.traceOp(r, "clone-range", project, src, "dst", dst)(&err)
+	spanStarted := h.traceStart(r, "clone-range", project, src, "dst", dst)
+	defer h.traceFinish(r, "clone-range", project, src, spanStarted, &err, "dst", dst)
 	revOpts, ok := h.preconditionForUpdate(w, r, project, src)
 	if !ok {
 		err = errors.New("update precondition failed")
@@ -402,7 +412,8 @@ func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "link", project, req.NewPath, "src", req.ExistingPath)(&err)
+	spanStarted := h.traceStart(r, "link", project, req.NewPath, "src", req.ExistingPath)
+	defer h.traceFinish(r, "link", project, req.NewPath, spanStarted, &err, "src", req.ExistingPath)
 	// Link reads the existing path and creates the new one; the guard sits
 	// on the source. LinkContext takes no mutate options, so a revision
 	// token fails loud with 412 (preconditionForUpdateNoCAS) instead of
@@ -445,7 +456,8 @@ func (h *restHandler) handleSymlink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "symlink", project, req.LinkPath, "target", req.Target)(&err)
+	spanStarted := h.traceStart(r, "symlink", project, req.LinkPath, "target", req.Target)
+	defer h.traceFinish(r, "symlink", project, req.LinkPath, spanStarted, &err, "target", req.Target)
 	// Symlink creation follows create-only semantics (SymlinkContext takes
 	// no mutate options: freshness only).
 	if _, _, ok := h.preconditionForCreate(w, r, project, req.LinkPath); !ok {
@@ -482,7 +494,8 @@ func (h *restHandler) handleChmod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "chmod", project, req.Path)(&err)
+	spanStarted := h.traceStart(r, "chmod", project, req.Path)
+	defer h.traceFinish(r, "chmod", project, req.Path, spanStarted, &err)
 	// ChmodContext takes no mutate options: a revision token cannot become
 	// apply-time compare-and-swap, so it fails loud with 412
 	// (preconditionForUpdateNoCAS) instead of silently degrading to a
@@ -521,7 +534,8 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "chown", project, req.Path)(&err)
+	spanStarted := h.traceStart(r, "chown", project, req.Path)
+	defer h.traceFinish(r, "chown", project, req.Path, spanStarted, &err)
 	// ChownContext takes no mutate options: like chmod, a revision token
 	// fails loud with 412 (preconditionForUpdateNoCAS) instead of silently
 	// degrading to a start-of-request check.
@@ -559,7 +573,8 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "utimes", project, req.Path)(&err)
+	spanStarted := h.traceStart(r, "utimes", project, req.Path)
+	defer h.traceFinish(r, "utimes", project, req.Path, spanStarted, &err)
 	// A zero time.Time would silently forward UnixNano() garbage to
 	// storage; require both stamps to be present.
 	if req.Atime.IsZero() || req.Mtime.IsZero() {

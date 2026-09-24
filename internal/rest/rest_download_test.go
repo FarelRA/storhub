@@ -105,6 +105,43 @@ func TestDownloadLinkRequiresSigningKey(t *testing.T) {
 	}
 }
 
+// TestDownloadAcceptsPathTokenAndBearer pins the credential-spelling fix:
+// the {token} path segment and the Authorization: Bearer header redeem a
+// download, not just ?token=. The pre-fix handler read the query only, so
+// both spellings below answered 404 on the old code.
+func TestDownloadAcceptsPathTokenAndBearer(t *testing.T) {
+	t.Parallel()
+	const content = "path token download\n"
+	fake := newFakeRESTClient()
+	seedDownloadFile(t, fake, "docs/report.txt", content)
+	handler, bearer := newAuthedShareHandler(t, fake)
+	resp := mustRequest(t, handler, http.MethodPost, "/api/v1/projects/demo/shares",
+		strings.NewReader(`{"path":"docs/report.txt","expires_in_seconds":300}`), map[string]string{"Authorization": bearer}, http.StatusCreated)
+	var share shareResponse
+	decodeJSONBody(t, resp, &share)
+	if share.Token == "" {
+		t.Fatal("mint response must carry the token")
+	}
+
+	// JWT itself as the path segment, no query credential.
+	// (Share JWTs are base64url plus dots: legal raw in one segment.)
+	pathed := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.Token+"/download", nil, nil, http.StatusOK)
+	if body := string(readBody(t, pathed)); body != content {
+		t.Fatalf("path-token download body mismatch: %q", body)
+	}
+
+	// Bearer header with a non-credential path segment.
+	bearered := mustRequest(t, handler, http.MethodGet, "/api/v1/shares/not-a-token/download",
+		nil, map[string]string{"Authorization": "Bearer " + share.Token}, http.StatusOK)
+	if body := string(readBody(t, bearered)); body != content {
+		t.Fatalf("bearer download body mismatch: %q", body)
+	}
+
+	// Query spelling keeps working and keeps precedence: a garbage query
+	// token fails even when the path names a valid JWT.
+	mustRequest(t, handler, http.MethodGet, "/api/v1/shares/"+share.Token+"/download?token=garbage", nil, nil, http.StatusNotFound)
+}
+
 func newAuthedShareHandler(t *testing.T, client *fakeRESTClient) (http.Handler, string) {
 	t.Helper()
 	opts := DefaultOptions()

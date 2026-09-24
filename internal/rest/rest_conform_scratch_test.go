@@ -25,7 +25,7 @@ func (a *restConformAdapter) OpenScratch(ttl time.Duration) (test.ScratchSession
 }
 
 // restScratchHandle is a pathless open-file description over one
-// server-side session: writes stage (no sync — an unlinked scratch has
+// server-side session: writes stage (no sync: an unlinked scratch has
 // nothing to commit to), Link names the staged image, Close publishes
 // or discards. A close that fails (taken target) leaves the description
 // open for Relink, mirroring close(2) never consuming a failed close.

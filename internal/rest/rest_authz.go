@@ -160,6 +160,11 @@ func (c *authorizedClient) StatPathContext(ctx context.Context, project, targetP
 	return entry, nil
 }
 func (c *authorizedClient) ReadDirContext(ctx context.Context, project, dirPath string) ([]shfs.DirEntry, error) {
+	// Stat-then-traverse order: a missing path answers 404 even to
+	// callers who could not traverse its parents (existence oracle),
+	// unlike StatPathContext which checks traverse first. Kept:
+	// directory enumeration already reveals child names by design
+	// (names, not bytes), so the oracle adds no new signal.
 	entry, err := c.base.StatPathContext(ctx, project, dirPath)
 	if err != nil {
 		return nil, err
@@ -344,10 +349,21 @@ func (c *authorizedClient) PressureSnapshot() (storage.PressureSnapshot, error) 
 }
 
 func (c *authorizedClient) PressureFailureStreak(project string) (uint64, error) {
+	// Admin-gated like the sibling pressure accessors above: hub-wide
+	// operability counters stay on the operator surface. handleStatus
+	// already requires admin transitively through DegradedProjects and
+	// PressureSnapshot; the explicit gates keep the lane closed even for
+	// future direct callers.
+	if !c.principal.Admin {
+		return 0, errForbidden("permission denied")
+	}
 	return c.base.PressureFailureStreak(project)
 }
 
 func (c *authorizedClient) PressurePendingDepth(project string) (int, error) {
+	if !c.principal.Admin {
+		return 0, errForbidden("permission denied")
+	}
 	return c.base.PressurePendingDepth(project)
 }
 func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project string) error {

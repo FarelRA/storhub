@@ -132,7 +132,8 @@ func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "node-get", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "node-get", project, targetPath)
+	defer h.traceFinish(r, "node-get", project, targetPath, spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -161,9 +162,10 @@ func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 // handleNodeDelete serves DELETE /nodes: remove one file or empty dir.
 func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "node-delete", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "node-delete", project, targetPath)
+	defer h.traceFinish(r, "node-delete", project, targetPath, spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -181,7 +183,7 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entry.IsDir {
-		recursive, berr := parseBoolStrict(r.URL.Query().Get("recursive"), "recursive")
+		recursive, berr := parseBoolStrict(queryFirstParam(r.URL.RawQuery, "recursive"), "recursive")
 		if berr != nil {
 			err = berr
 			h.writeMappedError(w, berr)
@@ -213,9 +215,10 @@ func (h *restHandler) handleNodeDelete(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleChildren(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	dirPath := r.URL.Query().Get("path")
+	dirPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "children", project, dirPath)(&err)
+	spanStarted := h.traceStart(r, "children", project, dirPath)
+	defer h.traceFinish(r, "children", project, dirPath, spanStarted, &err)
 	// Unbounded by design: no limit/offset parameters. Directory reads
 	// resolve against the published tree in one storage call and the
 	// response is one JSON document; adding pagination would need a
@@ -245,7 +248,7 @@ func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, pr
 		// Headers are already on the wire (the caller wrote the status
 		// before streaming), so no error document can follow: log and
 		// truncate like a mid-response read failure.
-		logging.Error(h.logger, "stream aborted before first byte", "project", project, "path", filePath, "err", err, "elapsed", time.Since(started))
+		logging.Error(h.logger, "stream aborted before first byte", "project", project, "path", filePath, "elapsed", time.Since(started), "err", err)
 		return
 	}
 	sent := int64(0)
@@ -256,7 +259,7 @@ func (h *restHandler) streamFileRange(w http.ResponseWriter, r *http.Request, pr
 		}
 		chunk, readErr := client.ReadFileAtContext(r.Context(), project, filePath, offset, readLen)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "err", readErr, "elapsed", time.Since(started))
+			logging.Error(h.logger, "stream aborted mid-response", "project", project, "path", filePath, "offset", offset, "sent", sent, "expected", end-start, "elapsed", time.Since(started), "err", readErr)
 			return
 		}
 		if len(chunk) == 0 {
@@ -387,9 +390,10 @@ func (h *restHandler) rejectIfNoneMatchStar(r *http.Request, project, filePath s
 
 func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "xattrs", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "xattrs", project, targetPath)
+	defer h.traceFinish(r, "xattrs", project, targetPath, spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -413,9 +417,10 @@ func (h *restHandler) handleXAttrs(w http.ResponseWriter, r *http.Request) {
 // the console's read path without adding security beyond nosniff+octet-stream.
 func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "xattr-get", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "xattr-get", project, targetPath)
+	defer h.traceFinish(r, "xattr-get", project, targetPath, spanStarted, &err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		err = errBadRequest("invalid xattr name")
@@ -442,9 +447,10 @@ func (h *restHandler) handleXAttrGet(w http.ResponseWriter, r *http.Request) {
 // handleXAttrPut serves PUT /xattrs/value.
 func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "xattr-put", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "xattr-put", project, targetPath)
+	defer h.traceFinish(r, "xattr-put", project, targetPath, spanStarted, &err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		err = errBadRequest("invalid xattr name")
@@ -453,7 +459,7 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 	// SetXAttrContext takes no mutate options: a revision token fails loud
 	// with 412 (preconditionForUpdateNoCAS) instead of silently degrading
 	// to a start-of-request check.
-	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrput") {
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-put") {
 		err = errors.New("xattr precondition failed")
 		return
 	}
@@ -488,17 +494,18 @@ func (h *restHandler) handleXAttrPut(w http.ResponseWriter, r *http.Request) {
 // handleXAttrDelete serves DELETE /xattrs/value.
 func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	targetPath := r.URL.Query().Get("path")
+	targetPath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "xattr-delete", project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "xattr-delete", project, targetPath)
+	defer h.traceFinish(r, "xattr-delete", project, targetPath, spanStarted, &err)
 	name, ok := h.requireXAttrName(w, r)
 	if !ok {
 		err = errBadRequest("invalid xattr name")
 		return
 	}
-	// RemoveXAttrContext takes no mutate options: like xattrput, a
+	// RemoveXAttrContext takes no mutate options: like xattr-put, a
 	// revision token fails loud with 412 (preconditionForUpdateNoCAS).
-	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattrdelete") {
+	if !h.preconditionForUpdateNoCAS(w, r, project, targetPath, "xattr-delete") {
 		err = errors.New("xattr precondition failed")
 		return
 	}
@@ -524,7 +531,7 @@ func (h *restHandler) handleXAttrDelete(w http.ResponseWriter, r *http.Request) 
 // free of CR/LF so Header.Set cannot split the response. ok=false means
 // the handler already answered 400.
 func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (string, bool) {
-	name := r.URL.Query().Get("name")
+	name := queryFirstParam(r.URL.RawQuery, "name")
 	if strings.TrimSpace(name) == "" {
 		h.writeMappedError(w, errBadRequest("name is required"))
 		return "", false
@@ -539,7 +546,8 @@ func (h *restHandler) requireXAttrName(w http.ResponseWriter, r *http.Request) (
 func (h *restHandler) handleRevisions(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var err error
-	defer h.traceOp(r, "revisions", project, "")(&err)
+	spanStarted := h.traceStart(r, "revisions", project, "")
+	defer h.traceFinish(r, "revisions", project, "", spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -627,8 +635,8 @@ func (h *restHandler) streamAppendBody(r *http.Request, project, filePath string
 
 // readSizedBody buffers at most MaxPatchBodySize bytes from a mutation body;
 // oversized payloads fail with the caller's 413 wording so the existing
-// endpoint messages stay unchanged. It replaces the former readMutationBody /
-// readPatchBody pair, which differed only in that message.
+// endpoint messages stay unchanged. It is the single capped-body reader
+// for mutation payloads.
 func (h *restHandler) readSizedBody(body io.Reader, tooLargeMessage string) ([]byte, error) {
 	payload, err := readCappedBody(body, h.opts.MaxPatchBodySize)
 	if err != nil {

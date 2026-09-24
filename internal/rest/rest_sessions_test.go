@@ -15,7 +15,7 @@ import (
 	"github.com/FarelRA/storhub/internal/test"
 )
 
-// rest_sessions_test.go: Phase 2B session manager over REST.
+// rest_sessions_test.go: session manager over REST (stateful open sessions).
 //
 // The fake client below emulates the manager contract in memory (pinned
 // snapshot at open, own-writes-visible reads, commit on sync/close, owner
@@ -534,6 +534,59 @@ func readSessionHTTP(t *testing.T, handler http.Handler, handle string, offset, 
 
 func itoa(v int64) string {
 	return fmt.Sprintf("%d", v)
+}
+
+// windowRecordingClient wraps a Client and records the largest ReadSession
+// length requested: the streaming regression test below asserts every
+// window stays within StreamChunkSize.
+type windowRecordingClient struct {
+	Client
+	maxRead *int64
+}
+
+func (c *windowRecordingClient) ReadSession(ctx context.Context, handleID string, offset, length int64) ([]byte, error) {
+	if length > *c.maxRead {
+		*c.maxRead = length
+	}
+	return c.Client.ReadSession(ctx, handleID, offset, length)
+}
+
+// TestSessionReadStreamsInWindows pins the unbounded-buffer fix: a bare
+// read (length defaults to EOF) over a session larger than StreamChunkSize
+// must arrive intact while no single backend read exceeds one window. The
+// pre-fix handler issued one ReadSession for the whole range, so the
+// window assertion fails on the old code.
+func TestSessionReadStreamsInWindows(t *testing.T) {
+	t.Parallel()
+	const window = 1024
+	payload := make([]byte, 3*window+100)
+	for i := range payload {
+		payload[i] = byte('a' + (i % 26))
+	}
+	fake := newFakeRESTClient()
+	if _, err := fake.CreateFileContext(context.Background(), "demo", "big.bin"); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	if _, err := fake.WriteFileAtContext(context.Background(), "demo", "big.bin", 0, payload); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	var maxRead int64
+	handler, err := newHandlerForClient(&windowRecordingClient{Client: fake, maxRead: &maxRead},
+		Options{AllowAnonymous: true, StreamChunkSize: window})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	handle := openSessionHTTP(t, handler, "demo", "big.bin", "r")
+	resp := mustRequest(t, handler, http.MethodGet, "/api/v1/handles/"+handle+"?offset=0", nil, nil, http.StatusOK)
+	if body := readBody(t, resp); string(body) != string(payload) {
+		t.Fatalf("streamed body mismatch: got %d bytes want %d", len(body), len(payload))
+	}
+	if maxRead <= 0 {
+		t.Fatal("expected at least one backend read")
+	}
+	if maxRead > window {
+		t.Fatalf("backend read of %d bytes exceeds window %d: read is not windowed", maxRead, window)
+	}
 }
 
 func writeSessionHTTP(t *testing.T, handler http.Handler, handle string, offset int64, data string) {

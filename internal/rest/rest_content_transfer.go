@@ -17,15 +17,19 @@ import (
 // (not a handle* JSON route) because the body is user-stored bytes.
 //
 // Atime note: reads through this endpoint update atime relatime-gated
-// in storage, while FUSE suppresses atime on every op (hot-path write
-// avoidance) and snapshot/session reads never touch it. That matrix is
-// deliberate per surface; unifying it further needs the FUSE and storage
-// layers, not this handler.
+// in storage (ReadFileAtContext queues TouchFileAccessTime in
+// verbs_fs.go, gated by the relatime ladder in fs/atime.go), while FUSE
+// reads ride ReadPinnedFileContext (fuse_file.go, no atime queue) and its
+// commit redrive reads pass WithSuppressedAtime (fuse_write_ranges.go),
+// and session reads serve staged bytes with no atime queue
+// (sessions_io.go). That matrix is deliberate per surface; unifying it
+// further needs the FUSE and storage layers, not this handler.
 func (h *restHandler) serveContent(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	filePath := queryFirstParam(r.URL.RawQuery, "path")
 	var err error
-	defer h.traceOp(r, "serve-content", project, filePath)(&err)
+	spanStarted := h.traceStart(r, "serve-content", project, filePath)
+	defer h.traceFinish(r, "serve-content", project, filePath, spanStarted, &err)
 	// User-stored bytes share the API origin with the console: never let a
 	// browser sniff an uploaded file into an executable representation.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -106,7 +110,8 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var err error
-	defer h.traceOp(r, "replace", project, filePath)(&err)
+	spanStarted := h.traceStart(r, "replace", project, filePath)
+	defer h.traceFinish(r, "replace", project, filePath, spanStarted, &err)
 	entry, exists, revOpts, ok := h.checkReplacePreconditions(w, r, project, filePath)
 	if !ok {
 		err = errors.New("replace precondition failed")
@@ -123,7 +128,10 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 	// did not exist (or clobbers a symlink). If the body transfer then
 	// fails, remove the placeholder instead of stranding an orphan the
 	// client believes was never created.
-	replaceOpts := revOpts
+	// Copy the precondition slice before extending it: revOpts is owned
+	// by the precondition helper, and appending to its backing array
+	// would corrupt the helper's result if it ever gains spare capacity.
+	replaceOpts := append([]shfs.MutateOption{}, revOpts...)
 	if r.ContentLength >= 0 {
 		replaceOpts = append(replaceOpts, shfs.WithSize(r.ContentLength))
 	}
@@ -233,7 +241,7 @@ func (h *restHandler) createReplacePlaceholder(w http.ResponseWriter, r *http.Re
 
 func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
-	filePath := r.URL.Query().Get("path")
+	filePath := queryFirstParam(r.URL.RawQuery, "path")
 	if err := requireNonEmptyPath("path", filePath); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -249,9 +257,10 @@ func (h *restHandler) handleContentPatch(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	op := strings.TrimSpace(r.URL.Query().Get("op"))
+	op := strings.TrimSpace(queryFirstParam(r.URL.RawQuery, "op"))
 	var err error
-	defer h.traceOp(r, "patch", project, filePath, "op", op)(&err)
+	spanStarted := h.traceStart(r, "patch", project, filePath, "op", op)
+	defer h.traceFinish(r, "patch", project, filePath, spanStarted, &err, "op", op)
 	switch op {
 	case "append":
 		err = h.patchOpAppend(r, project, filePath)
@@ -288,7 +297,7 @@ func (h *restHandler) patchOpAppend(r *http.Request, project, filePath string) e
 
 // patchOpWrite applies one atomic write at the required offset.
 func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) error {
-	offset, err := parseNonNegativeInt(r.URL.Query().Get("offset"), "offset")
+	offset, err := parseNonNegativeInt(queryFirstParam(r.URL.RawQuery, "offset"), "offset")
 	if err != nil {
 		return err
 	}
@@ -297,11 +306,11 @@ func (h *restHandler) patchOpWrite(r *http.Request, project, filePath string) er
 
 // patchOpPatch applies one range replacement (offset/delete_size/edit).
 func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) error {
-	offset, err := parseNonNegativeInt(r.URL.Query().Get("offset"), "offset")
+	offset, err := parseNonNegativeInt(queryFirstParam(r.URL.RawQuery, "offset"), "offset")
 	if err != nil {
 		return err
 	}
-	deleteSize, err := parseNonNegativeInt(r.URL.Query().Get("delete_size"), "delete_size")
+	deleteSize, err := parseNonNegativeInt(queryFirstParam(r.URL.RawQuery, "delete_size"), "delete_size")
 	if err != nil {
 		return err
 	}
@@ -323,7 +332,7 @@ func (h *restHandler) patchOpPatch(r *http.Request, project, filePath string) er
 
 // patchOpTruncate resizes the file to the required size.
 func (h *restHandler) patchOpTruncate(r *http.Request, project, filePath string) error {
-	size, err := parseNonNegativeInt(r.URL.Query().Get("size"), "size")
+	size, err := parseNonNegativeInt(queryFirstParam(r.URL.RawQuery, "size"), "size")
 	if err != nil {
 		return err
 	}

@@ -39,3 +39,27 @@ func TestOperabilityEndpoints(t *testing.T) {
 		t.Fatalf("unexpected status response: %+v", st)
 	}
 }
+
+// TestPressureStreakDepthRequireAdmin pins the pressure-lane gating: the
+// failure streak and pending depth are operator counters like the sibling
+// snapshot accessors, so non-admin principals get 403. The pre-fix
+// forwarders answered nil error to anyone, so the denial assertions fail
+// on the old code.
+func TestPressureStreakDepthRequireAdmin(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRESTClient()
+	admin := &authorizedClient{base: fake, principal: &restPrincipal{Kind: "user", Username: "root", Admin: true}}
+	user := &authorizedClient{base: fake, principal: &restPrincipal{Kind: "user", Username: "bob", UID: 1002, PrimaryGID: 3000}}
+	if _, err := user.PressureFailureStreak("demo"); mappedStatus(err) != http.StatusForbidden {
+		t.Fatalf("non-admin streak must be forbidden, got: %v", err)
+	}
+	if _, err := user.PressurePendingDepth("demo"); mappedStatus(err) != http.StatusForbidden {
+		t.Fatalf("non-admin depth must be forbidden, got: %v", err)
+	}
+	if _, err := admin.PressureFailureStreak("demo"); err != nil {
+		t.Fatalf("admin streak must pass through: %v", err)
+	}
+	if _, err := admin.PressurePendingDepth("demo"); err != nil {
+		t.Fatalf("admin depth must pass through: %v", err)
+	}
+}

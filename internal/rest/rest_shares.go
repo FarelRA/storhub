@@ -353,9 +353,10 @@ type shareResponse struct {
 	Path        string `json:"path"`
 	URL         string `json:"url"`
 	DownloadURL string `json:"download_url,omitempty"`
-	// Token is the signed share JWT, returned ONLY on creation (programmatic
-	// bearer use); listings never carry it so capabilities do not leak
-	// through read endpoints.
+	// Token is the signed share JWT, returned on creation (programmatic
+	// bearer use) and echoed by the self-info route (the caller proving
+	// the credential to render console URLs); listings never carry it
+	// so capabilities do not leak through read endpoints.
 	Token     string `json:"token,omitempty"`
 	ExpiresAt string `json:"expires_at"`
 	IsDir     bool   `json:"is_dir"`
@@ -408,7 +409,8 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "share-create", project, sharePath)(&err)
+	spanStarted := h.traceStart(r, "share-create", project, sharePath)
+	defer h.traceFinish(r, "share-create", project, sharePath, spanStarted, &err)
 	entry, err := client.StatPathContext(r.Context(), project, sharePath)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -442,7 +444,7 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 	// 201 with Location: a new resource was created and is addressable at
 	// the project-shares collection, consistent with REST creation
 	// semantics everywhere else in this API.
-	w.Header().Set("Location", path.Join(h.opts.BasePath, "projects", url.PathEscape(project), "shares", record.ID))
+	w.Header().Set("Location", h.opts.BasePath+"/projects/"+url.PathEscape(project)+"/shares/"+url.PathEscape(record.ID))
 	created := h.shareResponse(record)
 	created.Token = record.Token
 	h.writeJSON(w, http.StatusCreated, created)
@@ -450,7 +452,8 @@ func (h *restHandler) createProjectShare(w http.ResponseWriter, r *http.Request,
 
 func (h *restHandler) listProjectShares(w http.ResponseWriter, r *http.Request, project string) {
 	var err error
-	defer h.traceOp(r, "share-list", project, "")(&err)
+	spanStarted := h.traceStart(r, "share-list", project, "")
+	defer h.traceFinish(r, "share-list", project, "", spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -473,7 +476,8 @@ func canManageShare(record *shareRecord, callerUID uint32, callerAdmin bool) boo
 
 func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
 	var err error
-	defer h.traceOp(r, "share-get", project, "", "share", shareID)(&err)
+	spanStarted := h.traceStart(r, "share-get", project, "", "share", shareID)
+	defer h.traceFinish(r, "share-get", project, "", spanStarted, &err, "share", shareID)
 	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
@@ -504,7 +508,8 @@ func (h *restHandler) getProjectShare(w http.ResponseWriter, r *http.Request, pr
 
 func (h *restHandler) deleteProjectShare(w http.ResponseWriter, r *http.Request, project, shareID string) {
 	var err error
-	defer h.traceOp(r, "share-delete", project, "", "share", shareID)(&err)
+	spanStarted := h.traceStart(r, "share-delete", project, "", "share", shareID)
+	defer h.traceFinish(r, "share-delete", project, "", spanStarted, &err, "share", shareID)
 	record, ok := h.getLiveShare(shareID)
 	if !ok || record.Project != project {
 		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}

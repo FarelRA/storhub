@@ -145,7 +145,7 @@ type Client interface {
 	// lands in the remote commit (the storage fsync primitive). It backs
 	// the ?sync=1 opt-in on every mutating endpoint via maybeDrain.
 	DrainProjectContext(ctx context.Context, project string) error
-	// OpenSession opens a stateful file handle (Phase 2B sessions). The
+	// OpenSession opens a stateful file handle (server-held handles).
 	// signatures mirror *storage.StorHub directly so the real hub satisfies
 	// this interface with no adapter; handlers must forward the request
 	// context unchanged so the manager sees the authenticated identity.
@@ -194,9 +194,8 @@ func (h *restHandler) clientFor(r *http.Request) (Client, error) {
 	return h.client, nil
 }
 
-// HTTP status/byte capture lives in internal/logging (HTTPRecorder): the
-// former statusWriter duplicate was removed so one package owns one job.
-// See logging/http_recorder.go.
+// HTTP status/byte capture lives in internal/logging (HTTPRecorder): one
+// package owns one job. See logging/http_recorder.go.
 
 type shareRegistry struct {
 	mu    sync.RWMutex
@@ -448,7 +447,11 @@ func (h *restHandler) decodePathRequest(r *http.Request, field string) (string, 
 func (h *restHandler) writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	// After WriteHeader nothing useful can follow on the wire, but a
+	// Debug line keeps encode failures diagnosable server-side.
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		logging.Debug(h.logger, "response encode failed", "status", status, "err", err)
+	}
 }
 
 func (h *restHandler) writeError(w http.ResponseWriter, status int, code, message string) {
@@ -493,40 +496,53 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 	h.writeError(w, status, code, message)
 }
 
-// traceOpNoop is the package-level no-op finish func returned when Debug
-// is off. Returning a shared value (instead of a fresh closure) keeps the
-// disabled path allocation-free for the alloc-parity benchmark budgets.
-var traceOpNoop = func(*error) {}
-
-// traceOp logs the symmetric span for one handler invocation through the
-// canonical logging.Start/Finish core: Debug "<op> start" now, then Error
-// "<op> failed" with err or Debug "<op> complete" when the deferred
-// finish runs. The component attr carries the rest namespace, so the op
-// name stays bare. Handlers defer the returned closure with a pointer to
-// their err variable so every invocation completes its pair. targetPath
-// is a project-relative path from the request (never a token or secret);
-// extra carries endpoint-specific attrs such as scope.
-func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, extra ...any) func(*error) {
-	// Zero-cost when Debug is off: the alloc-parity benchmark budgets
-	// fail on any per-request heap work, so skip the slice builds,
-	// redaction, and clock read entirely instead of discarding them
-	// inside the span helpers.
+// traceStart logs the Debug "<op> start" half of one handler span through
+// the canonical logging.Start core and returns the clock read the deferred
+// traceFinish needs for elapsed. The component attr carries the rest
+// namespace, so the op name stays bare. targetPath is a project-relative
+// path from the request (never a token or secret); extra carries
+// endpoint-specific attrs such as scope.
+func (h *restHandler) traceStart(r *http.Request, op, project, targetPath string, extra ...any) time.Time {
+	// Skip everything but the clock read when Debug is off: slice builds,
+	// redaction, and logging are all disabled-path waste the alloc-parity
+	// benchmark budgets would charge per request.
 	if h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug) {
-		return traceOpNoop
+		return time.Now().UTC()
 	}
-	method := r.Method
-	route := logging.RedactSensitivePath(r.URL.Path)
 	started := time.Now().UTC()
-	startArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
+	startArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
 	logging.Start(h.logger, op, startArgs...)
-	return func(perr *error) {
-		var finishErr error
-		if perr != nil {
-			finishErr = *perr
-		}
-		finishArgs := append([]any{"project", project, "path", targetPath, "method", method, "route", route}, extra...)
-		logging.Finish(h.logger, op, started, finishErr, finishArgs...)
+	return started
+}
+
+// traceFinish logs the closing half of one handler span through the
+// canonical logging.Finish core: Error "<op> failed" with err or Debug
+// "<op> complete". Handlers call traceStart, then defer traceFinish with a
+// pointer to their err variable plus the returned clock read, so every
+// post-validation invocation completes its pair. Split into two direct
+// calls (instead of one closure-returning helper) so the disabled path
+// allocates nothing: no closure value, no slice builds, no redaction on
+// success. Handlers pass no extra attrs on the hot paths, so those finish
+// calls carry a nil extras slice.
+//
+// Failure pass-through: a non-nil finish error is always reported, even
+// when Debug is off, so production failures stay observable while success
+// spans stay gated. Spans open after request validation, so malformed-body
+// 400s answered before traceStart carry no span: the pair holds for
+// post-validation invocations only. Static-asset, info, and login routes
+// (serveUIRoot, serveConfigJS, serveUIAssets, serveUIPublic, handleAPIInfo,
+// handleLogin) never open spans by design: they carry no project/op
+// identity worth tracing at Debug.
+func (h *restHandler) traceFinish(r *http.Request, op, project, targetPath string, started time.Time, perr *error, extra ...any) {
+	var finishErr error
+	if perr != nil {
+		finishErr = *perr
 	}
+	if finishErr == nil && (h.logger == nil || !h.logger.Enabled(r.Context(), slog.LevelDebug)) {
+		return
+	}
+	finishArgs := append([]any{"project", project, "path", targetPath, "method", r.Method, "route", logging.RedactSensitivePath(r.URL.Path)}, extra...)
+	logging.Finish(h.logger, op, started, finishErr, finishArgs...)
 }
 
 // maybeDrain honors the ?sync=1 opt-in (mirroring the POSIX write/fsync
@@ -541,7 +557,7 @@ func (h *restHandler) traceOp(r *http.Request, op, project, targetPath string, e
 // deliberately bypassed here: it redacts 5xx wording, which would strip
 // the project name the caller needs for the retry.
 func (h *restHandler) maybeDrain(w http.ResponseWriter, r *http.Request, project string) bool {
-	want, err := parseBoolStrict(r.URL.Query().Get("sync"), "sync")
+	want, err := parseBoolStrict(queryFirstParam(r.URL.RawQuery, "sync"), "sync")
 	if err != nil {
 		h.writeMappedError(w, err)
 		return false
@@ -601,6 +617,10 @@ func mappedStatus(err error) int {
 	if errors.Is(err, syscall.EINVAL) {
 		return http.StatusBadRequest
 	}
+	// Zero-extend cap: single grows beyond 16 MiB fail in storage with
+	// EFBIG (fs/io.go), which has no arm above and lands here as 500.
+	// The cap is deterministic per request, so a future pass should map
+	// it to 413/400 explicitly instead of the retry-inviting 500.
 	switch {
 	case errors.Is(err, shfs.ErrAlreadyExists),
 		errors.Is(err, shfs.ErrNotEmpty),
@@ -612,9 +632,15 @@ func mappedStatus(err error) int {
 	}
 }
 
-// mappedCode is the single owner of wire error codes: every status maps
-// to exactly one code. Handlers must use errBadRequest/errPayloadTooLarge
-// (+writeMappedError) instead of inventing ad-hoc codes (xattr_too_large,
+// mappedCode is the single owner of wire error codes, with three narrow
+// bespoke exceptions beside it: session stale handles answer 410 "gone"
+// (HTTP has no mappedCode entry for 410, and the expired-vs-never-existed
+// signal is load-bearing for session clients), login challenges answer
+// 401 "invalid_credentials" (auth challenge shape, not an API error), and
+// the UI fallback answers 404 "ui_not_built" (non-API asset fallback).
+// Every other status maps to exactly one code below. Handlers must use
+// errBadRequest/errPayloadTooLarge (+writeMappedError) instead of
+// inventing ad-hoc codes (xattr_too_large,
 // invalid_request, invalid_patch_op, recursive_delete_unsupported); bespoke
 // codes survive only where the status alone cannot distinguish the case
 // (conflict sub-cases, not_implemented, range). writeError is reserved for
@@ -654,7 +680,7 @@ func mappedCode(status int) string {
 // with 400 HERE instead of forwarding it to storage, whose generic errors
 // would surface as 500s echoing internal wording.
 //
-// Canonical query/body parsers: exactly three — parseNonNegativeInt,
+// Canonical query/body parsers: exactly three: parseNonNegativeInt,
 // parseBoolStrict, parsePruneScope. Do not add a fourth idiom; CLI-side
 // parsing mirrors parseNonNegativeInt via parseNonNegativeArg (usageError).
 
@@ -676,10 +702,10 @@ const maxQueryParams = 10000
 // containing a literal ";" skipped, empty segments skipped, split on the
 // first "=", key and value QueryUnescaped (pairs with decoding errors
 // skipped), first match wins. Unlike r.URL.Query().Get it builds no map
-// or slices, so it costs zero heap on escape-free input. Only the
-// alloc-parity benchmark paths (serve-content, replace, node-get) use it:
-// traceOp's handler err pointer costs one alloc per traced request, and
-// this lookup pays it back so the REST budgets still hold.
+// or slices, so it costs zero heap on escape-free input. The benchmarked
+// read paths (serve-content, replace, node-get) use it, and every other
+// handler query lookup does too, so per-request query parsing adds no
+// heap on the alloc-parity benchmark paths.
 func queryFirstParam(raw, key string) string {
 	if strings.Count(raw, "&")+1 > maxQueryParams {
 		return ""

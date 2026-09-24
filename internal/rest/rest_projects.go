@@ -17,7 +17,8 @@ type projectResponse struct {
 func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var err error
-	defer h.traceOp(r, "project-get", project, "")(&err)
+	spanStarted := h.traceStart(r, "project-get", project, "")
+	defer h.traceFinish(r, "project-get", project, "", spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -36,7 +37,8 @@ func (h *restHandler) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 func (h *restHandler) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var err error
-	defer h.traceOp(r, "project-delete", project, "")(&err)
+	spanStarted := h.traceStart(r, "project-delete", project, "")
+	defer h.traceFinish(r, "project-delete", project, "", spanStarted, &err)
 	// Deleting the whole project has no target node: the guard is the
 	// project revision (412 when the caller decided on a moved HEAD).
 	if !h.preconditionForProjectOp(w, r, project) {

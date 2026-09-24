@@ -36,7 +36,8 @@ func (h *restHandler) handleShareInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "share-info", claims.Project, claims.Path)(&err)
+	spanStarted := h.traceStart(r, "share-info", claims.Project, claims.Path)
+	defer h.traceFinish(r, "share-info", claims.Project, claims.Path, spanStarted, &err)
 	if h.isRevoked(claims.ID) {
 		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
@@ -73,20 +74,32 @@ func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaim
 // come for free.
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
-	// Same single pathway as info: the token (query here) is the credential.
-	// Shares are always download-capable after normalization; no dl flag check.
-	claims, cerr := h.parseShareToken(r.URL.Query().Get("token"))
+	// Same single pathway as info: the token is the credential, in three
+	// spellings: ?token= query (existing links), Authorization: Bearer
+	// header, or the {token} path segment itself (the redemption spelling
+	// the info route uses). Query wins when present; the path segment
+	// stops being decorative. Shares are always download-capable after
+	// normalization; no dl flag check.
+	token := queryFirstParam(r.URL.RawQuery, "token")
+	if token == "" {
+		token = requestBearerToken(r)
+	}
+	if token == "" {
+		token = chi.URLParam(r, "token")
+	}
+	claims, cerr := h.parseShareToken(token)
 	if cerr != nil || h.isRevoked(claims.ID) {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
-	targetPath, rerr := h.resolveSharePath(claims, r.URL.Query().Get("path"))
+	targetPath, rerr := h.resolveSharePath(claims, queryFirstParam(r.URL.RawQuery, "path"))
 	if rerr != nil {
 		h.writeMappedError(w, rerr)
 		return
 	}
 	var err error
-	defer h.traceOp(r, "share-download", claims.Project, targetPath)(&err)
+	spanStarted := h.traceStart(r, "share-download", claims.Project, targetPath)
+	defer h.traceFinish(r, "share-download", claims.Project, targetPath, spanStarted, &err)
 	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
 }
@@ -102,21 +115,31 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 // silently: an ID in the path must match the presented token's ID, and a
 // JWT in the path must verify on its own.
 func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) {
-	parentToken := r.URL.Query().Get("token")
+	// The span opens first: verification, path checks, and the stat below
+	// are the bulk of the work, and early 404/403/400 answers carry spans
+	// like every other handler. Claims are unknown this early, so the
+	// span carries the raw path token instead of project/path.
+	rawToken := chi.URLParam(r, "token")
+	var err error
+	spanStarted := h.traceStart(r, "share-derive", "", rawToken)
+	defer h.traceFinish(r, "share-derive", "", rawToken, spanStarted, &err)
+	parentToken := queryFirstParam(r.URL.RawQuery, "token")
 	if parentToken == "" {
 		parentToken = requestBearerToken(r)
 	}
-	claims, err := h.parseShareToken(parentToken)
+	claims, perr := h.parseShareToken(parentToken)
+	err = perr
 	if err != nil || h.isRevoked(claims.ID) {
 		// Fall back to the redemption spelling: the path segment itself
 		// is the signed parent JWT (no query or header credential).
 		if parentToken == "" {
-			if pathClaims, perr := h.parseShareToken(chi.URLParam(r, "token")); perr == nil && !h.isRevoked(pathClaims.ID) {
+			if pathClaims, qerr := h.parseShareToken(rawToken); qerr == nil && !h.isRevoked(pathClaims.ID) {
 				claims, err = pathClaims, nil
 			}
 		}
 	}
 	if err != nil || h.isRevoked(claims.ID) {
+		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -124,16 +147,21 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 	// segment must match the presented token's ID when it names an ID.
 	// (When the path segment was the JWT itself it is already the
 	// verified parent, so the ID comparison below is skipped.)
-	token := chi.URLParam(r, "token")
-	if parentToken != "" && token != "" && token != claims.ID {
-		h.writeMappedError(w, errForbidden("share id mismatch"))
+	// The mismatch answers 403, not the 404 the share-management plane
+	// uses against ID enumeration: presenting a valid parent token
+	// already proves read access to that share, so confirming its ID
+	// leaks nothing new.
+	if parentToken != "" && rawToken != "" && rawToken != claims.ID {
+		err = errForbidden("share id mismatch")
+		h.writeMappedError(w, err)
 		return
 	}
 	// Derivation reads through the same nobody-identity, path-scoped client
 	// as redemption: the visitor's DAC, not the server's.
 	r = r.WithContext(h.shareRedemptionContext(r, claims))
 	var req shareRequest
-	if err := h.decodeJSON(r, &req, false); err != nil {
+	if derr := h.decodeJSON(r, &req, false); derr != nil {
+		err = derr
 		h.writeMappedError(w, err)
 		return
 	}
@@ -142,17 +170,20 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 	if targetRaw == "" {
 		targetRaw = claims.Path
 	}
-	sharePath, err := canonicalSharePath(targetRaw)
-	if err != nil {
-		h.writeMappedError(w, errBadRequest("invalid share path"))
+	sharePath, cerr := canonicalSharePath(targetRaw)
+	if cerr != nil {
+		err = errBadRequest("invalid share path")
+		h.writeMappedError(w, err)
 		return
 	}
 	if !hasPathPrefix(sharePath, claims.Path) {
-		h.writeMappedError(w, errForbidden("access denied: path not shared"))
+		err = errForbidden("access denied: path not shared")
+		h.writeMappedError(w, err)
 		return
 	}
 	remaining := time.Until(claims.ExpiresAt.Time)
 	if remaining <= 0 {
+		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -161,17 +192,18 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		expiresIn = ttlCap
 	}
 	// Stat to learn IsDir for new record (scoped + nobody identity, above).
-	client, err := h.clientFor(r)
-	if err != nil {
+	client, cerr := h.clientFor(r)
+	if cerr != nil {
+		err = cerr
 		h.writeMappedError(w, err)
 		return
 	}
-	entry, err := client.StatPathContext(r.Context(), claims.Project, sharePath)
-	if err != nil {
+	entry, serr := client.StatPathContext(r.Context(), claims.Project, sharePath)
+	if serr != nil {
+		err = serr
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "share-derive", claims.Project, sharePath)(&err)
 	// A derived share is a sub-capability of its parent: ownership follows
 	// the parent record when it is still in the registry, so the original
 	// sharer keeps management rights. Unknown parents (e.g. after a
@@ -207,19 +239,19 @@ func (h *restHandler) resolveSharePath(claims *shareClaims, rawPath string) (str
 }
 
 func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, project, targetPath string) {
+	// Single span by design: the caller (serveShareDownload) already
+	// opened the share-download span, so this stream helper adds none.
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
-	defer h.traceOp(r, "share-download", project, targetPath)(&err)
 	entry, err := client.StatPathContext(r.Context(), project, targetPath)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return
 	}
 	if entry.IsDir {
-		err = &restStatusError{status: http.StatusNotImplemented, message: "directory download not yet implemented"}
 		h.writeError(w, http.StatusNotImplemented, "not_implemented", "directory download not yet implemented")
 		return
 	}
@@ -228,11 +260,11 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 	if entry.IsSymlink {
 		target, readErr := client.ReadlinkContext(r.Context(), project, targetPath)
 		if readErr != nil {
-			err = readErr
 			h.writeMappedError(w, readErr)
 			return
 		}
 		w.Header().Set("Content-Type", "application/symlink-target")
+		w.Header().Set("X-StorHub-Symlink-Target", target)
 		w.Header().Set("Content-Length", strconv.Itoa(len(target)))
 		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusOK)
@@ -242,6 +274,15 @@ func (h *restHandler) serveDownloadPath(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	eTag := restEntryETag(entry)
+	// Best effort like /content: the share lane denies project revision
+	// by design (restrictedClient.RevisionContext), so this only emits
+	// for future non-share callers.
+	h.setRevisionHeader(w, r, project)
+	if matchEntityTag(r.Header.Get("If-None-Match"), eTag) {
+		w.Header().Set("ETag", eTag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.Header().Set("ETag", eTag)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", detectContentType(targetPath))

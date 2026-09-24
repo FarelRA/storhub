@@ -25,7 +25,7 @@ type restConformHandle struct {
 	// names a new file, and only the pin tells them apart. Backends
 	// preserve inode identity across commits (updates carry the
 	// existing inode; renames move it), so the pin never needs
-	// refreshing — adopting a new inode here would rebind the handle
+	// refreshing: adopting a new inode here would rebind the handle
 	// to a stranger's file, which is exactly the bug this prevents.
 	ino uint64
 	// session is the server-side open-file description (/handles).

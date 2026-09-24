@@ -72,7 +72,7 @@ func bearerOrQueryToken(r *http.Request) (token string, fromQuery bool) {
 	if token = requestBearerToken(r); token != "" {
 		return token, false
 	}
-	if token = strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+	if token = strings.TrimSpace(queryFirstParam(r.URL.RawQuery, "token")); token != "" {
 		return token, true
 	}
 	return "", false

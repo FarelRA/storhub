@@ -39,7 +39,8 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "rollback", project, "")(&err)
+	spanStarted := h.traceStart(r, "rollback", project, "")
+	defer h.traceFinish(r, "rollback", project, "", spanStarted, &err)
 	// Rollback republishes history without a target node: the guard is the
 	// project revision (412 when the caller decided on a moved HEAD).
 	if !h.preconditionForProjectOp(w, r, project) {
@@ -64,8 +65,8 @@ func (h *restHandler) handleRollback(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, ackResponse{Project: project, Status: "rolled_back"})
 }
 
-// pruneResponse is the typed result of a purge operation; it replaces the
-// former ad-hoc map so every endpoint returns a struct-shaped document.
+// pruneResponse is the typed result of a purge operation: every endpoint
+// returns a struct-shaped document.
 type pruneResponse struct {
 	Project          string   `json:"project"`
 	Status           string   `json:"status"`
@@ -115,7 +116,8 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "prune", project, "", "scope", string(scope), "dry_run", req.DryRun)(&err)
+	spanStarted := h.traceStart(r, "prune", project, "", "scope", string(scope), "dry_run", req.DryRun)
+	defer h.traceFinish(r, "prune", project, "", spanStarted, &err, "scope", string(scope), "dry_run", req.DryRun)
 	if !h.preconditionForProjectOp(w, r, project) {
 		err = errors.New("project precondition failed")
 		return
@@ -127,7 +129,7 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := client.PruneContext(r.Context(), project, string(scope), req.Keep, req.DryRun)
 	if err != nil {
-		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "err", err, "status", mappedStatus(err), "elapsed", time.Since(started))
+		logging.Error(h.logger, "prune failed", "project", project, "scope", scope, "status", mappedStatus(err), "elapsed", time.Since(started), "err", err)
 		h.writeMappedError(w, err)
 		return
 	}
@@ -159,7 +161,8 @@ func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	started := time.Now().UTC()
 	var err error
-	defer h.traceOp(r, "enable", project, "")(&err)
+	spanStarted := h.traceStart(r, "enable", project, "")
+	defer h.traceFinish(r, "enable", project, "", spanStarted, &err)
 	if !h.preconditionForProjectOp(w, r, project) {
 		err = errors.New("project precondition failed")
 		return
@@ -170,7 +173,7 @@ func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = client.ReEnableProject(project); err != nil {
-		logging.Error(h.logger, "enable failed", "project", project, "err", err, "status", mappedStatus(err), "elapsed", time.Since(started))
+		logging.Error(h.logger, "enable failed", "project", project, "status", mappedStatus(err), "elapsed", time.Since(started), "err", err)
 		h.writeMappedError(w, err)
 		return
 	}
@@ -196,7 +199,8 @@ type statusResponse struct {
 func (h *restHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var err error
-	defer h.traceOp(r, "status", project, "")(&err)
+	spanStarted := h.traceStart(r, "status", project, "")
+	defer h.traceFinish(r, "status", project, "", spanStarted, &err)
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
@@ -259,7 +263,8 @@ func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	defer h.traceOp(r, "revert", project, req.Path)(&err)
+	spanStarted := h.traceStart(r, "revert", project, req.Path)
+	defer h.traceFinish(r, "revert", project, req.Path, spanStarted, &err)
 	if !h.preconditionForProjectOp(w, r, project) {
 		err = errors.New("project precondition failed")
 		return
