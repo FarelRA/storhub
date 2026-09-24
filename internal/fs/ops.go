@@ -130,16 +130,30 @@ func (p *projectState) bump() {
 	p.mutations.Add(1)
 }
 
-// withOp wraps one service verb with start/finish debug logging and StatFS
+// withOp wraps one service verb with start/finish span lines and StatFS
 // invalidation. A mutating verb passes mutating=true so a successful call
 // bumps the mutation counter; read-only verbs pass false. It replaces the
 // per-verb Debug+logFinish+bumpMutations boilerplate (13 copies) with one
 // funnel.
+//
+// Span gating: the start line emits only when the project logger enables
+// Debug, checked here before the message concat and record build, and the
+// success finish line is gated the same way inside logFinishState.
+// Failures always reach logging.Finish so the Error "<op> failed" line
+// stays visible at the default level. Residual cost with Debug off is the
+// call-site args slice plus interface boxing: the verb call sites pass
+// []any literals, which are built before this funnel runs. Threading lazy
+// arg builders through every call site would trade one closure allocation
+// for that slice on each op, so the gate lives here and removes the concat,
+// the slog record, and the finish-path slice growth instead, with no change
+// to any call shape.
 func (s *Service) withOp(project, op string, mutating bool, args []any, fn func() error) (err error) {
 	state := s.state(project)
 	started := time.Now().UTC()
 	logger := state.log(s.backend.Logger())
-	logging.Debug(logger, op+" start", args...)
+	if logging.Enabled(logger, slog.LevelDebug) {
+		logging.Start(logger, op, args...)
+	}
 	defer func() {
 		if mutating && err == nil {
 			state.bump()
@@ -152,8 +166,14 @@ func (s *Service) withOp(project, op string, mutating bool, args []any, fn func(
 func (s *Service) logFinishState(state *projectState, op string, started time.Time, err error, args ...any) {
 	// Debug, not Info: per-op completion lines are a steady-state fire
 	// hose on a mount (every stat/read/write), and the default level no
-	// longer wants them.
-	logging.Finish(state.log(s.backend.Logger()), op, started, err, args...)
+	// longer wants them. Failures pass through unguarded so the Error
+	// line is reachable at the default level; only the success path stays
+	// gated on Debug.
+	logger := state.log(s.backend.Logger())
+	if err == nil && !logging.Enabled(logger, slog.LevelDebug) {
+		return
+	}
+	logging.Finish(logger, op, started, err, args...)
 }
 
 // RequireParentDirectory fails when the parent of filePath is missing.

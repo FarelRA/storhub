@@ -89,17 +89,33 @@ func (s *Service) ForgetProject(project string) {
 }
 
 func (s *Service) logFinish(project, op string, started time.Time, err error, args ...any) {
-	logging.Finish(s.logger(project), op, started, err, args...)
+	// Failures pass through unguarded so the Error "<op> failed" line is
+	// reachable at the default level; only the success path stays gated
+	// on Debug.
+	logger := s.logger(project)
+	if err == nil && !logging.Enabled(logger, slog.LevelDebug) {
+		return
+	}
+	logging.Finish(logger, op, started, err, args...)
 }
 
-// withOp wraps one service verb with start/finish debug logging. quiet,
+// withOp wraps one service verb with start/finish span lines. quiet,
 // when non-nil, suppresses the finish line for expected hot-path outcomes
 // (e.g. xattr ENODATA on GetXAttr). It replaces the per-verb Info+logFinish
 // boilerplate with one Debug-level funnel.
+//
+// Span gating mirrors the fs Service funnel: the start line emits only
+// when the project logger enables Debug, and the success finish line is
+// gated the same way inside logFinish above.
+// Residual cost with Debug off is the call-site args slice plus interface
+// boxing, which is built before this funnel runs; see the fs withOp note
+// for why the gate lives here instead of behind lazy arg builders.
 func (s *Service) withOp(project, op string, args []any, fn func() error, quiet func(error) bool) (err error) {
 	logger := s.logger(project)
 	started := time.Now().UTC()
-	logging.Debug(logger, op+" start", args...)
+	if logging.Enabled(logger, slog.LevelDebug) {
+		logging.Start(logger, op, args...)
+	}
 	defer func() {
 		if quiet != nil && quiet(err) {
 			return
