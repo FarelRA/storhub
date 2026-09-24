@@ -30,7 +30,7 @@ func ConformanceEnabled() bool {
 func RequireConformance(t *testing.T) {
 	t.Helper()
 	if !ConformanceEnabled() {
-		t.Skip("conformance suite runs only with STORHUB_CONFORMANCE=1 (Phase 0 RED: known deviations open)")
+		t.Skip("conformance suite runs only with STORHUB_CONFORMANCE=1 (known deviations open; see the conformance table notes)")
 	}
 }
 

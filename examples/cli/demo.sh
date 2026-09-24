@@ -54,7 +54,7 @@ cat "$TMP_DIR/downloaded.txt"
 
 echo
 echo "== Revisions =="
-"${CLI[@]}" revisions "$PROJECT"
+"${CLI[@]}" project revisions "$PROJECT"
 
 echo
 echo "== Cleanup one file =="

@@ -51,11 +51,10 @@ type Scenario struct {
 //     at zero and each scenario restores it, so product defaults never
 //     leak into the table.
 //   - Scratch multi-name rows (link-two-names-both-publish and
-//     siblings) currently run on the oracle only (Surfaces 0, which the
-//     oracle covers by running the full table unfiltered): the CLI and
-//     REST session fakes live outside the owned files, so their mirrors
-//     are prod-worker hunks (reported with this change) that flip these
-//     rows to SurfaceREST | SurfaceCLI once landed.
+//     siblings) run on the oracle and on the REST and CLI adapters
+//     (Surfaces SurfaceREST | SurfaceCLI; the oracle runs the full
+//     table unfiltered, and both fakes wire test.PendingNames into
+//     their session tables).
 //
 // Table is the full conformance suite.
 var Table = slices.Concat(

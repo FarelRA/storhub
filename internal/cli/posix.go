@@ -118,6 +118,8 @@ func (a *App) newTruncateCmd() *cobra.Command {
 		Short: "Resize a file",
 		Long: `Truncate resizes a file to size bytes, zero-filling growth
 like truncate(1). Size is non-negative; misuse is a usage error (exit 2).
+A single grow beyond 16 MiB fails with EFBIG (no sparse representation;
+grow in smaller steps for large files).
 
 Examples:
   storhub truncate docs-project docs/f.txt 0`,
@@ -480,32 +482,5 @@ func (a *App) runLink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	printFileSummary(a.stderr, "linked", meta)
-	return nil
-}
-
-func (a *App) newProjectSyncCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "sync <project>",
-		Short: "Drain a project until published state is durable",
-		Long: `Sync drains the project's journal until everything published
-before the call is durably committed (the storage fsync primitive). It is
-the standalone form of the --sync flag every mutating command accepts.
-
-Examples:
-  storhub sync docs-project`,
-		Args: usageArgs(cobra.ExactArgs(1)),
-		RunE: a.runProjectSync,
-	}
-}
-
-func (a *App) runProjectSync(cmd *cobra.Command, args []string) error {
-	hub, err := a.mustCmdHub(cmd, 0, false)
-	if err != nil {
-		return err
-	}
-	if err := hub.DrainProjectContext(cmd.Context(), args[0]); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(a.stderr, "synced %s\n", args[0])
 	return nil
 }

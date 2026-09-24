@@ -100,8 +100,8 @@ func MissingSessionParent(parent string) error {
 // linking onto an occupied name); Relink replaces the whole set with
 // one path; Close publishes to List after the caller pre-validates
 // every name. The oracle uses it directly; the CLI and REST fakes wire
-// it into their session tables with the hunks reported alongside this
-// change, so all three share one append/replace/list semantic.
+// it into their session tables, so all three share one
+// append/replace/list semantic.
 type PendingNames struct {
 	names []string
 }
@@ -125,10 +125,11 @@ func (p *PendingNames) Replace(path string) {
 	p.names = []string{path}
 }
 
-// List returns the pending names in link order. The caller must
-// pre-validate every name before publishing any of them.
+// List returns the pending names in link order, as a copy: the caller
+// must pre-validate every name before publishing any of them, and the
+// copy keeps a caller from mutating the stage through the result.
 func (p *PendingNames) List() []string {
-	return p.names
+	return append([]string(nil), p.names...)
 }
 
 // Empty reports whether no name is staged (close discards).

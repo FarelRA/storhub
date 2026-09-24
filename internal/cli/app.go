@@ -154,7 +154,7 @@ type hubClient interface {
 	// the --sync opt-in on every mutating command via drainIfSyncRequested.
 	DrainProjectContext(ctx context.Context, project string) error
 
-	// OpenSession opens a stateful file handle (Phase 2B sessions). The
+	// OpenSession opens a stateful file handle (server-held handles). The
 	// signatures mirror *storage.StorHub directly so storhubClient satisfies
 	// them through its embedded hub with no adapter; commands pass
 	// cmd.Context() unchanged and never synthesize a caller identity.
@@ -189,15 +189,12 @@ var warnOutput atomic.Pointer[io.Writer]
 // setWarnOutput swaps the pre-App warning sink, returning a restore func.
 // Test-only seam: prod never calls it.
 func setWarnOutput(w io.Writer) func() {
-	old, ok := warnOutput.Load(), true
+	old := warnOutput.Load()
 	if w == nil {
 		v := io.Writer(os.Stderr)
 		w = v
 	}
 	warnOutput.Store(&w)
-	if !ok {
-		return func() {}
-	}
 	return func() { warnOutput.Store(old) }
 }
 
@@ -286,7 +283,8 @@ func normalizeCLIChunkSize(size int64) int64 {
 	if size < minCLIChunkSize {
 		return minCLIChunkSize
 	}
-	return chunking.NormalizedSize(size)
+	clamped, _ := chunking.NormalizedSize(size)
+	return clamped
 }
 
 // New returns an App wired to process stdio with default settings.
@@ -296,10 +294,6 @@ func New() *App {
 	return a
 }
 
-// Seam accessors: per-App injection point (parallel-safe) with fallback to
-// the deprecated package globals. Until wave 2 migrates tests to set
-// a.seams per-test, the globals win so existing stub-swapping tests keep
-// working; new code should set a.seams explicitly for isolation.
 // Seam accessors: per-App injection point (parallel-safe). Tests set
 // a.seams fields directly for isolation; there are no package globals.
 func (a *App) seamHub() func(context.Context, string, string, int64, bool, logSettings) (hubClient, error) {
@@ -354,6 +348,18 @@ Examples:
 	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err}
 	})
+	// Log knobs fail loud here, before any logger is built: the logger
+	// constructor falls back to info on unknown values, so without this
+	// gate a --loglevel typo would run silently at the wrong verbosity.
+	rootCmd.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
+		if !shlog.ValidLevel(a.log.level) {
+			return &usageError{fmt.Errorf("invalid --loglevel %q: must be debug, info, warn, or error", a.log.level)}
+		}
+		if !shlog.ValidFormat(a.log.format) {
+			return &usageError{fmt.Errorf("invalid --logformat %q: must be pretty or text", a.log.format)}
+		}
+		return nil
+	}
 
 	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
 	rootCmd.PersistentFlags().String("apibase", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")

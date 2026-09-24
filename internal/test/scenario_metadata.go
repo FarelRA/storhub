@@ -93,6 +93,39 @@ var scenarioMetadata = []Scenario{
 		},
 	},
 	{
+		Name:     "metadata-dir-ops-succeed",
+		Surfaces: SurfaceAll,
+		Run: func(s Surface) error {
+			probe := "/pc-dir-ops-probe"
+			if err := s.CreateFile(probe, 0o644, false); err != nil {
+				return fmt.Errorf("create: %v", err)
+			}
+			// Chown to the current owner, like chown-roundtrip: the
+			// only chown a non-privileged caller is guaranteed on
+			// every enforcing surface.
+			self, err := s.Stat(probe)
+			if err != nil {
+				return fmt.Errorf("stat: %v", err)
+			}
+			d := "/pc-dir-ops"
+			if err := s.Mkdir(d, 0o755); err != nil {
+				return fmt.Errorf("mkdir: %v", err)
+			}
+			// Metadata verbs apply to directories, like production
+			// (no ErrIsDir): chmod lands, chown and utimens succeed.
+			if err := s.Chmod(d, 0o750); err != nil {
+				return fmt.Errorf("chmod dir: %v", err)
+			}
+			if err := s.Chown(d, self.UID, self.GID); err != nil {
+				return fmt.Errorf("chown dir: %v", err)
+			}
+			if err := s.Utimens(d, 1700000000123456789); err != nil {
+				return fmt.Errorf("utimens dir: %v", err)
+			}
+			return nil
+		},
+	},
+	{
 		Name:     "chown-roundtrip",
 		Surfaces: SurfaceAll,
 		Run: func(s Surface) error {

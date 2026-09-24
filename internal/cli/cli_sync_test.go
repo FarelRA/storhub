@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Phase 3 sync opt-in: every mutating command accepts --sync and drains the
+// The --sync drain opt-in: every mutating command accepts --sync and drains the
 // project's journal after success. Async stays the default: no drain runs
 // unless --sync is passed.
 

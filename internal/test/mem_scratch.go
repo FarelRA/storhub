@@ -219,7 +219,7 @@ func (h *memScratch) Close() error {
 		}
 	}
 	for _, name := range h.pending.List() {
-		h.mem.files[name] = &memFile{mode: 0o644, mtime: h.mem.tick(), version: 1, data: append([]byte(nil), h.data...)}
+		h.mem.files[name] = &memFile{mode: uint32(0o644) &^ (h.mem.umask & 0o777), mtime: h.mem.tick(), version: 1, data: append([]byte(nil), h.data...)}
 	}
 	h.closed = true
 	return nil

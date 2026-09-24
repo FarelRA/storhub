@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,12 +16,15 @@ import (
 	"github.com/FarelRA/storhub/internal/test"
 )
 
-// cli_sessions_test.go: Phase 2B session manager over the CLI.
+// cli_sessions_test.go: stateful open sessions (server-held handles) over the CLI.
 //
 // fakeHub gains an in-memory session table (pinned bytes at open,
 // own-writes-visible reads, commit on sync/close, unlinked scratch with
 // link/discard) so the command sequence is exercised end to end through
-// real cobra RunE paths. pcFakeHub gets stubs: it never speaks sessions,
+// real cobra RunE paths. The table runs on the shared session core
+// (test.LiveSession for unknown-is-stale lookup with lazy expiry,
+// test.SessionExpiryAt for TTL clamping, test.PendingNames for the
+// linked-name stage); pcFakeHub gets stubs: it never speaks sessions,
 // but it must satisfy the extended hubClient contract to keep compiling.
 
 // cliSession is one emulated open handle behind the CLI fake.
@@ -30,6 +34,12 @@ type cliSession struct {
 	mode    storage.OpenMode
 	data    []byte
 	dirty   bool
+	// expires bounds the handle like the product idle TTL; every
+	// operation past it fails stale through the shared core.
+	expires time.Time
+	// pending stages linked names: Link appends, Relink replaces the
+	// whole set, and path mirrors the live name for stat/close.
+	pending test.PendingNames
 }
 
 type cliSessionStore struct {
@@ -38,12 +48,20 @@ type cliSessionStore struct {
 	next     int
 }
 
+// cliStaleSession builds the typed stale error for the shared core: the
+// core owns the unknown/expired rules, this one line owns the error value
+// so lookups keep asserting errors.Is against the storage sentinel.
+func cliStaleSession(handleID, reason string) error {
+	return &storage.StaleSessionError{HandleID: handleID, Reason: reason}
+}
+
 func (s *cliSessionStore) live(id string) (*cliSession, error) {
-	sess, ok := s.sessions[id]
-	if !ok {
-		return nil, &storage.StaleSessionError{HandleID: id, Reason: "unknown handle"}
-	}
-	return sess, nil
+	// Unknown ids answer stale like expired ones, mirroring the
+	// product (and the sibling fakes): an id that was never issued
+	// and one that lapsed are indistinguishable, and expiry reaps
+	// lazily under the caller lock. Lookup lives in the shared core;
+	// the table shape stays here.
+	return test.LiveSession(s.sessions, id, func(sess *cliSession) time.Time { return sess.expires }, time.Now(), cliStaleSession)
 }
 
 func (h *fakeHub) sessionStore() *cliSessionStore {
@@ -53,13 +71,16 @@ func (h *fakeHub) sessionStore() *cliSessionStore {
 	return h.sess
 }
 
-func (h *fakeHub) OpenSession(_ context.Context, project, path string, mode storage.OpenMode, _ ...storage.SessionOption) (string, error) {
+func (h *fakeHub) OpenSession(_ context.Context, project, path string, mode storage.OpenMode, opts ...storage.SessionOption) (string, error) {
 	store := h.sessionStore()
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.next++
 	id := fmt.Sprintf("clisess-%d", store.next)
-	store.sessions[id] = &cliSession{project: project, path: path, mode: mode}
+	// Honor requested TTLs through the shared session core (default when
+	// unset); every operation past expiry fails stale via live.
+	expires := test.SessionExpiryAt(time.Now(), storage.RequestedTTL(opts), 10*time.Minute, time.Hour)
+	store.sessions[id] = &cliSession{project: project, path: path, mode: mode, expires: expires}
 	return id, nil
 }
 
@@ -165,6 +186,9 @@ func (h *fakeHub) LinkSession(_ context.Context, handleID, path string) error {
 	if sess.path != "" {
 		return fmt.Errorf("link session %s: %w", handleID, storage.ErrSessionLinked)
 	}
+	if err := sess.pending.Add(path); err != nil {
+		return fmt.Errorf("link session %s to %s: %w", handleID, path, storage.ErrSessionLinked)
+	}
 	sess.path = path
 	sess.dirty = true
 	return nil
@@ -178,6 +202,7 @@ func (h *fakeHub) RelinkSession(_ context.Context, handleID, path string) error 
 	if err != nil {
 		return err
 	}
+	sess.pending.Replace(path)
 	sess.path = path
 	sess.dirty = true
 	return nil
@@ -696,6 +721,30 @@ func TestCLISessionOpenRejectsBadMode(t *testing.T) {
 	err = app2.Run([]string{"session", "open", "--token", "x", "demo", "--ttl", "nope"})
 	if err == nil || !IsUsageError(err) {
 		t.Fatalf("bad ttl must be a usage error, got %v", err)
+	}
+}
+
+// TestFakeHubSessionExpiryFailsStale pins the shared-core lookup: an
+// id that was never issued and one past its TTL both answer the typed
+// stale error, and expiry reaps lazily.
+func TestFakeHubSessionExpiryFailsStale(t *testing.T) {
+	fake := &fakeHub{t: t}
+	store := fake.sessionStore()
+	store.mu.Lock()
+	store.sessions["clisess-old"] = &cliSession{project: "demo", expires: time.Now().Add(-time.Minute)}
+	store.mu.Unlock()
+	for _, id := range []string{"clisess-old", "clisess-never"} {
+		_, err := fake.ReadSession(context.Background(), id, 0, 1)
+		var stale *storage.StaleSessionError
+		if !errors.As(err, &stale) {
+			t.Fatalf("read on %s must fail stale, got %v", id, err)
+		}
+	}
+	store.mu.Lock()
+	_, stillThere := store.sessions["clisess-old"]
+	store.mu.Unlock()
+	if stillThere {
+		t.Fatal("expired entry must be reaped by the lookup")
 	}
 }
 

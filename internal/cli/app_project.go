@@ -88,7 +88,7 @@ func (a *App) newProjectPruneCmd() *cobra.Command {
             scope that needs no flush first.
   all       history (where possible) + objects + assets (the default)
 
-Use --dryrun to see what would be reclaimed without deleting anything.
+Use --dry-run (--dryrun) to see what would be reclaimed without deleting anything.
 --keep bounds history compaction (manifests newer than keep are retained).
 
 The serve-mode admin boundary covers the REST surface only: this
@@ -97,7 +97,8 @@ command runs with local-process trust and performs no admin check
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
 		RunE: a.runProjectPrune,
 	}
-	cmd.Flags().Bool("dryrun", false, "Report what would be reclaimed without deleting")
+	cmd.Flags().Bool("dryrun", false, "Report what would be reclaimed without deleting (dry_run)")
+	cmd.Flags().Bool("dry-run", false, "Alias of --dryrun (dry_run)")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
 	addSyncFlag(cmd)
 	return cmd
@@ -142,6 +143,33 @@ func (a *App) runProjectStatus(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.stderr, "%s: %s, pending ops %d, commits %d ok / %d failed / %d rebased, cap-crosses %d\n",
 		args[0], state, depth, snap.CommitSuccesses, snap.CommitFailures, snap.Rebases, snap.CapCrosses)
+	return nil
+}
+
+func (a *App) newProjectSyncCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync <project>",
+		Short: "Drain a project until published state is durable",
+		Long: `Sync drains the project's journal until everything published
+before the call is durably committed (the storage fsync primitive). It is
+the standalone form of the --sync flag every mutating command accepts.
+
+Examples:
+  storhub sync docs-project`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: a.runProjectSync,
+	}
+}
+
+func (a *App) runProjectSync(cmd *cobra.Command, args []string) error {
+	hub, err := a.mustCmdHub(cmd, 0, false)
+	if err != nil {
+		return err
+	}
+	if err := hub.DrainProjectContext(cmd.Context(), args[0]); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.stderr, "synced %s\n", args[0])
 	return nil
 }
 
@@ -268,6 +296,9 @@ func (a *App) runProjectPrune(cmd *cobra.Command, args []string) error {
 		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, chunks, all)", scope)}
 	}
 	dryRun, _ := cmd.Flags().GetBool("dryrun")
+	if dashDryRun, _ := cmd.Flags().GetBool("dry-run"); dashDryRun {
+		dryRun = true
+	}
 	keep, _ := cmd.Flags().GetInt("keep")
 	if keep < 1 {
 		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}

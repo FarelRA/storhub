@@ -3,11 +3,11 @@ package cli
 import (
 	"bytes"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	shlog "github.com/FarelRA/storhub/internal/logging"
 )
 
 type flakyMount struct {
@@ -58,22 +58,15 @@ func TestUnmountWithRetryGivesUpAfterBudget(t *testing.T) {
 	}
 }
 
-func TestLoggingMiddlewareRedactsTokens(t *testing.T) {
-	app, _, stderr := newTestApp(t)
-	// Request lines log at Debug; enable it so this test exercises the
-	// redaction path instead of asserting on silence.
-	app.log.level = "debug"
-	handler := app.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest("GET", "/shares/sigcapabilitytoken/download?path=/a.txt&sig=secret", nil)
-	handler.ServeHTTP(httptest.NewRecorder(), req)
-
-	logs := stderr()
-	if strings.Contains(logs, "sigcapabilitytoken") || strings.Contains(logs, "secret") {
-		t.Fatalf("credentials leaked into logs: %q", logs)
+func TestRedactRequestURIRedactsTokens(t *testing.T) {
+	// The CLI no longer wraps the REST handler in its own logging
+	// middleware (single log layer: rest.requestLogging); this pins the
+	// surviving redaction helper the request logs flow through instead.
+	got := shlog.RedactRequestURI("/shares/sigcapabilitytoken/download?path=/a.txt&sig=secret")
+	if strings.Contains(got, "sigcapabilitytoken") || strings.Contains(got, "secret") {
+		t.Fatalf("credentials leaked into redacted URI: %q", got)
 	}
-	if !strings.Contains(logs, "path=/a.txt") && !strings.Contains(logs, "path=%2Fa.txt") {
-		t.Fatalf("safe query value lost: %q", logs)
+	if !strings.Contains(got, "path=/a.txt") && !strings.Contains(got, "path=%2Fa.txt") {
+		t.Fatalf("safe query value lost: %q", got)
 	}
 }

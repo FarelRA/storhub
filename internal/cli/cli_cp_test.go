@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -217,6 +218,54 @@ func TestCpUsageErrors(t *testing.T) {
 		if err == nil || !IsUsageError(err) {
 			t.Fatalf("cp %q must be a usage error (exit 2), got %v", strings.Join(args, " "), err)
 		}
+	}
+}
+
+// TestCpAutoGuardedCloneFailureReturnsCloneError pins the guarded-cp
+// contract: with --expectedrevision set there is no streaming fallback
+// (it cannot honor the compare-and-swap), so a failed clone fails the
+// command with the clone error instead of exiting 0 unapplied.
+func TestCpAutoGuardedCloneFailureReturnsCloneError(t *testing.T) {
+	cloneErr := errors.New("clone unavailable: backend down")
+	fake := &cpFakeHub{files: map[string][]byte{"a.txt": []byte("guarded")}, cloneErr: cloneErr}
+	app, _, _ := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return fake, nil
+	}
+	err := app.Run([]string{"cp", "--reflink=auto", "--expectedrevision", "rev1", "demo", "a.txt", "b.txt"})
+	if err == nil {
+		t.Fatal("guarded clone failure must fail the command, got nil (exit 0 unapplied)")
+	}
+	if !errors.Is(err, cloneErr) {
+		t.Fatalf("guarded clone failure must return the clone error, got %v", err)
+	}
+	if fake.readCalls+fake.writeCalls+fake.createCalls != 0 {
+		t.Fatalf("guarded failure must not fall back to streaming, got reads=%d writes=%d creates=%d",
+			fake.readCalls, fake.writeCalls, fake.createCalls)
+	}
+	if _, ok := fake.files["b.txt"]; ok {
+		t.Fatal("guarded failure must not create the destination")
+	}
+}
+
+// TestCpAutoFallbackWarnsWithCloneError pins the diagnostic half: an
+// unguarded clone failure falls back to streaming and warns with the
+// real clone error, never a nil one.
+func TestCpAutoFallbackWarnsWithCloneError(t *testing.T) {
+	cloneErr := errors.New("clone broke: no clone op")
+	fake := &cpFakeHub{files: map[string][]byte{"a.txt": []byte("stream me")}, cloneErr: cloneErr}
+	app, _, stderr := newTestApp(t)
+	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
+		return fake, nil
+	}
+	if err := app.Run([]string{"cp", "--reflink=auto", "demo", "a.txt", "b.txt"}); err != nil {
+		t.Fatalf("unguarded fallback must succeed, got %v", err)
+	}
+	if string(fake.files["b.txt"]) != "stream me" {
+		t.Fatalf("fallback bytes wrong, got %q", fake.files["b.txt"])
+	}
+	if out := stderr(); !strings.Contains(out, "clone broke: no clone op") {
+		t.Fatalf("fallback warning must carry the real clone error, got %q", out)
 	}
 }
 

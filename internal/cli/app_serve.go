@@ -165,9 +165,7 @@ func shareSigningKey(cmd *cobra.Command) string {
 
 // buildRESTHandler builds the REST handler. It returns the REST layer's
 // own handler directly: request logging lives in exactly one layer
-// (rest.requestLogging), so the former CLI loggingMiddleware wrapper was
-// removed from this chain. The middleware method stays (deprecated) for
-// existing tests.
+// (rest.requestLogging), so the CLI never wraps the chain.
 func (a *App) buildRESTHandler(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error) {
 	return a.seamRESTHandler()(hub, opts)
 }
@@ -434,29 +432,6 @@ func (a *App) serveRESTUntilSignal(server *http.Server) error {
 	// server stops is exactly the right order - in-flight requests can
 	// still mutate metadata, and shutdownHub commits all of it.
 	return nil
-}
-
-// loggingMiddleware is deprecated: buildRESTHandler no longer wraps the
-// REST handler with it (single log layer: rest.requestLogging). Kept for
-// backward compatibility with existing tests; new code must not wire it
-// into the HTTP chain.
-func (a *App) loggingMiddleware(next http.Handler) http.Handler {
-	if next == nil {
-		// A nil inner handler must never degrade into http.Server's
-		// DefaultServeMux fallback: answer every request with a loud 500
-		// instead of silently serving the wrong thing.
-		next = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "rest handler unavailable", http.StatusInternalServerError)
-		})
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		wrapped := shlog.NewHTTPRecorder(w)
-		uri := shlog.RedactRequestURI(r.URL.RequestURI())
-		shlog.Debug(a.logger(), "http start", "method", r.Method, "path", uri, "remote", r.RemoteAddr)
-		next.ServeHTTP(wrapped, r)
-		shlog.Debug(a.logger(), "http done", "method", r.Method, "path", uri, "remote", r.RemoteAddr, "status", wrapped.Status(), "elapsed", time.Since(start).Round(time.Millisecond).String())
-	})
 }
 
 // statusRecorder was removed: status/byte capture lives in

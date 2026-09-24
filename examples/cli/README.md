@@ -25,7 +25,7 @@ What it demonstrates:
 - `upload`, `replace`, `patch`, `download`
 - `ls`, `stat`, `cat`
 - `mkdir`, `mv`, `rm`
-- `revisions`, `rollback`
+- `project revisions`, `project rollback`
 - `rest`
 - `serve` (mount + REST together)
 - optional `mount`

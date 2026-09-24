@@ -260,12 +260,18 @@ func (m *MemSurface) Truncate(path string, size int64) error {
 
 // Chmod implements Surface.Chmod. Replacing the mode is a metadata-only
 // change: it advances the revision (so a CAS token taken before the chmod
-// is stale) but leaves the data clock alone.
+// is stale) but leaves the data clock alone. Directories take chmod like
+// production (no ErrIsDir): the mode lands in the dir table, which has
+// no revision clock.
 func (m *MemSurface) Chmod(path string, mode uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validPath(path) {
 		return ErrInvalid
+	}
+	if _, ok := m.dirs[path]; ok {
+		m.dirs[path] = mode & 0o7777
+		return nil
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {
@@ -286,6 +292,12 @@ func (m *MemSurface) Chown(path string, uid, gid uint32) error {
 	defer m.mu.Unlock()
 	if !validPath(path) {
 		return ErrInvalid
+	}
+	// Directories take chown like production (no ErrIsDir): the dir
+	// table stores no ownership, so success records nothing beyond the
+	// nil error the CLI and REST fakes also answer.
+	if _, ok := m.dirs[path]; ok {
+		return nil
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {
@@ -317,12 +329,17 @@ func (m *MemSurface) ChownAdmin(path string, uid, gid uint32) error {
 	return nil
 }
 
-// Utimens implements Surface.Utimens.
+// Utimens implements Surface.Utimens. Directories take utimens like
+// production (no ErrIsDir): the dir table stores no timestamps, so
+// success records nothing, like chown above.
 func (m *MemSurface) Utimens(path string, mtime int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validPath(path) {
 		return ErrInvalid
+	}
+	if _, ok := m.dirs[path]; ok {
+		return nil
 	}
 	f, err := m.resolveLocked(path)
 	if err != nil {

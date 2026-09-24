@@ -56,6 +56,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/test"
@@ -98,7 +99,7 @@ type pcFakeHub struct {
 	files map[string]*pcFile
 	links map[string]string
 	// linkIno carries symlink identity alongside links: lstat of a link
-	// reports its own inode, rename moves it, unlink drops it — the
+	// reports its own inode, rename moves it, unlink drops it: the
 	// same lifecycle as file inodes, in a parallel map so link reads
 	// keep their shape.
 	linkIno map[string]uint64
@@ -326,6 +327,12 @@ func (h *pcFakeHub) MkdirContext(_ context.Context, _, dirPath string) error {
 	if h.dirs[p] || h.files[p] != nil {
 		return fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
 	}
+	// mkdir never creates through a final symlink: an occupied link name
+	// fails like production (EEXIST on the link itself), not by layering
+	// a directory over it.
+	if _, ok := h.links[p]; ok {
+		return fmt.Errorf("%w: %s", shfs.ErrAlreadyExists, p)
+	}
 	h.ensureParentsLocked(p)
 	h.dirs[p] = true
 	return nil
@@ -443,6 +450,9 @@ func (h *pcFakeHub) TruncateFileContext(_ context.Context, _, filePath string, s
 	} else {
 		f.data = append([]byte(nil), f.data[:size]...)
 	}
+	// Like every other data mutation (and the oracle): a truncate that
+	// succeeds clears setuid/setgid for the non-privileged caller.
+	f.mode &^= 0o6000
 	f.mtime = h.tick()
 	return &storhub.FileMetadata{Size: int64(len(f.data)), Mode: f.mode, Inode: h.fileInoLocked(f)}, nil
 }
@@ -688,6 +698,44 @@ func (h *pcFakeHub) Shutdown(_ context.Context) error { return nil }
 // DrainProjectContext is a no-op here: the conformance fake journals
 // nothing, and the CLI conformance surface has no fsync equivalent.
 func (h *pcFakeHub) DrainProjectContext(_ context.Context, _ string) error { return nil }
+
+// TestPCFakeHubTruncateClearsPrivBits pins the oracle parity: a
+// truncate that succeeds clears setuid/setgid like every other data
+// mutation (and like production's SanitizeWrittenFileModeForContext).
+func TestPCFakeHubTruncateClearsPrivBits(t *testing.T) {
+	h := newPCFakeHub()
+	ctx := context.Background()
+	if _, err := h.CreateFileContext(ctx, "p", "tool"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := h.ChmodContext(ctx, "p", "tool", 0o4755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := h.TruncateFileContext(ctx, "p", "tool", 0); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	st, err := h.StatPathContext(ctx, "p", "tool")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Mode&0o6000 != 0 {
+		t.Fatalf("truncate must clear setuid/setgid, mode = %o", st.Mode)
+	}
+}
+
+// TestPCFakeHubMkdirOverLinkFailsExists pins the production parity:
+// mkdir never creates through a final symlink (EEXIST on the link
+// itself), matching the oracle's ErrExists.
+func TestPCFakeHubMkdirOverLinkFailsExists(t *testing.T) {
+	h := newPCFakeHub()
+	ctx := context.Background()
+	if _, err := h.SymlinkContext(ctx, "p", "target", "link"); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := h.MkdirContext(ctx, "p", "link"); !errors.Is(err, shfs.ErrAlreadyExists) {
+		t.Fatalf("mkdir over a symlink must fail AlreadyExists, got %v", err)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Surface adapter driving the CLI.

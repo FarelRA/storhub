@@ -15,13 +15,12 @@
 //	table     (scenario.go)  - the shared POSIX + session scenario table.
 //	runner    (runner.go)    - Filter/Run/RunWithBudget execution with
 //	  per-scenario budgets.
-//	oracle    (mem.go, mem_scratch.go) - in-memory Surface plus pathless
+//	oracle    (mem_surface.go, mem_handle.go, mem_scratch.go) - in-memory Surface plus pathless
 //	  scratch oracle; the expected behavior every adapter is held to.
 //	session   (session.go)   - TTL clamp + expiry check shared by the
 //	  oracle and the CLI/REST fakes.
 //	fake core (session_fake.go) - handle-table mechanics plus the
-//	  PendingNames multi-name stage shared by the oracle and (once the
-//	  prod worker wires it) the CLI/REST fakes.
+//	  PendingNames multi-name stage shared by the oracle and the CLI/REST fakes.
 //	errormap  (map_error.go) - backend-to-sentinel translation shared by
 //	  the CLI, REST, and FUSE adapter delegates.
 //	budgets   (budgets_test.go) - benchmark ceilings enforced in CI.

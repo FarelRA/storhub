@@ -32,3 +32,40 @@ func TestExpired(t *testing.T) {
 		t.Fatal("deadline equal to now must read expired (Before is strict)")
 	}
 }
+
+func TestPendingNamesListReturnsCopy(t *testing.T) {
+	var p PendingNames
+	if err := p.Add("/a"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	got := p.List()
+	got[0] = "/mutated"
+	if again := p.List(); len(again) != 1 || again[0] != "/a" {
+		t.Fatalf("List must return a copy, stage now %q", again)
+	}
+}
+
+func TestMemScratchCloseHonorsUmask(t *testing.T) {
+	m := NewMemSurface()
+	m.SetUmask(0o077)
+	h, err := m.OpenScratch(0)
+	if err != nil {
+		t.Fatalf("open scratch: %v", err)
+	}
+	if _, err := h.Write([]byte("x")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := h.Link("/pc-scratch-umask"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	st, err := m.Stat("/pc-scratch-umask")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Mode&0o777 != 0o600 {
+		t.Fatalf("scratch close must mask 0o644 with the umask, mode = %o", st.Mode)
+	}
+}

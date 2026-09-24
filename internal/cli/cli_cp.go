@@ -151,7 +151,8 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (streaming)", src, dst), meta)
 		return nil
 	default: // auto
-		if meta, err := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode); err == nil {
+		meta, cerr := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode)
+		if cerr == nil {
 			if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
 				return err
 			}
@@ -161,10 +162,10 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		if opts != nil {
 			// The clone carried a compare-and-swap guard the streaming
 			// path cannot honor: failing loud beats applying unguarded.
-			return err
+			return cerr
 		}
 		a.warnfWithAttrs(nil, "clone unavailable; falling back to streaming copy",
-			[]any{"err", err, "fallback", "streaming copy"})
+			[]any{"err", cerr, "fallback", "streaming copy"})
 		meta, err := streamingCopy(ctx, hub, project, src, srcOff, dst, dstOff, length)
 		if err != nil {
 			return err
@@ -194,7 +195,8 @@ func cloneWithFlags(ctx context.Context, hub hubClient, project, src string, src
 // when missing so a full-file stream lands on a fresh path. A newly
 // created destination takes the source permission bits minus
 // setuid/setgid (the CLI runs as the trusted local process, never
-// admin), matching the CopyContext/CloneRange mode rule so the --reflink
+// admin), matching the CloneRange mode rule (internal/storage/clone.go
+// clears via SanitizeWrittenFileModeForContext) so the --reflink
 // choice never changes the result mode. An existing destination keeps
 // its mode (range-write semantics, like CloneRange onto an existing
 // file).

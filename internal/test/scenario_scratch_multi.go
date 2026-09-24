@@ -7,10 +7,11 @@ import (
 
 var scenarioScratchMulti = []Scenario{
 	{
-		// Multi-name scratch rows run on the oracle only until the CLI
-		// and REST fake mirrors land (see the table notes): the session
-		// fakes live outside the owned files, so adapter suites skip
-		// these rows until the prod worker wires test.PendingNames in.
+		// Multi-name scratch rows run on the oracle and on the REST
+		// and CLI adapters (Surfaces SurfaceREST | SurfaceCLI): the
+		// session fakes wire test.PendingNames into their tables, so
+		// adapter suites exercise the same append/replace/list
+		// semantic as the oracle.
 		Name:     "scratch-link-two-names-both-publish",
 		Surfaces: SurfaceREST | SurfaceCLI,
 		Run: func(s Surface) error {

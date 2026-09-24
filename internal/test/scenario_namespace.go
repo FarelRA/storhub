@@ -84,7 +84,7 @@ var scenarioNamespace = []Scenario{
 			// mount (the kernel resolves it against the host root,
 			// correctly yielding ENOENT), so loop detection on a
 			// mount is only testable with contained targets. The
-			// property under test — ELOOP on a cycle — is identical.
+			// property under test: ELOOP on a cycle: identical.
 			if err := s.Symlink("pc-loop-b", a); err != nil {
 				return fmt.Errorf("symlink a: %v", err)
 			}

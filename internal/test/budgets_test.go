@@ -1,6 +1,6 @@
 package test
 
-// Benchmark budgets with teeth (plan Phase 0 requirement, H7).
+// Benchmark budgets with teeth.
 //
 // The per-op benches live next to the code they measure and cannot be
 // imported here: the 7 FUSE benches in internal/fusefs/posix_bench_test.go
@@ -30,8 +30,8 @@ package test
 // varies by machine (a sibling bench ran FASTER on CI the same job),
 // so ceilings carry cross-machine headroom while allocs parity stays
 // the sharp tool (allocations never vary by machine). Re-baseline only
-// with a same-box A/B plus allocs parity, per the plan's performance
-// design.
+// with a same-box A/B plus allocs parity, per the allocation-parity
+// methodology above.
 
 import (
 	"context"
@@ -66,12 +66,13 @@ var budgetTable = []budgetEntry{
 	{pkg: "./internal/rest", bench: "BenchmarkPosixRESTStat", ceilingNs: 54400, maxAllocs: 71},
 }
 
-// Log spam splits rows: the REST handler logs to stdout mid-benchmark, so
+// Log spam splits rows: the REST handler logs to stderr mid-benchmark, so
 // a result row arrives as a `Benchmark<name>-N` prefix line, many log
 // lines, then a bare numbers line (`3000  45109 ns/op  ...  83
 // allocs/op`). The parser tracks the last-seen bench prefix and attributes
 // the next numbers line to it; quiet benches (FUSE) keep prefix and
-// numbers on one line and parse the same way.
+// numbers on one line and parse the same way. CombinedOutput captures
+// both streams, so the split rows still parse.
 var benchStart = regexp.MustCompile(`^(Benchmark\S+?)-\d+`)
 var benchNums = regexp.MustCompile(`\b\d+\s+([\d.]+)\s+ns/op\s+\d+\s+B/op\s+(\d+)\s+allocs/op`)
 

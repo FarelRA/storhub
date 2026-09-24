@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// cli_sessions.go: Phase 2B session manager over the CLI.
+// cli_sessions.go: stateful open sessions (server-held handles) over the CLI.
 //
 // One parent, `session`, with one subcommand per manager verb. Every
 // subcommand except `open` threads the handle through the persistent
@@ -156,6 +156,8 @@ func (a *App) runSessionRead(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// Two-call shape (stat for EOF, then read): a concurrent writer can
+	// change the size between the calls, so EOF reads are best-effort.
 	if length == -1 {
 		stat, err := hub.StatSession(cmd.Context(), handle)
 		if err != nil {

@@ -26,7 +26,7 @@ type cliHandle struct {
 	// ino pins the open-time inode: after unlink+recreate the path
 	// names a new file, and only the pin tells them apart. Backends
 	// preserve inode identity across commits, so the pin never needs
-	// refreshing — adopting a new inode would rebind the handle to a
+	// refreshing: adopting a new inode would rebind the handle to a
 	// stranger's file.
 	ino uint64
 	// session is the server-side open-file description (session open).
