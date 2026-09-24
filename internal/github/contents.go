@@ -116,7 +116,9 @@ func (c *Client) PutFileContent(ctx context.Context, owner, project, filePath st
 	return result.Commit.SHA, result.Content.SHA, nil
 }
 
-// ListFileCommits lists the commits touching filePath.
+// ListFileCommits lists the commits touching filePath. The path goes in
+// the ?path= query, so QueryEscape is correct here (path segments in the
+// URL body use PathEscape via escapeContentPath instead).
 func (c *Client) ListFileCommits(ctx context.Context, owner, project, filePath string) ([]Commit, error) {
 	escapedPath := url.QueryEscape(filePath)
 	batchCommits, err := paginateGET[commitResponse](ctx, c, func(page int) string {

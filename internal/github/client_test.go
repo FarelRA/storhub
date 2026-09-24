@@ -127,7 +127,7 @@ func TestDecodeAPIErrorClassification(t *testing.T) {
 				Header:     tc.headers,
 				Body:       io.NopCloser(strings.NewReader(tc.body)),
 			}
-			got := decodeAPIError(resp)
+			got := decodeAPIErrorAt(resp, time.Unix(1700000000, 0).UTC())
 			if got == nil {
 				t.Fatal("expected an APIError")
 			}
@@ -242,7 +242,7 @@ func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
 	// low core snapshot and throttles them client-side while the real
 	// budget is healthy. Asset uploads must not draw from the hourly bucket,
 	// so a burst against a low snapshot must fire with zero throttle sleeps.
-	// NOTE: the clock-advancing sleep is load-bearing — a recording no-op
+	// NOTE: the clock-advancing sleep is load-bearing: a recording no-op
 	// sleep sends acquire() into an infinite WARN-spinning loop (2026-09-09:
 	// 8.7M lines in 17s, OOM-killed the go process twice). Never use a
 	// frozen clock with throttle-asserting tests.

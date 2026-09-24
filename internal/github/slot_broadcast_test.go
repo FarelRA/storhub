@@ -10,7 +10,7 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 )
 
-// F13 / Phase E3b: a parked content admission must wake immediately on
+// Slot-release broadcast: a parked content admission must wake immediately on
 // slot release via broadcast, never via the old 10ms sleep-poll tick.
 // Channel-asserted, budget-guarded, no sleeps.
 func TestSlotReleaseWakesWaiterImmediately(t *testing.T) {

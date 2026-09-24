@@ -76,7 +76,7 @@ type Client struct {
 	// runs on every FUSE range read, and an exclusive lock there would
 	// serialize all mounted reads through one convoy.
 	assetMu   sync.RWMutex
-	assetURLs map[int64]cachedAssetURL
+	assetURLs map[int64]assetURLCacheEntry
 }
 
 // NewClient builds a Client for the token with the given config.
@@ -113,7 +113,7 @@ func NewClient(token string, cfg storcfg.Config) *Client {
 		sleep:              sleep,
 		logger:             logging.WithComponent(cfg.Logger, "github"),
 		governor:           newRateGovernor(cfg, cfg.Logger, sleep),
-		assetURLs:          make(map[int64]cachedAssetURL),
+		assetURLs:          make(map[int64]assetURLCacheEntry),
 		noFollow:           noRedirectClient(client),
 		cdn:                bareCDNClient(client),
 	}
@@ -198,7 +198,7 @@ func (c *Client) doJSONWithRetryable(ctx context.Context, method, endpoint strin
 // (GetFileContent): the contents API never redirects, so surfacing
 // redirects is immaterial there, and the timeout-free transport matches
 // the sized-transfer doctrine (a large raw read must not be amputated by
-// the 5-minute client timeout either — the same bug class fixed for
+// the 5-minute client timeout either: the same bug class fixed for
 // uploads).
 func (c *Client) doCDNResolve(ctx context.Context, endpoint, accept, rangeHeader string) (*http.Response, error) {
 	return c.doRequest(ctx, http.MethodGet, endpoint, func() (io.Reader, error) {
@@ -220,13 +220,16 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
 
 // doRequest is the shared retry loop: it runs governed attempts until
 // classifyAndWait reports success or a terminal error. The request
-// profile arrives as explicit scalars — class selects the governor
+// profile arrives as explicit scalars: class selects the governor
 // windows, retryable gates retries, the header strings and contentSize
 // are pure data, and noFollow selects the redirect-surfacing transport
 // for CDN resolution. Only the three explicit entry points above (plus
 // deleteByURL) construct profiles; there is no flag bundle.
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFactory func() (io.Reader, error), class requestClass, retryable bool, contentType, accept, rangeHeader string, contentSize int64, noFollow bool) (*http.Response, error) {
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if logging.Enabled(c.logger, slog.LevelDebug) {
+			logging.Debug(c.logger, "http request start", "method", method, "endpoint", redactEndpoint(endpoint), "attempt", attempt+1)
+		}
 		resp, sendErr := c.sendOnce(ctx, method, endpoint, bodyFactory, class, contentType, accept, rangeHeader, contentSize, noFollow)
 		out, retry, err := c.classifyAndWait(ctx, method, endpoint, attempt, resp, sendErr, retryable)
 		if err != nil {
@@ -236,12 +239,12 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, bodyFac
 			return out, nil
 		}
 	}
-	return nil, fmt.Errorf("github request %s %s: retry loop exhausted (maxRetries=%d)", method, endpoint, c.maxRetries)
+	return nil, fmt.Errorf("github request %s %s: retry loop exhausted (maxRetries=%d)", method, redactEndpoint(endpoint), c.maxRetries)
 }
 
 // sendOnce performs a single governed HTTP exchange: governor admission,
 // request build, transport, and header observation. It returns the
-// response on transport success (whatever the status — classification
+// response on transport success (whatever the status: classification
 // belongs to classifyAndWait) or an error that is either a governor
 // admission refusal (*APIError, subject to the same rate-limit wait
 // discipline as server rejections) or a transport failure.
@@ -286,7 +289,10 @@ func (c *Client) sendOnce(ctx context.Context, method, endpoint string, bodyFact
 	// attempt's response arrives, so retries always get a full deadline
 	// and timers never pile up on a loop-shared defer.
 	cancel := context.CancelFunc(func() {})
-	if class == requestUpload && contentSize > 0 {
+	// Zero-size uploads are bounded too: transferDeadline(0) returns the
+	// floor timeout, so an empty asset cannot wait on an unbounded attempt
+	// once the client-wide timeout is cleared above.
+	if class == requestUpload && contentSize >= 0 {
 		var reqCtx context.Context
 		reqCtx, cancel = context.WithTimeout(ctx, c.transferDeadline(contentSize))
 		req = req.WithContext(reqCtx)
@@ -417,15 +423,15 @@ var rateLimitMarkers = []string{
 // against the same now() that reset waits in rateWait use. Fake-clock
 // tests that freeze time must not see the wall clock leak in through
 // this branch (the numeric-seconds Retry-After path is clock-free).
+// The caller owns resp.Body close: decode reads the body but never
+// closes it, so every caller must close after decode returns.
 func (c *Client) decodeAPIError(resp *http.Response) *APIError {
 	return decodeAPIErrorAt(resp, c.now())
 }
 
-func decodeAPIError(resp *http.Response) *APIError {
-	return decodeAPIErrorAt(resp, time.Now())
-}
-
 func decodeAPIErrorAt(resp *http.Response, now time.Time) *APIError {
+	// The caller owns resp.Body close: this function reads a bounded
+	// prefix but never closes, so a future caller must close after use.
 	if resp.StatusCode < http.StatusBadRequest {
 		return nil
 	}
@@ -511,7 +517,7 @@ func (c *Client) rateWait(attempt int, apiErr *APIError) time.Duration {
 	if !apiErr.RateLimitReset.IsZero() {
 		// Wait for the documented reset exactly: the server dictates the
 		// resume instant, so jitter/caps here only overshoot it. Pinned
-		// by TestRateLimitAwareRetry — the floor only prevents a hot
+		// by TestResetWaitUsesClientClock: the floor only prevents a hot
 		// loop when the clock has already passed reset. The client's
 		// single (injectable) clock keeps fake-clock tests honest.
 		return nonNegativeDelay(apiErr.RateLimitReset.Sub(c.now()))
@@ -587,7 +593,7 @@ func isRetrySafeMethod(method string) bool {
 // AND contents-API PUT/DELETE (metadata commits). Classifying only
 // assetUpload here once let a metadata-chatty mount burst past the
 // window and eat real secondary penalties, so the contents-write rule
-// lives here alongside the upload rule — never as an OR-expression at a
+// lives here alongside the upload rule: never as an OR-expression at a
 // call site.
 func classifyRequest(method, endpoint string, assetUpload bool) requestClass {
 	if assetUpload {
@@ -640,7 +646,8 @@ func parseUnixTime(value string) (time.Time, bool) {
 // addJitter spreads a computed wait by up to +25% so retries from a fleet
 // of synchronized callers do not arrive as one thundering herd. The floor
 // of the input is always preserved: guidance minimums (60s secondary
-// patience, reset waits) stay intact.
+// patience, reset waits) stay intact. The global rand is auto-seeded
+// since Go 1.20, so no explicit seed is needed for jitter.
 func addJitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -657,7 +664,7 @@ func addJitter(d time.Duration) time.Duration {
 // It is nil-safe and checks, in order:
 //
 //  1. Primary: net.Error.Timeout() (including *url.Error, whose Timeout
-//     delegates to the wrapped error) — a genuine stalled transfer.
+//     delegates to the wrapped error): a genuine stalled transfer.
 //  2. Fallback: the "Client.Timeout exceeded" substring http.Client
 //     embeds when its own timeout fires.
 //
@@ -666,13 +673,8 @@ func addJitter(d time.Duration) time.Duration {
 // by this definition: retrying it burns the governor's budget against a
 // decision the caller already made. context.Canceled is never a timeout.
 //
-// CONTRACT for the storage pipeline agent: internal/storage/retry.go's
-// isRetryableNetworkError duplicates the DeadlineExceeded-vs-timeout
-// distinction with its own strings.Contains check. Replace that arm with
-// ghapi.IsTimeout (import already present as ghapi): inside the
-// errors.Is(err, context.DeadlineExceeded) branch, return
-// ghapi.IsTimeout(err). Keep the surrounding Canceled/DNS/net.Error
-// structure identical.
+// The storage layer shares this timeout semantic through its own
+// isRetryableNetworkError copy; keep the two identical.
 func IsTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -682,7 +684,7 @@ func IsTimeout(err error) bool {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		// http.Client's own timeout surfaces as the same wrapped
-		// context.DeadlineExceeded but carries the marker — a stalled
+		// context.DeadlineExceeded but carries the marker: a stalled
 		// transfer is exactly what retries exist to absorb. A bare
 		// DeadlineExceeded is the caller's deadline: not a timeout.
 		return strings.Contains(err.Error(), "Client.Timeout exceeded")

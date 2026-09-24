@@ -45,10 +45,10 @@ type rateConfig struct {
 // "unset"):
 //   - reserve:       <0 → library default (25); 0 → LIVE-ZERO, a real
 //     setting meaning "no hourly floor, pace against the full budget"
-//     (distinct from unset — zero-fuel headroom is a legitimate choice
+//     (distinct from unset: zero-fuel headroom is a legitimate choice
 //     for tests and one-shot CLIs); >0 → keep that many requests back.
 //   - maxWait:        0 → library default (15m, long-running processes);
-//     <0 → fail-fast (any positive wait is refused up front — one-shot
+//     <0 → fail-fast (any positive wait is refused up front: one-shot
 //     CLI); >0 → refuse waits beyond it.
 //   - pointsPerMin / contentPerMin / concurrency:
 //     <=0 → library default (720 / 60 / 16); >0 → that value.
@@ -166,7 +166,7 @@ func methodCost(method string) int64 {
 }
 
 // requestClass selects which governor windows a request draws from.
-// Exactly three values exist — no fourth: the point cost still comes
+// Exactly three values exist, no fourth: the point cost still comes
 // from methodCost, while the class decides window membership.
 type requestClass int
 
@@ -208,7 +208,8 @@ func (k requestClass) content() bool { return k == requestContent || k == reques
 func (k requestClass) assetUpload() bool { return k == requestUpload }
 
 // classifyFlags maps a legacy (content, assetUpload) flag pair onto a
-// class. It exists only for the compat acquire wrapper below; new code
+// class. It serves the compat acquire wrapper below and the existing
+// test suite, which still drives admission through acquire; new code
 // classifies once via classifyRequest (client.go) and calls acquireClass.
 func classifyFlags(content, assetUpload bool) requestClass {
 	if assetUpload {
@@ -337,6 +338,9 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 			// signal would fall back to ctx cancel below (loud),
 			// never a silent stall. Pure broadcast, no tick.
 			g.slotWaits++
+			// Defensive: newRateGovernor always inits slotWake, so nil
+			// here only arises for a zero-value governor. Keep the
+			// guard so such a governor still parks safely.
 			if g.slotWake == nil {
 				g.slotWake = make(chan struct{})
 			}
@@ -392,6 +396,8 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 // guards the condition check and the waiter capture is what makes the
 // signal unmissable.
 func (g *rateGovernor) broadcastSlotReleaseLocked() {
+	// Defensive: newRateGovernor always inits slotWake; the guard
+	// covers only a zero-value governor.
 	if g.slotWake == nil {
 		g.slotWake = make(chan struct{})
 	}
@@ -402,13 +408,15 @@ func (g *rateGovernor) broadcastSlotReleaseLocked() {
 // throttleJitter spreads client-side pacing waits to keep fleets of
 // StorHub processes from waking in lockstep against the same budget
 // reset: +0-25%, additive only. Additive (never subtractive) so a wait
-// never dips below what the budget accounting requires — pacing slower
+// never dips below what the budget accounting requires: pacing slower
 // is always safe, pacing faster is not. Server-dictated waits (hourly
 // reset, rate-limit Retry-After/Reset) stay exact: the server owns the
 // resume instant, and fuzzing it would either arrive early (wasted call)
 // or sleep past maxWait incorrectly. maxWait denial is evaluated on the
 // unjittered wait inside reserve; the jittered sleep may overshoot
 // maxWait by up to 25%, which is bounded and ctx-cancellable. Zero-safe.
+// The global rand is auto-seeded since Go 1.20, so no explicit seed is
+// needed for jitter.
 func throttleJitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return d
@@ -514,7 +522,7 @@ func (g *rateGovernor) hourlyWaitLocked(now time.Time, cost int64, class request
 // Asset uploads skip this: the upload endpoint never reports a budget,
 // so pacing bursts against a stale core snapshot only manufactures
 // denials for a server that would accept the traffic (returns zero
-// tokens, zero wait, nil error — commit ignores the balance for uploads).
+// tokens, zero wait, nil error: commit ignores the balance for uploads).
 // Callers must hold g.mu.
 func (g *rateGovernor) pacingWaitLocked(now time.Time, cost int64, class requestClass) (float64, time.Duration, *APIError) {
 	if class.assetUpload() {
@@ -552,7 +560,7 @@ func (g *rateGovernor) pacingWaitLocked(now time.Time, cost int64, class request
 
 // windowWaitLocked rolls the per-minute secondary windows over when due
 // and returns the wait they impose (point budget, then content-creation
-// budget). The rollover mutates even when a wait or denial follows —
+// budget). The rollover mutates even when a wait or denial follows:
 // that matches the pre-split behavior exactly. Callers must hold g.mu.
 func (g *rateGovernor) windowWaitLocked(now time.Time, cost int64, class requestClass) (time.Duration, *APIError) {
 	if now.Sub(g.winStart) >= secondaryWindow {
@@ -584,7 +592,7 @@ func (g *rateGovernor) windowWaitLocked(now time.Time, cost int64, class request
 
 // commitReservationLocked applies zero-wait accounting: hourly tokens and
 // budget for core requests only (asset uploads neither draw from nor
-// replenish the hourly bucket — their endpoint reports nothing), plus
+// replenish the hourly bucket: their endpoint reports nothing), plus
 // the per-minute windows for every class. Callers must hold g.mu and
 // must call it only when the computed wait is zero.
 func (g *rateGovernor) commitReservationLocked(now time.Time, cost int64, class requestClass, tokens float64) {

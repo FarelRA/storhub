@@ -182,7 +182,7 @@ func TestGovernorDormantWithoutServerBudget(t *testing.T) {
 // TestThrottleJitterBounds pins the jitter contract: additive-only (never
 // below the budgeted wait, so pacing never overspends), capped at +25%,
 // and zero-safe. Bounds are on rand.Int63n's range, so they hold with
-// probability 1 — no flake window.
+// probability 1: no flake window.
 func TestThrottleJitterBounds(t *testing.T) {
 	t.Parallel()
 	if got := throttleJitter(0); got != 0 {

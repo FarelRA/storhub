@@ -27,3 +27,7 @@ Public APIs highlighted:
 - `(*storhub.FS).Wait`
 - `(*storhub.FS).Unmount`
 - `(*storhub.FS).Close`
+
+Sync semantics: an fsync on a file renamed after it was opened reports
+ENOENT. The data is safely staged and retried at the new name; the error
+only says the old path no longer resolves.

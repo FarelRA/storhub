@@ -23,7 +23,7 @@ GITHUB_TOKEN=your_token go run ./examples/showcase
 Optional environment variables:
 
 - `STORHUB_DELETE_PROJECT=1` to delete the created project at the end
-- `STORHUB_DELETE_RELEASE_TAG=<tag>` to delete a specific release during the maintenance phase
+- `STORHUB_DELETE_RELEASE_TAG=<tag>` to delete a specific release during maintenance cleanup
 
 What it does:
 

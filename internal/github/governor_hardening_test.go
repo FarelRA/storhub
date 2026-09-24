@@ -68,8 +68,8 @@ func TestHardenedMaxWaitRefusesLongRateLimit(t *testing.T) {
 }
 
 // TestHardenedSecondaryBackoffFloorAndCeiling pins GitHub's secondary-limit
-// guidance: at least ~60s of patience with growth, never past the 15m
-// ceiling (plus bounded jitter).
+// guidance: at least ~60s of patience with growth, never past the 15m cap
+// plus bounded jitter (~18.75m); the test guards a 20m outer bound.
 func TestHardenedSecondaryBackoffFloorAndCeiling(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

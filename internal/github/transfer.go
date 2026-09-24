@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
-type cachedAssetURL struct {
+type assetURLCacheEntry struct {
 	url     string
 	expires time.Time
 }
@@ -37,6 +38,9 @@ func (c *Client) UploadAsset(ctx context.Context, uploadURL, assetName string, r
 	endpoint := parsed.String()
 
 	started := time.Now().UTC()
+	if logging.Enabled(c.logger, slog.LevelDebug) {
+		logging.Debug(c.logger, "upload asset start", "asset", assetName, "size", size)
+	}
 	assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
 	if err == nil {
 		logging.Debug(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
@@ -70,6 +74,9 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		return nil, 0, fmt.Errorf("download asset %d: invalid byte range [%d,%d]", assetID, start, end)
 	}
 	started := time.Now().UTC()
+	if logging.Enabled(c.logger, slog.LevelDebug) {
+		logging.Debug(c.logger, "download asset start", "asset", assetID, "range", rangeHeader)
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		cdnURL, cached := c.cachedAssetURL(assetID)
 		if cached {
@@ -157,7 +164,6 @@ func (c *Client) fetchCDNRange(ctx context.Context, url, rangeHeader string, len
 		return nil, 0, resp.StatusCode, &CDNError{StatusCode: resp.StatusCode}
 	}
 	// Ownership of cancel transfers to the returned body.
-	_ = cancel
 	return &deadlineBoundBody{ReadCloser: resp.Body, cancel: cancel}, resp.ContentLength, resp.StatusCode, nil
 }
 
@@ -215,7 +221,7 @@ func isCDNRejection(status int) bool {
 // invalidations (the rare paths) take the exclusive lock. An expired
 // entry returns ok=false but is left in place: the insert-time prune in
 // storeAssetURL bounds physical retention.
-func (c *Client) cachedAssetURL(assetID int64) (cachedAssetURL, bool) {
+func (c *Client) cachedAssetURL(assetID int64) (assetURLCacheEntry, bool) {
 	c.assetMu.RLock()
 	defer c.assetMu.RUnlock()
 	cached, ok := c.assetURLs[assetID]
@@ -246,8 +252,8 @@ func (c *Client) storeAssetURL(assetID int64, rawURL string) {
 		// A release-assets URL carries TWO independent expiries: the front-door
 		// JWT (validated by release-assets.githubusercontent.com; exceeding it
 		// yields the non-standard 618 "jwt:expired") and the backing Azure SAS
-		// 'se'. They differ — the JWT is ~30 min while 'se' can run ~10 min
-		// longer — so the EARLIER one governs whether the URL still works.
+		// 'se'. They differ: the JWT is ~30 min while 'se' can run ~10 min
+		// longer, so the EARLIER one governs whether the URL still works.
 		// Trusting 'se' alone kept a JWT-dead URL cached for minutes,
 		// guaranteeing a 618 storm on deep reads.
 		if exp, ok := signedURLExpiry(parsed); ok {
@@ -256,7 +262,7 @@ func (c *Client) storeAssetURL(assetID int64, rawURL string) {
 	}
 	c.assetMu.Lock()
 	defer c.assetMu.Unlock()
-	c.assetURLs[assetID] = cachedAssetURL{url: rawURL, expires: expires}
+	c.assetURLs[assetID] = assetURLCacheEntry{url: rawURL, expires: expires}
 	c.pruneAssetURLLocked()
 }
 

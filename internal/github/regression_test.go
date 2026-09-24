@@ -37,7 +37,7 @@ func TestDecodeRateMarkersRequireAbuseStatuses(t *testing.T) {
 				Header:     http.Header{},
 				Body:       io.NopCloser(strings.NewReader(markerBody)),
 			}
-			got := decodeAPIError(resp)
+			got := decodeAPIErrorAt(resp, time.Unix(1700000000, 0).UTC())
 			if got == nil {
 				t.Fatal("expected an APIError")
 			}
@@ -62,7 +62,7 @@ func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
 		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(b))}
 	}
 
-	got := decodeAPIError(newResp(http.StatusUnprocessableEntity, body))
+	got := decodeAPIErrorAt(newResp(http.StatusUnprocessableEntity, body), time.Unix(1700000000, 0).UTC())
 	if got == nil {
 		t.Fatal("expected an APIError")
 	}
@@ -86,7 +86,7 @@ func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
 	}
 
 	// Same structured body on a non-422 status is not a validation issue.
-	other := decodeAPIError(newResp(http.StatusNotFound, body))
+	other := decodeAPIErrorAt(newResp(http.StatusNotFound, body), time.Unix(1700000000, 0).UTC())
 	if other.IsValidationIssue("already_exists", "") {
 		t.Error("non-422 status must never report a validation issue")
 	}
@@ -94,7 +94,7 @@ func TestDecodeParsesStructuredValidationCodes(t *testing.T) {
 	// Message variants carrying "1000"/"too many" prose but no structured
 	// code must not match: bare-substring matching is exactly the bug.
 	prose := `{"message":"file_count report: 1000 files listed, too many cooks in the kitchen"}`
-	proseErr := decodeAPIError(newResp(http.StatusUnprocessableEntity, prose))
+	proseErr := decodeAPIErrorAt(newResp(http.StatusUnprocessableEntity, prose), time.Unix(1700000000, 0).UTC())
 	if proseErr.IsValidationIssue("custom", "file_count") {
 		t.Error("prose-only body must not match a structured validation code")
 	}

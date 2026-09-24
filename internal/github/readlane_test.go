@@ -8,8 +8,9 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 )
 
-// F4: reserved read share lets interactive reads proceed under bulk load.
-func TestPhase5ReadLaneReservation(t *testing.T) {
+// Read-lane reservation: reserved read share lets interactive reads
+// proceed under bulk load.
+func TestReadLaneReservation(t *testing.T) {
 	t.Parallel()
 	cfg := storcfg.Default()
 	cfg.RatePointsPerMin = 10

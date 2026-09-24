@@ -58,6 +58,8 @@ func (c *Client) CreateRepo(ctx context.Context, project, description string, pr
 }
 
 // RepoExists reports whether the owner/project repository exists.
+// The success body is drained before close so keep-alive connections
+// can be reused instead of stalling on an unread body.
 func (c *Client) RepoExists(ctx context.Context, owner, project string) (bool, error) {
 	resp, err := c.doJSON(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil)
 	if err != nil {
@@ -67,6 +69,7 @@ func (c *Client) RepoExists(ctx context.Context, owner, project string) (bool, e
 		}
 		return false, err
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
 	return true, nil
 }

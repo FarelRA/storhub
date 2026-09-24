@@ -82,7 +82,7 @@ func (e *APIError) IsValidationIssue(code, field string) bool {
 // IsSHANotSupplied matches the contents-API 422 for a sha-less create onto
 // an existing path: `Invalid request. "sha" wasn't supplied.` GitHub sends
 // NO structured errors[] entry for this case (unlike already_exists), so
-// the status + exact message sentence IS the structural signature —
+// the status + exact message sentence IS the structural signature:
 // matched on the full quoted sentence, never a bare keyword. A concurrent
 // writer having created the path first is success for idempotent writes:
 // callers verify upstream content and adopt it.
@@ -181,12 +181,8 @@ func (e *APIError) IsRetryable() bool {
 	if e.StatusCode >= 500 && e.StatusCode <= 599 {
 		return true
 	}
-	switch e.StatusCode {
-	case http.StatusForbidden:
-		// Reached only when !RateLimited (handled above): a bare 403 is
-		// a permission denial, never a throttle.
-		return e.RateLimited
-	default:
-		return false
-	}
+	// Reached only when !RateLimited (handled above): a bare 403 is
+	// a permission denial, never a throttle, and every other status
+	// below 500 is terminal.
+	return false
 }
