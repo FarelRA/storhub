@@ -1,6 +1,6 @@
 package storage
 
-// sessions.go: stateful open sessions (FUSE handles over HTTP), Phase 2B.
+// sessions.go: stateful open sessions (open handles held server-side).
 //
 // A session is an open file handle held server-side. Open pins the content
 // layout (revision SHA plus the file entry and chunk descriptors needed to
@@ -33,9 +33,12 @@ package storage
 //     already-pending name fails with ErrSessionLinked; RelinkSession
 //     replaces the whole pending set with one validated path. Close and
 //     Sync pre-validate every pending name, then publish the staged bytes
-//     to each with create semantics: any taken name fails the whole
-//     operation with AlreadyExists, publishing nothing, and the handle
-//     stays open for Relink.
+//     to each with create semantics: any name taken by another writer
+//     fails the whole operation with AlreadyExists, publishing nothing,
+//     and the handle stays open for Relink. Names this handle already
+//     published in an earlier partial attempt republish idempotently
+//     instead of conflicting with themselves, so a retry after a
+//     mid-fan-out failure completes the remaining names.
 //   - Idle TTL defaults to 10 minutes with a configurable max cap. There is
 //     no background goroutine: expired handles are swept when opening new
 //     ones plus lazily on use. Expired and unknown ids answer StaleSessionError.
@@ -50,8 +53,8 @@ package storage
 // makes. Commits additionally serialize on a per-hub commit mutex so two
 // closes cannot interleave their verb sequences.
 //
-// The registry is keyed by hub pointer (no StorHub struct changes: this
-// file is additive only), so a fresh hub naturally holds no sessions.
+// The registry lives on the hub (sessionMu/sessions in client.go), so a
+// fresh hub naturally holds no sessions.
 
 import (
 	"context"
@@ -60,6 +63,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -155,18 +159,26 @@ const (
 	SessionExclusive
 )
 
-// String renders the mode as a compact flag set for debugging.
+// String renders the mode as a compact flag set for debugging. The
+// SessionReadWrite bit renders as "rw"; the legacy SessionReadOnly plus
+// SessionWriteOnly combination renders as "r+w" so the two spellings stay
+// distinguishable in debug output.
 func (m OpenMode) String() string {
-	out := ""
-	if m&SessionReadOnly != 0 {
-		out += "r"
-	}
-	if m&SessionWriteOnly != 0 {
-		out += "w"
-	}
+	access := ""
 	if m&SessionReadWrite != 0 {
-		out += "rw"
+		access = "rw"
+	} else {
+		if m&SessionReadOnly != 0 {
+			access += "r"
+		}
+		if m&SessionWriteOnly != 0 {
+			if access != "" {
+				access += "+"
+			}
+			access += "w"
+		}
 	}
+	out := access
 	if m&SessionCreate != 0 {
 		out += "+create"
 	}
@@ -234,12 +246,10 @@ func WithSessionTTL(d time.Duration) SessionOption {
 }
 
 // RequestedTTL folds SessionOptions and reports the requested idle TTL:
-// <=0 means "hub default". Conformance doubles (the oracle plus the
-// CLI/REST fakes) honor it so the shared table can drive handle expiry;
-// production clamps it to [default, max] at open. It lives in prod code
-// only because SessionOption closes over unexported state that no
-// external test package can decode; the clamping itself is owned by
-// test.ClampTTL so fakes share one implementation.
+// <=0 means "hub default". Values above the hub max cap are clamped at
+// open; values below the default keep the default. It lives alongside the
+// option constructors because SessionOption closes over unexported state
+// that external packages cannot decode directly.
 func RequestedTTL(opts []SessionOption) time.Duration {
 	var o sessionOpenOptions
 	for _, fn := range opts {
@@ -323,6 +333,13 @@ type openSession struct {
 	mode      OpenMode
 	ownerUID  uint32
 	hasOpener bool
+	// published records the pending names this handle already published
+	// in the current staged generation. A linked fan-out that fails
+	// mid-loop leaves applied false with a subset published; the retry
+	// republishes those names idempotently instead of treating its own
+	// prior publish as a conflict. Cleared on repin (generation
+	// committed) and on relink (pending set replaced).
+	published map[string]bool
 	// opener pins the open-time caller identity for the commit path:
 	// staged bytes are the opener's work, so ownership and
 	// privilege-clearing follow the opener even when someone else
@@ -438,17 +455,23 @@ func newSessionID() (string, error) {
 // pinned as the revision SHA plus the file entry and chunk descriptors
 // needed to re-read the snapshot via ReadPinnedFileContext.
 func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode OpenMode, opts ...SessionOption) (handleID string, err error) {
+	// mode.String allocates; render it only when the span below will
+	// emit (zero-heap when Debug is off).
+	modeStr := ""
+	if logging.Enabled(h.logger, slog.LevelDebug) {
+		modeStr = mode.String()
+	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(project), "session open start", "project", project, "path", path, "mode", mode.String())
+	logging.Debug(h.projectLogger(project), "session-open start", "project", project, "path", path, "mode", modeStr)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		switch {
 		case err == nil:
-			logging.Debug(h.projectLogger(project), "session open complete", "project", project, "path", path, "mode", mode.String(), "handle", shortSHA(handleID), "elapsed", elapsed)
+			logging.Debug(h.projectLogger(project), "session-open complete", "project", project, "path", path, "mode", modeStr, "handle", shortSHA(handleID), "elapsed", elapsed)
 		case errors.Is(err, ErrSessionProjectBusy) || errors.Is(err, ErrSessionUserBusy):
-			logging.Warn(h.projectLogger(project), "session open refused: handle cap reached", "project", project, "path", path, "mode", mode.String(), "elapsed", elapsed, "err", err)
+			logging.Warn(h.projectLogger(project), "session-open refused: handle cap reached", "project", project, "path", path, "mode", modeStr, "elapsed", elapsed, "err", err)
 		default:
-			logging.Error(h.projectLogger(project), "session open failed", "project", project, "path", path, "mode", mode.String(), "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(project), "session-open failed", "project", project, "path", path, "mode", modeStr, "elapsed", elapsed, "err", err)
 		}
 	}()
 	if err := validateProject(project); err != nil {
@@ -683,10 +706,17 @@ func newSessionTemp() (*sessionTempFile, error) {
 	return &sessionTempFile{File: f, Name: f.Name()}, nil
 }
 
+// hydrateWindowSize bounds one hydrate window: hydrateSessionLocked streams
+// the pinned snapshot in windows of at most this many bytes so a first
+// write on a multi-GB file never materializes the whole file in RAM.
+const hydrateWindowSize = 1 << 20
+
 // hydrateSessionLocked materializes the pinned snapshot into the staging
 // temp on first mutation, so later reads and a full-image commit serve the
 // handle's own bytes. Reads before the first write serve the pin directly
-// with no download beyond what they ask for. Caller holds s.mu; the
+// with no download beyond what they ask for. The snapshot streams in
+// bounded windows (at most hydrateWindowSize bytes of heap per window)
+// instead of one baseSize allocation. Caller holds s.mu; the
 // download runs outside the table lock so other sessions proceed.
 func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) error {
 	if s.staged {
@@ -694,12 +724,24 @@ func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) erro
 	}
 	if s.baseSize > 0 {
 		pinned := s.pinned.Clone()
-		data, err := h.ReadPinnedFileContext(ctx, s.project, &pinned, s.pinnedChunks, 0, s.baseSize)
-		if err != nil {
+		// Pre-size sparsely: unrecorded spans (holes) stay holes and
+		// read back as zeros without ever being written.
+		if err := s.tmp.Truncate(s.baseSize); err != nil {
 			return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
 		}
-		if _, err := s.tmp.WriteAt(data, 0); err != nil {
-			return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+		for off := int64(0); off < s.baseSize; {
+			end := off + hydrateWindowSize
+			if end > s.baseSize {
+				end = s.baseSize
+			}
+			data, err := h.ReadPinnedFileContext(ctx, s.project, &pinned, s.pinnedChunks, off, end-off)
+			if err != nil {
+				return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+			}
+			if _, err := s.tmp.WriteAt(data, off); err != nil {
+				return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+			}
+			off = end
 		}
 	}
 	s.staged = true

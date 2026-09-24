@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,29 @@ func TestIsRetryableDownloadError(t *testing.T) {
 	}
 	for _, tc := range tests {
 		if got := isRetryableDownloadError(tc.err); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestIsRetryableNetworkErrorTimeoutClassification(t *testing.T) {
+	t.Parallel()
+	stalled := fmt.Errorf("stalled: %w (Client.Timeout exceeded while awaiting headers)", context.DeadlineExceeded)
+	bare := fmt.Errorf("slow: %w", context.DeadlineExceeded)
+	canceled := fmt.Errorf("gone: %w", context.Canceled)
+	canceledStalled := fmt.Errorf("race: %w: %w (Client.Timeout exceeded)", context.Canceled, context.DeadlineExceeded)
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"client timeout marker retries", stalled, true},
+		{"bare caller deadline never retries", bare, false},
+		{"canceled never retries", canceled, false},
+		{"canceled wins over timeout marker", canceledStalled, false},
+	}
+	for _, tc := range tests {
+		if got := isRetryableNetworkError(tc.err); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}

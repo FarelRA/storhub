@@ -9,7 +9,7 @@ import (
 
 // assetDictionary is the single source for both name words and extensions.
 // Expanded from the original ~77-word wordlist to ~320 words to make
-// 1–5 word / 1–5 extension combinations collision-robust without relying
+// 1-5 word / 1-5 extension combinations collision-robust without relying
 // on a separate wordlist. All entries are lower-case a-z so the resulting
 // asset names remain `^[a-z]+(?:[-_]?[a-z]+)*(\.[a-z]+)+$`.
 var assetDictionary = []string{
@@ -42,7 +42,7 @@ var assetSeparators = []string{"-", "_", ""}
 
 type assetNamer struct {
 	// No mutex: the namer is per-chunkSink (one upload loop), never
-	// shared across goroutines (audit 24). Hoisting it to the hub
+	// shared across goroutines (single-flight collision scope). Hoisting it to the hub
 	// would require re-adding a lock; per-sink keeps collision scope
 	// to the current file's chunks, which is exactly what the
 	// maxNameRetries budget assumes.
@@ -69,9 +69,9 @@ func (n *assetNamer) Next() (string, error) {
 }
 
 func randomAssetName() (string, error) {
-	// 1–5 words and 1–5 extensions, each uniformly random. This yields
+	// 1-5 words and 1-5 extensions, each uniformly random. This yields
 	// 320^1·320^1 ≈ 1e5 combinations at the small end up to 320^5·320^5 ≈ 1e25
-	// at the large end - far more robust than the previous 2–4 words × 1 ext
+	// at the large end - far more robust than the previous 2-4 words × 1 ext
 	// on a 77-word list, without ever deriving from the source file name.
 	wordCount, err := randomInt(5)
 	if err != nil {

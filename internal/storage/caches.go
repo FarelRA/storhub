@@ -19,11 +19,11 @@ import (
 
 // projectMetadata holds metadata for a single project with batched commit support.
 //
-// Sharing discipline (load-bearing, enforced by cowTree/publishTreeLocked):
+// Sharing discipline (load-bearing, enforced by cloneForWrite/publishTreeLocked):
 // the tree reachable through pm.meta is IMMUTABLE once published. Readers
 // (cachedRepoMetadata*) hand out the live pointer under pm.mu.RLock without
 // cloning, so every mutation must go through copy-on-write: take a private
-// copy with cowTree, mutate it, publish it back with publishTreeLocked (or a
+// copy with cloneForWrite, mutate it, publish it back with publishTreeLocked (or a
 // wholesale swap under pm.mu.Lock). Mutating a published tree in place is a
 // data race against lock-free readers, not a style violation. Entry values
 // (FileMeta/DirMeta) are likewise immutable: replace map entries, never edit
@@ -405,7 +405,7 @@ func (h *StorHub) getGitRepo(project string) *gitRepo {
 	}
 	r = newGitRepo(h.config.GitCacheDir, h.owner, project, h.token)
 	// Thread the hub's injectable clock into the git backend so tests
-	// can freeze time (audit 34): wall time.Now() made commit ordering
+	// can freeze time (clock injection): wall time.Now() made commit ordering
 	// diverge from the mock's logical clock. Nil means time.Now.
 	r.now = h.config.Now
 	h.gitRepos[project] = r
@@ -413,7 +413,7 @@ func (h *StorHub) getGitRepo(project string) *gitRepo {
 }
 
 // touchLastAccess bumps the idle-evict clock without taking pm.mu.
-// The atomic keeps per-op hits off the exclusive lock (audit 33).
+// The atomic keeps per-op hits off the exclusive lock (commit-admission batching).
 func touchLastAccess(pm *projectMetadata, now time.Time) {
 	if pm == nil || now.IsZero() {
 		return
@@ -441,7 +441,7 @@ func lastAccessTime(pm *projectMetadata) time.Time {
 // admit=true refuses a brand-new project when the residency cap cannot
 // admit it.
 //
-// Idle expiry (Phase E2, replacing the sweeper tick): a hit whose idle
+// Idle expiry (event-driven idle eviction, replacing the sweeper tick): a hit whose idle
 // clock passed metaCacheIdleTTL falls through to the slow path, which
 // evicts the entry while it is still clean and idle and inserts a fresh
 // one. Touched, dirty, reviving, or concurrently replaced entries are
@@ -489,9 +489,9 @@ func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, 
 	// event, so the cap is applied exactly when a new project joins. Read
 	// paths admit unbounded (a freshly loaded entry is clean and therefore
 	// evictable); mutation entry points use admit=true for backpressure.
-	// DELIBERATE CONTRACT (audit 31, test-pinned): an all-dirty cache
+	// DELIBERATE CONTRACT (object-cache residency, test-pinned): an all-dirty cache
 	// inserts unbounded on the read path; hard-capping reads too was
-	// EXCLUDED — change nothing here without revisiting
+	// EXCLUDED: change nothing here without revisiting
 	// eventdriven_test.go:347.
 	admitted, capEvicted := h.evictForCapacityLocked()
 	evicted = append(evicted, capEvicted...)
@@ -509,7 +509,7 @@ func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, 
 
 // idleExpired reports whether pm's idle clock passed metaCacheIdleTTL: a
 // clean entry nobody touched for the TTL is evictable on the get path
-// (Phase E2 replaces the sweeper tick). A zero stamp means never accessed
+// (event-driven idle eviction replaces the sweeper tick). A zero stamp means never accessed
 // and never expires. now is the caller's clock read, reused for the touch
 // so the fast path pays a single Now per hit.
 func (h *StorHub) idleExpired(pm *projectMetadata, now time.Time) bool {
@@ -653,7 +653,7 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 	return false, nil
 }
 
-// Cache residency policy (Phase E2: no periodic goroutine; every leg is
+// Cache residency policy (event-driven: no periodic goroutine; every leg is
 // event-driven): a clean project's metadata is dropped after
 // metaCacheIdleTTL without access, enforced on the lookupOrInsert get
 // path (the lastAccess stamp was already recorded; the get path reads it
@@ -676,7 +676,7 @@ const metaCacheIdleTTL = 360 * storcfg.PatienceUnit
 // read path already treats older-than-TTL as a miss, and projects nobody
 // touches need no eviction.
 //
-// Lock discipline (audit 33): the candidate snapshot is taken under
+// Lock discipline (commit-admission batching): the candidate snapshot is taken under
 // metaMu.RLock; per-project decisions run after the global lock is
 // dropped so a contended pm.mu never stalls all cache misses/inserts.
 // Eviction re-takes metaMu for writing and re-validates under pm.mu.
@@ -726,7 +726,7 @@ func (h *StorHub) sweepCachesOnce() {
 			s.pm.mu.Lock()
 			stale := s.pm.stopped || s.pm.reviving
 			trigger := s.pm.triggerCh
-			stillDirty := s.pm.dirty && len(s.pm.opStack.ops) >= maxPendingOpsPerProject
+			stillDirty := s.pm.dirty && s.pm.opStack.needsForceFlush()
 			if !stale && stillDirty {
 				h.pressure.noteForceRetry()
 				// Retry the failing commit; the stack can never be dropped

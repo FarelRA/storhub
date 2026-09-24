@@ -197,7 +197,7 @@ func TestGitRepoEnsureReclaimsStaleDirectory(t *testing.T) {
 	}
 }
 
-// CacheBase()/objects/<project> must be swept too — a deleted project's
+// CacheBase()/objects/<project> must be swept too: a deleted project's
 // object cache otherwise lingers forever. Liveness is judged by the git
 // worktree lock (the object cache has none of its own).
 func TestReapOrphanedObjectCaches(t *testing.T) {

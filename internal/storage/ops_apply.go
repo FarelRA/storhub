@@ -70,8 +70,6 @@ func indexUnlink(set map[uint64]map[string]struct{}, inode uint64, path string) 
 }
 
 // setFile records path holding inode (nil-safe no-op on a nil index).
-
-// setFile records path holding inode (nil-safe no-op on a nil index).
 func (c *collisionIndex) setFile(path string, inode uint64) {
 	if c == nil {
 		return
@@ -85,8 +83,6 @@ func (c *collisionIndex) setFile(path string, inode uint64) {
 	c.files[path] = inode
 	indexLink(c.fileInode, inode, path)
 }
-
-// setDir records path holding inode (nil-safe).
 
 // setDir records path holding inode (nil-safe).
 func (c *collisionIndex) setDir(path string, inode uint64) {
@@ -104,8 +100,6 @@ func (c *collisionIndex) setDir(path string, inode uint64) {
 }
 
 // delFile drops path's occupancy (nil-safe; missing paths are no-ops).
-
-// delFile drops path's occupancy (nil-safe; missing paths are no-ops).
 func (c *collisionIndex) delFile(path string) {
 	if c == nil {
 		return
@@ -115,8 +109,6 @@ func (c *collisionIndex) delFile(path string) {
 		indexUnlink(c.fileInode, old, path)
 	}
 }
-
-// delDir drops path's occupancy (nil-safe; missing paths are no-ops).
 
 // delDir drops path's occupancy (nil-safe; missing paths are no-ops).
 func (c *collisionIndex) delDir(path string) {
@@ -130,18 +122,12 @@ func (c *collisionIndex) delDir(path string) {
 }
 
 // setRoot records a root inode change (nil-safe).
-
-// setRoot records a root inode change (nil-safe).
 func (c *collisionIndex) setRoot(inode uint64) {
 	if c == nil {
 		return
 	}
 	c.rootInode = inode
 }
-
-// moveSubtree relocates every indexed path under from to its remapped path,
-// mirroring remapSubtree with the same prefix rule. Overwritten targets drop
-// their previous occupant first, matching the meta overwrite.
 
 // moveSubtree relocates every indexed path under from to its remapped path,
 // mirroring remapSubtree with the same prefix rule. Overwritten targets drop
@@ -182,16 +168,6 @@ func (c *collisionIndex) moveSubtree(from, to string) {
 // membership inline is O(occupants); building a per-op copy of the target
 // set here would make file-heavy batches quadratic. The root always
 // collides. Nil-plan safe.
-
-// fileCollidesWithLiveDir reports whether inode is taken by the root or a
-// directory the batch does NOT overwrite: occupants at batch-asserted
-// paths are replay scaffolding (or earlier batch state), never divergent
-// upstream allocations, so they don't count. The op's own path is never
-// exempted: a file replacing a same-inode directory keeps the pre-existing
-// remap behavior. Occupants per inode are typically one, so testing
-// membership inline is O(occupants); building a per-op copy of the target
-// set here would make file-heavy batches quadratic. The root always
-// collides. Nil-plan safe.
 func (c *collisionIndex) fileCollidesWithLiveDir(inode uint64, p *replayPlan, own string) bool {
 	if c == nil {
 		return false
@@ -212,12 +188,6 @@ func (c *collisionIndex) fileCollidesWithLiveDir(inode uint64, p *replayPlan, ow
 	}
 	return false
 }
-
-// takenByAnotherNodeExceptTargets is takenByAnotherNode with batch-target
-// awareness: occupants at target paths are overwritten by the batch in
-// every delivery order, so they never count as divergent allocations.
-// Membership is tested inline (O(occupants)) instead of copying the whole
-// target set per op, which would make dir-heavy batches quadratic.
 
 // takenByAnotherNodeExceptTargets is takenByAnotherNode with batch-target
 // awareness: occupants at target paths are overwritten by the batch in
@@ -257,11 +227,6 @@ func (c *collisionIndex) takenByAnotherNodeExceptTargets(inode uint64, exceptPat
 // index (nil-safe). EnsureDirectory may materialize several missing levels
 // at once; syncing only the leaf would leave fresh ancestor inodes invisible
 // to later collision checks in the batch.
-
-// syncDirChain records path and every ancestor directory in the collision
-// index (nil-safe). EnsureDirectory may materialize several missing levels
-// at once; syncing only the leaf would leave fresh ancestor inodes invisible
-// to later collision checks in the batch.
 func syncDirChain(meta *RepoMetadata, path string, cidx *collisionIndex) {
 	if cidx == nil {
 		return
@@ -272,10 +237,6 @@ func syncDirChain(meta *RepoMetadata, path string, cidx *collisionIndex) {
 		}
 	}
 }
-
-// ensureParentFor creates the parent directory for a literal target path and
-// records created parents in the collision index. Shared by every handler
-// that materializes state at a new location.
 
 // ensureParentFor creates the parent directory for a literal target path and
 // records created parents in the collision index. Shared by every handler
@@ -291,13 +252,7 @@ func ensureParentFor(meta *RepoMetadata, target string, now int64, cidx *collisi
 
 // applyHandler applies one op class. path is the op's raw Paths[0] scope;
 // handlers resolve stale references via the plan themselves.
-
-// applyHandler applies one op class. path is the op's raw Paths[0] scope;
-// handlers resolve stale references via the plan themselves.
 type applyHandler func(meta *RepoMetadata, op Op, plan *replayPlan, resolutions *[]ConflictResolution, cidx *collisionIndex, now int64, path string) error
-
-// opApplyHandlers dispatches applyOneOp by class: file-state assertions,
-// literal creates, removals, moves, and catalog ops each read independently.
 
 // opApplyHandlers dispatches applyOneOp by class: file-state assertions,
 // literal creates, removals, moves, and catalog ops each read independently.
@@ -314,10 +269,6 @@ var opApplyHandlers = map[OpType]applyHandler{
 	OpRelease:    applyReleaseOp,
 	OpChunkPrune: applyChunkPruneOp,
 }
-
-// applyOneOpIndexed is the batch entry: the caller builds one collisionIndex
-// per batch (applyOpsWithResolutions, rebaseWorkingTree) and threads it
-// through every op, so identifier remapping stays O(1) per op.
 
 // applyOneOpIndexed is the batch entry: the caller builds one collisionIndex
 // per batch (applyOpsWithResolutions, rebaseWorkingTree) and threads it
@@ -521,13 +472,6 @@ func applyChunkPruneOp(meta *RepoMetadata, op Op, _ *replayPlan, _ *[]ConflictRe
 // derived index and size cache stay warm incrementally. The collision index
 // moves with the entries (nil-safe) so later ops in the batch still resolve
 // identifier occupancy exactly.
-
-// remapSubtree moves every entry under from to its remapped path (directory
-// rename semantics). Keys are rewritten; entry bodies are untouched. Each
-// move goes through the tracked mutators (remove old, write new) so the
-// derived index and size cache stay warm incrementally. The collision index
-// moves with the entries (nil-safe) so later ops in the batch still resolve
-// identifier occupancy exactly.
 func remapSubtree(meta *RepoMetadata, from, to string, cidx *collisionIndex) {
 	type dirMove struct {
 		from, to string
@@ -567,17 +511,7 @@ func remapSubtree(meta *RepoMetadata, from, to string, cidx *collisionIndex) {
 // Members missing at replay time are skipped: they were deleted by another
 // op in the batch (whose own delete/put carries the final state), or the
 // op is replaying onto a tree that already absorbed them. Entries NOT in
-// the list — created under the old path after the rename was synthesized —
-// stay put, which is what makes both delivery orders converge.
-
-// remapSubtreeMembers moves exactly the listed from-paths to their
-// remapped locations: the member list a dir rename recorded at fold time.
-// Each move is an independent map-key relocation (remove old, write new)
-// through the tracked mutators, so no ordering between members is needed.
-// Members missing at replay time are skipped: they were deleted by another
-// op in the batch (whose own delete/put carries the final state), or the
-// op is replaying onto a tree that already absorbed them. Entries NOT in
-// the list — created under the old path after the rename was synthesized —
+// the list (created under the old path after the rename was synthesized)
 // stay put, which is what makes both delivery orders converge.
 func remapSubtreeMembers(meta *RepoMetadata, from, to string, members []string, cidx *collisionIndex) {
 	for _, m := range members {
@@ -600,13 +534,6 @@ func remapSubtreeMembers(meta *RepoMetadata, from, to string, members []string, 
 		}
 	}
 }
-
-// subtreePopulated reports whether any file or directory lives strictly
-// under path: after a member-list rename, a populated source was
-// repopulated by another op in the batch and its dir record must be kept.
-// Walks the child index iteratively with early exit (O(subtree), not
-// O(tree)): renames are rare, but a full catalog scan per rename would
-// still be quadratic on rename-heavy batches.
 
 // subtreePopulated reports whether any file or directory lives strictly
 // under path: after a member-list rename, a populated source was

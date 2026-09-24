@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"os"
 	"syscall"
@@ -36,25 +35,14 @@ func (s *openSession) authorize(ctx context.Context) error {
 	return fmt.Errorf("session %s: %w (owner uid %d): %w", shortSHA(s.id), ErrSessionOwnerMismatch, s.ownerUID, syscall.EPERM)
 }
 
-// constantTimeIDEqual compares a presented handle id in constant time. The
-// table lookup already selected the candidate; this keeps the acceptance
-// itself free of early-exit byte comparison.
-func constantTimeIDEqual(stored, presented string) bool {
-	a, b := []byte(stored), []byte(presented)
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(a, b) == 1
-}
-
 // getLiveLocked resolves a handle id to its live session, sweeping it when
-// expired. Unknown, mismatched, and expired ids answer StaleSessionError.
-// Caller holds sh.mu. On success the session mu is held (order sh then s);
-// the caller must Unlock the session and must not take sh.mu while holding
-// it (release s.mu first, then re-acquire in sh-then-s order).
+// expired. Unknown and expired ids answer StaleSessionError. Caller holds
+// sh.mu. On success the session mu is held (order sh then s); the caller
+// must Unlock the session and must not take sh.mu while holding it
+// (release s.mu first, then re-acquire in sh-then-s order).
 func (sh *sessionHubState) getLiveLocked(handleID string, now time.Time) (*openSession, error) {
 	s, ok := sh.byID[handleID]
-	if !ok || !constantTimeIDEqual(s.id, handleID) {
+	if !ok || s.id != handleID {
 		return nil, newStaleSessionError(handleID, "unknown handle")
 	}
 	s.mu.Lock()
@@ -105,7 +93,8 @@ func (sh *sessionHubState) sweepExpiredLocked(now time.Time) {
 		}
 		if s.expired(now) {
 			sh.destroyLocked(s, true)
-			// destroyLocked leaves s.mu held; release for next entry.
+			// s.mu is still held here (destroyLocked never touches
+			// it); release before moving to the next entry.
 			s.mu.Unlock()
 			continue
 		}

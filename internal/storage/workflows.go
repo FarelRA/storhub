@@ -60,6 +60,24 @@ func (h *StorHub) repoExists(ctx context.Context, project string) (bool, error) 
 	return exists, nil
 }
 
+// deleteRepo deletes the remote repository and drops all hub-local state
+// for the project: the commit loop stops, the metadata cache entry goes
+// (cascading residue if resident), then the cascade runs unconditionally
+// so no gitRepos/objCaches/repoState/releaseCache entry lingers even when
+// the project was never resident in metaCache. releaseProjectResidue is
+// idempotent, so the double call is safe.
+func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
+	if err := h.ensureOwner(ctx); err != nil {
+		return err
+	}
+	if err := h.gh.DeleteRepo(ctx, h.owner, project); err != nil {
+		return err
+	}
+	h.invalidateRepoMetadata(project)
+	h.releaseProjectResidue(project)
+	return nil
+}
+
 func (h *StorHub) getAuthenticatedUser(ctx context.Context) (string, error) {
 	return h.gh.GetAuthenticatedUser(ctx)
 }
@@ -107,9 +125,6 @@ func (h *StorHub) loadRepoMetadataFresh(ctx context.Context, project string) (*R
 	close(f.done)
 	return f.meta, f.sha, f.err
 }
-
-// loadFlight is one in-flight fresh metadata load shared by every
-// goroutine that missed the cache for the project while it ran.
 
 // loadFlight is one in-flight fresh metadata load shared by every
 // goroutine that missed the cache for the project while it ran.
@@ -204,23 +219,11 @@ func (h *StorHub) setRepoState(project string, exists bool) {
 
 // forgetRepoState drops the cached existence bool for a project that no
 // longer exists, so a deleted project's entry cannot linger forever.
-
-// forgetRepoState drops the cached existence bool for a project that no
-// longer exists, so a deleted project's entry cannot linger forever.
 func (h *StorHub) forgetRepoState(project string) {
 	h.repoMu.Lock()
 	defer h.repoMu.Unlock()
 	delete(h.repoState, project)
 }
-
-// releaseProjectResidue tears down every per-project map entry besides the
-// metadata cache: the git mirror handle (closing the *git.Repository and
-// removing its claimed cache dir), the object cache handle, the repo-state
-// bool, and the release list. Eviction and project deletion must cascade
-// here or a long-lived server leaks one heavy entry per create/delete churn.
-//
-// It takes each map's own lock and never metaMu, so callers may hold metaMu
-// (eviction) or no lock at all (deleteRepo) without inverting lock order.
 
 // releaseProjectResidue tears down every per-project map entry besides the
 // metadata cache: the git mirror handle (closing the *git.Repository and
@@ -241,7 +244,7 @@ func (h *StorHub) releaseProjectResidue(project string) {
 		}
 	}
 	// Free the in-memory handle first, then remove its disk dir best-effort
-	// (audit 17/31): evicted/deleted projects previously accumulated
+	// (size-ceiling plus object-cache residency): evicted/deleted projects previously accumulated
 	// objects/<owner__proj>/ dirs until the next process-start
 	// ReapOrphanedCaches, unbounded across churn despite the per-project
 	// count+byte caps. I/O runs after the map lock, matching the git
@@ -264,12 +267,6 @@ func (h *StorHub) releaseProjectResidue(project string) {
 	// plus map entries per churned project until Shutdown.
 	h.closeProjectJournal(project)
 }
-
-// cachedMeta is the single home of the shared-pointer cache read:
-// requireHydrated=false serves any resident entry (loadRepoMetadata path),
-// requireHydrated=true misses on unhydrated entries whose EMPTY tree is not
-// remote truth (loadRepoMetadataReadonly path). cachedRepoMetadata and
-// cachedRepoMetadataReadonly are thin wrappers (verbs.go calls both).
 
 // cachedMeta is the single home of the shared-pointer cache read:
 // requireHydrated=false serves any resident entry (loadRepoMetadata path),
@@ -319,40 +316,16 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 // the copy is cheap. The first tracked mutation drops the copy to a private
 // dirty derived state (the engine's owner/mapsShared guard), never writing
 // into maps the published tree still reads.
-
-// cloneForWrite returns a private, mutable copy of a published metadata tree.
-//
-// Published trees (pm.meta) are shared with lock-free readers, so no code
-// may mutate one in place. Mutation sites take a copy here, apply their
-// changes, and publish with publishTreeLocked. The copy is the metadata
-// engine's Clone: the four stored maps are copied while their immutable
-// entry VALUES are shared, and a clean derived index is shared read-only, so
-// the copy is cheap. The first tracked mutation drops the copy to a private
-// dirty derived state (the engine's owner/mapsShared guard), never writing
-// into maps the published tree still reads.
 func cloneForWrite(m *RepoMetadata) *RepoMetadata {
 	return m.Clone()
 }
 
 // cowTree returns a private, mutable copy of a published metadata tree
-// (historical spelling of cloneForWrite; new code uses cloneForWrite).
+// (historical spelling of cloneForWrite; kept while verb, transfer, and
+// cleanup call sites migrate, see out-of-scope note to W4).
 func cowTree(m *RepoMetadata) *RepoMetadata {
 	return cloneForWrite(m)
 }
-
-// ProjectVersion reports the per-project metadata version counter, the
-// cross-surface invalidation source: every swap of shared truth
-// (publishTreeLocked callers via markProjectDirtyLocked, the
-// storeRepoMetadata apply-back branches) advances it, while paths that
-// replace nothing leave it alone. A subscriber (FUSE) baselines the value
-// and treats any movement as "kernel-cached entries for this project may
-// be stale", then revalidates and invalidates exactly the affected
-// entries. ok=false means the project is not resident: no counter exists,
-// so the caller falls back to timeout expiry.
-//
-// Lock discipline: metaMu for the map lookup, then pm.mu for reading,
-// the same order as every other reader. The swap side always advances the
-// counter under pm.mu for writing, so this read never races a publish.
 
 // ProjectVersion reports the per-project metadata version counter, the
 // cross-surface invalidation source: every swap of shared truth
@@ -484,12 +457,6 @@ func (h *StorHub) storeRepoMetadata(project string, meta *RepoMetadata, sha stri
 // hydrated (cold start). A hydrated project with pending ops is in its
 // normal commit cycle; replaying there would resurrect discarded state.
 // Returns the replayed ops for the pending stack, or nil.
-
-// journalReplayForLoad replays the crash-recovery journal onto a freshly
-// loaded remote state, but only for a cache entry that has never been
-// hydrated (cold start). A hydrated project with pending ops is in its
-// normal commit cycle; replaying there would resurrect discarded state.
-// Returns the replayed ops for the pending stack, or nil.
 func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op {
 	h.metaMu.RLock()
 	pm, ok := h.metaCache[project]
@@ -520,16 +487,6 @@ func (h *StorHub) journalReplayForLoad(project string, meta *RepoMetadata) []Op 
 	logging.Info(h.projectLogger(project), "op journal replayed onto remote state", "ops", len(ops))
 	return ops
 }
-
-// dropSupersededOps removes journal ops that a full-state assertion must not
-// re-apply over newer remote state: a journal rewrite that failed after
-// a commit leaves committed ops in the file, and a cold replay would then
-// assert them over entries the world has since moved past. An op whose
-// timestamp predates the change time of the entry it targets is stale and is
-// dropped; renames consult renameSupersededByUpstream (rebase.go: a stale
-// rename would clobber a newer target unconditionally at apply time);
-// catalog ops without a resolvable target are kept - replay applies them
-// defensively.
 
 // dropSupersededOps removes journal ops that a full-state assertion must not
 // re-apply over newer remote state: a journal rewrite that failed after

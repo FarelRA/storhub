@@ -15,8 +15,8 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// Granular prune. Full-history retention is a deliberate choice (locked
-// decision), so nothing referenced by any retained manifest is ever
+// Granular prune. Full-history retention is a deliberate choice, so nothing
+// referenced by any retained manifest is ever
 // auto-deleted; prune is explicit and reclaims only genuine garbage:
 //
 //	objects   content-addressed index objects referenced by NO retained
@@ -46,8 +46,8 @@ const (
 	PruneHistory PruneScope = "history"
 	// PruneChunks collects orphaned chunk records from the live catalog:
 	// records no file and no pending edit references. Unlike the other
-	// scopes it works on live (possibly dirty) state by construction —
-	// its roots include the pending op stack — so it skips the
+	// scopes it works on live (possibly dirty) state by construction:
+	// its roots include the pending op stack, so it skips the
 	// flush-first gate below. Refuses while any session holds the
 	// project; nothing runs automatically.
 	PruneChunks PruneScope = "chunks"
@@ -101,7 +101,9 @@ type pruneFenceState struct {
 
 // pruneFences keys fence states by hub: StorHub's struct cannot grow a
 // field from this workstream, so per-hub state hangs off the pointer here,
-// mirroring the degraded latch registry.
+// mirroring the degraded latch registry. Entries are never deleted when a
+// hub is garbage-collected (the key holds the pointer): acceptable for
+// process-lifetime hubs, worth a Shutdown cleanup later.
 var pruneFences sync.Map // *StorHub -> *pruneFenceState
 
 func (h *StorHub) pruneFenceTable() *pruneFenceState {
@@ -212,7 +214,9 @@ func (h *StorHub) PruneContext(ctx context.Context, project, scope string, keep 
 
 // PruneRequest is the flag-free prune invocation: scope selects what to
 // reclaim, keep is the history-compaction threshold (git only; keep > 1 is
-// rejected), dryRun reports without deleting. It replaces the
+// rejected, keep < 1 clamps to 1 because "keep nothing" is unrepresentable:
+// the checkpoint must retain the current tree), dryRun reports without
+// deleting. It replaces the
 // boolean-flag Prune(..., keep, dryRun) 4-way switch with per-scope
 // methods sharing one validation front.
 type PruneRequest struct {
@@ -252,7 +256,7 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 		err := h.pruneChunks(ctx, project, res, guard)
 		if err != nil {
 			logging.Error(h.projectLogger(project), "prune failed", "scope", string(req.Scope), "keep", req.Keep, "dry_run", req.DryRun, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
-			return res, err
+			return nil, err
 		}
 		logging.Debug(h.projectLogger(project), "prune complete", "scope", string(req.Scope), "keep", req.Keep, "dry_run", req.DryRun, "scanned", res.ScannedChunks, "orphaned", res.OrphanChunks, "reclaimed", res.CollectedChunks, "reclaimed_bytes", res.CollectedBytes, "elapsed", h.config.Now().UTC().Sub(started))
 		return res, nil
@@ -300,7 +304,9 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 // (git): compaction runs only when manifest commits exceed keep, and it
 // collapses every older manifest into ONE checkpoint commit, so exactly one
 // revision survives; keep > 1 is rejected because it would promise a
-// retention the checkpoint cannot provide. dryRun reports without deleting.
+// retention the checkpoint cannot provide. keep < 1 is clamped to 1:
+// "keep nothing" is unrepresentable because the checkpoint must retain the
+// current tree. dryRun reports without deleting.
 func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, keep int, dryRun bool) (*PruneResult, error) {
 	return h.PruneReq(ctx, project, PruneRequest{Scope: scope, Keep: keep, DryRun: dryRun})
 }
@@ -453,7 +459,7 @@ func (h *StorHub) pruneObjects(ctx context.Context, project string, res *PruneRe
 // referencedObjects unions every object reachable from any retained manifest
 // (the current one plus every historical revision still in git/file history).
 // Every failure to read or parse a revision is fatal: a revision that cannot
-// be classified must abort the prune, never be skipped — silently dropping
+// be classified must abort the prune, never be skipped: silently dropping
 // one revision from the union would orphan (and let prune delete) the objects
 // only it references, including the live tree if the skipped read was HEAD.
 func (h *StorHub) referencedObjects(ctx context.Context, project string, headData []byte) (map[string]bool, error) {
@@ -534,7 +540,7 @@ type objectRef struct {
 
 // contentsListingCap is GitHub's hard cap on a contents-API directory
 // listing: larger directories are truncated or rejected outright. Prune
-// must never classify reachability from a possibly truncated enumeration —
+// must never classify reachability from a possibly truncated enumeration:
 // an object the cap hid would be deleted as an orphan. This equals
 // releaseAssetCap numerically but is a different ceiling (API listing page
 // vs release assets), so it keeps its own name on purpose.

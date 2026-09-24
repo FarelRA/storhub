@@ -80,7 +80,7 @@ func TestPruneObjectsRemovesOrphans(t *testing.T) {
 // Sabotage check: a revision whose manifest cannot be READ must abort the
 // prune, never be skipped. The old reachability loop swallowed per-revision
 // errors, so one blip orphaned (and deleted) everything only that revision
-// referenced — including, if the blip hit HEAD's own read, the live index.
+// referenced, including, if the blip hit HEAD's own read, the live index.
 func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -130,7 +130,7 @@ func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
 
 // GitHub caps a contents-API directory listing at 1000 entries. A shard
 // at the cap may be truncated, and an object the cap hides would be deleted
-// as an orphan — prune must refuse to classify from a partial enumeration.
+// as an orphan: prune must refuse to classify from a partial enumeration.
 func TestPruneObjectsRefusesTruncatedListing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -305,7 +305,7 @@ func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
 
 // The checkpoint collapses ALL older manifests into ONE commit, so keep
 // is a threshold, not a retention count. keep > 1 promises retention the
-// squash cannot deliver and must be rejected — on either backend.
+// squash cannot deliver and must be rejected: on either backend.
 func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

@@ -17,9 +17,9 @@ import (
 // idempotently before it, so a crash between object writes and the manifest
 // CAS leaves only unreferenced garbage for `storhub prune` to reclaim.
 
-// isNotFoundErr is the uniform NotFound check for backend reads (audit 24:
-// the two inline styles — `!errors.As(...) || !NotFound` vs
-// `e.(*APIError)` type assertion — now have one home). It matches only the
+// isNotFoundErr is the uniform NotFound check for backend reads (single-flight backend-error normalization:
+// the two inline styles: `!errors.As(...) || !NotFound` vs
+// `e.(*APIError)` type assertion: now have one home). It matches only the
 // APIError NotFound shape; git/sentinel NotFound goes through
 // isMetadataNotFound (workflows.go).
 func isNotFoundErr(err error) bool {
@@ -28,7 +28,7 @@ func isNotFoundErr(err error) bool {
 }
 
 // readIndexDoc fetches ONE index document (manifest or legacy blob) at a
-// ref: "" means HEAD. It is the single backend-dispatch point (audit 24)
+// ref: "" means HEAD. It is the single backend-dispatch point (single-flight backend dispatch)
 // behind readIndexHead/readIndexRevision and the object fetchers
 // (fetchObjectAt/fetchObjectAtRef via readObjectBytes): git reads go
 // through the mirror, REST through GetFileContent. found=false
@@ -136,7 +136,7 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 	if err != nil {
 		return nil, 0, err
 	}
-	// Batch load against one pinned HEAD (audit 33): the per-object
+	// Batch load against one pinned HEAD (commit-admission batching): the per-object
 	// fetchObject path syncs (fetch+hard-reset) per object, so a cold
 	// load paid O(objects) serialized syncs on one mutex. Pin once,
 	// resolve every object against the pin with no further syncs.
@@ -165,7 +165,7 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 // The build streams (BuildTreeStream) through the project's retained
 // TreeCache with known=object-cache-membership: unchanged subtrees are
 // neither re-marshalled nor retained, so a commit no longer materializes
-// the full Objects map duplicating tree bytes (audit 31: filesByParent +
+// the full Objects map duplicating tree bytes (object-cache residency: filesByParent +
 // dirs + byBucket + full objects map per commit). Only genuinely-new
 // objects drive the running count and the upload set.
 //
@@ -279,7 +279,7 @@ func (h *StorHub) buildIndexStream(ctx context.Context, project string, tree *me
 // (full-build fallback, which populates no cache) resets the baseline to
 // empty instead of keeping stale entries: the next streaming build then
 // re-emits by object-cache membership, wasteful but never wrong. A missing
-// entry (evicted mid-commit) simply drops the cache — the next commit
+// entry (evicted mid-commit) simply drops the cache: the next commit
 // rebuilds uncached.
 func (h *StorHub) rememberTreeCache(project string, tree *RepoMetadata, scratch *meta.TreeCache) {
 	pm := h.lookupProjectMeta(project)

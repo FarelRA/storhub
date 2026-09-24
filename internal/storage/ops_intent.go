@@ -154,7 +154,7 @@ func pairRenames(after *RepoMetadata, class *intentClass, rec *metadata.IntentRe
 		// A recreated path's new inode is a fresh allocation, never a
 		// rename target: pairing it would steal the recreation. The
 		// allocator never reuses freed ids within a tree, so this guard
-		// only fires for hand-built trees — defense in depth.
+		// only fires for hand-built trees: defense in depth.
 		recreatedInodes := make(map[uint64]struct{}, len(class.recreatedDirs))
 		for _, entry := range class.recreatedDirs {
 			recreatedInodes[entry.Inode] = struct{}{}

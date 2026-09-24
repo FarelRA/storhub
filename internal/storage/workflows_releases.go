@@ -22,9 +22,9 @@ import (
 //
 // op names the caller ("rollback"/"revert") and prefixes every error so a
 // shared validator does not misattribute failures to rollback when it also
-// serves the revert path (audit 24).
+// serves the revert path (revert-path refetch).
 //
-// Range geometry is enforced, not just membership (audit 18): a reverted
+// Range geometry is enforced, not just membership (range-geometry enforcement): a reverted
 // chunk pointing at a live asset with an out-of-range window previously
 // committed successfully and failed later as a 416 at read time. Every
 // chunk must satisfy AssetOffset >= 0 and AssetOffset+Size <= asset Size.
@@ -34,9 +34,9 @@ import (
 // The release list itself stays a fresh (uncached) listReleases: the point
 // of the re-checks around the commit is to catch deletions that landed
 // after the previous check, which a TTL cache would hide.
-// NEEDS-INTEGRATION(13): a targeted GET /releases/assets/{id} would replace
-// the per-release fallback entirely; the ghapi client exposes no such
-// method today, so the fallback paginates ListReleaseAssets instead.
+// A targeted GET /releases/assets/{id} would replace the per-release
+// fallback entirely; the ghapi client exposes no such method, so the
+// fallback paginates ListReleaseAssets instead.
 func (h *StorHub) validateSnapshotRefs(ctx context.Context, project, op string, metadata *RepoMetadata) error {
 	// Structural validation first - chunk/file size consistency
 	// (chunks beyond EOF, negative geometry, dangling references,
@@ -134,17 +134,9 @@ func (h *StorHub) validateSnapshotRefs(ctx context.Context, project, op string, 
 // validateMetadataSnapshot is the rollback-facing entry point, retained for
 // callers outside this slice (verbs.go calls it five times): it validates
 // with the "rollback" op prefix.
-
-// validateMetadataSnapshot is the rollback-facing entry point, retained for
-// callers outside this slice (verbs.go calls it five times): it validates
-// with the "rollback" op prefix.
 func (h *StorHub) validateMetadataSnapshot(ctx context.Context, project string, metadata *RepoMetadata) error {
 	return h.validateSnapshotRefs(ctx, project, "rollback", metadata)
 }
-
-// sortReleasesOldestFirst orders releases by numeric v tag ascending so
-// uploads pack elders full before opening new headroom. Tags without a
-// numeric suffix keep listed order after all numeric ones.
 
 // sortReleasesOldestFirst orders releases by numeric v tag ascending so
 // uploads pack elders full before opening new headroom. Tags without a
@@ -220,12 +212,6 @@ func (h *StorHub) getOrCreateUploadRelease(ctx context.Context, project string, 
 // rollback validation can resolve chunk references. Rotation may spread one
 // file's chunks across releases; ensuring only the originally targeted tag
 // would strand the rotated chunks.
-
-// ensureChunkReleases registers every release holding new chunks in the
-// authoritative metadata so purge cannot delete live data and
-// rollback validation can resolve chunk references. Rotation may spread one
-// file's chunks across releases; ensuring only the originally targeted tag
-// would strand the rotated chunks.
 func ensureChunkReleases(meta *RepoMetadata, chunks []ChunkInfo, now int64) error {
 	seen := make(map[string]struct{}, len(chunks))
 	for _, c := range chunks {
@@ -252,17 +238,7 @@ func ensureChunkReleases(meta *RepoMetadata, chunks []ChunkInfo, now int64) erro
 // near the ceiling (worst observed skew: 57 assets on storhub-web v14), so
 // at or above this limit the true count is resolved through the paginated
 // ListReleaseAssets endpoint instead.
-
-// embeddedAssetTrustLimit bounds how far the asset array embedded in a
-// release object may be trusted for capacity decisions. GitHub truncates it
-// near the ceiling (worst observed skew: 57 assets on storhub-web v14), so
-// at or above this limit the true count is resolved through the paginated
-// ListReleaseAssets endpoint instead.
 const embeddedAssetTrustLimit = 900
-
-// releaseAssetCount returns the number of assets in a release for capacity
-// decisions: the embedded count when safely below the ceiling, the true
-// paginated count inside the danger band.
 
 // releaseAssetCount returns the number of assets in a release for capacity
 // decisions: the embedded count when safely below the ceiling, the true
@@ -282,9 +258,6 @@ func (h *StorHub) releaseAssetCount(ctx context.Context, project string, r ghapi
 	}
 	return h.trueReleaseAssetCount(ctx, project, r)
 }
-
-// trueReleaseAssetCount resolves a release's asset count through the
-// paginated ListReleaseAssets endpoint instead of the embedded array.
 
 // trueReleaseAssetCount resolves a release's asset count through the
 // paginated ListReleaseAssets endpoint instead of the embedded array.
@@ -383,21 +356,4 @@ func (h *StorHub) deleteAssetByID(ctx context.Context, project string, assetID i
 		h.invalidateReleaseCache(project)
 	}
 	return err
-}
-
-func (h *StorHub) deleteRepo(ctx context.Context, project string) error {
-	if err := h.ensureOwner(ctx); err != nil {
-		return err
-	}
-	if err := h.gh.DeleteRepo(ctx, h.owner, project); err != nil {
-		return err
-	}
-	// Stop the commit loop + drop the metadata cache entry (cascading
-	// residue if it was resident), then cascade unconditionally: a deleted
-	// repo must leave no gitRepos/objCaches/repoState/releaseCache entry
-	// even if it was never resident in metaCache. releaseProjectResidue is
-	// idempotent, so the double call is safe.
-	h.invalidateRepoMetadata(project)
-	h.releaseProjectResidue(project)
-	return nil
 }

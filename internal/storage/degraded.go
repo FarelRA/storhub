@@ -3,12 +3,11 @@ package storage
 import (
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
-// Degraded-mode policy (item A4): once a project's commits fail
+// Degraded-mode policy: once a project's commits fail
 // consecutively past MaxConsecutiveCommitFailures, the project stops
 // admitting new mutations and fails them fast with a loud typed error.
 // The latch is sticky: later commit successes clear the pressure streak
@@ -27,10 +26,9 @@ import (
 // deliberately NOT bypassed: it synthesizes new work through
 // UpdateRepoMetadataContext, making it a mutation, not a rescue.
 //
-// The latch lives outside StorHub (whose struct is owned elsewhere) in a
-// hub-keyed registry below. Entries are created lazily per hub and die
-// with the test process; one small entry per hub is cheaper than
-// cross-workstream struct surgery.
+// The latch lives on the hub (StorHub.degradedLatched, guarded by
+// degradedMu) so entries die with the hub: no process-wide registry can
+// pin dead hubs, and lifecycle needs no cleanup beyond hub teardown.
 
 // DegradedProjectError is the fail-fast refusal a degraded project answers
 // to new mutations. It names the project and the streak that tripped the
@@ -43,25 +41,6 @@ type DegradedProjectError struct {
 
 func (e *DegradedProjectError) Error() string {
 	return fmt.Sprintf("project %q is degraded after %d consecutive commit failures (threshold %d): refusing new mutations; recover with rollback, prune, or drain, or enable explicitly via ReEnableProject", e.Project, e.Streak, e.Threshold)
-}
-
-// degradedLatch is one hub's set of latched-degraded projects.
-type degradedLatch struct {
-	mu sync.Mutex
-	// latched maps project to degraded; absent means healthy.
-	latched map[string]bool
-}
-
-// degradedLatches keys latch sets by hub: StorHub's struct cannot grow a
-// field from this workstream, so per-hub state hangs off the pointer here.
-var degradedLatches sync.Map // *StorHub -> *degradedLatch
-
-func (h *StorHub) degradedState() *degradedLatch {
-	if v, ok := degradedLatches.Load(h); ok {
-		return v.(*degradedLatch)
-	}
-	v, _ := degradedLatches.LoadOrStore(h, &degradedLatch{latched: make(map[string]bool)})
-	return v.(*degradedLatch)
 }
 
 // degradedThreshold resolves the effective trip point: a non-positive knob
@@ -77,25 +56,25 @@ func (h *StorHub) degradedThreshold() int {
 // isProjectDegraded reports whether the latch is set (sticky: independent
 // of the live pressure streak, which successes reset).
 func (h *StorHub) isProjectDegraded(project string) bool {
-	st := h.degradedState()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.latched[project]
+	h.degradedMu.Lock()
+	defer h.degradedMu.Unlock()
+	return h.degradedLatched[project]
 }
 
 // markProjectDegraded sets the latch, logging the transition exactly once.
 // The streak stays visible in PressureSnapshot; the latch is visible here.
 func (h *StorHub) markProjectDegraded(project string) {
-	st := h.degradedState()
-	st.mu.Lock()
-	already := st.latched[project]
-	if !already {
-		st.latched[project] = true
+	h.degradedMu.Lock()
+	if h.degradedLatched == nil {
+		h.degradedLatched = make(map[string]bool)
 	}
-	st.mu.Unlock()
+	already := h.degradedLatched[project]
+	if !already {
+		h.degradedLatched[project] = true
+	}
+	h.degradedMu.Unlock()
 	if !already {
 		logging.Warn(h.projectLogger(project), "project degraded: refusing new mutations until explicit re-enable",
-			"project", project,
 			"streak", h.PressureFailureStreak(project),
 			"threshold", h.degradedThreshold())
 	}
@@ -137,17 +116,14 @@ func (h *StorHub) ReEnableProject(project string) error {
 	if err := validateProject(project); err != nil {
 		return err
 	}
-	st := h.degradedState()
-	st.mu.Lock()
-	was := st.latched[project]
-	delete(st.latched, project)
-	st.mu.Unlock()
+	h.degradedMu.Lock()
+	was := h.degradedLatched[project]
+	delete(h.degradedLatched, project)
+	h.degradedMu.Unlock()
 	if was {
-		logging.Info(h.projectLogger(project), "project re-enabled by explicit admin action; mutations admitted again",
-			"project", project)
+		logging.Info(h.projectLogger(project), "project re-enabled by explicit admin action; mutations admitted again")
 	} else {
-		logging.Debug(h.projectLogger(project), "project re-enable on a healthy project; no latch to clear",
-			"project", project)
+		logging.Debug(h.projectLogger(project), "project re-enable on a healthy project; no latch to clear")
 	}
 	return nil
 }
@@ -156,13 +132,12 @@ func (h *StorHub) ReEnableProject(project string) error {
 // sorted for stable operator output. The live streaks behind the latch
 // remain visible in PressureSnapshot.
 func (h *StorHub) DegradedProjects() []string {
-	st := h.degradedState()
-	st.mu.Lock()
-	out := make([]string, 0, len(st.latched))
-	for name := range st.latched {
+	h.degradedMu.Lock()
+	out := make([]string, 0, len(h.degradedLatched))
+	for name := range h.degradedLatched {
 		out = append(out, name)
 	}
-	st.mu.Unlock()
+	h.degradedMu.Unlock()
 	sort.Strings(out)
 	return out
 }

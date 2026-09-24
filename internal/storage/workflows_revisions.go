@@ -48,11 +48,6 @@ func (h *StorHub) listMetadataRevisions(ctx context.Context, project string) ([]
 // history: the split manifest when the project is (or will be) version 5,
 // else the legacy metadata blob. Revision listing and history walks must
 // follow the active layout or they see an empty history for a split project.
-
-// activeIndexPath returns the repo path carrying the project's current index
-// history: the split manifest when the project is (or will be) version 5,
-// else the legacy metadata blob. Revision listing and history walks must
-// follow the active layout or they see an empty history for a split project.
 func (h *StorHub) activeIndexPath(ctx context.Context, project string) (string, error) {
 	if pm := h.lookupProjectMeta(project); pm != nil {
 		pm.mu.RLock()
@@ -99,10 +94,6 @@ func (h *StorHub) getMetadataRevision(ctx context.Context, project, commitSHA st
 // readIndexRevision fetches the manifest or metadata blob at a specific commit
 // SHA. Callers distinguish the layout with meta.IsManifest(data). Dispatches
 // through readIndexDoc (index.go), the single git-vs-REST point.
-
-// readIndexRevision fetches the manifest or metadata blob at a specific commit
-// SHA. Callers distinguish the layout with meta.IsManifest(data). Dispatches
-// through readIndexDoc (index.go), the single git-vs-REST point.
 func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA string) ([]byte, bool, error) {
 	if d, _, ok, rerr := h.readIndexDoc(ctx, project, indexFilePath, commitSHA); rerr != nil {
 		return nil, false, rerr
@@ -115,10 +106,6 @@ func (h *StorHub) readIndexRevision(ctx context.Context, project, commitSHA stri
 	}
 	return d, ok, nil
 }
-
-// loadIndexTreeAtRef materializes a revision's tree, detecting the layout by
-// shape and fetching split objects at the same ref so a historical manifest
-// resolves its historical objects.
 
 // loadIndexTreeAtRef materializes a revision's tree, detecting the layout by
 // shape and fetching split objects at the same ref so a historical manifest
@@ -148,11 +135,6 @@ func (h *StorHub) loadIndexTreeAtRef(ctx context.Context, project, ref string, d
 // content-addressed and layout-agnostic, so it serves any ref). Backend
 // bytes come from readObjectBytes (objects.go); the ref-pinned error
 // wording is preserved.
-
-// fetchObjectAtRef loads one index object pinned to a commit SHA (cache is
-// content-addressed and layout-agnostic, so it serves any ref). Backend
-// bytes come from readObjectBytes (objects.go); the ref-pinned error
-// wording is preserved.
 func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string) ([]byte, error) {
 	cache := h.objectCacheFor(project)
 	if data, ok := cache.get(sha); ok {
@@ -168,30 +150,3 @@ func (h *StorHub) fetchObjectAtRef(ctx context.Context, project, ref, sha string
 	cache.put(sha, data)
 	return data, nil
 }
-
-// validateSnapshotRefs checks a snapshot against live server state before
-// a rollback/revert commits it. Structural validation is total; asset
-// existence is checked LAZILY and TARGETED: only releases the snapshot
-// references are examined, and a release's full asset list is paginated
-// only when its embedded view is untrustworthy (at/above the truncation
-// danger band, or an expected ID is missing from it). The old form built
-// an index over every asset of every release - O(total assets) transient
-// memory per call, three calls per rollback.
-//
-// op names the caller ("rollback"/"revert") and prefixes every error so a
-// shared validator does not misattribute failures to rollback when it also
-// serves the revert path (audit 24).
-//
-// Range geometry is enforced, not just membership (audit 18): a reverted
-// chunk pointing at a live asset with an out-of-range window previously
-// committed successfully and failed later as a 416 at read time. Every
-// chunk must satisfy AssetOffset >= 0 and AssetOffset+Size <= asset Size.
-// Sizes ride the same targeted listing as membership (embedded view when
-// trusted, paginated ListReleaseAssets otherwise).
-//
-// The release list itself stays a fresh (uncached) listReleases: the point
-// of the re-checks around the commit is to catch deletions that landed
-// after the previous check, which a TTL cache would hide.
-// NEEDS-INTEGRATION(13): a targeted GET /releases/assets/{id} would replace
-// the per-release fallback entirely; the ghapi client exposes no such
-// method today, so the fallback paginates ListReleaseAssets instead.

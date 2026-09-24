@@ -27,7 +27,7 @@ type gitRepo struct {
 	// production; the unit harness points it at a local bare repository.
 	remoteBase string
 	// now is the injectable clock for commit timestamps, threaded from
-	// h.config.Now (audit 34). Nil means time.Now: git timestamps
+	// h.config.Now (clock injection). Nil means time.Now: git timestamps
 	// previously used wall time while the mock used logical
 	// 1700000000+id, so ordering diverged and tests could not freeze
 	// time. All commit signatures must go through nowUTC().
@@ -38,7 +38,7 @@ type gitRepo struct {
 	// write lock. Network I/O (fetch/clone/push) and worktree mutation
 	// never hold stateMu: they serialize on syncMu instead, so same-
 	// project git traffic does not convoy behind a single mutex held
-	// across the network (audit 33).
+	// across the network.
 	stateMu sync.RWMutex
 	// syncMu serializes remote synchronization and mutating worktree
 	// operations (fetch+reset, commit+push, squash). Reads pinned to a
@@ -50,9 +50,6 @@ type gitRepo struct {
 func newGitRepo(cacheDir, owner, project, token string) *gitRepo {
 	return newGitRepoWithClock(cacheDir, owner, project, token, nil)
 }
-
-// newGitRepoWithClock is the clock-injectable constructor; the 4-arg
-// wrapper above is retained for test compatibility.
 
 // newGitRepoWithClock is the clock-injectable constructor; the 4-arg
 // wrapper above is retained for test compatibility.
@@ -72,22 +69,12 @@ func newGitRepoWithClock(cacheDir, owner, project, token string, now func() time
 }
 
 // nowUTC returns the commit timestamp through the injectable clock.
-
-// nowUTC returns the commit timestamp through the injectable clock.
 func (r *gitRepo) nowUTC() time.Time {
 	if r != nil && r.now != nil {
 		return r.now().UTC()
 	}
 	return time.Now().UTC()
 }
-
-// gitCacheKey is the cache-directory and lock identity for a project.
-// Owner-qualifying it keeps same-named projects from different owners
-// (several tokens sharing one GitCacheDir) from colliding in a single
-// worktree. An unresolved owner (the lazy /user lookup has not run yet)
-// falls back to the bare project name; the gitRepo instance is created
-// once per process and keeps its key, so the two spellings never mix
-// within one mount.
 
 // gitCacheKey is the cache-directory and lock identity for a project.
 // Owner-qualifying it keeps same-named projects from different owners
@@ -106,20 +93,11 @@ func gitCacheKey(owner, project string) string {
 // ensure opens or creates the local worktree. It serializes concurrent
 // creators on syncMu; the repo pointer itself is guarded by stateMu and
 // network I/O never holds stateMu.
-
-// ensure opens or creates the local worktree. It serializes concurrent
-// creators on syncMu; the repo pointer itself is guarded by stateMu and
-// network I/O never holds stateMu.
 func (r *gitRepo) ensure(ctx context.Context) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 	return r.ensureLocked(ctx)
 }
-
-// ensureLocked opens or creates the worktree. Caller holds syncMu.
-// A directory left behind by a dead process is reclaimed first
-// ("cleanup on startup"); a directory held by a live process fails
-// honestly instead of corrupting it.
 
 // ensureLocked opens or creates the worktree. Caller holds syncMu.
 // A directory left behind by a dead process is reclaimed first
@@ -188,10 +166,6 @@ func (r *gitRepo) auth() *githttp.BasicAuth {
 // release drops this process's claim on the cache dir. remove also
 // deletes the directory, per the Shutdown contract: the worktree is a
 // pure cache of remote state and is re-cloned on demand.
-
-// release drops this process's claim on the cache dir. remove also
-// deletes the directory, per the Shutdown contract: the worktree is a
-// pure cache of remote state and is re-cloned on demand.
 func (r *gitRepo) release(remove bool) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
@@ -213,10 +187,6 @@ func (r *gitRepo) release(remove bool) error {
 // sync fetches from remote and resets the worktree to match origin/main.
 // It serializes on syncMu; the repo pointer is read under stateMu.RLock
 // so HEAD observers never block on network I/O beyond the fetch itself.
-
-// sync fetches from remote and resets the worktree to match origin/main.
-// It serializes on syncMu; the repo pointer is read under stateMu.RLock
-// so HEAD observers never block on network I/O beyond the fetch itself.
 func (r *gitRepo) sync(ctx context.Context) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
@@ -225,8 +195,6 @@ func (r *gitRepo) sync(ctx context.Context) error {
 	}
 	return r.syncLocked(ctx)
 }
-
-// syncLocked fetches and hard-resets. Caller holds syncMu.
 
 // syncLocked fetches and hard-resets. Caller holds syncMu.
 func (r *gitRepo) syncLocked(ctx context.Context) error {
@@ -265,13 +233,7 @@ func (r *gitRepo) syncLocked(ctx context.Context) error {
 // syncAndPinHEAD syncs once and returns the post-sync HEAD hash. Batch
 // loaders (index object fetches) pin this hash and resolve every object
 // against it via readFileAtPinned instead of paying a fetch+hard-reset
-// per object (audit 33: a 100k-file cold load paid thousands of
-// serialized fetch+reset cycles on one mutex).
-
-// syncAndPinHEAD syncs once and returns the post-sync HEAD hash. Batch
-// loaders (index object fetches) pin this hash and resolve every object
-// against it via readFileAtPinned instead of paying a fetch+hard-reset
-// per object (audit 33: a 100k-file cold load paid thousands of
+// per object (a 100k-file cold load paid thousands of
 // serialized fetch+reset cycles on one mutex).
 func (r *gitRepo) syncAndPinHEAD(ctx context.Context) (plumbing.Hash, error) {
 	r.syncMu.Lock()
@@ -288,10 +250,6 @@ func (r *gitRepo) syncAndPinHEAD(ctx context.Context) (plumbing.Hash, error) {
 // headHashLocked returns the post-sync HEAD hash. Caller holds syncMu or
 // stateMu (read or write); it reads the repo pointer under stateMu.RLock
 // when the caller does not already guarantee stability.
-
-// headHashLocked returns the post-sync HEAD hash. Caller holds syncMu or
-// stateMu (read or write); it reads the repo pointer under stateMu.RLock
-// when the caller does not already guarantee stability.
 func (r *gitRepo) headHashLocked() plumbing.Hash {
 	r.stateMu.RLock()
 	defer r.stateMu.RUnlock()
@@ -304,12 +262,6 @@ func (r *gitRepo) headHashLocked() plumbing.Hash {
 	}
 	return ref.Hash()
 }
-
-// readFileAtPinned reads path at the given commit hash without syncing.
-// It takes only stateMu.RLock (no network, no worktree mutation), so
-// concurrent pinned reads do not convoy behind fetches. The hash must
-// come from syncAndPinHEAD or headCommitSHA; a concurrent sync advancing
-// HEAD does not affect this read.
 
 // readFileAtPinned reads path at the given commit hash without syncing.
 // It takes only stateMu.RLock (no network, no worktree mutation), so
@@ -345,8 +297,6 @@ func (r *gitRepo) readFileAtPinned(ctx context.Context, head plumbing.Hash, path
 	}
 	return []byte(content), nil
 }
-
-// readFileRef reads a file from the repo at the given reference (SHA, branch, tag).
 
 // readFileRef reads a file from the repo at the given reference (SHA, branch, tag).
 func (r *gitRepo) readFileRef(ctx context.Context, ref, path string) ([]byte, error) {
@@ -402,13 +352,6 @@ func (r *gitRepo) readFileRef(ctx context.Context, ref, path string) ([]byte, er
 // write that was canceled between os.WriteFile and Commit would otherwise
 // be served as HEAD truth - the hub would operate on state that was never
 // pushed.
-
-// readFileHead reads the file from the latest HEAD, syncing first. The read
-// goes through the HEAD TREE, not the worktree filesystem: go-git's
-// HardReset never deletes untracked files, so a file left behind by a
-// write that was canceled between os.WriteFile and Commit would otherwise
-// be served as HEAD truth - the hub would operate on state that was never
-// pushed.
 func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error) {
 	head, err := r.syncAndPinHEAD(ctx)
 	if err != nil {
@@ -416,8 +359,6 @@ func (r *gitRepo) readFileHead(ctx context.Context, path string) ([]byte, error)
 	}
 	return r.readFileAtPinned(ctx, head, path)
 }
-
-// writeCommitPush writes a file, commits, and pushes. Returns (commitSHA, contentSHA, error).
 
 // headHashNoLock returns the post-sync HEAD commit hash, or the zero hash
 // when the repo has no HEAD yet (brand-new, nothing committed). Callers must
@@ -469,8 +410,6 @@ func (r *gitRepo) readFileContentsNoLock(_ context.Context, path string) ([]byte
 }
 
 // resolveRevisionLocked resolves a revision. Caller holds syncMu.
-
-// resolveRevisionLocked resolves a revision. Caller holds syncMu.
 func (r *gitRepo) resolveRevisionLocked(ref string) (plumbing.Hash, error) {
 	r.stateMu.RLock()
 	repo := r.repo
@@ -494,13 +433,6 @@ func resolveRevisionIn(repo *git.Repository, ref string) (plumbing.Hash, error) 
 	}
 	return plumbing.ZeroHash, fmt.Errorf("cannot resolve %q", ref)
 }
-
-// headCommitSHA returns the SHA of the HEAD commit, or empty string if not
-// available. It takes stateMu.RLock: every caller (index/prune/commit loops)
-// runs off-lock while writeCommitPushCAS, squashTreeCAS and release mutate
-// r.repo and its refs under syncMu+stateMu-write - an unlocked read raced
-// release(true) into a nil-deref and could pair a CAS token with a
-// mid-commit HEAD.
 
 // headCommitSHA returns the SHA of the HEAD commit, or empty string if not
 // available. It takes stateMu.RLock: every caller (index/prune/commit loops)

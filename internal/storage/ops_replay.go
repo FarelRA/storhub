@@ -10,7 +10,7 @@ import (
 // foldOps coalesces a raw op sequence (journal DELTA lines, one per
 // appendWithDelta) through the same rules as live appends, so a replayed
 // journal yields exactly the stack the crashed process held. The rules are
-// deliberately identical to live appends — no cross-line rewrites live here:
+// deliberately identical to live appends: no cross-line rewrites live here:
 // convergence comes from replaying the identical append sequence, not from
 // fold-specific chain/delete handling. Journal lines carry Times=1 (see
 // journalAppend/journalRead); the fold accumulates Times exactly as live
@@ -26,7 +26,7 @@ import (
 // (TestJournalGenCompatSnapMarkedLinesConverge). Marks share numbering
 // with op seqs only historically; the fold still preserves the journaled
 // seqs (the stack counter fast-forwards to each line) because drain
-// targets and resolutions number by them — only the merge shape, order,
+// targets and resolutions number by them: only the merge shape, order,
 // and numbering must match, which is what the equivalence tests pin.
 func foldOps(ops []Op) []Op {
 	stack := &opStack{}
@@ -43,35 +43,9 @@ func foldOps(ops []Op) []Op {
 // so replay is defensive by construction: deletes of missing entries are
 // no-ops, and an rmdir of a directory that gained upstream children is
 // skipped (data preservation) with a recorded resolution.
-
-// applyOps replays ops onto meta in order. Ops are full-state assertions,
-// so replay is defensive by construction: deletes of missing entries are
-// no-ops, and an rmdir of a directory that gained upstream children is
-// skipped (data preservation) with a recorded resolution.
 func applyOps(meta *RepoMetadata, ops []Op) error {
 	return applyOpsWithResolutions(meta, ops, nil)
 }
-
-// replayPlan makes a batch of ops apply order-independently. The fold
-// emits ops in map order, so emission carries no meaning and replay must
-// converge to the same final tree in ANY sequence. Two pieces of batch
-// state make that true:
-//
-//   - doomed: every path the batch removes - OpDeleteFile and OpRmdir
-//     paths plus OpRename from-paths. OpRmdir skips only when children
-//     exist OUTSIDE this set, which preserves the upstream-children
-//     guarantee (data preservation) for intra-batch deletes replayed in
-//     any order.
-//
-//   - moved: subtree prefixes relocated by dir renames applied so far in
-//     this batch (recorded-from prefix -> current prefix). A later op
-//     that references a path under a moved prefix resolves it to the live
-//     location; a path that still exists literally wins (a same-path
-//     recreation is real state, not a stale reference). Only references
-//     to PRE-EXISTING state are resolved (rename-from, delete, rmdir,
-//     setattr/patch/truncate targets); creates, mkdirs, rename-to paths
-//     and EnsureDirectory parents stay literal - a literal new path is
-//     real, never stale.
 
 // replayPlan makes a batch of ops apply order-independently. The fold
 // emits ops in map order, so emission carries no meaning and replay must
@@ -177,11 +151,6 @@ func newReplayPlan(ops []Op) *replayPlan {
 // file-state, and mkdir-with-record paths. Deletes, rmdirs, catalog ops,
 // xattrs, and record-less mkdirs assert nothing (an EnsureDirectory-only
 // mkdir keeps a live occupant, so it must not exempt it).
-
-// opAssertPaths reports every path an op asserts a record for: rename-to,
-// file-state, and mkdir-with-record paths. Deletes, rmdirs, catalog ops,
-// xattrs, and record-less mkdirs assert nothing (an EnsureDirectory-only
-// mkdir keeps a live occupant, so it must not exempt it).
 func opAssertPaths(op Op) []string {
 	switch op.Type {
 	case OpRename:
@@ -199,15 +168,6 @@ func opAssertPaths(op Op) []string {
 	}
 	return nil
 }
-
-// allocInodeAvoiding mints a fresh inode that no batch op claims.
-// Collision remapping must never reissue an identifier another batch op
-// carries, or the remap trades one collision for another. The loop is
-// pigeonhole-bounded: at most len(claimed) mints can collide, so
-// len(claimed)+1 iterations always succeed on a live counter. A wrapped
-// counter (minting math.MaxUint64) means the id space is exhausted: the
-// next mint would reissue low ids, so the allocator fails closed with an
-// ENOSPC-wrapped error instead of reusing identifiers.
 
 // allocInodeAvoiding mints a fresh inode that no batch op claims.
 // Collision remapping must never reissue an identifier another batch op
@@ -241,8 +201,6 @@ func (p *replayPlan) allocInodeAvoiding(meta *RepoMetadata) (uint64, error) {
 }
 
 // allocChunkAvoiding is allocInodeAvoiding for chunk catalog ids.
-
-// allocChunkAvoiding is allocInodeAvoiding for chunk catalog ids.
 func (p *replayPlan) allocChunkAvoiding(meta *RepoMetadata) (int64, error) {
 	if p == nil {
 		id := meta.AllocateChunkID()
@@ -268,22 +226,11 @@ func (p *replayPlan) allocChunkAvoiding(meta *RepoMetadata) (int64, error) {
 // never lands, so live occupants at its paths are genuine again and later
 // collision checks must see them. Removing a path that was never targeted
 // is a no-op.
-
-// untarget drops an op's asserted paths from the target set. Call it when
-// a batch member is SKIPPED (rebase conflict resolution): its overwrite
-// never lands, so live occupants at its paths are genuine again and later
-// collision checks must see them. Removing a path that was never targeted
-// is a no-op.
 func (p *replayPlan) untarget(op Op) {
 	for _, t := range opAssertPaths(op) {
 		delete(p.targets, t)
 	}
 }
-
-// unremove drops an op's paths from the doomed set. Call it when a batch
-// member is SKIPPED during a conflict-resolving replay (rebase): its removal
-// never lands, so a later rmdir must see the survivor as a live child again.
-// Removing a path that was never doomed is a no-op.
 
 // unremove drops an op's paths from the doomed set. Call it when a batch
 // member is SKIPPED during a conflict-resolving replay (rebase): its removal
@@ -311,11 +258,6 @@ func applyOpsWithResolutions(meta *RepoMetadata, ops []Op, resolutions *[]Confli
 // this batch referencing the recorded from-prefix resolve to the live
 // location. Called only when the source existed at apply time, so the
 // table never maps a phantom prefix onto an unrelated live tree.
-
-// recordMove notes that a dir rename relocated a subtree: later ops in
-// this batch referencing the recorded from-prefix resolve to the live
-// location. Called only when the source existed at apply time, so the
-// table never maps a phantom prefix onto an unrelated live tree.
 func (p *replayPlan) recordMove(from, to string) {
 	if from == "" {
 		return
@@ -323,10 +265,6 @@ func (p *replayPlan) recordMove(from, to string) {
 	p.moved[from] = to
 	p.liveValid = false
 }
-
-// longestMovedPrefix returns the longest table key that is the path itself
-// or a strict parent of it (the trailing-slash check keeps "/ab" from
-// matching key "/a"). Empty keys never match.
 
 // longestMovedPrefix returns the longest table key that is the path itself
 // or a strict parent of it (the trailing-slash check keeps "/ab" from
@@ -348,36 +286,14 @@ func longestMovedPrefix(moved map[string]string, path string) string {
 
 // Replay reference flavors (do not conflate):
 //
-//	resolveLive(meta, path)  — a reference to PRE-EXISTING state: the
+//	resolveLive(meta, path): a reference to PRE-EXISTING state: the
 //	    literal path when anything lives there, else the longest
 //	    moved-prefix translation that lands on something live. Chains are
 //	    followed with a visited set; anything unresolvable returns the
 //	    original path so the handler's missing-entry semantics apply
 //	    unchanged. Used for rename-from, delete, rmdir, and
 //	    setattr/patch/truncate targets.
-//	translateForward(path)   — pure batch translation: follows the batch's
-//	    recorded subtree moves to a fixed point (cycle-safe), with no
-//	    liveness checks. Used to map recorded removals to their current
-//	    locations (liveRemovals) and to exempt a rename's own
-//	    batch-forwarded location from collision remapping.
-//
-// resolveLive returns the live location for a reference to pre-existing state:
-//
-//	the literal path when anything lives there, else the longest
-//	moved-prefix translation that lands on something live. Chains are
-//	followed with a visited set; anything unresolvable returns the original
-//	path so the handler's missing-entry semantics apply unchanged.
-
-// Replay reference flavors (do not conflate):
-//
-//	resolveLive(meta, path)  — a reference to PRE-EXISTING state: the
-//	    literal path when anything lives there, else the longest
-//	    moved-prefix translation that lands on something live. Chains are
-//	    followed with a visited set; anything unresolvable returns the
-//	    original path so the handler's missing-entry semantics apply
-//	    unchanged. Used for rename-from, delete, rmdir, and
-//	    setattr/patch/truncate targets.
-//	translateForward(path)   — pure batch translation: follows the batch's
+//	translateForward(path): pure batch translation: follows the batch's
 //	    recorded subtree moves to a fixed point (cycle-safe), with no
 //	    liveness checks. Used to map recorded removals to their current
 //	    locations (liveRemovals) and to exempt a rename's own
@@ -422,10 +338,6 @@ func (p *replayPlan) resolveLive(meta *RepoMetadata, path string) string {
 // translateForward translates a recorded path to its current location by
 // following the batch's recorded subtree moves to a fixed point (cycle-safe
 // via the visited set). Pure translation: no liveness checks.
-
-// translateForward translates a recorded path to its current location by
-// following the batch's recorded subtree moves to a fixed point (cycle-safe
-// via the visited set). Pure translation: no liveness checks.
 func (p *replayPlan) translateForward(path string) string {
 	cur := path
 	seen := map[string]struct{}{path: {}}
@@ -443,11 +355,6 @@ func (p *replayPlan) translateForward(path string) string {
 	}
 	return cur
 }
-
-// liveRemovals translates every recorded-removed path to its current
-// location at this point in the replay, for the OpRmdir children check.
-// Computed once per batch and memoized; unremove/recordMove invalidate the
-// cache for a lazy recompute on next use.
 
 // liveRemovals translates every recorded-removed path to its current
 // location at this point in the replay, for the OpRmdir children check.

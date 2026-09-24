@@ -108,7 +108,7 @@ type StorHub struct {
 	flightMu sync.Mutex
 	flights  map[string]*loadFlight
 
-	// Open-session table (Phase 2B). Lives on the hub so sessions die
+	// Open-session table (stateful open sessions: server-held handles). Lives on the hub so sessions die
 	// with it: restarts drop everything, and no global registry can pin
 	// dead hubs. Lazily created under sessionMu.
 	sessionMu sync.Mutex
@@ -173,11 +173,20 @@ type StorHub struct {
 	// capWarned records that the MaxTrackedProjects overflow warning has
 	// fired for the current threshold crossing; guarded by metaMu.
 	capWarned bool
-	// pressure is the commit-pipeline pressure registry (item A1):
+	// pressure is the commit-pipeline pressure registry:
 	// cap-cross events, force-retry pokes, commit outcomes with
 	// per-project failure streaks, and rebases. Zero value is
 	// ready; every method guards itself with the registry mutex.
 	pressure pressureRegistry
+
+	// degradedLatched is the degraded-mode latch set: projects whose
+	// commits failed consecutively past the threshold stop admitting new
+	// mutations until an explicit ReEnableProject. It lives on the hub
+	// so entries die with the hub instead of pinning dead hubs in a
+	// process-wide registry. Guarded by degradedMu; lazily created so a
+	// zero-value hub stays usable.
+	degradedMu      sync.Mutex
+	degradedLatched map[string]bool
 }
 
 // isValidation422 matches a 422 whose structured errors[] array carries the
@@ -223,15 +232,26 @@ func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
 	// read-only verbs. At Debug an idle mount is chatty by design;
 	// production stays quiet by running above Debug, not by carving
 	// ops out of the span.
+	//
+	// Engine exception: the mutation funnel (UpdateRepoMetadataContext),
+	// commit publish, and rebase log their own per-attempt lines instead of a
+	// single logOp span, because one funnel call covers admission plus
+	// coalescing plus trigger while commit/rebase span multiple attempts;
+	// a single start/complete pair would misattribute elapsed. Leaf verbs
+	// still carry the full span via these helpers.
 	if !logging.Enabled(h.logger, slog.LevelDebug) {
-		return time.Now().UTC()
+		return h.config.Now().UTC()
 	}
 	logging.Start(h.projectLogger(project), op, args...)
-	return time.Now().UTC()
+	return h.config.Now().UTC()
 }
 
 func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
-	if !logging.Enabled(h.logger, slog.LevelDebug) {
+	// Failures pass through unguarded so the Error "<op> failed" line is
+	// reachable at the default level; only the success path stays gated
+	// on Debug (hot-path alloc parity: success args are never boxed when
+	// Debug is off, failure args are cold-path by definition).
+	if err == nil && !logging.Enabled(h.logger, slog.LevelDebug) {
 		return
 	}
 	logging.Finish(h.projectLogger(project), op, started, err, args...)
@@ -279,7 +299,7 @@ func NewStorHubWithContext(ctx context.Context, token string, cfg Config) (*Stor
 	}
 	hub.fsSvc = shfs.NewService(hub)
 	hub.posixSvc = implposix.NewService(hub)
-	// Phase E2: no sweeper goroutine. Idle eviction runs on the
+	// Event-driven eviction: no sweeper goroutine. Idle eviction runs on the
 	// lookupOrInsert get path, release lists expire lazily on read, and
 	// over-cap stacks are force-retried by the crossing mutation itself.
 	return hub, nil

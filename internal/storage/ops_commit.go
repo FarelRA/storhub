@@ -21,10 +21,6 @@ func chunksEqual(a, b []int64) bool {
 // fileEqual reports whether two file entries carry the same identity and
 // content. With ignoreChangedAt, ChangedAt is zeroed first: renames and
 // child mutations bump it without changing what the entry IS.
-
-// fileEqual reports whether two file entries carry the same identity and
-// content. With ignoreChangedAt, ChangedAt is zeroed first: renames and
-// child mutations bump it without changing what the entry IS.
 func fileEqual(a, b FileMeta, ignoreChangedAt bool) bool {
 	if ignoreChangedAt {
 		a.ChangedAt, b.ChangedAt = 0, 0
@@ -49,10 +45,6 @@ func fileBodiesEqual(a, b FileMeta) bool {
 	}
 	return true
 }
-
-// dirEqual reports whether two directory entries carry the same identity.
-// With ignoreTimes, ModifiedAt/ChangedAt are zeroed first: renames and child
-// mutations touch them without changing the directory's own identity.
 
 // dirEqual reports whether two directory entries carry the same identity.
 // With ignoreTimes, ModifiedAt/ChangedAt are zeroed first: renames and child
@@ -83,10 +75,6 @@ func dirBodiesEqual(a, b DirMeta) bool {
 // chunkRecordsFor collects the catalog records a file's chunk IDs reference,
 // making a put op self-contained (replay never depends on the records
 // already existing upstream).
-
-// chunkRecordsFor collects the catalog records a file's chunk IDs reference,
-// making a put op self-contained (replay never depends on the records
-// already existing upstream).
 func chunkRecordsFor(meta *RepoMetadata, ids []int64) map[int64]ChunkInfo {
 	if len(ids) == 0 {
 		return nil
@@ -102,9 +90,6 @@ func chunkRecordsFor(meta *RepoMetadata, ids []int64) map[int64]ChunkInfo {
 
 // opSummaryCounts renders the per-class op counts for a commit summary
 // line, fixed order, non-zero classes only: "2 put, 1 del, 1 mkdir".
-
-// opSummaryCounts renders the per-class op counts for a commit summary
-// line, fixed order, non-zero classes only: "2 put, 1 del, 1 mkdir".
 func opSummaryCounts(ops []Op) string {
 	order := []struct {
 		label string
@@ -117,7 +102,7 @@ func opSummaryCounts(ops []Op) string {
 		{"mkdir", func(t OpType) bool { return t == OpMkdir }},
 		{"rename", func(t OpType) bool { return t == OpRename }},
 		{"release", func(t OpType) bool { return t == OpRelease }},
-		{"prune", func(t OpType) bool { return t == OpChunkPrune }},
+		{"chunkprune", func(t OpType) bool { return t == OpChunkPrune }},
 	}
 	counts := make(map[string]int, len(order))
 	for _, op := range ops {
@@ -136,11 +121,6 @@ func opSummaryCounts(ops []Op) string {
 	}
 	return strings.Join(parts, ", ")
 }
-
-// buildCommitMessage renders the commit message for a batch of ops: a
-// summary first line plus one body line per op (capped), giving the
-// metadata history the "what happened to this file" answer the generic
-// message never could.
 
 // buildCommitMessage renders the commit message for a batch of ops: a
 // summary first line plus one body line per op (capped), giving the
@@ -243,7 +223,7 @@ func opMessageLine(op Op) string {
 		}
 		fmt.Fprintf(&sb, "release %s %s", verb, op.Tag)
 	case OpChunkPrune:
-		fmt.Fprintf(&sb, "prune %d chunk records", len(op.RemovedChunks))
+		fmt.Fprintf(&sb, "chunkprune %d chunk records", len(op.RemovedChunks))
 	default:
 		fmt.Fprintf(&sb, "%s %s", op.Type, opPath(op))
 	}
@@ -253,9 +233,6 @@ func opMessageLine(op Op) string {
 	}
 	return sb.String()
 }
-
-// causeFromMessage extracts the operation word from a transaction message
-// ("storhub: mkdir /path" -> "mkdir") so op causes stay short and stable.
 
 // causeFromMessage extracts the operation word from a transaction message
 // ("storhub: mkdir /path" -> "mkdir") so op causes stay short and stable.
@@ -271,10 +248,6 @@ func causeFromMessage(message string) string {
 	}
 	return m
 }
-
-// humanizeBytes renders a byte count for commit messages: 512B, 3.0KiB,
-// 2.2MiB, 1.5GiB. Scales truncate (floor) rather than round so the shown
-// size never overstates the stored bytes.
 
 // humanizeBytes renders a byte count for commit messages: 512B, 3.0KiB,
 // 2.2MiB, 1.5GiB. Scales truncate (floor) rather than round so the shown

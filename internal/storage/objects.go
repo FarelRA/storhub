@@ -36,7 +36,7 @@ func objectRepoPath(sha string) string {
 // The cache is LRU-bounded so a long-lived mount cannot grow without limit;
 // eviction only costs a later refetch, never correctness. The bound is
 // two-fold: an entry count AND a byte budget. Entries alone are not a disk
-// bound — an index object can be up to the contents-API size limit, so a
+// bound: an index object can be up to the contents-API size limit, so a
 // count-only cap still allows max × 8 MiB of cache per project. Recency is
 // maintained with a container/list (O(1) touch) instead of a linear scan of
 // the order slice per hit.
@@ -79,12 +79,16 @@ func (c *objectCache) path(sha string) string {
 	return filepath.Join(c.dir, meta.ObjectPath(sha))
 }
 
-// get returns cached bytes for sha. A warm entry (verified when it entered
-// the cache) is trusted with only an O(1) length check - re-hashing the whole
-// object per hit was the dominant cost; a length mismatch means truncation or
-// a partial write, so the entry is dropped as corrupt. A cold entry (first
-// read in this process, e.g. bytes surviving from an earlier run) is verified
-// against its content address once, then trusted.
+// get returns cached bytes for sha. Best-effort by design: the file is
+// read BEFORE taking mu, so a concurrent put/evict can change the size
+// epoch between the read and the length check. The only consequence is a
+// miss plus refetch (or a dropped corrupt entry), never wrong bytes: a
+// warm entry (verified when it entered the cache) is trusted with only an
+// O(1) length check - re-hashing the whole object per hit was the dominant
+// cost; a length mismatch means truncation or a partial write, so the
+// entry is dropped as corrupt. A cold entry (first read in this process,
+// e.g. bytes surviving from an earlier run) is verified against its
+// content address once, then trusted.
 func (c *objectCache) get(sha string) ([]byte, bool) {
 	data, err := os.ReadFile(c.path(sha))
 	if err != nil {
@@ -164,7 +168,7 @@ func (c *objectCache) remove(sha string) {
 
 // touchLocked records a use of sha: O(1) move-to-front on the recency list,
 // inserting the entry if it is new. Membership is the LRU list + map
-// alone (audit 24): the former order/pos set duplicated them.
+// alone: one structure owns membership, so no second set can drift.
 func (c *objectCache) touchLocked(sha string, size int) {
 	if el, ok := c.elems[sha]; ok {
 		if old := c.sizes[sha]; old != size {
@@ -247,7 +251,7 @@ func (h *StorHub) fetchObject(ctx context.Context, project, sha string) ([]byte,
 	return h.fetchObjectAt(ctx, project, "", sha)
 }
 
-// fetchObjectAt is the single home of index-object fetching (audit 24:
+// fetchObjectAt is the single home of index-object fetching (single-flight backend dispatch:
 // fetchObject/fetchObjectAtRef shared only the verify+put tail through
 // divergent git-vs-REST heads). ref="" reads HEAD, otherwise the given
 // commit SHA.
@@ -297,7 +301,7 @@ func (h *StorHub) readObjectBytes(ctx context.Context, project, ref, sha string)
 
 // pinnedFetcher returns a batch object loader pinned to one sync: on the
 // git backend it syncs ONCE and resolves every object against the pinned
-// HEAD with no further fetch+hard-reset cycles (audit 33: cold loads paid
+// HEAD with no further fetch+hard-reset cycles (commit-admission batching: cold loads paid
 // O(objects) serialized syncs). On REST each object is one GET either way,
 // so the closure is fetchObject directly. Content addresses are immutable,
 // so a pinned read serves any manifest revision, not just HEAD.

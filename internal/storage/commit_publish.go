@@ -33,7 +33,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 	working.MarkSplit()
 
 	// SEAL-SKIP: working trees built only from tracked mutators are already
-	// normalized (SealTransaction + incremental stats) — skip the full
+	// normalized (SealTransaction + incremental stats): skip the full
 	// Normalize + RecomputeStats O(tree) walk when the seal is clean. A
 	// single-op commit (touch) otherwise pays per-op O(tree) async CPU.
 	sealed := isSealedClean(working, project)
@@ -165,7 +165,7 @@ func (h *StorHub) publishWithRebase(ctx context.Context, project string, pm *pro
 //
 //   - no mid-commit mutation (version unchanged): the normalized working
 //     copy becomes the shared truth (without this the cache keeps raw
-//     mutation state — stale stats, unrepaired inode counter — and every
+//     mutation state: stale stats, unrepaired inode counter: and every
 //     later Validate trips over it) and dirty clears;
 //   - mid-commit mutation WITH rebase: the committed tree carries upstream
 //     changes the live tree lacks, so the surviving ops replay onto the
@@ -287,7 +287,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 		// The snapshot published nothing, and there is no mark to roll
 		// back: the frozen batch keeps its generation, post-freeze
 		// appends live in a newer one, and the merge rule never spans
-		// generations — so later appends still coalesce exactly as the
+		// generations: so later appends still coalesce exactly as the
 		// journal fold replays them, with no restore step that could be
 		// forgotten or raced. The next snapshot seals every pending
 		// generation at once. (This deletes the old rollbackSnapshot:

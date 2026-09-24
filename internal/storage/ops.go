@@ -9,8 +9,6 @@ import (
 type OpType string
 
 // Op wire values: frozen strings, validated on unmarshal.
-
-// Op wire values: frozen strings, validated on unmarshal.
 const (
 	OpPutFile    OpType = "put"
 	OpDeleteFile OpType = "del"
@@ -29,11 +27,6 @@ const (
 // strings are frozen for journal compatibility; unknown values fail closed
 // at decode time (UnmarshalText/UnmarshalJSON) instead of replaying
 // silently.
-
-// Valid reports whether t is one of the 11 known wire values. The wire
-// strings are frozen for journal compatibility; unknown values fail closed
-// at decode time (UnmarshalText/UnmarshalJSON) instead of replaying
-// silently.
 func (t OpType) Valid() bool {
 	switch t {
 	case OpPutFile, OpDeleteFile, OpMkdir, OpRmdir, OpRename, OpSetattr,
@@ -43,9 +36,6 @@ func (t OpType) Valid() bool {
 		return false
 	}
 }
-
-// UnmarshalText validates one wire value, rejecting unknown op types with
-// an error naming the bad value.
 
 // UnmarshalText validates one wire value, rejecting unknown op types with
 // an error naming the bad value.
@@ -60,9 +50,6 @@ func (t *OpType) UnmarshalText(text []byte) error {
 
 // UnmarshalJSON validates a JSON-encoded wire value the same way. Marshal
 // stays a plain string so the wire encoding is byte-identical.
-
-// UnmarshalJSON validates a JSON-encoded wire value the same way. Marshal
-// stays a plain string so the wire encoding is byte-identical.
 func (t *OpType) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
@@ -70,13 +57,6 @@ func (t *OpType) UnmarshalJSON(data []byte) error {
 	}
 	return t.UnmarshalText([]byte(s))
 }
-
-// Op is one discrete, self-contained metadata operation. Every op carries
-// the FULL resulting state for its path scope, never a delta: replaying the
-// stack against arbitrary upstream state is what makes rebase-on-conflict
-// possible, and full-state assertions make replay idempotent (a journal
-// replayed after a crash that landed between commit and journal truncation
-// re-applies harmlessly).
 
 // Op is one discrete, self-contained metadata operation. Every op carries
 // the FULL resulting state for its path scope, never a delta: replaying the
@@ -141,10 +121,6 @@ type Op struct {
 // ConflictResolution records one policy decision made while replaying ops,
 // so a commit message (and strict mode) can surface exactly what was
 // resolved instead of silently picking winners.
-
-// ConflictResolution records one policy decision made while replaying ops,
-// so a commit message (and strict mode) can surface exactly what was
-// resolved instead of silently picking winners.
 type ConflictResolution struct {
 	Seq  uint64
 	Path string
@@ -166,7 +142,7 @@ type ConflictResolution struct {
 // opStackMaxBytes caps the serialized weight (each op carries full state
 // plus chunk catalog records, so a few ops on huge files can outweigh
 // thousands of tiny ones). Either bound crossing compacts the journal and
-// force-retries the commit — acknowledged ops are never dropped.
+// force-retries the commit: acknowledged ops are never dropped.
 
 func isStateClass(t OpType) bool {
 	switch t {
@@ -193,9 +169,6 @@ func recordResolution(resolutions *[]ConflictResolution, op Op, path, note strin
 	}
 	*resolutions = append(*resolutions, ConflictResolution{Seq: op.Seq, Path: path, Note: note})
 }
-
-// cloneOpPayloads copies an op's state payloads so replay-time rewrites
-// (collision remapping) never mutate the caller's stack entry.
 
 // cloneOpPayloads copies an op's state payloads so replay-time rewrites
 // (collision remapping) never mutate the caller's stack entry.

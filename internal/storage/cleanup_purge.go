@@ -10,7 +10,7 @@ import (
 )
 
 // purge task types, hoisted so the purge tail and the prune-assets dry-run
-// share one classification (audit 18: dry-run must report would-delete
+// share one classification (dry-run must report would-delete
 // counts, not zeros).
 type purgeReleaseTask struct {
 	id  int64
@@ -119,7 +119,7 @@ func trackedPurgeSets(repoMeta *RepoMetadata) (trackedReleases map[string]struct
 // drop tasks that became tracked; fail closed (abort the purge) when the
 // reload itself fails rather than deleting on stale classification. The
 // residual window (re-verify to DELETE call) is milliseconds of network,
-// not seconds of classification — GitHub offers no CAS on releases or
+// not seconds of classification: GitHub offers no CAS on releases or
 // assets to close it fully, which is documented here, not solved.
 func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, releaseTasks []purgeReleaseTask, assetTasks []purgeAssetTask) ([]purgeReleaseTask, []purgeAssetTask, error) {
 	if len(releaseTasks) == 0 && len(assetTasks) == 0 {
@@ -158,8 +158,8 @@ func (h *StorHub) reverifyPurgePlan(ctx context.Context, project string, release
 // checks the truth version, and on any movement since the last check it
 // rebuilds the tracked sets once from fresh truth and drops newly-tracked
 // remainders loudly. A concurrent writer landing mid-loop therefore spares
-// its data instead of racing the delete — the old whole-plan reverify
-// could not see writes that landed after it ran. A delete failure aborts
+// its data instead of racing the delete: every delete re-checks the truth
+// version first, so writes that land after classification stay visible. A delete failure aborts
 // with the original task context (no partial counts reported on error,
 // matching the old behavior); skipped tasks are reported in Notes, never
 // silently dropped.
@@ -304,7 +304,7 @@ func (h *StorHub) purgeAndSquashUntracked(ctx context.Context, project string, h
 		// Read-only no-op probe on fresh truth: a clone the Update never
 		// sees, so the shared tree stays clean when there is nothing to
 		// reclaim. (A concurrent mutation racing the probe only means the
-		// later Update finds work — never a missed delete.)
+		// later Update finds work: never a missed delete.)
 		probeMeta, _, err := h.loadRepoMetadataFresh(ctx, project)
 		if err != nil {
 			return err

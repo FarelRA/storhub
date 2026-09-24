@@ -35,18 +35,6 @@ func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadU
 // re-resolves against a fresh server list (with true counts near the
 // ceiling), so a repeat pick means a concurrent writer filled it in the
 // millisecond race window, and the next re-list observes that fill.
-
-// chunkSink uploads chunk payloads one at a time, accumulating ChunkInfos
-// and rotating to a fresh release whenever the server reports the current
-// one full. It is the single home of name-collision retries and
-// release-full rotation; every upload loop (planner windows, reader
-// windows, inline edits, rewritten ranges) funnels through put so a stale
-// release choice can never strand an upload.
-//
-// Rotation terminates: each rotation invalidates the release cache and
-// re-resolves against a fresh server list (with true counts near the
-// ceiling), so a repeat pick means a concurrent writer filled it in the
-// millisecond race window, and the next re-list observes that fill.
 type chunkSink struct {
 	hub        *StorHub
 	ctx        context.Context
@@ -80,19 +68,7 @@ func (h *StorHub) newChunkSink(ctx context.Context, project, releaseTag, uploadU
 //
 // Rotation is capped at maxReleaseRotations (central tunables, client.go):
 // each rotation re-resolves against a fresh server list, so a repeat pick
-// means a concurrent writer filled it in the race window — but a
-// persistently-full set (many concurrent writers, no headroom) previously
-// re-listed + re-uploaded forever. Exceeding the cap fails loudly instead.
-
-// put uploads one chunk payload. The transport rewinds the reader per
-// attempt. The returned ChunkInfo carries the release that actually holds
-// the bytes, which may differ from the sink's initial target after a
-// rotation. Partial results stay in s.results for the caller to compensate
-// on error; put itself never deletes.
-//
-// Rotation is capped at maxReleaseRotations (central tunables, client.go):
-// each rotation re-resolves against a fresh server list, so a repeat pick
-// means a concurrent writer filled it in the race window — but a
+// means a concurrent writer filled it in the race window: but a
 // persistently-full set (many concurrent writers, no headroom) previously
 // re-listed + re-uploaded forever. Exceeding the cap fails loudly instead.
 func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
@@ -113,8 +89,10 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 			if rotations > maxReleaseRotations {
 				return fmt.Errorf("upload chunk (offset %d): release %s full after %d rotations; concurrent writers hold every release at the %d-asset ceiling, retry the upload", offset, s.releaseTag, maxReleaseRotations, releaseAssetCap)
 			}
-			if s.hub.logger.Enabled(context.Background(), slog.LevelDebug) {
-				logging.Debug(s.hub.projectLogger(s.project), "upload release full, rotating", "project", s.project, "release", s.releaseTag, "uploaded", len(s.results), "total", s.total, "rotation", rotations)
+			// Guard the logger being emitted on: projectLogger already
+			// binds project, so no repeat "project" attr is passed.
+			if logging.Enabled(s.hub.projectLogger(s.project), slog.LevelDebug) {
+				logging.Debug(s.hub.projectLogger(s.project), "upload release full, rotating", "release", s.releaseTag, "uploaded", len(s.results), "total", s.total, "rotation", rotations)
 			}
 			s.hub.invalidateReleaseCache(s.project)
 			tag, url, err := s.prepare(s.total - len(s.results))
@@ -125,8 +103,8 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 			continue
 		}
 		if isAlreadyExists(err) {
-			if s.hub.logger.Enabled(context.Background(), slog.LevelDebug) {
-				logging.Debug(s.hub.projectLogger(s.project), "upload chunk asset name collision, retry", "project", s.project, "asset", assetName, "release", s.releaseTag)
+			if logging.Enabled(s.hub.projectLogger(s.project), slog.LevelDebug) {
+				logging.Debug(s.hub.projectLogger(s.project), "upload chunk asset name collision, retry", "asset", assetName, "release", s.releaseTag)
 			}
 			nameRetries++
 			if nameRetries >= maxNameRetries {
@@ -177,7 +155,7 @@ func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chun
 	// Single-attempt closure over the open→read→close sequence; withRetry
 	// (retry.go) owns the backoff/sleep shape shared with purgeRetry and
 	// downloadChunkWithRetry. Both open and read errors gate on
-	// isRetryableDownloadError, preserving the old two-phase semantics.
+	// isRetryableDownloadError, preserving the old two-branch (API error plus CDN error) semantics.
 	attempt := func() error {
 		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {

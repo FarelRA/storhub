@@ -5,9 +5,8 @@ import (
 	"errors"
 	"io"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
-	"strings"
 	"syscall"
 	"time"
 
@@ -18,15 +17,16 @@ import (
 
 func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration {
 	if apiErr != nil && apiErr.RateLimited {
-		// Mirror the github client's branches (client.go:1125-1145):
-		// a rate-limited reset is honored EXACTLY (uncapped) — the
+		// Mirror the github client's branches (rateWait/backoffWait in
+		// internal/github/client.go):
+		// a rate-limited reset is honored EXACTLY (uncapped): the
 		// server dictates the resume instant, so jitter/caps only
-		// overshoot it — as is a rate-limited Retry-After. Only
+		// overshoot it: as is a rate-limited Retry-After. Only
 		// non-rate-limit Retry-After hints are bounded by
 		// MaxRetryDelay. This purposefully diverges from the old
 		// storage behavior that capped rate-limit waits: truncating
 		// them manufactures repeat rejections and burns the point
-		// window. The multiplicative bulk-read/purge shape (audit 33)
+		// window. The multiplicative bulk-read/purge shape (commit-admission batching)
 		// is bounded by design and ctx-cancellable; the governor's
 		// maxWait ceiling (not MaxRetryDelay) is what refuses an
 		// excessive wait.
@@ -52,14 +52,14 @@ func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration 
 	if delay <= 0 {
 		return 0
 	}
-	jitter := time.Duration(rand.Int63n(int64(delay/4 + 1)))
+	jitter := time.Duration(rand.Int64N(int64(delay/4 + 1)))
 	return delay + jitter
 }
 
 // boundedWait caps a NON-rate-limit server-provided wait hint
 // (Retry-After) at MaxRetryDelay so one bad header cannot stall callers.
 // Rate-limit waits (RateLimitReset, rate-limited Retry-After) are
-// intentionally NOT capped here — see retryDelay: they are honored
+// intentionally NOT capped here: see retryDelay: they are honored
 // exactly per the purge contract ("always honor the advertised window").
 func (h *StorHub) boundedWait(d time.Duration) time.Duration {
 	d = nonNegativeDelay(d)
@@ -80,7 +80,10 @@ func addJitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	jitter := time.Duration(rand.Int63n(int64(d/4 + 1)))
+	// math/rand/v2's top-level source seeds itself randomly per process,
+	// so this jitter decorrelates thundering herds across restarts with
+	// no explicit seeding.
+	jitter := time.Duration(rand.Int64N(int64(d/4 + 1)))
 	return d + jitter
 }
 
@@ -143,7 +146,7 @@ func isRetryableNetworkError(err error) bool {
 	// context.DeadlineExceeded but carries the "Client.Timeout exceeded"
 	// marker - a stalled transfer is exactly what retries exist to absorb.
 	if errors.Is(err, context.DeadlineExceeded) {
-		return strings.Contains(err.Error(), "Client.Timeout exceeded")
+		return ghapi.IsTimeout(err)
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {

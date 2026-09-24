@@ -83,14 +83,14 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 	if err != nil {
 		return nil, err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, traversed, err := shfs.StatResolveTracked(repoMeta, fileName)
 	if err != nil {
 		return nil, err
 	}
 	if cleanName == "" {
 		return nil, errors.New("file name is required")
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	if offset < 0 {
@@ -157,14 +157,14 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	if err != nil {
 		return nil, err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, traversed, err := shfs.StatResolveTracked(repoMeta, fileName)
 	if err != nil {
 		return nil, err
 	}
 	if cleanName == "" {
 		return nil, errors.New("file name is required")
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, traversed); err != nil {
 		return nil, err
 	}
 	fileMeta := repoMeta.FindFile(cleanName)
@@ -192,31 +192,15 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 		return nil, err
 	}
 	// Mutations apply to a private COW copy; publish only on success.
-	tree := cowTree(pm.meta)
 	// A patch shrinking to empty (or a no-op edit) mints no chunks and
-	// picks no release: there is nothing to register, so the empty tag
-	// must not reach EnsureRelease (which rejects it).
-	if releaseTag != "" {
-		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, uploaded)
-			return nil, err
-		}
-	}
-	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
+	// picks no release: the helper skips registration for the empty tag
+	// (EnsureRelease rejects it).
+	tree := cowTree(pm.meta)
+	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
+	if allocErr != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, uploaded)
-		return nil, err
-	}
-	chunkIDs := make([]int64, len(newChunks))
-	for i := range newChunks {
-		id := tree.AllocateChunkID()
-		if err := tree.PutChunk(id, newChunks[i]); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, uploaded)
-			return nil, err
-		}
-		chunkIDs[i] = id
+		return nil, allocErr
 	}
 	patched.Chunks = chunkIDs
 	totalDelete, totalInsert := int64(0), int64(0)
@@ -285,34 +269,15 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// Register the release holding the new chunks so purge cannot
 	// delete live data. buildPatchedChunksFresh EnsureReleases only on a local
 	// clone that is discarded here. Mutations apply to a private COW copy;
-	// publish only on success.
+	// publish only on success. A patch shrinking to empty mints no chunks
+	// and picks no release: the helper skips registration for the empty tag
+	// (EnsureRelease rejects it).
 	tree := cowTree(pm.meta)
-	// A patch shrinking to empty (or a no-op edit) mints no chunks and
-	// picks no release: there is nothing to register, so the empty tag
-	// must not reach EnsureRelease (which rejects it).
-	if releaseTag != "" {
-		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, fresh)
-			return nil, err
-		}
-	}
-	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
+	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
+	if allocErr != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, fresh)
-		return nil, err
-	}
-	// Allocate identifiers against the authoritative in-memory metadata so
-	// concurrent operations can never mint colliding chunk IDs.
-	chunkIDs := make([]int64, len(newChunks))
-	for i := range newChunks {
-		id := tree.AllocateChunkID()
-		if err := tree.PutChunk(id, newChunks[i]); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, fresh)
-			return nil, err
-		}
-		chunkIDs[i] = id
+		return nil, allocErr
 	}
 	patched.Chunks = chunkIDs
 	patched.Size = fileMeta.Size - deleteSize + int64(len(edit))
@@ -377,34 +342,15 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	// Register the release holding the new chunks so purge cannot
 	// delete live data. buildRewrittenChunks EnsureReleases only on a local
 	// clone that is discarded here. Mutations apply to a private COW copy;
-	// publish only on success.
+	// publish only on success. A rewrite shrinking to empty mints no chunks
+	// and picks no release: the helper skips registration for the empty tag
+	// (EnsureRelease rejects it).
 	tree := cowTree(pm.meta)
-	// A patch shrinking to empty (or a no-op edit) mints no chunks and
-	// picks no release: there is nothing to register, so the empty tag
-	// must not reach EnsureRelease (which rejects it).
-	if releaseTag != "" {
-		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, uploaded)
-			return nil, err
-		}
-	}
-	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
+	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
+	if allocErr != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, uploaded)
-		return nil, err
-	}
-	// Allocate identifiers against the authoritative in-memory metadata so
-	// concurrent operations can never mint colliding chunk IDs.
-	chunkIDs := make([]int64, len(newChunks))
-	for i := range newChunks {
-		id := tree.AllocateChunkID()
-		if err := tree.PutChunk(id, newChunks[i]); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, uploaded)
-			return nil, err
-		}
-		chunkIDs[i] = id
+		return nil, allocErr
 	}
 	rewritten.Chunks = chunkIDs
 	rewritten.Size = finalSize
@@ -457,14 +403,14 @@ func (h *StorHub) DownloadFileContext(ctx context.Context, project, fileName, ou
 	if err != nil {
 		return err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, true)
+	cleanName, traversed, err := shfs.StatResolveTracked(repoMeta, fileName)
 	if err != nil {
 		return err
 	}
 	if cleanName == "" {
 		return errors.New("file name is required")
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, traversed); err != nil {
 		return err
 	}
 	fileMeta := repoMeta.FindFile(cleanName)

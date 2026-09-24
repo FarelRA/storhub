@@ -9,7 +9,7 @@ import (
 )
 
 // Ordered-commit data-first: every commit attempt fsyncs the journal
-// after snapshotting and before publishing — no timer involved. A failed
+// after snapshotting and before publishing: no timer involved. A failed
 // push must leave the journal lines intact (for retry) but fsynced (for
 // crash survival): dirty empty, lines present.
 func TestFailedCommitFlushesJournalSynchronously(t *testing.T) {

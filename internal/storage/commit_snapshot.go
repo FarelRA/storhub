@@ -39,9 +39,9 @@ func (h *StorHub) snapshotCommitState(_ string, pm *projectMetadata) *commitSnap
 	// Normalize a private copy, never the shared tree. A failed commit
 	// (size ceiling, push error) must leave pm.meta exactly as the
 	// mutations left it; the normalized working copy is applied back only
-	// on success below. cowTree is a shallow copy over immutable entries,
+	// on success below. cloneForWrite is a shallow copy over immutable entries,
 	// so the commit no longer deep-copies every Chunks/XAttrs.
-	working := cowTree(pm.meta)
+	working := cloneForWrite(pm.meta)
 	// Defensive backfill for the same nil-baseline case: a commit can
 	// snapshot dirty state whose mutations predated the appendOpLocked
 	// heal above (or arrived via a path that bypassed it). The snapshot

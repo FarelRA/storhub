@@ -272,7 +272,7 @@ func TestChangedPathsDetection(t *testing.T) {
 	gone := FileMeta{Size: 1, Mode: 0o644, Inode: upstream.AllocateInode(), Chunks: []int64{}, UploadedAt: 1700000100, ModifiedAt: 1700000100, AccessedAt: 1700000100, ChangedAt: 1700000100}
 	upstream.UpsertFile("added.txt", gone, 1700000100)
 
-	changes := changedPaths(basePaths, upstream)
+	changes := changedByHash(basePaths, upstream)
 	if !changes["f:same.txt"] {
 		t.Fatalf("expected same.txt detected as changed, got %v", changes)
 	}

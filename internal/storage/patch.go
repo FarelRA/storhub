@@ -36,8 +36,8 @@ func (h *StorHub) preparePatchWorkspace(ctx context.Context, project string, rep
 // finalizePlaylist orders an assembled chunk playlist by file offset. The
 // builders usually emit in order already (rewrites sweep offsets ascending;
 // single edits splice into an ordered base), so the sort runs only when a
-// linear scan finds an inversion — skipping the O(k log k) re-sort per op
-// on wide files (audit 33). The returned slice is always offset-sorted.
+// linear scan finds an inversion: skipping the O(k log k) re-sort per op
+// on wide files (commit-admission batching). The returned slice is always offset-sorted.
 func finalizePlaylist(assembled []ChunkInfo) []ChunkInfo {
 	for i := 1; i < len(assembled); i++ {
 		if assembled[i].Offset < assembled[i-1].Offset {
@@ -133,7 +133,7 @@ func spliceEdit(chunks []ChunkInfo, patchOffset, deleteSize, insertedLen int64, 
 func (h *StorHub) uploadInlineChunks(ctx context.Context, project, releaseTag, uploadURL string, fileOffset int64, data []byte, prepare func(remaining int) (string, string, error)) (chunks []ChunkInfo, actualTag, actualURL string, err error) {
 	count := inlineChunkCount(int64(len(data)), h.config.ChunkSize)
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, count, prepare)
-	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
+	chunkSize, _ := chunking.NormalizedSize(h.config.ChunkSize)
 	for i := 0; i < count; i++ {
 		start := int64(i) * chunkSize
 		end := start + chunkSize
@@ -160,7 +160,7 @@ func sliceChunkView(original ChunkInfo, newOffset, newSize int64) ChunkInfo {
 }
 
 func inlineChunkCount(size, chunkSize int64) int {
-	chunkSize = chunking.NormalizedSize(chunkSize)
+	chunkSize, _ = chunking.NormalizedSize(chunkSize)
 	if size == 0 {
 		return 0
 	}
@@ -168,7 +168,7 @@ func inlineChunkCount(size, chunkSize int64) int {
 }
 
 func (h *StorHub) buildRewrittenChunks(ctx context.Context, project string, repoMeta *RepoMetadata, file FileMeta, filePath, snapshotPath string, finalSize int64, dirtyRanges []byteRange) (assembled, uploaded []ChunkInfo, tag string, err error) {
-	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
+	chunkSize, _ := chunking.NormalizedSize(h.config.ChunkSize)
 	dirtySegments := make([]byteRange, 0, len(dirtyRanges))
 	for _, dirty := range dirtyRanges {
 		dirtySegments = mergeByteRange(dirtySegments, dirty)
@@ -250,7 +250,7 @@ func (h *StorHub) uploadFileRangeChunks(ctx context.Context, project, releaseTag
 	if end <= start {
 		return nil, releaseTag, uploadURL, nil
 	}
-	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
+	chunkSize, _ := chunking.NormalizedSize(h.config.ChunkSize)
 	count := inlineChunkCount(end-start, chunkSize)
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, count, prepare)
 	for i := 0; i < count; i++ {
@@ -304,7 +304,7 @@ func (h *StorHub) buildPatchedRangeChunks(ctx context.Context, project string, r
 	if len(edits) == 0 {
 		return nil, nil, "", errors.New("patch batch is empty")
 	}
-	chunkSize := chunking.NormalizedSize(h.config.ChunkSize)
+	chunkSize, _ := chunking.NormalizedSize(h.config.ChunkSize)
 
 	requiredSlots := 0
 	for _, edit := range edits {

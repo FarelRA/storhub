@@ -19,15 +19,9 @@ import (
 // FlushMetadata forces an immediate commit of all dirty metadata for all projects
 // This is useful for testing or when you need to ensure metadata is persisted immediately
 func (h *StorHub) FlushMetadata(ctx context.Context) (err error) {
-	started := h.config.Now().UTC()
-	logging.Debug(h.logger, "flush-metadata start")
+	started := h.logOpStart("", "flush-metadata")
 	defer func() {
-		elapsed := h.config.Now().UTC().Sub(started)
-		if err != nil {
-			logging.Error(h.logger, "flush-metadata failed", "elapsed", elapsed, "err", err)
-			return
-		}
-		logging.Debug(h.logger, "flush-metadata complete", "elapsed", elapsed)
+		h.logOpFinish("", "flush-metadata", started, err)
 	}()
 	h.metaMu.RLock()
 	type projectWithName struct {
@@ -48,7 +42,7 @@ func (h *StorHub) FlushMetadata(ctx context.Context) (err error) {
 			// FlushMetadata gets the same conflict recovery as the
 			// commit loop: recoverMetadataCommitFailure RETAINS the dirty
 			// state (pending ops included) for the next trigger instead of
-			// discarding it — there is no 409-reload here. The error is
+			// discarding it: there is no 409-reload here. The error is
 			// still reported to the caller.
 			h.recoverMetadataCommitFailure(p.name, err)
 			errs = append(errs, fmt.Errorf("flush %s: %w", p.name, err))
@@ -202,7 +196,6 @@ func (h *StorHub) RollbackMetadataContext(ctx context.Context, project, commitSH
 
 // RevertPathContext restores a single path (a file or an entire directory subtree) to
 // its state at commitSHA, leaving every other path untouched, as a NEW commit.
-// its state at commitSHA, leaving every other path untouched, as a NEW commit.
 // RevertPathContext is the per-path counterpart of RollbackMetadataContext:
 // instead of repointing the whole index at an old revision, it replays just
 // `path`'s historical state onto the current tree. It is a revert, not a
@@ -250,7 +243,7 @@ func (h *StorHub) RevertPathContext(ctx context.Context, project, path, commitSH
 	// A revert addresses the node the path names, so the final symlink is
 	// followed; the historical tree is keyed by concrete paths, hence the
 	// resolved key (not the raw spelling) is what RevertSubtree replays.
-	cleanPath, _, err := shfs.ResolveAccessPath(current, path, true)
+	cleanPath, _, err := shfs.StatResolveTracked(current, path)
 	if err != nil {
 		return err
 	}
@@ -328,10 +321,7 @@ func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 // publishTreeLocked, and lock-free readers already rely on it), so handing
 // out the pointer is safe and avoids a full O(tree) Clone + RebuildIndexes
 // per transaction. Callers MUST treat the result as read-only: mutating it
-// corrupts the hub's in-memory truth and races lock-free readers. (Wave-2
-// test flip: TestUpdateRepoMetadataReturnsClone in repo_safety_test.go
-// asserts the old Clone return — it must be updated to pin read-only
-// sharing instead of copying.)
+// corrupts the hub's in-memory truth and races lock-free readers.
 func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*metadata.RepoMetadata) error, message string) (*metadata.RepoMetadata, error) {
 	// Degraded-mode admission: every fs/posix mutation funnels through
 	// here, so one gate covers them all. Recovery verbs bypass
@@ -351,7 +341,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	logging.Debug(h.projectLogger(project), "metadata writer acquired", "message", message, "wait", h.config.Now().UTC().Sub(lockStarted))
 
 	started := h.config.Now().UTC()
-	if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+	if h.projectLogger(project).Enabled(context.Background(), slog.LevelDebug) {
 		logging.Debug(h.projectLogger(project), "metadata update start", "project", project, "message", message)
 	}
 
@@ -372,7 +362,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, err
 	}
 
-	// 8MB ceiling — fail fast, never accept-then-never-commit. Apply the
+	// 8MB ceiling: fail fast, never accept-then-never-commit. Apply the
 	// mutation to a throwaway COW copy and measure the result before
 	// touching shared state. An oversize growth is rejected at admission
 	// with a remediation pointer; shared state, dirty, and usability stay
@@ -444,12 +434,12 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	default:
 	}
 
-	if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+	if h.projectLogger(project).Enabled(context.Background(), slog.LevelDebug) {
 		logging.Debug(h.projectLogger(project), "metadata update complete", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started))
 	}
 
 	// Shared read-only pointer under the COW discipline (see the doc
-	// comment above): no Clone, no RebuildIndexes — publishTreeLocked
+	// comment above): no Clone, no RebuildIndexes: publishTreeLocked
 	// already rebuilt the candidate's indexes before the swap.
 	pm.mu.RLock()
 	out := pm.meta
@@ -489,14 +479,14 @@ func (h *StorHub) hydrateProjectForTx(ctx context.Context, project string, pm *p
 // admitCandidateSplit enforces the size ceiling on a sealed candidate.
 // Admission is expressed for the split layout (version 5): the whole-tree
 // serialized size is a cheap upper bound (incremental counter, no
-// allocation-heavy encode) — if the entire tree serializes under the
+// allocation-heavy encode): if the entire tree serializes under the
 // contents-API limit, every object (a strict subset) does too, so the
 // mutation is admitted without building the tree. Only when the size
 // breaches the limit do we pay for a BuildTree to find whether a SINGLE
 // object (one enormous directory) is the culprit; a tree that merely exceeds
 // the old blob ceiling but splits into small objects is admitted, because
 // the split removed that ceiling. Shrinks always stay open. Fail-fast: once
-// the ceiling is armed, a growth mutation can never commit — reject it here
+// the ceiling is armed, a growth mutation can never commit: reject it here
 // instead of paying the full BuildTree + publish cycle on every trigger.
 //
 // The O(tree) BuildTree probe runs OFF pm.mu (it reads only the private
@@ -533,7 +523,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 		// probe still measures only our private candidate, so the
 		// oversize verdict below stands; the flags it feeds into are
 		// re-read fresh (sizeCapped below), never the pre-probe copy.
-		if h.logger.Enabled(context.Background(), slog.LevelDebug) {
+		if h.projectLogger(project).Enabled(context.Background(), slog.LevelDebug) {
 			logging.Debug(h.projectLogger(project), "metadata admission raced a concurrent publish", "project", project)
 		}
 	}
@@ -560,7 +550,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 // publishTxLocked folds the recorded intents into the shared op stack and
 // swaps the private candidate in as the shared truth via publishTreeLocked
 // (which RebuildIndexes the candidate before the swap, so the published
-// tree is clean and exclusively owned — no second rebuild needed). Runs only
+// tree is clean and exclusively owned: no second rebuild needed). Runs only
 // after admission: a rejected mutation leaves the shared stack and journal
 // untouched (the recorder dies with the discarded candidate). Caller holds
 // pm.mu.

@@ -15,7 +15,7 @@ package storage
 // opStackMaxBytes caps the serialized weight (each op carries full state
 // plus chunk catalog records, so a few ops on huge files can outweigh
 // thousands of tiny ones). Either bound crossing compacts the journal and
-// force-retries the commit — acknowledged ops are never dropped.
+// force-retries the commit: acknowledged ops are never dropped.
 type opStack struct {
 	ops      []Op
 	seq      uint64
@@ -41,17 +41,7 @@ type opStack struct {
 // drops acknowledged work (drop-never): the journal is compacted to the
 // folded survivors and the commit is force-retried until it drains, with a
 // warn log (no fail-loud backpressure).
-
-// opStackMaxBytes bounds one project's pending op stack by weight (64MiB),
-// complementing the maxPendingOpsPerProject count bound. Crossing it never
-// drops acknowledged work (drop-never): the journal is compacted to the
-// folded survivors and the commit is force-retried until it drains, with a
-// warn log (no fail-loud backpressure).
 const opStackMaxBytes = 64 << 20
-
-// approxOpBytes estimates one op's memory/journal weight for cap accounting.
-// It does not need to match the JSON encoding byte-for-byte; it must be
-// monotone in payload size and cheap (no marshaling on the hot path).
 
 // approxOpBytes estimates one op's memory/journal weight for cap accounting.
 // It does not need to match the JSON encoding byte-for-byte; it must be
@@ -93,15 +83,6 @@ func approxOpBytes(op Op) int {
 // (`len(s.ops) >= maxPendingOpsPerProject || s.bytes >= opStackMaxBytes`,
 // still evaluated under pm.mu), shared by the append-site poke and the
 // sweepCachesOnce retry leg. Everything else stays as-is.
-
-// needsForceFlush reports whether the stack crossed a residency bound (op
-// count or bytes). The append site pokes the commit trigger when true; ops
-// are never dropped for crossing.
-//
-// Contract: the force-flush condition is count-or-bytes
-// (`len(s.ops) >= maxPendingOpsPerProject || s.bytes >= opStackMaxBytes`,
-// still evaluated under pm.mu), shared by the append-site poke and the
-// sweepCachesOnce retry leg. Everything else stays as-is.
 func (s *opStack) needsForceFlush() bool {
 	return len(s.ops) >= maxPendingOpsPerProject || s.bytes >= opStackMaxBytes
 }
@@ -109,15 +90,7 @@ func (s *opStack) needsForceFlush() bool {
 // stackPathKey returns the byPath lookup key for an op that participates in
 // per-path coalescing. Keys are kind-prefixed so namespaces sharing the raw
 // string space can never collide: file paths ("f:"), directory paths ("d:",
-// including the root path ""), and release tags ("r:") — a file put of "v1"
-// and a release tag "v1" previously overwrote each other's index entry and
-// missed coalescing. Rename, chunkprune and unknown ops are not
-// byPath-indexed (ok=false); renames live in byTarget, prunes in pruneIdx.
-
-// stackPathKey returns the byPath lookup key for an op that participates in
-// per-path coalescing. Keys are kind-prefixed so namespaces sharing the raw
-// string space can never collide: file paths ("f:"), directory paths ("d:",
-// including the root path ""), and release tags ("r:") — a file put of "v1"
+// including the root path ""), and release tags ("r:"): a file put of "v1"
 // and a release tag "v1" previously overwrote each other's index entry and
 // missed coalescing. Rename, chunkprune and unknown ops are not
 // byPath-indexed (ok=false); renames live in byTarget, prunes in pruneIdx.
@@ -131,7 +104,10 @@ func stackPathKey(op Op) (key string, ok bool) {
 		}
 	case OpRmdir:
 		if len(op.Paths) > 0 {
-			return "d:" + op.Paths[0], true
+			if op.Dir != nil {
+				return "d:" + op.Paths[0], true
+			}
+			return "", false
 		}
 	case OpPutFile, OpTruncate, OpPatch:
 		if len(op.Paths) > 0 {
@@ -139,14 +115,20 @@ func stackPathKey(op Op) (key string, ok bool) {
 		}
 	case OpMkdir:
 		if len(op.Paths) > 0 {
-			return "d:" + op.Paths[0], true
+			if op.Dir != nil {
+				return "d:" + op.Paths[0], true
+			}
+			return "", false
 		}
 	case OpSetattr, OpXattr:
 		if len(op.Paths) > 0 {
 			if op.File != nil {
 				return "f:" + op.Paths[0], true
 			}
-			return "d:" + op.Paths[0], true
+			if op.Dir != nil {
+				return "d:" + op.Paths[0], true
+			}
+			return "", false
 		}
 	}
 	return "", false
@@ -159,8 +141,6 @@ func (s *opStack) initIndex() {
 		s.pruneIdx = -1
 	}
 }
-
-// indexOp records op's position under its lookup keys.
 
 // indexOp records op's position under its lookup keys.
 func (s *opStack) indexOp(op Op, idx int) {
@@ -177,10 +157,6 @@ func (s *opStack) indexOp(op Op, idx int) {
 		}
 	}
 }
-
-// removeAt drops the op at idx and shifts the indices of everything after
-// it. O(n) but only reached on coalesce/transform, which bulk imports never
-// hit. The byte total drops with the op.
 
 // removeAt drops the op at idx and shifts the indices of everything after
 // it. O(n) but only reached on coalesce/transform, which bulk imports never
@@ -204,21 +180,6 @@ func (s *opStack) removeAt(idx int) {
 		s.pruneIdx = -1
 	}
 }
-
-// append folds op into the stack. Coalescing rules:
-//
-//	state + state (same path)   -> latest state wins, times accumulate
-//	state + delete (same path)  -> delete wins (put-then-delete nets to delete)
-//	delete + state (same path)  -> state wins (recreate)
-//	delete + delete             -> one delete
-//	rename A->B + rename B->C   -> rename A->C (adjacent only)
-//	rename A->B + delete B      -> delete A (adjacent only)
-//	prune + prune               -> merged ID set
-//
-// Cross-class combinations that cannot collapse (rename then put on the
-// target, put then rename of the source) are kept as-is: replay applies
-// them in order and each op is a full-state assertion, so composition stays
-// correct.
 
 // append folds op into the stack. Coalescing rules:
 //
@@ -364,18 +325,7 @@ func (s *opStack) append(op Op) {
 // delta for the crash-recovery journal: the op exactly as appended (Times
 // normalized to 1), BEFORE coalescing rewrote it. The journal stores deltas,
 // never post-coalescing tails, so foldOps over the journal lines replays the
-// identical append sequence and converges to exactly the live stack —
-// including cross-transaction rename chains (T1 A->B, T2 B->C) and
-// rename-then-delete, which folded tails cannot reproduce (a journaled tail
-// A->C misses the byTarget chain check; a journaled del A misses the
-// deleteTransform). Times accumulates during the fold from per-delta Times=1
-// lines, so the folded total stays exact.
-
-// appendWithDelta folds op into the stack and returns the pre-coalescing
-// delta for the crash-recovery journal: the op exactly as appended (Times
-// normalized to 1), BEFORE coalescing rewrote it. The journal stores deltas,
-// never post-coalescing tails, so foldOps over the journal lines replays the
-// identical append sequence and converges to exactly the live stack —
+// identical append sequence and converges to exactly the live stack,
 // including cross-transaction rename chains (T1 A->B, T2 B->C) and
 // rename-then-delete, which folded tails cannot reproduce (a journaled tail
 // A->C misses the byTarget chain check; a journaled del A misses the
@@ -397,15 +347,6 @@ func (s *opStack) appendWithDelta(op Op) Op {
 	delta.Gen = s.gen
 	return delta
 }
-
-// deleteTransform applies the rename-then-delete collapse for a delete-class
-// op whose target path is a pending adjacent rename target. Returns true
-// when the op was rewritten (caller re-runs its matching). A rename in a
-// frozen generation must not be consumed (same boundary as the chain
-// merge): the commit publishes A->B, so the delete has to survive as
-// "delete B" for the next replay, not collapse to "delete A". The
-// structure excludes the old mark-check interleaving: only the open
-// generation satisfies Gen == s.gen, so a frozen rename can never match.
 
 // deleteTransform applies the rename-then-delete collapse for a delete-class
 // op whose target path is a pending adjacent rename target. Returns true
@@ -438,15 +379,6 @@ func (s *opStack) deleteTransform(op *Op) bool {
 // so the generation boundary agrees with the seq cutoff by construction;
 // the seq comparison stays because drain targets and resolutions number
 // by seq, not by generation.)
-
-// clearUpTo drops every op whose last append happened at or before seq.
-// Appends always stamp op.Seq with the newest sequence number, so an op
-// coalesced by a mutation that landed mid-commit carries a seq above the
-// snapshot and survives - exactly the ops the next commit must include.
-// (Those survivors also carry a newer generation than the frozen batch,
-// so the generation boundary agrees with the seq cutoff by construction;
-// the seq comparison stays because drain targets and resolutions number
-// by seq, not by generation.)
 func (s *opStack) clearUpTo(seq uint64) {
 	kept := make([]Op, 0, len(s.ops))
 	var keptBytes int64
@@ -470,13 +402,10 @@ func (s *opStack) clear() {
 	// Reset the open generation: the stack is empty, so no merge partner
 	// survives, and a later hydrate (crash-replay appends folded journal
 	// ops) must fast-forward from the JOURNAL's generations, not restamp
-	// them upward into a stale open generation — restamping would merge
+	// them upward into a stale open generation: restamping would merge
 	// chains the fold kept split and break fold==live after recovery.
 	s.gen = 0
 }
-
-// reindex rebuilds the lookup maps from scratch after bulk mutation. The
-// byte total is recomputed too, so any accounting drift self-heals here.
 
 // reindex rebuilds the lookup maps from scratch after bulk mutation. The
 // byte total is recomputed too, so any accounting drift self-heals here.
@@ -498,16 +427,40 @@ func (s *opStack) snapshot() []Op {
 	}
 	out := make([]Op, len(s.ops))
 	copy(out, s.ops)
-	// Deep-copy the slice-backed fields: the live stack keeps mutating
-	// (rename coalescing, prune merging), and an in-flight commit reads
-	// this snapshot outside pm.mu. Sharing backing arrays is a data race
-	// and can rewrite the committed message/rebase mid-flight.
+	// Deep-copy every reference-backed field: the live stack keeps
+	// mutating (rename coalescing, prune merging, collision remaps), and
+	// an in-flight commit reads this snapshot outside pm.mu. Sharing
+	// backing arrays or maps is a data race and can rewrite the committed
+	// message/rebase mid-flight. File/Dir carry chunk slices and xattr
+	// maps; Chunks is a catalog map; Members backs dir-rename delivery.
 	for i := range out {
 		if out[i].Paths != nil {
 			out[i].Paths = append([]string(nil), out[i].Paths...)
 		}
 		if out[i].RemovedChunks != nil {
 			out[i].RemovedChunks = append([]int64(nil), out[i].RemovedChunks...)
+		}
+		if out[i].Members != nil {
+			out[i].Members = append([]string(nil), out[i].Members...)
+		}
+		if out[i].File != nil {
+			f := out[i].File.Clone()
+			out[i].File = &f
+		}
+		if out[i].Dir != nil {
+			d := out[i].Dir.Clone()
+			out[i].Dir = &d
+		}
+		if out[i].Chunks != nil {
+			m := make(map[int64]ChunkInfo, len(out[i].Chunks))
+			for k, v := range out[i].Chunks {
+				m[k] = v
+			}
+			out[i].Chunks = m
+		}
+		if out[i].Release != nil {
+			r := *out[i].Release
+			out[i].Release = &r
 		}
 	}
 	return out
@@ -521,23 +474,7 @@ func (s *opStack) snapshot() []Op {
 //
 // A failed publish needs no rollback call: there is no mark to restore.
 // The sealed ops keep their generation, post-freeze appends landed in a
-// newer one, and the merge rule never spans generations — so the next
-// freeze simply seals every still-pending generation at once, and both
-// the live stack and any refold agree on the split. This is the property
-// the old noteSnapshot/rollbackSnapshot pair maintained by hand:
-// rollbackSnapshot existed because a stale mark poisoned later merges
-// (live split vs fold merged); with the boundary in the structure, a
-// failed snapshot leaves nothing behind that a mark-restore could fix.
-
-// freeze seals the open generation for one commit: it returns the pending
-// ops (the exact publish batch, a copy the commit owns) plus the frozen
-// generation, and opens a strictly newer generation for later appends.
-// The frozen batch is immutable from here on; the commit publishes
-// exactly it, and clearUpTo drops exactly it on success.
-//
-// A failed publish needs no rollback call: there is no mark to restore.
-// The sealed ops keep their generation, post-freeze appends landed in a
-// newer one, and the merge rule never spans generations — so the next
+// newer one, and the merge rule never spans generations: so the next
 // freeze simply seals every still-pending generation at once, and both
 // the live stack and any refold agree on the split. This is the property
 // the old noteSnapshot/rollbackSnapshot pair maintained by hand:
@@ -560,7 +497,7 @@ func (s *opStack) maxSeq() uint64 { return s.seq }
 // foldOps coalesces a raw op sequence (journal DELTA lines, one per
 // appendWithDelta) through the same rules as live appends, so a replayed
 // journal yields exactly the stack the crashed process held. The rules are
-// deliberately identical to live appends — no cross-line rewrites live here:
+// deliberately identical to live appends: no cross-line rewrites live here:
 // convergence comes from replaying the identical append sequence, not from
 // fold-specific chain/delete handling. Journal lines carry Times=1 (see
 // journalAppend/journalRead); the fold accumulates Times exactly as live
@@ -576,5 +513,5 @@ func (s *opStack) maxSeq() uint64 { return s.seq }
 // (TestJournalGenCompatSnapMarkedLinesConverge). Marks share numbering
 // with op seqs only historically; the fold still preserves the journaled
 // seqs (the stack counter fast-forwards to each line) because drain
-// targets and resolutions number by them — only the merge shape, order,
+// targets and resolutions number by them: only the merge shape, order,
 // and numbering must match, which is what the equivalence tests pin.

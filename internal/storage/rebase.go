@@ -87,11 +87,6 @@ func changedByHash(base map[string][16]byte, upstream *RepoMetadata) map[string]
 	return changed
 }
 
-// changedPaths is the historical name of changedByHash; prefer changedByHash.
-func changedPaths(base map[string][16]byte, upstream *RepoMetadata) map[string]bool {
-	return changedByHash(base, upstream)
-}
-
 // opConflictKeys returns the namespace keys an op asserts over.
 func opConflictKeys(op Op) []string {
 	switch op.Type {
@@ -204,7 +199,7 @@ func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byt
 		if conflictPath != "" && op.Type == OpRename && renameSupersededByUpstream(working, op) {
 			// Renames overwrite their target unconditionally at apply
 			// time, so a stale rename would clobber a newer upstream
-			// target with no timestamp check — the rename counterpart of
+			// target with no timestamp check: the rename counterpart of
 			// the state-class LWW drop above.
 			resolutions = append(resolutions, ConflictResolution{Seq: op.Seq, Path: conflictPath,
 				Note: fmt.Sprintf("upstream newer for rename target %s (kept upstream, our stale %s dropped)", op.Paths[1], op.Type)})
@@ -280,7 +275,7 @@ func changedByTime(working *RepoMetadata, op Op) bool {
 // current upstream state: its target exists upstream with a change time
 // newer than the op. File/dir renames overwrite their target
 // unconditionally at apply time, so a stale rename (journaled before a
-// crash, rival advanced the target since) would clobber newer remote bytes —
+// crash, rival advanced the target since) would clobber newer remote bytes,
 // unlike single-target state ops, which the timestamp guard already drops. A
 // missing from-path is NOT superseding: replay is defensive and applies the
 // payload literally.

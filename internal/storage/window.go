@@ -41,7 +41,7 @@ var errWindowOverrun = errors.New("window reader: live stream overran window")
 // errWindowSeekAhead rejects a Seek past the mirrored high-water mark: the
 // bytes there were never pulled from the live stream, so a forward seek
 // then Read would WriteAt the next live byte at the wrong absolute offset,
-// leaving an unwritten hole that later replays as zeros (audit 18). The
+// leaving an unwritten hole that later replays as zeros (range-geometry enforcement). The
 // uploader's only real use is Seek(0, Start) between transport retries,
 // which always satisfies target <= mirrored.
 var errWindowSeekAhead = errors.New("window reader: seek ahead of mirrored bytes")
@@ -49,24 +49,37 @@ var errWindowSeekAhead = errors.New("window reader: seek ahead of mirrored bytes
 // spoolBase returns the upload-spool directory: <CacheBase>/rest (flat
 // upload-* files, no per-upload dirs).
 //
-// History: this was once <CacheBase>/storhub/rest (double "storhub" —
+// History: this was once <CacheBase>/storhub/rest (double "storhub":
 // CacheBase already ends in storhub via XDG). The old path migrates via a
 // symlink shim: if <base>/storhub/rest exists and <base>/rest does not,
 // it is renamed into place and a symlink is left at the old location so
 // older binaries still find their spools. New code writes only the new
-// path. NOTE for wave-2 tests: TestSpoolLayout pins the old path and must
-// move to <STORHUB_CACHE_DIR>/rest.
+// path. NOTE: TestSpoolLayout pins the old path and must move to
+// <STORHUB_CACHE_DIR>/rest.
 //
 // Config.CacheDir precedence (explicit > env > XDG > temp) and the
 // Config.SpoolBase/ObjectCacheDir/CacheBase accessors are the config
 // owner's slice (internal/config); this file consumes storcfg.CacheBase()
 // and must switch to cfg.SpoolBase() once it lands.
+
+// spoolMigrateOnce runs the legacy-dir migration at most once per process:
+// migration is a one-time event, while spoolBase runs per upload window.
+var spoolMigrateOnce sync.Once
+
 func spoolBase() (string, error) {
 	base := storcfg.CacheBase()
 	rest := filepath.Join(base, "rest")
 	if err := os.MkdirAll(rest, 0o755); err != nil {
 		return "", fmt.Errorf("create spool base dir: %w", err)
 	}
+	spoolMigrateOnce.Do(func() { migrateLegacySpoolDir(base, rest) })
+	return rest, nil
+}
+
+// migrateLegacySpoolDir moves entries from the pre-XDG <base>/storhub/rest
+// dir into place and leaves a symlink shim so older binaries still find
+// their spools. Best-effort: a failed entry move keeps the legacy dir.
+func migrateLegacySpoolDir(base, rest string) {
 	legacy := filepath.Join(base, "storhub", "rest")
 	if info, err := os.Lstat(legacy); err == nil && info.IsDir() && !isSymlink(info) {
 		// Legacy dir from a previous version: migrate contents one entry
@@ -84,7 +97,6 @@ func spoolBase() (string, error) {
 			_ = os.Symlink(rest, legacy)
 		}
 	}
-	return rest, nil
 }
 
 func isSymlink(info os.FileInfo) bool { return info.Mode()&os.ModeSymlink != 0 }

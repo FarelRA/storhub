@@ -24,7 +24,7 @@ func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, leng
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session read lookup failed", "handle", shortSHA(handleID), "op", "read", "err", lerr)
+		logging.Error(h.logger, "session-read lookup failed", "handle", shortSHA(handleID), "op", "read", "err", lerr)
 		return nil, lerr
 	}
 	sh.mu.Unlock()
@@ -34,14 +34,14 @@ func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, leng
 		return nil, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session read start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length)
+	logging.Debug(h.projectLogger(s.project), "session-read start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session read failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-read failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session read complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "bytes", len(out), "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-read complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "bytes", len(out), "elapsed", elapsed)
 	}()
 	if !s.mode.readable() {
 		return nil, fmt.Errorf("read session %s: handle not open for reading: %w", shortSHA(s.id), syscall.EBADF)
@@ -85,7 +85,7 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session write lookup failed", "handle", shortSHA(handleID), "op", "write", "err", lerr)
+		logging.Error(h.logger, "session-write lookup failed", "handle", shortSHA(handleID), "op", "write", "err", lerr)
 		return 0, lerr
 	}
 	sh.mu.Unlock()
@@ -95,14 +95,14 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 		return 0, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session write start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data))
+	logging.Debug(h.projectLogger(s.project), "session-write start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data))
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session write failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-write failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session write complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "bytes", wrote, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-write complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "bytes", wrote, "elapsed", elapsed)
 	}()
 	if !s.mode.writable() {
 		return 0, fmt.Errorf("write session %s: handle not open for writing: %w", shortSHA(s.id), syscall.EBADF)
@@ -122,8 +122,11 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 	}
 	curBefore := s.curSize
 	if offset > s.curSize {
-		zeros := make([]byte, offset-s.curSize)
-		if _, err := s.tmp.WriteAt(zeros, s.curSize); err != nil {
+		// Sparse hole, never a heap fill: Truncate extends the staging
+		// temp with a zero-reading hole instead of allocating
+		// offset-curSize bytes. A single far-offset write (e.g. 10 GiB
+		// on an empty stage) must not attempt a same-sized allocation.
+		if err := s.tmp.Truncate(offset); err != nil {
 			return 0, fmt.Errorf("write session %s: %w", shortSHA(s.id), err)
 		}
 		s.ranges = mergeByteRange(s.ranges, byteRange{start: s.curSize, end: offset})
@@ -166,7 +169,7 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session truncate lookup failed", "handle", shortSHA(handleID), "op", "truncate", "err", lerr)
+		logging.Error(h.logger, "session-truncate lookup failed", "handle", shortSHA(handleID), "op", "truncate", "err", lerr)
 		return lerr
 	}
 	sh.mu.Unlock()
@@ -176,14 +179,14 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session truncate start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size)
+	logging.Debug(h.projectLogger(s.project), "session-truncate start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session truncate failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-truncate failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session truncate complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-truncate complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed)
 	}()
 	if !s.mode.writable() {
 		return fmt.Errorf("truncate session %s: handle not open for writing: %w", shortSHA(s.id), syscall.EBADF)
@@ -217,7 +220,7 @@ func (h *StorHub) StatSession(ctx context.Context, handleID string) (stat Sessio
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session stat lookup failed", "handle", shortSHA(handleID), "op", "stat", "err", lerr)
+		logging.Error(h.logger, "session-stat lookup failed", "handle", shortSHA(handleID), "op", "stat", "err", lerr)
 		return SessionStat{}, lerr
 	}
 	sh.mu.Unlock()
@@ -227,14 +230,14 @@ func (h *StorHub) StatSession(ctx context.Context, handleID string) (stat Sessio
 		return SessionStat{}, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session stat start", "handle", shortSHA(s.id), "project", s.project, "path", s.path)
+	logging.Debug(h.projectLogger(s.project), "session-stat start", "handle", shortSHA(s.id), "project", s.project, "path", s.path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session stat failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-stat failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session stat complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", stat.Size, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-stat complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", stat.Size, "elapsed", elapsed)
 	}()
 	s.lastUse = sh.now()
 	stat = SessionStat{

@@ -38,22 +38,6 @@ func (r *gitRepo) writeCommitPush(ctx context.Context, path string, content []by
 // self-consistent for this backend. A backend toggle surfaces the foreign
 // token type as a 409 and the commit loop's rebase re-reads the correct
 // type - noisy, never silent.
-
-// writeCommitPushCAS is writeCommitPush with compare-and-swap: expectedOld is
-// the caller-observed HEAD commit OID (empty disables the pre-check). After
-// syncing, a non-empty expectedOld that no longer matches HEAD aborts with a
-// 409 conflict instead of silently overwriting the concurrent writer.
-// Regardless of the pre-check, the push carries a force-with-lease on the
-// post-sync HEAD so a writer racing the sync→push window is rejected rather
-// than silently won or lost against.
-//
-// Token-type note: both commit functions return the HEAD COMMIT
-// sha as the content token, not the blob sha the REST contents path
-// returns. That is deliberate: the git-path CAS pre-check compares
-// expectedOld against HEAD, so only a commit-pairing token is
-// self-consistent for this backend. A backend toggle surfaces the foreign
-// token type as a 409 and the commit loop's rebase re-reads the correct
-// type - noisy, never silent.
 func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content []byte, message, expectedOld string) (string, string, error) {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
@@ -115,13 +99,6 @@ func (r *gitRepo) writeCommitPushCAS(ctx context.Context, path string, content [
 	commitSHA := hash.String()
 	return commitSHA, commitSHA, nil
 }
-
-// writeCommitPushCASMulti commits several files in ONE commit with the same
-// compare-and-swap semantics as writeCommitPushCAS: the split index writes its
-// content-addressed objects and the manifest together so the manifest CAS is
-// the single atomic point (objects become referenced exactly when the
-// manifest that names them lands). Git's own content addressing makes
-// re-writing an unchanged object file a no-op at the blob level.
 
 // writeCommitPushCASMulti commits several files in ONE commit with the same
 // compare-and-swap semantics as writeCommitPushCAS: the split index writes its
@@ -203,10 +180,6 @@ func sortedFileKeys(files map[string][]byte) []string {
 	return keys
 }
 
-// listTreePaths returns every tracked file path under prefix (e.g.
-// ".storhub/objects") from the synced worktree. Used by prune to enumerate
-// the repo's content-addressed objects.
-
 // deleteCommitPushCAS removes the given paths in one commit with the same
 // compare-and-swap semantics as writeCommitPushCASMulti. Prune uses it to
 // drop orphaned objects atomically.
@@ -264,10 +237,6 @@ func (r *gitRepo) deleteCommitPushCAS(ctx context.Context, paths []string, messa
 	return hash.String(), nil
 }
 
-// headHashNoLock returns the post-sync HEAD commit hash, or the zero hash
-// when the repo has no HEAD yet (brand-new, nothing committed). Callers must
-// hold syncMu (writers) or have pinned HEAD via syncAndPinHEAD.
-
 // casConflict maps a rejected lease/non-fast-forward push to a 409 conflict
 // so git-path CAS failures surface exactly like the REST path's stale-SHA
 // rejection; any other push error passes through untouched. The match set
@@ -291,20 +260,10 @@ func casConflict(err error, base plumbing.Hash) error {
 	return fmt.Errorf("push: %w", err)
 }
 
-// listFileCommits returns commits that touch the given path, newest first.
-
 // squashHistory creates a single orphan commit with the current metadata content and force pushes it.
 func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error {
 	return r.squashHistoryCAS(ctx, path, message, "")
 }
-
-// squashHistoryCAS is squashHistory with compare-and-swap: it syncs from
-// remote BEFORE reading HEAD (so the squashed content is the latest remote
-// truth, never a stale local copy), and the force-push carries a
-// force-with-lease on the post-sync HEAD instead of a blind force-push, so a
-// concurrent writer racing the squash is rejected with a 409 conflict rather
-// than silently discarded. A non-empty expectedOld additionally aborts when
-// the post-sync HEAD no longer matches the caller's observation.
 
 // squashHistoryCAS is squashHistory with compare-and-swap: it syncs from
 // remote BEFORE reading HEAD (so the squashed content is the latest remote
@@ -432,13 +391,6 @@ func (r *gitRepo) squashHistoryCAS(ctx context.Context, path, message, expectedO
 // objects to a history prune, so this is the history-compaction primitive for
 // split (version-5) projects. The force-push carries a lease on the post-sync HEAD so a
 // concurrent writer is rejected with 409 rather than discarded.
-
-// squashTreeCAS collapses history into a single orphan commit that keeps the
-// ENTIRE current tree (manifest + every object), unlike squashHistoryCAS
-// which rebuilds a tree from one path. The split index must never lose its
-// objects to a history prune, so this is the history-compaction primitive for
-// split (version-5) projects. The force-push carries a lease on the post-sync HEAD so a
-// concurrent writer is rejected with 409 rather than discarded.
 func (r *gitRepo) squashTreeCAS(ctx context.Context, message, expectedOld string) error {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
@@ -501,8 +453,6 @@ func (r *gitRepo) squashTreeCAS(ctx context.Context, message, expectedOld string
 	}
 	return nil
 }
-
-// readFileContentsNoLock reads current file content from HEAD (no lock, callers must hold syncMu).
 
 func storeBlob(s storage.Storer, data []byte) (plumbing.Hash, error) {
 	o := s.NewEncodedObject()

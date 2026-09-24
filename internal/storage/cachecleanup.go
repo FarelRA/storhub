@@ -124,7 +124,7 @@ func projectDirIsOrphan(base, project string) bool {
 }
 
 // reapDirs is the single home of the reaper's ReadDir/RemoveAll/Warn/Info
-// loop (audit 24): reapOrphaned (git mirrors + legacy roots) and
+// loop (single-flight reaper dispatch): reapOrphaned (git mirrors + legacy roots) and
 // reapOrphanedObjectCaches (lock-judged object dirs) shared only the shape
 // through duplicated code. shouldReap decides per entry (returning keep =
 // false skips); after runs on each successful removal (e.g. lock release).
@@ -201,7 +201,7 @@ func reapOrphaned(logger *slog.Logger, bases ...string) int {
 // spoolOrphanAge bounds how long a crashed upload's spool file may linger:
 // live spools exist only for one asset-window upload (bounded by the HTTP
 // client's own timeout, minutes), so anything older died with its uploader
-// (audit 31: ReapOrphanedCaches swept git/objects/legacy-tmp but never
+// (spool-class gap: the orphan reaper swept git/objects/legacy-tmp but never
 // rest/upload-*).
 const spoolOrphanAge = 720 * storcfg.PatienceUnit // 1 hour
 
@@ -209,7 +209,10 @@ const spoolOrphanAge = 720 * storcfg.PatienceUnit // 1 hour
 // dir (flat layout, no per-upload dirs). Live uploads hold young files;
 // only crash orphans age out. Best-effort; returns files reclaimed.
 // A missing dir is not an error (nothing ever spooled there).
-func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
+// The now clock is a parameter so frozen-clock tests can pin the age
+// boundary; production passes time.Now or the hub clock
+// (see ReapOrphanedCachesForBaseAt).
+func reapSpoolDirAt(logger *slog.Logger, dir string, maxAge time.Duration, now time.Time) int {
 	if logger != nil && logger.Enabled(context.Background(), slog.LevelDebug) {
 		logger.Debug("cache reaper spool scan start", "label", "orphaned spool files", "base", dir)
 	}
@@ -217,7 +220,6 @@ func reapSpoolDir(logger *slog.Logger, dir string, maxAge time.Duration) int {
 	if err != nil {
 		return 0
 	}
-	now := time.Now()
 	reaped := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "upload-") {
@@ -262,6 +264,13 @@ func ReapOrphanedCaches(logger *slog.Logger) int {
 // CacheBase. Object liveness is judged by the git worktree lock, spool
 // files by mtime (live spools are young).
 func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
+	return ReapOrphanedCachesForBaseAt(logger, base, time.Now())
+}
+
+// ReapOrphanedCachesForBaseAt is the clock-injectable form of
+// ReapOrphanedCachesForBase: hub paths pass h.config.Now() so the spool
+// age boundary follows the frozen test clock instead of wall time.
+func ReapOrphanedCachesForBaseAt(logger *slog.Logger, base string, now time.Time) int {
 	if base == "" {
 		return 0
 	}
@@ -275,8 +284,8 @@ func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
 	// Spool sweep by mtime: current path plus the pre-fix double-storhub
 	// shim (<base>/storhub/rest), which spoolBase() migrates at runtime
 	// but may still hold files when the symlink was never created.
-	reaped += reapSpoolDir(logger, filepath.Join(base, "rest"), spoolOrphanAge)
-	reaped += reapSpoolDir(logger, filepath.Join(base, "storhub", "rest"), spoolOrphanAge)
+	reaped += reapSpoolDirAt(logger, filepath.Join(base, "rest"), spoolOrphanAge, now)
+	reaped += reapSpoolDirAt(logger, filepath.Join(base, "storhub", "rest"), spoolOrphanAge, now)
 	if logger != nil {
 		logger.Debug("cache reaper complete", "base", base, "reaped", reaped)
 	}
@@ -287,7 +296,7 @@ func ReapOrphanedCachesForBase(logger *slog.Logger, base string) int {
 // deleted (or never mounted again) while their cache dir lingered. Object
 // caches carry no lock of their own, so liveness is judged by the git
 // worktree lock in lockBase: a git-backed mount is spared outright. A
-// REST-only mount has no lock and may lose its cached bytes here — that is
+// REST-only mount has no lock and may lose its cached bytes here: that is
 // a performance event, never a correctness one: the cache verifies a cold
 // entry's content address on first read and self-heals, and every miss
 // simply refetches from the repo.

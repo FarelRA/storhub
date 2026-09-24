@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -24,7 +25,11 @@ func stagingHasBytes(name string) bool {
 }
 
 // quarantineSessionTemp moves a temp aside under the spool base for manual
-// recovery. It never re-drives the bytes anywhere.
+// recovery. It never re-drives the bytes anywhere. The destination embeds
+// the full handle id (hex is filename-safe): truncating to 48 bits let two
+// quarantined temps collide with the later rename silently overwriting the
+// earlier one. When the destination is already taken, a numeric suffix
+// keeps both recoveries instead of overwriting.
 func quarantineSessionTemp(name, id string) error {
 	base, err := spoolBase()
 	if err != nil {
@@ -34,7 +39,18 @@ func quarantineSessionTemp(name, id string) error {
 	if err := os.MkdirAll(qdir, 0o755); err != nil {
 		return fmt.Errorf("create session quarantine dir: %w", err)
 	}
-	dest := filepath.Join(qdir, "session-"+shortSHA(id)+".staged")
+	dest := filepath.Join(qdir, "session-"+id+".staged")
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(dest); os.IsNotExist(err) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("quarantine session temp: %w", err)
+		}
+		dest = filepath.Join(qdir, fmt.Sprintf("session-%s.%d.staged", id, n))
+		if n > 1000 {
+			return fmt.Errorf("quarantine session temp: too many collisions for %q", id)
+		}
+	}
 	if err := os.Rename(name, dest); err != nil {
 		return fmt.Errorf("quarantine session temp: %w", err)
 	}
@@ -48,14 +64,14 @@ func quarantineSessionTemp(name, id string) error {
 // orphaned temps move. Returns how many files were quarantined.
 func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, err error) {
 	started := h.config.Now().UTC()
-	logging.Debug(h.logger, "session quarantine start", "max_age", maxAge)
+	logging.Debug(h.logger, "session-quarantine start", "max_age", maxAge)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.logger, "session quarantine failed", "max_age", maxAge, "elapsed", elapsed, "err", err)
+			logging.Error(h.logger, "session-quarantine failed", "max_age", maxAge, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.logger, "session quarantine complete", "max_age", maxAge, "moved", moved, "elapsed", elapsed)
+		logging.Debug(h.logger, "session-quarantine complete", "max_age", maxAge, "moved", moved, "elapsed", elapsed)
 	}()
 	base, err := spoolBase()
 	if err != nil {
@@ -65,7 +81,7 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, 
 	if err != nil {
 		return 0, fmt.Errorf("list spool base: %w", err)
 	}
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := h.sessionHub().now().Add(-maxAge)
 	moved = 0
 	for _, e := range entries {
 		if e.IsDir() {
@@ -83,7 +99,10 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, 
 		if fi.ModTime().After(cutoff) {
 			continue
 		}
-		if err := quarantineSessionTemp(full, name); err != nil {
+		// Pass the full source name as the quarantine identity: the old
+		// code passed the filename through shortSHA again, folding every
+		// swept temp back into the same 48-bit space as live handles.
+		if err := quarantineSessionTemp(full, strings.TrimPrefix(name, "session-")); err != nil {
 			continue
 		}
 		moved++
@@ -107,7 +126,7 @@ func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path st
 	if err != nil {
 		return "", err
 	}
-	cleanName, traversed, err := shfs.ResolveAccessPath(live, path, false)
+	cleanName, traversed, err := shfs.LstatResolveTracked(live, path)
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +166,7 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) (err e
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session link lookup failed", "handle", shortSHA(handleID), "op", "link", "err", lerr)
+		logging.Error(h.logger, "session-link lookup failed", "handle", shortSHA(handleID), "op", "link", "err", lerr)
 		return lerr
 	}
 	sh.mu.Unlock()
@@ -157,14 +176,14 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) (err e
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session link start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	logging.Debug(h.projectLogger(s.project), "session-link start", "handle", shortSHA(s.id), "project", s.project, "path", path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session link failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-link failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session link complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "pending", len(s.pending), "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-link complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "pending", len(s.pending), "elapsed", elapsed)
 	}()
 	if s.path != "" && len(s.pending) == 0 {
 		return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
@@ -200,7 +219,7 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) (err
 	s, lerr := sh.getLiveLocked(handleID, sh.now())
 	if lerr != nil {
 		sh.mu.Unlock()
-		logging.Error(h.logger, "session relink lookup failed", "handle", shortSHA(handleID), "op", "relink", "err", lerr)
+		logging.Error(h.logger, "session-relink lookup failed", "handle", shortSHA(handleID), "op", "relink", "err", lerr)
 		return lerr
 	}
 	sh.mu.Unlock()
@@ -210,14 +229,14 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) (err
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session relink start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	logging.Debug(h.projectLogger(s.project), "session-relink start", "handle", shortSHA(s.id), "project", s.project, "path", path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session relink failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-relink failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session relink complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-relink complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed)
 	}()
 	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {
@@ -228,6 +247,9 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) (err
 	s.created = true
 	s.dirty = true
 	s.applied = false
+	// The pending set was replaced: publish records for the dropped names
+	// no longer describe anything this handle owns.
+	s.published = nil
 	s.lastUse = sh.now()
 	return nil
 }

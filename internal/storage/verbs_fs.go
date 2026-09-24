@@ -57,9 +57,9 @@ func (h *StorHub) RmdirContext(ctx context.Context, project, dirPath string, opt
 
 // RenameContext moves oldPath to newPath.
 func (h *StorHub) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...shfs.MutateOption) (err error) {
-	started := h.logOpStart(project, "rename", "path", oldPath, "new_path", newPath)
+	started := h.logOpStart(project, "rename", "src", oldPath, "dst", newPath)
 	defer func() {
-		h.logOpFinish(project, "rename", started, err, "path", oldPath, "new_path", newPath)
+		h.logOpFinish(project, "rename", started, err, "src", oldPath, "dst", newPath)
 	}()
 	if err := h.enforceExpectedRevision(ctx, project, opts); err != nil {
 		return err
@@ -173,14 +173,14 @@ func (h *StorHub) ReadFileAtBufferContext(ctx context.Context, project, filePath
 	if err != nil {
 		return 0, err
 	}
-	cleanPath, traversed, err := shfs.ResolveAccessPath(repo, filePath, true)
+	cleanPath, traversed, err := shfs.StatResolveTracked(repo, filePath)
 	if err != nil {
 		return 0, err
 	}
 	if cleanPath == "" {
 		return 0, errors.New("file name is required")
 	}
-	if err := shfs.CheckTraversal(ctx, repo, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repo, traversed); err != nil {
 		return 0, err
 	}
 	file := repo.FindFile(cleanPath)
@@ -300,9 +300,9 @@ func (h *StorHub) ReadlinkContext(ctx context.Context, project, linkPath string)
 
 // LinkContext hard-links newPath to existingPath.
 func (h *StorHub) LinkContext(ctx context.Context, project, existingPath, newPath string) (result *metadata.FileMeta, err error) {
-	started := h.logOpStart(project, "link", "existing", existingPath, "new_path", newPath)
+	started := h.logOpStart(project, "link", "src", existingPath, "dst", newPath)
 	defer func() {
-		h.logOpFinish(project, "link", started, err, "existing", existingPath, "new_path", newPath)
+		h.logOpFinish(project, "link", started, err, "src", existingPath, "dst", newPath)
 	}()
 	result, err = h.posixService().LinkContext(ctx, project, existingPath, newPath)
 	return result, err

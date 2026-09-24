@@ -222,7 +222,7 @@ func TestCopyFileAndDirectory(t *testing.T) {
 	}
 }
 
-// Copy error paths — missing source, self-copy, dir onto file.
+// Copy error paths: missing source, self-copy, dir onto file.
 func TestCopyErrors(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
@@ -246,7 +246,7 @@ func TestCopyErrors(t *testing.T) {
 	}
 }
 
-// Git backend round trip — write through one handle, read through a
+// Git backend round trip: write through one handle, read through a
 // fresh handle and through the hub's git path.
 func TestGitBackendWriteReadRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -338,7 +338,7 @@ func TestGitBackendRevisionHistory(t *testing.T) {
 	}
 }
 
-// Advanced metadata API — update, read back, revision advance,
+// Advanced metadata API: update, read back, revision advance,
 // revision listing, and rollback. File payloads travel the real upload
 // path (valid chunk references); the update itself is a metadata-only
 // marker entry, which validates as an empty file.
@@ -553,7 +553,7 @@ func TestFlushProject(t *testing.T) {
 	}
 }
 
-// Guard: new tests must not touch hub internals — this compile-time
+// Guard: new tests must not touch hub internals: this compile-time
 // probe fails if the suite ever needs metaCache/pm access. It exercises a
 // full mutation cycle purely through public APIs.
 func TestPublicAPIOnlyMutationCycle(t *testing.T) {

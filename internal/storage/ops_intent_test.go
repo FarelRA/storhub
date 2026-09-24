@@ -679,7 +679,7 @@ func TestIntentFoldEmitsRenameMkdirPutForRenameRecreate(t *testing.T) {
 // a rename-vs-recreate set converges to the SAME tree: whichever order the
 // journal or the network delivers, replay is deterministic. The sets mirror
 // exactly what the fold emits (rename with member list, literal mkdir
-// carrying the candidate's record for a recreated path, state puts) —
+// carrying the candidate's record for a recreated path, state puts):
 // replay convergence is only defined over fold-shaped batches, because the
 // mkdir's candidate record is what lets all orders agree on the recreated
 // path's identity.

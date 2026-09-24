@@ -265,7 +265,7 @@ func TestFailedBuildDoesNotPoisonTreeCache(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	// Simulate the failed attempt's build: same tree, same shared cache,
-	// results discarded — nothing reaches upstream.
+	// results discarded: nothing reaches upstream.
 	hub.metaMu.RLock()
 	pm := hub.metaCache["projectpoisoncache"]
 	hub.metaMu.RUnlock()

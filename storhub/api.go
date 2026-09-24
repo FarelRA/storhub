@@ -12,6 +12,7 @@ package storhub
 import (
 	"context"
 	"net/http"
+	"time"
 
 	chunking "github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
@@ -89,6 +90,29 @@ type (
 	// RESTUser is a single authenticated principal with its POSIX identity
 	// (UID, primary GID, supplementary groups) used for authorization.
 	RESTUser = implrest.User
+	// OpenMode is a bitmask describing how a session may be used (read,
+	// write, create, truncate, append, exclusive). See internal/storage.
+	OpenMode = impl.OpenMode
+	// SessionOption decorates one OpenSession call (e.g. WithSessionTTL).
+	SessionOption = impl.SessionOption
+	// SessionHubOption tunes one hub's session policy (caps and TTLs).
+	SessionHubOption = impl.SessionHubOption
+	// SessionStat describes a live session handle: project, path, size,
+	// dirty state, mode, and staleness against the committed revision.
+	SessionStat = impl.SessionStat
+	// StaleSessionError is the typed stale-handle error answered for
+	// expired or unknown ids. Match with errors.As.
+	StaleSessionError = impl.StaleSessionError
+	// PruneRequest is the flag-free prune invocation: scope, keep
+	// threshold, and dry-run flag.
+	PruneRequest = impl.PruneRequest
+	// PruneConflictError is the loud typed refusal a project answers
+	// while a prune run holds its write fence. Match with errors.As.
+	PruneConflictError = impl.PruneConflictError
+	// ChunkGCRefusedError is the loud typed refusal a chunk-GC compaction
+	// answers under doubt (live session, bad project). Match with
+	// errors.As.
+	ChunkGCRefusedError = impl.ChunkGCRefusedError
 )
 
 const (
@@ -117,12 +141,48 @@ const (
 	PruneChunks = impl.PruneChunks
 	// PruneAll reclaims everything a prune run can reclaim.
 	PruneAll = impl.PruneAll
+	// SessionReadOnly opens a session for reads only.
+	SessionReadOnly = impl.SessionReadOnly
+	// SessionWriteOnly opens a session for writes only.
+	SessionWriteOnly = impl.SessionWriteOnly
+	// SessionReadWrite opens a session for reads and writes.
+	SessionReadWrite = impl.SessionReadWrite
+	// SessionCreate creates the file if missing (staged until commit).
+	SessionCreate = impl.SessionCreate
+	// SessionTruncate truncates an existing file to zero at open (staged
+	// until commit). Requires a write bit.
+	SessionTruncate = impl.SessionTruncate
+	// SessionAppend forces every session write to the current end (staged
+	// until commit). Requires a write bit.
+	SessionAppend = impl.SessionAppend
+	// SessionExclusive fails the open when the file already exists.
+	// Requires SessionCreate.
+	SessionExclusive = impl.SessionExclusive
 )
 
 var (
 	// ErrNotFound reports a missing path of any kind (files, directories,
 	// projects); every not-found failure in the library wraps it.
 	ErrNotFound = shfs.ErrNotFound
+	// ErrStaleSession matches any expired or unknown session handle id.
+	// Prefer errors.As with *StaleSessionError when the reason matters.
+	ErrStaleSession = impl.ErrStaleSession
+	// ErrSessionProjectBusy reports the per-project session handle cap.
+	ErrSessionProjectBusy = impl.ErrSessionProjectBusy
+	// ErrSessionUserBusy reports the per-user session handle cap.
+	ErrSessionUserBusy = impl.ErrSessionUserBusy
+	// ErrSessionOwnerMismatch reports a session handle driven by a UID
+	// other than the opener (admins bypass).
+	ErrSessionOwnerMismatch = impl.ErrSessionOwnerMismatch
+	// ErrSessionUnlinked reports syncing (or committing) a scratch
+	// session handle that was never linked to a path.
+	ErrSessionUnlinked = impl.ErrSessionUnlinked
+	// ErrSessionLinked reports linking an already-pending name, or
+	// linking a handle opened with a path.
+	ErrSessionLinked = impl.ErrSessionLinked
+	// ErrSessionPathGone reports a commit or sync for a handle whose
+	// pinned inode lost its last name after open.
+	ErrSessionPathGone = impl.ErrSessionPathGone
 )
 
 // MutateOption customizes a single storage mutation.
@@ -144,6 +204,49 @@ const (
 // before applying, failing with ErrPreconditionFailed when it moved.
 func WithExpectedRevision(rev string) MutateOption {
 	return shfs.WithExpectedRevision(rev)
+}
+
+// ParseOpenMode maps fopen-style strings ("r", "w", "a", "r+", "w+",
+// "a+", optional "x" for exclusive) to a session OpenMode.
+func ParseOpenMode(s string) (OpenMode, error) {
+	return impl.ParseOpenMode(s)
+}
+
+// WithSessionTTL requests an idle TTL for a new session handle.
+// Non-positive means the hub default; anything above the hub max cap is
+// clamped to it.
+func WithSessionTTL(d time.Duration) SessionOption {
+	return impl.WithSessionTTL(d)
+}
+
+// RequestedTTL folds SessionOptions and reports the requested idle TTL:
+// <=0 means "hub default".
+func RequestedTTL(opts []SessionOption) time.Duration {
+	return impl.RequestedTTL(opts)
+}
+
+// WithSessionMaxPerProject overrides the per-project session handle cap
+// for one hub. Non-positive values are ignored.
+func WithSessionMaxPerProject(n int) SessionHubOption {
+	return impl.WithSessionMaxPerProject(n)
+}
+
+// WithSessionMaxPerUser overrides the per-user session handle cap for one
+// hub. Non-positive values are ignored.
+func WithSessionMaxPerUser(n int) SessionHubOption {
+	return impl.WithSessionMaxPerUser(n)
+}
+
+// WithSessionDefaultTTL overrides the default session idle TTL for one
+// hub. Non-positive values are ignored.
+func WithSessionDefaultTTL(d time.Duration) SessionHubOption {
+	return impl.WithSessionDefaultTTL(d)
+}
+
+// WithSessionMaxTTL overrides the max session TTL cap for one hub.
+// Non-positive values are ignored.
+func WithSessionMaxTTL(d time.Duration) SessionHubOption {
+	return impl.WithSessionMaxTTL(d)
 }
 
 // ErrPreconditionFailed reports a failed compare-and-swap: the remote

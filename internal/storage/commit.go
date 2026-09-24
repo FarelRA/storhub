@@ -19,7 +19,7 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 // and mirrors it to the crash-recovery journal. Caller holds pm.mu. The
 // journal receives the PRE-COALESCING DELTA (the op exactly as appended,
 // Times=1), so a later fold replays the identical append sequence and
-// converges to exactly the in-memory stack — including cross-transaction
+// converges to exactly the in-memory stack: including cross-transaction
 // rename chains and rename-then-delete, which post-coalescing tails cannot
 // reproduce.
 //
@@ -27,7 +27,7 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 // bound compacts the journal to the folded survivors (even though no commit
 // succeeded) and warns; the append site pokes the commit trigger directly
 // so the retry is immediate, not delayed. Growth pressure beyond that only
-// warns — never fail-loud backpressure, never dropped acknowledged ops.
+// warns: never fail-loud backpressure, never dropped acknowledged ops.
 func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	beforeBytes := pm.opStack.bytes
 	// Heal a nil rebase baseline left by a cold hydrate: every mutation
@@ -39,8 +39,8 @@ func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 		pm.baseTree = pm.meta
 	}
 	delta := pm.opStack.appendWithDelta(op)
-	h.journalAppend(project, delta)
-	if pm.opStack.bytes >= opStackMaxBytes || h.journalOverCap(project, pm.opStack.maxSeq()) {
+	lineBytes := h.journalAppend(project, delta)
+	if pm.opStack.bytes >= opStackMaxBytes || h.journalOverCap(project, pm.opStack.maxSeq(), lineBytes) {
 		h.journalRewrite(project, pm.opStack.ops)
 	}
 	switch {
@@ -198,7 +198,7 @@ func (h *StorHub) waitCommitLoopExit(project string, stoppedCh <-chan struct{}) 
 	case <-stoppedCh:
 		return true
 	case <-timer.C:
-		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap", "project", project)
+		logging.Error(h.projectLogger(project), "evicted commit loop did not stop; reviving without channel swap")
 		return false
 	}
 }
@@ -252,7 +252,7 @@ func (h *StorHub) reviveEvictedProject(project string, pm *projectMetadata, stop
 		return pm.triggerCh
 	}
 	if revived {
-		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation", "project", project)
+		logging.Info(h.projectLogger(project), "reviving evicted project metadata after concurrent operation")
 		// startCommitLoopLocked returns false if Shutdown began between the
 		// flag check in the switch above and the Add; the loop is not
 		// started, but the entry is live in the cache and the tail below
@@ -280,8 +280,7 @@ func (h *StorHub) tryReviveLocked(project string, pm *projectMetadata) (revived,
 	switch {
 	case exists && current != pm:
 		logging.Error(h.projectLogger(project),
-			"evicted metadata snapshot diverged from a newer reload; mutations in this window are lost",
-			"project", project)
+			"evicted metadata snapshot diverged from a newer reload; mutations in this window are lost")
 	case exists && current == pm && !current.stopped:
 		// Another goroutine completed the revival while we waited on
 		// stoppedCh/metaMu; the instance is live again - just mark dirty.
@@ -411,15 +410,15 @@ func (h *StorHub) recoverMetadataCommitFailure(project string, err error) {
 // walk would be a no-op and is skipped (SEAL-SKIP). A tree failing the check
 // takes the wholesale-construction path.
 //
-// Seal fields consumed (owned by the metadata agent, which guarantees
-// SealTransaction marks the seal — coordinate: the metadata agent must keep
+// Seal fields consumed (owned by the metadata engine, which guarantees
+// SealTransaction marks the seal: coordinate: the metadata engine must keep
 // stamping Project, Version, Root.Inode/Mode, and LastMod there, and every
 // mutation path must stay on tracked mutators with incremental stats):
 // Project (stamped non-empty), Version (stamped when zero), Root.Inode and
 // Root.Mode (materialized when zero). LastMod is deliberately excluded: the
 // commit stamps it unconditionally after the check.
 //
-// NOTE (residual risk, accepted per audit-33): an unsealed-but-normalized
+// NOTE (residual risk, accepted per commit-admission review): an unsealed-but-normalized
 // tree also passes and skips the walk. That is safe exactly while every
 // mutation path goes through tracked mutators with incremental stats; a
 // future direct-write path that bypasses them must either seal or force the

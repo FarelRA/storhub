@@ -232,7 +232,7 @@ func TestMockListReleasesExactMultipleOfPageSize(t *testing.T) {
 	}
 }
 
-// Opt-in rate-limit fault — one 429 with Retry-After, then success.
+// Opt-in rate-limit fault: one 429 with Retry-After, then success.
 // The fault is armed after the upload warms the owner/repo caches, so the
 // next API call (the flush PUT) deterministically takes the 429 and the
 // retry succeeds: served==1 proves the fault fired, puts>=2 proves the

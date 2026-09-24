@@ -409,7 +409,7 @@ func TestHardeningPickerResolvesTrueCountWithPlaceholders(t *testing.T) {
 	}
 }
 
-// 8MB ceiling — fail fast, never accept-then-never-commit. An
+// 8MB ceiling: fail fast, never accept-then-never-commit. An
 // UpdateRepoMetadataContext mutation whose result exceeds maxMetadataBytes
 // must be rejected at admission with a clear error, leaving shared state
 // untouched and the project still usable (sized by oversizePaddedTestEntries).

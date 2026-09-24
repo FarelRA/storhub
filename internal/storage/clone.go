@@ -38,8 +38,9 @@ import (
 //
 // Permissions are read on the source plus write on the destination, checked
 // once at call time with the same Check functions the sibling verbs use. A
-// clone is not a read for atime: the source entry is left fully untouched
-// (no atime refresh), and the destination keeps its own atime.
+// clone counts as a read of the source for atime: the source stamp is
+// queued through the usual atime funnel after the transaction commits,
+// while the destination keeps its own stamp.
 //
 // Atomicity is one exclusive UpdateRepoMetadataContext transaction:
 // all records land or none do. Expected-revision preconditions (opts) are
@@ -77,21 +78,21 @@ func (h *StorHub) CloneRange(ctx context.Context, project, src string, srcOff in
 	}
 	// Clone follows a final symlink at both ends (open semantics, like the
 	// read and write verbs), so resolution is stat-style on both paths.
-	srcClean, srcTraversed, err := shfs.ResolveAccessPath(repoMeta, src, true)
+	srcClean, srcTraversed, err := shfs.StatResolveTracked(repoMeta, src)
 	if err != nil {
 		return nil, err
 	}
-	dstClean, dstTraversed, err := shfs.ResolveAccessPath(repoMeta, dst, true)
+	dstClean, dstTraversed, err := shfs.StatResolveTracked(repoMeta, dst)
 	if err != nil {
 		return nil, err
 	}
 	if srcClean == "" || dstClean == "" {
 		return nil, errors.New("clone source and destination names are required")
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, srcTraversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, srcTraversed); err != nil {
 		return nil, err
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, dstTraversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, dstTraversed); err != nil {
 		return nil, err
 	}
 	if repoMeta.HasDirectory(srcClean) {
@@ -135,7 +136,9 @@ func (h *StorHub) CloneRange(ctx context.Context, project, src string, srcOff in
 	}
 	if length == 0 {
 		// Zero-length clone is a validated no-op: permissions, existence
-		// and ranges already checked above, nothing to mutate.
+		// and ranges already checked above, nothing to mutate. A missing
+		// destination reports NotFound instead of creating an empty file:
+		// there are no source bytes to link, so this path stages nothing.
 		if dstFile == nil {
 			return nil, shfs.NotFound(dstClean)
 		}

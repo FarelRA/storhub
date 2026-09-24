@@ -35,7 +35,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	}
 	// unlink(2) removes the final component itself: a symlink is unlinked,
 	// never followed to its target, so followFinal is false.
-	cleanName, traversed, err := shfs.ResolveAccessPath(repoMeta, fileName, false)
+	cleanName, traversed, err := shfs.LstatResolveTracked(repoMeta, fileName)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,19 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 
-	if err := shfs.CheckTraversal(ctx, pm.meta, traversed); err != nil {
+	// Hydration pre-flight on the shared tree: without it this path relied
+	// on the readonly preload above having populated the cache as a side
+	// effect. Checks below run against hydrated truth, matching every
+	// other direct mutation site. Deliberately not the full
+	// ensureMutableLocked: its size-ceiling gate would refuse deletes on a
+	// capped project, and deleting is the documented escape hatch from
+	// capped state.
+	if err := h.ensureHydratedLocked(ctx, project, pm); err != nil {
+		pm.mu.Unlock()
+		return err
+	}
+
+	if err := shfs.CheckWalkResolved(ctx, pm.meta, traversed); err != nil {
 		pm.mu.Unlock()
 		return err
 	}
@@ -65,12 +77,11 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 		pm.mu.Unlock()
 		return shfs.NotFound(cleanName)
 	}
-	// In-transaction CAS gate: this path mutates directly under pm.mu
-	// instead of through ensureMutableLocked, so the token check runs
-	// here, in the same critical section as the removal below. Placed
-	// after the existence checks so a missing file still reports
-	// NotFound, and before the COW copy so a rejected CAS publishes
-	// nothing (never partial application).
+	// In-transaction CAS gate: the token check runs here, in the same
+	// critical section as the removal below. Placed after the existence
+	// checks so a missing file still reports NotFound, and before the COW
+	// copy so a rejected CAS publishes nothing (never partial
+	// application).
 	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
 		pm.mu.Unlock()
 		return err
@@ -180,11 +191,10 @@ func (h *StorHub) CleanupProjectContext(ctx context.Context, project string) err
 	if err != nil {
 		return err
 	}
-	// Cheap no-op check first (audit 33): the old code paid 2 clones +
-	// Normalize/RecomputeStats + 2 full ToJSON marshals just to test
-	// no-op-ness. SerializedSize is the engine's incremental counter
-	// (no encode); only when the sizes match do we pay for the marshal
-	// pair to rule out a same-size-but-different tree.
+	// Cheap no-op check first: SerializedSize is the engine's incremental
+	// counter (no encode), so a size mismatch proves work is needed
+	// without paying for marshals; only when the sizes match do we pay
+	// for the marshal pair to rule out a same-size-but-different tree.
 	before := repoMeta.Clone()
 	before.Normalize(project, h.config.Now().UnixNano())
 	working := repoMeta.Clone()
@@ -240,5 +250,5 @@ func (h *StorHub) projectHasUncommittedState(project string) bool {
 // can reference a release between purge's classification and its delete.
 // Closing that window needs a purge-wide write fence (or a server-side
 // lease), which this codebase has no primitive for yet. The gate removes
-// the cheap, common case — a visibly dirty tree — while true
+// the cheap, common case, a visibly dirty tree, while true
 // concurrent-write-during-purge remains callers-must-quiesce territory.

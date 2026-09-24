@@ -42,7 +42,7 @@ func (h *StorHub) PrepareReplaceContext(ctx context.Context, project, fileName s
 	if existing == nil {
 		return "", "", fmt.Errorf("%w: %s", shfs.ErrNotFound, cleanName)
 	}
-	// Release probe, not a full tree clone (audit 33): picking only reads
+	// Release probe, not a full tree clone: picking only reads
 	// the release set + counts, so a throwaway carrying just the catalog
 	// avoids an O(tree) memcpy per upload/patch.
 	probe, err := newReleaseProbe(repoMeta, project, h.config.Now().UnixNano())
@@ -64,17 +64,54 @@ func (h *StorHub) resolveAuthedPath(ctx context.Context, repoMeta *RepoMetadata,
 	if err := shfs.ValidateAccessPathShape(rawPath); err != nil {
 		return "", nil, err
 	}
-	cleanName, traversed, err = shfs.ResolveAccessPath(repoMeta, rawPath, followFinal)
+	if followFinal {
+		cleanName, traversed, err = shfs.StatResolveTracked(repoMeta, rawPath)
+	} else {
+		cleanName, traversed, err = shfs.LstatResolveTracked(repoMeta, rawPath)
+	}
 	if err != nil {
 		return "", nil, err
 	}
 	if cleanName == "" {
 		return "", nil, errors.New("file name is required")
 	}
-	if err := shfs.CheckTraversal(ctx, repoMeta, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, repoMeta, traversed); err != nil {
 		return "", nil, err
 	}
 	return cleanName, traversed, nil
+}
+
+// allocateChunkRecords registers releaseTag plus the releases of newChunks
+// on the COW tree and allocates chunk IDs against it, returning the IDs in
+// newChunks order. It is the single home of the EnsureRelease /
+// ensureChunkReleases / AllocateChunkID triple previously pasted across
+// FinalizeReplaceChunksContext, putFileInner, PatchFileRangesContext,
+// patchFileWithMetadataContext, and rewriteFileRangesWithMetadataContext,
+// so a fix to release registration or ID allocation lands once. An empty
+// releaseTag registers nothing: a patch shrinking to empty mints no chunks
+// and picks no release, and EnsureRelease rejects the empty tag. Caller
+// holds pm.mu; on error the caller unlocks, compensates the uploaded
+// assets, and aborts.
+func allocateChunkRecords(tree *RepoMetadata, newChunks []ChunkInfo, releaseTag string, now int64) ([]int64, error) {
+	if releaseTag != "" {
+		if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := ensureChunkReleases(tree, newChunks, now); err != nil {
+		return nil, err
+	}
+	// Allocate identifiers against the authoritative in-memory metadata so
+	// concurrent operations can never mint colliding chunk IDs.
+	chunkIDs := make([]int64, len(newChunks))
+	for i := range newChunks {
+		id := tree.AllocateChunkID()
+		if err := tree.PutChunk(id, newChunks[i]); err != nil {
+			return nil, err
+		}
+		chunkIDs[i] = id
+	}
+	return chunkIDs, nil
 }
 
 // newReleaseProbe builds a minimal catalog-only tree for release picking:
@@ -163,27 +200,11 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// clone that is discarded before this call. All mutations apply to a
 	// private COW copy; the shared tree is swapped in only on success.
 	tree := cowTree(pm.meta)
-	if _, err := tree.EnsureRelease(releaseTag, now); err != nil {
+	chunkIDs, allocErr := allocateChunkRecords(tree, chunks, releaseTag, now)
+	if allocErr != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, chunks)
-		return nil, err
-	}
-	if err := ensureChunkReleases(tree, chunks, now); err != nil {
-		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, chunks)
-		return nil, err
-	}
-	// Allocate identifiers against the authoritative in-memory metadata so
-	// concurrent operations can never mint colliding chunk IDs.
-	chunkIDs := make([]int64, len(chunks))
-	for i := range chunks {
-		id := tree.AllocateChunkID()
-		if err := tree.PutChunk(id, chunks[i]); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, chunks)
-			return nil, err
-		}
-		chunkIDs[i] = id
+		return nil, allocErr
 	}
 	fileMeta.Chunks = chunkIDs
 	fileMeta.Size = size
@@ -255,7 +276,7 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 		}
 		h.logOpFinish(project, "replace-file-reader", started, err, "path", filePath, "size", size, "result_size", resultSize)
 	}()
-	chunkSize := chunking.NormalizedSize(h.ChunkSize())
+	chunkSize, _ := chunking.NormalizedSize(h.ChunkSize())
 	requiredSlots := 0
 	if size > 0 {
 		requiredSlots = int((size + chunkSize - 1) / chunkSize)
@@ -426,7 +447,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 		return nil, err
 	}
 
-	if err := shfs.CheckTraversal(ctx, pm.meta, traversed); err != nil {
+	if err := shfs.CheckWalkResolved(ctx, pm.meta, traversed); err != nil {
 		pm.mu.Unlock()
 		// The chunks are already uploaded by now; a late permission
 		// failure must not leak them as orphans.
@@ -458,30 +479,15 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	// All mutations apply to a private COW copy; the shared tree is swapped
 	// in only once every fallible step has succeeded.
 	tree := cowTree(pm.meta)
-	if _, err := tree.EnsureRelease(releaseTag, h.config.Now().UnixNano()); err != nil {
+	// Rotation may have spread this file's chunks across releases; the
+	// helper ensures every chunk's own release, not just the initial tag,
+	// so rotated chunks never strand outside the catalog where purge
+	// deletes live data.
+	chunkIDs, allocErr := allocateChunkRecords(tree, results, releaseTag, h.config.Now().UnixNano())
+	if allocErr != nil {
 		pm.mu.Unlock()
 		h.compensateDeleteAssets(ctx, project, results)
-		return nil, err
-	}
-	// Rotation may have spread this file's chunks across releases;
-	// ensuring only the initial tag would strand rotated chunks outside
-	// the catalog where purge deletes live data.
-	if err := ensureChunkReleases(tree, results, h.config.Now().UnixNano()); err != nil {
-		pm.mu.Unlock()
-		h.compensateDeleteAssets(ctx, project, results)
-		return nil, err
-	}
-	// Allocate identifiers against the authoritative in-memory metadata so
-	// concurrent operations can never mint colliding chunk IDs.
-	chunkIDs := make([]int64, len(results))
-	for i := range results {
-		id := tree.AllocateChunkID()
-		if err := tree.PutChunk(id, results[i]); err != nil {
-			pm.mu.Unlock()
-			h.compensateDeleteAssets(ctx, project, results)
-			return nil, err
-		}
-		chunkIDs[i] = id
+		return nil, allocErr
 	}
 	fileMeta.Chunks = chunkIDs
 	current := tree.FindFile(cleanName)

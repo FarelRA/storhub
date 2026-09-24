@@ -48,10 +48,6 @@ func (r *gitRepo) listTreePaths(ctx context.Context, prefix string) ([]string, e
 	return out, nil
 }
 
-// deleteCommitPushCAS removes the given paths in one commit with the same
-// compare-and-swap semantics as writeCommitPushCASMulti. Prune uses it to
-// drop orphaned objects atomically.
-
 // listFileCommits returns commits that touch the given path, newest first.
 func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataRevision, error) {
 	r.syncMu.Lock()
@@ -96,13 +92,6 @@ func (r *gitRepo) listFileCommits(ctx context.Context, path string) ([]MetadataR
 	}
 	return revisions, nil
 }
-
-// commitTouchesPath reports whether c changed path relative to its parents.
-// REST's commits?path= lists only commits that TOUCH the path; a
-// tree-containment test would also count every later commit that merely
-// still carries it, so revision lists diverged by backend.
-// A root commit touches every path it carries; a commit is untouched when
-// any parent's tree holds the same blob (git's TREESAME rule).
 
 // commitTouchesPath reports whether c changed path relative to its parents.
 // REST's commits?path= lists only commits that TOUCH the path; a

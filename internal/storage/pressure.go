@@ -6,16 +6,16 @@ import (
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
-// Pressure counters (item A1): a hub-level registry of commit
+// Pressure counters: a hub-level registry of commit
 // pipeline pressure events for operators and degraded-mode
 // policy. All counters are monotonic except the per-project
 // consecutive-failure streak, which resets on success.
 //
-// Design notes for Wave-2 consumers (A4/A5/A10):
-//   - A4 reads streaks via PressureFailureStreak / Snapshot.
-//   - A5 reads queue depth via PressurePendingDepth (live stack
+// Design notes for session/REST/CLI consumers of the pressure snapshot:
+//   - Sessions read streaks via PressureFailureStreak / Snapshot.
+//   - REST reads queue depth via PressurePendingDepth (live stack
 //     length, not a counter: depth falls on every commit).
-//   - A10 adds orphan/sprawl counters here: one uint64 field,
+//   - Chunk GC adds orphan/sprawl counters here: one uint64 field,
 //     one note* method, one Snapshot line each. The extension
 //     pattern is one monotonic counter per event class, all
 //     guarded by the same mutex.
@@ -33,7 +33,7 @@ type pressureRegistry struct {
 	commitSuccesses uint64
 	commitFailures  uint64
 	rebases         uint64
-	// Item A10 chunk-GC totals. Scans/Collected/Reclaimed are
+	// Chunk-GC totals. Scans/Collected/Reclaimed are
 	// monotonic event counters; OrphanLast* are gauges holding the
 	// most recent scan result (set, not incremented) so operators
 	// can derive the orphan rate (last/scanned) without a probe.
@@ -203,6 +203,6 @@ func (h *StorHub) PressurePendingDepth(project string) int {
 	pm.mu.RLock()
 	depth := len(pm.opStack.ops)
 	pm.mu.RUnlock()
-	logging.Debug(h.projectLogger(project), "pressure depth check", "project", project, "depth", depth)
+	logging.Debug(h.projectLogger(project), "pressure depth check", "depth", depth)
 	return depth
 }
