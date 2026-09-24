@@ -81,7 +81,7 @@ func TestNormalizeIdentityFastPath(t *testing.T) {
 }
 
 // TestCheckAccessResolvedConsumesTraversedChain pins the single-resolve
-// DAC contract: the traversed chain from ResolveAccessPath covers the
+// DAC contract: the traversed chain from StatResolveTracked covers the
 // symlink walk (a 0700 directory containing an absolute link must not
 // leak through the link), while the plain check on the concrete key alone
 // would miss it.
@@ -101,7 +101,7 @@ func TestCheckAccessResolvedConsumesTraversedChain(t *testing.T) {
 		UploadedAt: backend.now, ModifiedAt: backend.now, AccessedAt: backend.now, ChangedAt: backend.now,
 	}, backend.now)
 	repo := backend.repo
-	clean, traversed, err := ResolveAccessPath(repo, "secret/link", true)
+	clean, traversed, err := StatResolveTracked(repo, "secret/link")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -124,11 +124,11 @@ func TestCheckAccessResolvedConsumesTraversedChain(t *testing.T) {
 	}
 }
 
-// TestResolveAccessPathPhysicalSemantics guards the prefix-stack rewrite
+// TestStatResolveTrackedPhysicalSemantics guards the prefix-stack rewrite
 // of resolvePathTracked: ".." pops the resolved stack (physical parent),
 // absolute links reset the cursor, and relative links splice against the
 // link's parent - all while the traversed chain stays in walk order.
-func TestResolveAccessPathPhysicalSemantics(t *testing.T) {
+func TestStatResolveTrackedPhysicalSemantics(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(600)
 	backend.seedDir("a")
@@ -144,7 +144,7 @@ func TestResolveAccessPathPhysicalSemantics(t *testing.T) {
 
 	// link -> b/c resolves relative to its parent a, so the physical
 	// parent of a/b/c is a/b - not the lexical "a" a naive join yields.
-	clean, traversed, err := ResolveAccessPath(repo, "a/link/..", false)
+	clean, traversed, err := LstatResolveTracked(repo, "a/link/..")
 	if err != nil {
 		t.Fatalf("resolve a/link/..: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestResolveAccessPathPhysicalSemantics(t *testing.T) {
 	if !slices.Contains(traversed, "a/b") {
 		t.Fatalf("traversed must record the descended chain in walk order: %v", traversed)
 	}
-	clean, _, err = ResolveAccessPath(repo, "a/link/f.txt", true)
+	clean, _, err = StatResolveTracked(repo, "a/link/f.txt")
 	if err != nil {
 		t.Fatalf("resolve a/link/f.txt: %v", err)
 	}

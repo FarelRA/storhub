@@ -76,13 +76,22 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		}
 		fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repoMeta, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 		if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := validateCreate(ctx, repo, cleanPath, traversed); err != nil {
+			// Re-resolve against the live transaction state: the
+			// pre-transaction walk above is fast-fail only.
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, filePath)
+			if err != nil {
 				return err
 			}
-			fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repo, cleanPath, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
+			if liveClean == "" {
+				return errors.New("file path is required")
+			}
+			if err := validateCreate(ctx, repo, liveClean, liveTraversed); err != nil {
+				return err
+			}
+			fileMeta.Mode, fileMeta.UID, fileMeta.GID = ApplyParentInheritance(repo, liveClean, false, fileMeta.Mode, fileMeta.UID, fileMeta.GID)
 			fileMeta.Inode = repo.AllocateInode()
-			repo.UpsertFile(cleanPath, fileMeta, now)
-			TouchParentDirectory(repo, cleanPath, now)
+			repo.UpsertFile(liveClean, fileMeta, now)
+			TouchParentDirectory(repo, liveClean, now)
 			return nil
 		}, fmt.Sprintf("storhub: create %s", cleanPath)); err != nil {
 			return err
@@ -112,7 +121,9 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := LstatResolveTracked(repoMeta, dirPath)
+		// Fast-fail only (resolution errors, root short-circuit): the
+		// transaction below re-resolves against live state.
+		cleanPath, _, err := LstatResolveTracked(repoMeta, dirPath)
 		if err != nil {
 			return err
 		}
@@ -122,29 +133,41 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 			return AlreadyExists("/")
 		}
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
+			// Re-resolve against the live transaction state: the
+			// pre-transaction walk above is fast-fail only.
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, dirPath)
+			if err != nil {
 				return err
 			}
-			if err := CheckParentWriteResolved(ctx, repo, cleanPath, traversed); err != nil {
+			if liveClean == "" {
+				return AlreadyExists("/")
+			}
+			if err := CheckWalkResolved(ctx, repo, liveTraversed); err != nil {
 				return err
 			}
-			if repo.HasDirectory(cleanPath) {
-				return AlreadyExists(cleanPath)
+			if err := CheckParentWriteResolved(ctx, repo, liveClean, liveTraversed); err != nil {
+				return err
 			}
-			if repo.FindFile(cleanPath) != nil {
-				return AlreadyExists(cleanPath)
+			if repo.HasDirectory(liveClean) {
+				return AlreadyExists(liveClean)
 			}
-			if parent := ParentPath(cleanPath); parent != "" && !repo.HasDirectory(parent) {
+			if repo.FindFile(liveClean) != nil {
+				return AlreadyExists(liveClean)
+			}
+			if parent := ParentPath(liveClean); parent != "" && !repo.HasDirectory(parent) {
 				return NotFound(parent)
 			}
-			repo.EnsureDirectory(cleanPath, s.backend.Now())
-			if dir := repo.GetDirectory(cleanPath); dir != nil {
+			// One timestamp per op: the directory, its inheritance, and its
+			// parent all stamp the same instant.
+			now := s.backend.Now()
+			repo.EnsureDirectory(liveClean, now)
+			if dir := repo.GetDirectory(liveClean); dir != nil {
 				dir.UID, dir.GID = OwnerIDsForCreate(ctx, dir.UID, dir.GID)
-				dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, cleanPath, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
-				dir.ChangedAt = s.backend.Now()
-				repo.WriteDirDirect(cleanPath, *dir)
+				dir.Mode, dir.UID, dir.GID = ApplyParentInheritance(repo, liveClean, true, ApplyCreateMode(ctx, dir.Mode), dir.UID, dir.GID)
+				dir.ChangedAt = now
+				repo.WriteDirDirect(liveClean, *dir)
 			}
-			TouchParentDirectory(repo, cleanPath, s.backend.Now())
+			TouchParentDirectory(repo, liveClean, now)
 			return nil
 		}, fmt.Sprintf("storhub: mkdir %s", cleanPath))
 		return err
@@ -164,7 +187,9 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := LstatResolveTracked(repoMeta, dirPath)
+		// Fast-fail only (resolution errors, root short-circuit): the
+		// transaction below re-resolves against live state.
+		cleanPath, _, err := LstatResolveTracked(repoMeta, dirPath)
 		if err != nil {
 			return err
 		}
@@ -174,36 +199,46 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 			return syscall.EBUSY
 		}
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
+			// Re-resolve against the live transaction state: the
+			// pre-transaction walk above is fast-fail only.
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, dirPath)
+			if err != nil {
 				return err
 			}
-			if err := CheckParentWriteResolved(ctx, repo, cleanPath, traversed); err != nil {
+			if liveClean == "" {
+				return syscall.EBUSY
+			}
+			if err := CheckWalkResolved(ctx, repo, liveTraversed); err != nil {
 				return err
 			}
-			if err := CheckStickyDelete(ctx, repo, ParentPath(cleanPath), cleanPath); err != nil {
+			if err := CheckParentWriteResolved(ctx, repo, liveClean, liveTraversed); err != nil {
 				return err
 			}
-			if repo.FindFile(cleanPath) != nil {
-				return NotDirectory(cleanPath)
+			if err := CheckStickyDelete(ctx, repo, ParentPath(liveClean), liveClean); err != nil {
+				return err
 			}
-			if !repo.HasDirectory(cleanPath) {
-				return NotFound(cleanPath)
+			if repo.FindFile(liveClean) != nil {
+				return NotDirectory(liveClean)
 			}
-			childDirs, childFiles := repo.DirectoryChildren(cleanPath)
+			if !repo.HasDirectory(liveClean) {
+				return NotFound(liveClean)
+			}
+			childDirs, childFiles := repo.DirectoryChildren(liveClean)
 			if len(childDirs) > 0 || len(childFiles) > 0 {
-				return NotEmpty(cleanPath)
+				return NotEmpty(liveClean)
 			}
-			repo.RemoveDirectory(cleanPath)
-			TouchParentDirectory(repo, cleanPath, s.backend.Now())
+			repo.RemoveDirectory(liveClean)
+			TouchParentDirectory(repo, liveClean, s.backend.Now())
 			return nil
 		}, fmt.Sprintf("storhub: rmdir %s", cleanPath))
 		return err
 	})
 }
 
-// RenameContext moves oldPath to newPath honoring mutate options.
+// RenameContext moves oldPath to newPath honoring mutate options. The log
+// keys are src/dst, matching copy and the canonical dst vocabulary.
 func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath string, opts ...MutateOption) (err error) {
-	return s.withOp(project, "rename", true, []any{"old_path", oldPath, "new_path", newPath}, func() error {
+	return s.withOp(project, "rename", true, []any{"src", oldPath, "dst", newPath}, func() error {
 		mutate := ApplyMutateOptions(opts)
 		// rename(2) renames the final component itself: a symlink endpoint is
 		// moved, never followed, so resolution is lstat-style on both
@@ -218,11 +253,13 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 		if err != nil {
 			return err
 		}
-		oldClean, oldTraversed, err := LstatResolveTracked(preRepo, oldPath)
+		// Fast-fail only: the transaction below re-resolves both endpoints
+		// against live state before authorizing anything.
+		oldClean, _, err := LstatResolveTracked(preRepo, oldPath)
 		if err != nil {
 			return err
 		}
-		newClean, newTraversed, err := LstatResolveTracked(preRepo, newPath)
+		newClean, _, err := LstatResolveTracked(preRepo, newPath)
 		if err != nil {
 			return err
 		}
@@ -234,39 +271,57 @@ func (s *Service) RenameContext(ctx context.Context, project, oldPath, newPath s
 			return nil
 		}
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := CheckWalkResolved(ctx, repo, oldTraversed); err != nil {
+			// Re-resolve both endpoints against the live transaction state:
+			// the pre-transaction walk above is fast-fail only. Authorizing
+			// the stale chains would bless a walk a concurrent
+			// rename/replace of a symlink component already redirected.
+			oldLive, oldChain, err := LstatResolveTracked(repo, oldPath)
+			if err != nil {
 				return err
 			}
-			if err := CheckWalkResolved(ctx, repo, newTraversed); err != nil {
+			newLive, newChain, err := LstatResolveTracked(repo, newPath)
+			if err != nil {
 				return err
 			}
-			srcFile := repo.FindFile(oldClean)
-			srcIsDir := repo.HasDirectory(oldClean)
+			if oldLive == newLive {
+				if repo.FindFile(oldLive) == nil && !repo.HasDirectory(oldLive) {
+					return NotFound(oldLive)
+				}
+				return nil
+			}
+			if err := CheckWalkResolved(ctx, repo, oldChain); err != nil {
+				return err
+			}
+			if err := CheckWalkResolved(ctx, repo, newChain); err != nil {
+				return err
+			}
+			srcFile := repo.FindFile(oldLive)
+			srcIsDir := repo.HasDirectory(oldLive)
 			if srcFile == nil && !srcIsDir {
-				return NotFound(oldClean)
+				return NotFound(oldLive)
 			}
-			if err := CheckParentWriteResolved(ctx, repo, oldClean, oldTraversed); err != nil {
+			if err := CheckParentWriteResolved(ctx, repo, oldLive, oldChain); err != nil {
 				return err
 			}
-			if err := CheckParentWriteResolved(ctx, repo, newClean, newTraversed); err != nil {
+			if err := CheckParentWriteResolved(ctx, repo, newLive, newChain); err != nil {
 				return err
 			}
-			if parent := ParentPath(newClean); parent != "" && !repo.HasDirectory(parent) {
+			if parent := ParentPath(newLive); parent != "" && !repo.HasDirectory(parent) {
 				return NotFound(parent)
 			}
-			dstFile := repo.FindFile(newClean)
-			dstDir := repo.GetDirectory(newClean)
+			dstFile := repo.FindFile(newLive)
+			dstDir := repo.GetDirectory(newLive)
 			// RENAME_NOREPLACE: the existence decision is made against the
 			// live transaction state, closing the TOCTOU window a pre-stat
 			// check leaves open.
 			if mutate.NoReplace() && (dstFile != nil || dstDir != nil) {
-				return AlreadyExists(newClean)
+				return AlreadyExists(newLive)
 			}
 			now := s.backend.Now()
 			if srcFile != nil {
-				return renameFileInTxn(ctx, repo, oldClean, newClean, dstFile, dstDir, now)
+				return renameFileInTxn(ctx, repo, oldLive, newLive, dstFile, dstDir, now)
 			}
-			return renameDirInTxn(ctx, repo, oldClean, newClean, dstFile, dstDir, now)
+			return renameDirInTxn(ctx, repo, oldLive, newLive, dstFile, dstDir, now)
 		}, fmt.Sprintf("storhub: rename %s to %s", oldClean, newClean))
 		return err
 	})
@@ -414,11 +469,13 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 		if err != nil {
 			return err
 		}
-		srcClean, srcTraversed, err := StatResolveTracked(preRepo, srcPath)
+		// Fast-fail only: the transaction below re-resolves both endpoints
+		// against live state before authorizing anything.
+		srcClean, _, err := StatResolveTracked(preRepo, srcPath)
 		if err != nil {
 			return err
 		}
-		dstClean, dstTraversed, err := StatResolveTracked(preRepo, dstPath)
+		dstClean, _, err := StatResolveTracked(preRepo, dstPath)
 		if err != nil {
 			return err
 		}
@@ -429,38 +486,54 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			return AlreadyExists(srcClean)
 		}
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := CheckWalkResolved(ctx, repo, srcTraversed); err != nil {
+			// Re-resolve both endpoints against the live transaction state:
+			// the pre-transaction walk above is fast-fail only.
+			srcLive, srcChain, err := StatResolveTracked(repo, srcPath)
+			if err != nil {
 				return err
 			}
-			if err := CheckWalkResolved(ctx, repo, dstTraversed); err != nil {
+			dstLive, dstChain, err := StatResolveTracked(repo, dstPath)
+			if err != nil {
 				return err
 			}
-			srcFile := repo.FindFile(srcClean)
-			srcIsDir := repo.HasDirectory(srcClean)
+			if srcLive == dstLive {
+				if repo.FindFile(srcLive) == nil && !repo.HasDirectory(srcLive) {
+					return NotFound(srcLive)
+				}
+				return AlreadyExists(srcLive)
+			}
+			if err := CheckWalkResolved(ctx, repo, srcChain); err != nil {
+				return err
+			}
+			if err := CheckWalkResolved(ctx, repo, dstChain); err != nil {
+				return err
+			}
+			srcFile := repo.FindFile(srcLive)
+			srcIsDir := repo.HasDirectory(srcLive)
 			if srcFile == nil && !srcIsDir {
-				return NotFound(srcClean)
+				return NotFound(srcLive)
 			}
 			// A copy is a read of the source: mirror the read-side DAC of
 			// ReadFileAtContext/ReadDirContext, or an attacker could duplicate
 			// unreadable 0600 files (content refs, sizes, symlink targets)
 			// into their own directory.
 			if srcFile != nil {
-				if err := CheckReadAccessResolved(ctx, repo, srcClean, srcTraversed); err != nil {
+				if err := CheckReadAccessResolved(ctx, repo, srcLive, srcChain); err != nil {
 					return err
 				}
 			} else {
-				if err := CheckListDirAccessResolved(ctx, repo, srcClean, srcTraversed); err != nil {
+				if err := CheckListDirAccessResolved(ctx, repo, srcLive, srcChain); err != nil {
 					return err
 				}
 			}
-			if err := CheckParentWriteResolved(ctx, repo, dstClean, dstTraversed); err != nil {
+			if err := CheckParentWriteResolved(ctx, repo, dstLive, dstChain); err != nil {
 				return err
 			}
-			if parent := ParentPath(dstClean); parent != "" && !repo.HasDirectory(parent) {
+			if parent := ParentPath(dstLive); parent != "" && !repo.HasDirectory(parent) {
 				return NotFound(parent)
 			}
-			dstFile := repo.FindFile(dstClean)
-			dstDir := repo.GetDirectory(dstClean)
+			dstFile := repo.FindFile(dstLive)
+			dstDir := repo.GetDirectory(dstLive)
 			now := s.backend.Now()
 			// Caller ownership for the new nodes: provisioned once here so
 			// both copy helpers stamp the same identity (OwnerIDsForCreate
@@ -469,9 +542,9 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 			defaultUID, defaultGID := s.backend.DefaultOwnerIDs()
 			createUID, createGID := OwnerIDsForCreate(ctx, defaultUID, defaultGID)
 			if srcFile != nil {
-				return copyFileInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now, createUID, createGID)
+				return copyFileInTxn(ctx, repo, srcLive, dstLive, dstFile, dstDir, now, createUID, createGID)
 			}
-			return copyDirInTxn(ctx, repo, srcClean, dstClean, dstFile, dstDir, now, createUID, createGID)
+			return copyDirInTxn(ctx, repo, srcLive, dstLive, dstFile, dstDir, now, createUID, createGID)
 		}, fmt.Sprintf("storhub: copy %s to %s", srcClean, dstClean))
 		return err
 	})
@@ -484,7 +557,8 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 // Ownership and privilege model: a copy is a creation, not an identity
 // transfer. The destination carries the caller's owner IDs (plus
 // setgid-parent inheritance) and the source permission bits minus
-// setuid/setgid for unprivileged callers (decision 1A), exactly like a
+// setuid/setgid for unprivileged callers (non-admin data writes clear
+// setuid+setgid, see SanitizeWrittenFileModeForContext), exactly like a
 // CloneRange new destination and data writes. Admin (the CAP_FSETID
 // equivalent) keeps the source owner and bits. The store bypasses
 // UpsertFile for WriteFileDirect (the destination parent is verified

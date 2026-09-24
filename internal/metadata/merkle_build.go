@@ -14,8 +14,9 @@ import (
 // BuildTreeStream serializes a flat RepoMetadata into the Merkle object set
 // ONE OBJECT AT A TIME: each new or changed object is handed to emit before
 // the next is built, so the caller can upload/free it instead of holding
-// the entire serialized index in RAM (the whole-tree objects map was ~20%
-// of allocations).
+// the entire serialized index in RAM (profiling once attributed roughly a
+// fifth of commit-path allocations to the whole-tree objects map; the share
+// varies by tree shape, so treat it as motive, not a pinned budget).
 //
 //   - cache (optional): reuse across commits. A node/bucket/releases object
 //     whose inputs are identical to the cached build is skipped entirely

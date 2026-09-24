@@ -10,7 +10,7 @@ import (
 // ever address, without consulting one: empty and whitespace-only paths.
 // It mirrors NormalizePath's blank checks exactly. Traversal spellings are
 // deliberately NOT rejected here: access resolution is physical and
-// repo-aware (see ResolveAccessPath), so only the resolver can decide
+// repo-aware (see StatResolveTracked), so only the resolver can decide
 // whether a ".." pops past the root.
 func ValidateAccessPathShape(value string) error {
 	if value == "" {
@@ -34,7 +34,7 @@ func ValidateAccessPathShape(value string) error {
 // NormalizePath is KEY CANONICALIZATION: it maps a concrete path (no "..",
 // no symlink components) to its canonical storage key. User paths that may
 // contain ".", "..", or symlink components must go through the repo-aware
-// access resolver (ResolveAccessPath) instead.
+// access resolver (StatResolveTracked/LstatResolveTracked) instead.
 func NormalizePath(value string) (string, error) {
 	if err := ValidateAccessPathShape(value); err != nil {
 		return "", err
@@ -55,6 +55,12 @@ func NormalizePath(value string) (string, error) {
 // surrounding slashes) but never trims significant whitespace: a traversal
 // spelling like "../x" can only ever miss the exact-key repo maps (ENOENT),
 // while collapsing it to "" would masquerade as the root directory.
+//
+// Failure-path whitespace differs from the metadata normalizer on purpose:
+// this spelling trims slashes only, while metadata trims surrounding
+// whitespace first. The success path is pinned by the path-conformance test;
+// the failure path only ever misses lookups, so the drift is documented,
+// not unified.
 func normalizeStoredPath(value string) string {
 	cleaned, err := NormalizePath(value)
 	if err != nil {
@@ -86,10 +92,18 @@ func IsParentOrSame(parent, child string) bool {
 	return child == parent || strings.HasPrefix(child, parent+"/")
 }
 
-// RemapPath rewrites target from under oldBase to under newBase.
+// RemapPath rewrites target from under oldBase to under newBase. Callers
+// pass collected subtree members, so target is always oldBase or a slash-
+// delimited child of it; the boundary assert below keeps an out-of-tree
+// target (oldBase "a", target "ab/c") from remapping to a nonsense key.
+// Off-boundary input is returned unchanged (ENOENT surfaces at lookup)
+// instead of producing newBase+"b/c".
 func RemapPath(oldBase, newBase, target string) string {
 	if target == oldBase {
 		return newBase
+	}
+	if !strings.HasPrefix(target, oldBase+"/") {
+		return target
 	}
 	return newBase + strings.TrimPrefix(target, oldBase)
 }

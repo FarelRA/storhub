@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"log/slog"
 	"os/user"
 	"strconv"
 	"sync"
@@ -16,7 +17,13 @@ import (
 // must resolve supplementary groups itself; without them the DAC judges a
 // multi-group caller by primary group alone and wrongly denies group
 // access. REST fills groups from its user record instead and never calls
-// here.
+// here: FUSE is the only production caller (see fuse_state.go).
+//
+// Placement: the cache lives in fs rather than fusefs because the DAC check
+// consuming Groups (identityInGroup) is here, and no other package needs a
+// groups helper today. Relocating it to fusefs (or a dedicated groups
+// package) remains an option if a second consumer appears; that move touches
+// fusefs wiring and is tracked as a follow-up, not done here.
 //
 // Design: os/user (NSS-aware per build: cgo builds consult nsswitch, pure
 // builds read /etc/group), a 5-minute TTL cache capped at 1024 entries
@@ -92,8 +99,10 @@ func LookupUserGroups(uid uint32) ([]uint32, error) {
 	if err != nil {
 		// Fail open with a debug line: the caller proceeds with the
 		// primary gid only, exactly the pre-groups behavior, so a
-		// broken NSS never newly denies access.
-		logging.Debug(nil, "supplementary group lookup failed; continuing with primary group only", "uid", uid, "err", err)
+		// broken NSS never newly denies access. slog.Default is passed
+		// explicitly: there is no per-project logger this deep, and the
+		// package loggers all derive from the process default anyway.
+		logging.Debug(slog.Default(), "supplementary group lookup failed; continuing with primary group only", "uid", uid, "err", err)
 		return nil, err
 	}
 	return append([]uint32(nil), groups...), nil
@@ -147,7 +156,9 @@ func storeGroupCacheLocked(uid uint32, groups []uint32) {
 }
 
 // clearUserGroupCache drops all cached memberships and in-flight markers.
-// Test seam only: production code never resets the cache.
+// Test seam only: production code never resets the cache. Tests calling it
+// must not run in parallel: the cache is process-global, so a parallel
+// test would observe (or evict) entries belonging to another test.
 func clearUserGroupCache() {
 	groupMu.Lock()
 	defer groupMu.Unlock()

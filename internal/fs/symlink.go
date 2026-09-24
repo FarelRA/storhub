@@ -41,37 +41,8 @@ func StatResolveTracked(repo *meta.RepoMetadata, targetPath string) (string, []s
 	return resolvePathTracked(repo, targetPath, true)
 }
 
-// ResolvePath is kept for existing callers: it is LstatResolve when
-// followFinal is false and StatResolve when true.
-func ResolvePath(repo *meta.RepoMetadata, targetPath string, followFinal bool) (string, error) {
-	if followFinal {
-		return StatResolve(repo, targetPath)
-	}
-	return LstatResolve(repo, targetPath)
-}
-
-// ResolveAccessPath is the single repo-aware entry point every
-// path-taking operation must use to turn a USER path (which may contain
-// ".", "..", and symlink components) into the concrete storage key it
-// addresses, with POSIX physical resolution semantics. It returns the
-// ordered list of directories the walk descended into alongside the key so
-// DAC checks can consume the real traversal chain (an absolute link resets
-// the cursor; checking only the final key's ancestors would miss the
-// chain up to the link). followFinal selects stat/open semantics (true:
-// the final symlink is followed) versus lstat/readlink/unlink semantics
-// (false: the final component is returned unresolved). Prefer the
-// StatResolveTracked/LstatResolveTracked pair for new code; this wrapper
-// stays for existing callers. Pure key
-// canonicalization of concrete paths stays with NormalizePath; this
-// function never pre-canonicalizes its input.
-func ResolveAccessPath(repo *meta.RepoMetadata, rawPath string, followFinal bool) (string, []string, error) {
-	if followFinal {
-		return StatResolveTracked(repo, rawPath)
-	}
-	return LstatResolveTracked(repo, rawPath)
-}
-
-// resolvePathTracked is ResolvePath plus the ordered list of directories
+// resolvePathTracked is the tracked-resolution core behind StatResolveTracked
+// and LstatResolveTracked. It returns the ordered list of directories
 // the walk actually descended into (root first). An absolute link resets
 // the resolution cursor, so checking only the final path's ancestors would
 // skip the chain up to the link itself - a 0700 directory containing an

@@ -306,13 +306,13 @@ const maxMetadataVersion = 6
 // is written as a split (version 6) document.
 const maxBlobVersion = 5
 
-// IsSplit reports whether this tree corresponds to the split (version-5)
+// IsSplit reports whether this tree corresponds to the split (version-6)
 // layout: a manifest plus content-addressed objects. A tree loaded from a
 // legacy single-blob document reports false until it is migrated on write.
 func (m *RepoMetadata) IsSplit() bool { return m.Version >= maxMetadataVersion }
 
 // MarkSplit records that this tree is (or will be) stored in the split
-// (version-5) layout. The write path calls it before publishing, so a legacy
+// (version-6) layout. The write path calls it before publishing, so a legacy
 // tree migrates on its first commit.
 func (m *RepoMetadata) MarkSplit() { m.Version = maxMetadataVersion }
 

@@ -99,6 +99,10 @@ func Migrate(data []byte) ([]byte, int, error) {
 		return data, from, nil
 	}
 	started := time.Now()
+	// Warn vocabulary (reason/from/to/step) is load-path convention: storage
+	// verbs use step/message/project for commit work, while migration and
+	// timestamp-fallback lines keep reason/from/to so manifest-era greps stay
+	// stable. The split is deliberate, not drift.
 	logging.Warn(metaLog(), "metadata migration", "reason", "upgrading metadata blob to the current schema", "from", from, "to", maxBlobVersion)
 	for v := from; v < maxBlobVersion; v++ {
 		step := migrators[v]

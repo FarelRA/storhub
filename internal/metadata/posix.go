@@ -64,5 +64,15 @@ func timeToUnix(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
 	}
+	// UnixNano wraps silently outside the ~1678-2262 window a v1 document
+	// can legally carry (pre-1678 or far-future stamps); saturate instead
+	// of storing a wrapped value Validate would then chase.
+	const maxInt64 = int64(^uint64(0) >> 1)
+	const minInt64 = -maxInt64 - 1
+	if sec := t.Unix(); sec > maxInt64/nanosPerSecond {
+		return maxInt64
+	} else if sec < minInt64/nanosPerSecond {
+		return minInt64
+	}
 	return t.UnixNano()
 }

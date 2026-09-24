@@ -94,7 +94,9 @@ func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		}
 	}
 	if manifest.Version < maxMetadataVersion {
-		// Seconds-era manifest: its objects carry seconds timestamps.
+		// Seconds-era manifest: its objects carry seconds timestamps. The
+		// reason/from/to vocabulary matches the migration line in migrate.go
+		// (load-path convention, not storage-verb step/message).
 		logging.Warn(metaLog(), "metadata timestamp fallback", "reason", "seconds-era manifest, migrating timestamps to nanoseconds", "from", manifest.Version, "to", maxMetadataVersion)
 		migrateTreeTimesToNano(meta)
 	}
@@ -106,6 +108,15 @@ func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 	return meta, nil
 }
 
+// maxLoadTreeDepth bounds manifest directory nesting for both tree
+// loaders. Each level below recurses (sequential loader) or chains fetches
+// (parallel loader), so a degenerate manifest tens of thousands deep would
+// exhaust stack or pile up loader state before cycle detection (which only
+// catches repeated SHAs, not depth) could fire. 4096 sits far above any real
+// tree: PATH_MAX caps single paths at 4096 bytes, so ~2048 one-character
+// levels is the deepest addressable tree, and this limit never rejects one.
+const maxLoadTreeDepth = 4096
+
 // loadNode recursively loads a directory node and its subtree. chain is
 // the sha chain from the root to this node's parent: a sha repeating on
 // its OWN ancestor chain is a corrupt cycle, but the same object shared
@@ -114,6 +125,9 @@ func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 func loadNode(meta *RepoMetadata, dirPath, sha string, getObject func(string) ([]byte, error), chain map[string]bool) error {
 	if sha == "" {
 		return fmt.Errorf("empty node sha at %q", dirPath)
+	}
+	if len(chain) > maxLoadTreeDepth {
+		return fmt.Errorf("tree depth exceeds %d levels at %q", maxLoadTreeDepth, dirPath)
 	}
 	if chain[sha] {
 		return fmt.Errorf("cycle in tree objects at %q (sha %s)", dirPath, shortObj(sha))
@@ -349,6 +363,12 @@ func (l *parallelTreeLoader) spawnSubtree(name, sha string, chain []string) {
 
 func (l *parallelTreeLoader) loadSubtree(dirPath, sha string, chain []string) {
 	if l.stop.Load() {
+		return
+	}
+	// Depth bound mirrors the sequential loader: len(chain)-1 is the
+	// directory depth (chain ends in this node's own sha).
+	if len(chain)-1 > maxLoadTreeDepth {
+		l.fail(fmt.Errorf("tree depth exceeds %d levels at %q", maxLoadTreeDepth, dirPath))
 		return
 	}
 	// chain already ends in sha (extended by the spawner); membership is

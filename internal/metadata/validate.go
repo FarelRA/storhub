@@ -200,6 +200,12 @@ func (m *RepoMetadata) validateFiles(seenDirs map[string]struct{}) (int, int64, 
 // overlap, bounds) and every orphan chunk record for negativity. Referenced
 // records are checked per file for precise messages; the orphan loop over
 // the catalog then only ever fires for unreferenced records.
+//
+// The per-file duplicate-chunk-reference check here intentionally overlaps
+// FileMeta.Validate's own duplicate scan: Validate runs at entry granularity
+// (missing-record-agnostic, usable standalone), while this walk checks the
+// same ids against the live catalog with file-qualified messages. One pass
+// cannot serve both callers, so the double scan stays.
 func (m *RepoMetadata) validateChunkRange() error {
 	// One scratch map for every file's duplicate-chunk-reference check:
 	// cleared per file instead of allocated per file.

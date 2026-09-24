@@ -8,7 +8,7 @@ import (
 // TestMutatorStatsAgreementWithRecomputeStats drives every tracked mutator
 // (plus the RemoveRelease+EnsureRelease and PutChunk-before-EnsureRelease
 // drain cycles) and requires the incremental TotalFiles/TotalSize/AssetCount
-// accounting to agree exactly with a from-scratch RecomputeStats walk — and
+// accounting to agree exactly with a from-scratch RecomputeStats walk, and
 // with the sealed transaction. Any drift between incremental and full
 // accounting fails here instead of passing silently through Validate.
 func TestMutatorStatsAgreementWithRecomputeStats(t *testing.T) {

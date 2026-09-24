@@ -149,5 +149,10 @@ type FSStats struct {
 	Inodes      int   `json:"inodes"`
 	Bytes       int64 `json:"bytes"`
 	Releases    int   `json:"releases"`
-	Assets      int   `json:"assets"`
+	// Assets counts chunk records carrying a release tag (one per chunk
+	// row), not distinct asset IDs: chunks sharing one asset ID count
+	// once per row. The authoritative per-asset count is the release
+	// catalog's AssetCount, which StatFS callers needing asset precision
+	// should prefer.
+	Assets int `json:"assets"`
 }

@@ -190,7 +190,7 @@ func TestServicePOSIXWorkflow(t *testing.T) {
 	if err := svc.RemoveXAttrContext(ctx, "demo", "", "user.root"); err != nil {
 		t.Fatalf("remove root xattr: %v", err)
 	}
-	if !shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).IsDir && shfs.EntryInfoFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).Path != "docs/base.txt" {
+	if !shfs.EntryFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).IsDir && shfs.EntryFromFile(base, "docs/base.txt", backend.repo.FileNLink("docs/base.txt")).Path != "docs/base.txt" {
 		t.Fatal("unexpected file entry conversion")
 	}
 }

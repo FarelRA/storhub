@@ -53,9 +53,6 @@ type Service struct {
 // past the cap evict one arbitrary entry; the next op rebuilds it.
 const maxProjectStates = 256
 
-// PendingReleaseTag is the staging release tag for in-flight uploads.
-const PendingReleaseTag = "pending"
-
 // NewService builds a Service over the given backend.
 func NewService(backend Backend) *Service {
 	return &Service{backend: backend}
@@ -168,7 +165,7 @@ func RequireParentDirectory(repo *meta.RepoMetadata, filePath string) error {
 }
 
 // EntryFromFile builds the stat view of one file node. It is the single
-// constructor behind EntryInfoFromFile and the FUSE entry fills: every
+// constructor behind the FUSE entry fills: every
 // renderer calls this instead of re-spelling the field mapping.
 func EntryFromFile(file *meta.FileMeta, path string, nlink int) *EntryInfo {
 	kind := meta.NodeKindFile
@@ -193,13 +190,7 @@ func EntryFromFile(file *meta.FileMeta, path string, nlink int) *EntryInfo {
 	}
 }
 
-// EntryInfoFromFile is kept for existing callers; new code calls EntryFromFile.
-func EntryInfoFromFile(file *meta.FileMeta, path string, nlink int) *EntryInfo {
-	return EntryFromFile(file, path, nlink)
-}
-
-// EntryFromDirectory builds the stat view of one directory node: the
-// single constructor behind EntryInfoFromDirectory.
+// EntryFromDirectory builds the stat view of one directory node.
 func EntryFromDirectory(dir *meta.DirMeta, path string, nlink int) *EntryInfo {
 	return &EntryInfo{
 		Path:       path,
@@ -214,11 +205,6 @@ func EntryFromDirectory(dir *meta.DirMeta, path string, nlink int) *EntryInfo {
 		AccessedAt: dir.AccessedAt,
 		ChangedAt:  dir.ChangedAt,
 	}
-}
-
-// EntryInfoFromDirectory is kept for existing callers; new code calls EntryFromDirectory.
-func EntryInfoFromDirectory(dir *meta.DirMeta, path string, nlink int) *EntryInfo {
-	return EntryFromDirectory(dir, path, nlink)
 }
 
 // EntryFromDirEntry lifts a listing row into the full attribute view the
@@ -243,7 +229,11 @@ func EntryFromDirEntry(e DirEntry, childPath string) *EntryInfo {
 	}
 }
 
-// DirEntryFromDirectory builds a listing row for one directory node.
+// DirEntryFromDirectory builds a listing row for one directory node. It
+// takes the entry by value (listing rows are copied into slices anyway)
+// while EntryFromDirectory takes a pointer (it renders shared stored state
+// without copying): the convention is value for row builders, pointer for
+// view builders.
 func DirEntryFromDirectory(dir meta.DirMeta, dirPath string, nlink int) DirEntry {
 	return DirEntry{Name: path.Base(dirPath), Path: dirPath, IsDir: true, Inode: dir.Inode, Mode: dir.Mode, NLink: uint32(nlink), UID: dir.UID, GID: dir.GID, CreatedAt: dir.CreatedAt, ModifiedAt: dir.ModifiedAt, AccessedAt: dir.AccessedAt, ChangedAt: dir.ChangedAt}
 }

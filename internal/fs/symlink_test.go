@@ -21,20 +21,20 @@ func TestSymlinkResolution(t *testing.T) {
 	// Absolute link to a directory.
 	m.UpsertFile("abs", meta.FileMeta{Symlink: "/target", Inode: 5}, 1)
 
-	resolved, err := ResolvePath(m, "docs/link", true)
+	resolved, err := StatResolve(m, "docs/link")
 	if err != nil || resolved != "docs/base.txt" {
 		t.Fatalf("relative link resolved to %q err=%v", resolved, err)
 	}
-	resolved, err = ResolvePath(m, "docs/link", false)
+	resolved, err = LstatResolve(m, "docs/link")
 	if err != nil || resolved != "docs/link" {
 		t.Fatalf("no-follow final resolved to %q err=%v", resolved, err)
 	}
-	resolved, err = ResolvePath(m, "abs", true)
+	resolved, err = StatResolve(m, "abs")
 	if err != nil || resolved != "target" {
 		t.Fatalf("absolute dir link resolved to %q err=%v", resolved, err)
 	}
-	// stat() semantics compose ResolvePath(follow) with a lookup.
-	resolved, err = ResolvePath(m, "docs/link", true)
+	// stat() semantics compose StatResolve with a lookup.
+	resolved, err = StatResolve(m, "docs/link")
 	if err != nil {
 		t.Fatalf("resolve followed: %v", err)
 	}
@@ -44,14 +44,14 @@ func TestSymlinkResolution(t *testing.T) {
 	}
 
 	// Traversal permission checks resolve intermediate links.
-	if err := CheckTraverse(context.Background(), m, "docs/link"); err != nil {
+	if err := CheckWalk(context.Background(), m, "docs/link"); err != nil {
 		t.Fatalf("traverse through symlink failed: %v", err)
 	}
 
 	// Cycles must fail with ELOOP, not hang or succeed.
 	m.UpsertFile("loop-a", meta.FileMeta{Symlink: "loop-b", Inode: 6}, 1)
 	m.UpsertFile("loop-b", meta.FileMeta{Symlink: "loop-a", Inode: 7}, 1)
-	if _, err := ResolvePath(m, "loop-a", true); err != syscall.ELOOP {
+	if _, err := StatResolve(m, "loop-a"); err != syscall.ELOOP {
 		t.Fatalf("expected ELOOP for cyclic links, got %v", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestSymlinkResolution(t *testing.T) {
 // of the link's own parent chain must still be exec-checked. A 0700
 // directory containing "link -> /pub/x" must not leak the link's existence
 // or target to a caller with no permission on the directory.
-func TestCheckTraverseAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
+func TestCheckWalkAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
 	t.Parallel()
 	m := meta.NewRepoMetadata("demo")
 	m.EnsureDirectory("v", 1)
@@ -78,21 +78,21 @@ func TestCheckTraverseAbsoluteSymlinkKeepsLinkParentChain(t *testing.T) {
 	m.RebuildIndexes()
 
 	attacker := WithIdentity(context.Background(), Identity{UID: 1001, GID: 1001, Groups: []uint32{1001}})
-	if err := CheckTraverse(attacker, m, "v/link"); !errors.Is(err, syscall.EACCES) {
+	if err := CheckWalk(attacker, m, "v/link"); !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES reaching a link inside a 0700 dir, got %v", err)
 	}
-	if err := CheckTraverse(attacker, m, "v/link/deeper"); !errors.Is(err, syscall.EACCES) {
+	if err := CheckWalk(attacker, m, "v/link/deeper"); !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES through the absolute link, got %v", err)
 	}
 	owner := WithIdentity(context.Background(), Identity{UID: 1000, GID: 1000, Groups: []uint32{1000}})
-	if err := CheckTraverse(owner, m, "v/link"); err != nil {
+	if err := CheckWalk(owner, m, "v/link"); err != nil {
 		t.Fatalf("owner traverse: %v", err)
 	}
 }
 
 // The hop budget must match Linux's SYMLOOP_MAX (40); legitimate
 // deep chains get spurious ELOOP below it.
-func TestResolvePathDeepChainWithinLinuxSymlinkLimit(t *testing.T) {
+func TestStatResolveDeepChainWithinLinuxSymlinkLimit(t *testing.T) {
 	t.Parallel()
 	m := meta.NewRepoMetadata("demo")
 	m.UpsertFile("leaf", meta.FileMeta{Size: 1, Inode: 2}, 1)
@@ -103,7 +103,7 @@ func TestResolvePathDeepChainWithinLinuxSymlinkLimit(t *testing.T) {
 		}
 		m.UpsertFile(fmt.Sprintf("link%d", i), meta.FileMeta{Symlink: target, Inode: uint64(10 + i)}, 1)
 	}
-	resolved, err := ResolvePath(m, "link29", true)
+	resolved, err := StatResolve(m, "link29")
 	if err != nil || resolved != "leaf" {
 		t.Fatalf("30-hop chain must resolve under the 40-hop limit, got %q err=%v", resolved, err)
 	}

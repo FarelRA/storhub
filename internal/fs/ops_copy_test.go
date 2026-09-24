@@ -41,7 +41,8 @@ func TestCopyRequiresSourceReadAccess(t *testing.T) {
 }
 
 // CopyContext must mint caller ownership and clear setuid/setgid for
-// unprivileged callers (decision 1A), matching CloneRange new
+// unprivileged callers (non-admin data writes clear setuid+setgid, see
+// SanitizeWrittenFileModeForContext), matching CloneRange new
 // destinations and data writes: a copy must never mint a root-owned
 // setuid node for a non-root caller.
 func TestCopySanitizesOwnerAndPrivilegeBits(t *testing.T) {

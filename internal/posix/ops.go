@@ -17,7 +17,27 @@ import (
 // an alias of fs.Backend so both facades share exactly one interface
 // definition; the extra methods posix itself never calls (patch, asset
 // fills) are part of that single contract rather than a divergent copy.
+//
+// The subset this facade actually exercises is pinned below: adding a new
+// backend call outside posixBackendUses must extend the subset alongside
+// the caller, so the alias never silently widens what posix depends on.
 type Backend = shfs.Backend
+
+// posixBackendUses is the Backend subset the posix verbs call. It exists so
+// the shared alias stays honest about which methods each facade needs.
+type posixBackendUses interface {
+	ValidateProjectName(project string) error
+	EnsureRepoContext(ctx context.Context, project string) error
+	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
+	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
+	Logger() *slog.Logger
+	Now() int64
+	FileNotFound(path string) error
+	DefaultFileMode(kind meta.NodeKind) uint32
+	DefaultOwnerIDs() (uint32, uint32)
+}
+
+var _ posixBackendUses = Backend(nil)
 
 // Service implements POSIX metadata verbs over a Backend.
 type Service struct {
@@ -204,6 +224,9 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 }
 
 // ApplyMetadataPatchContext applies a metadata-only patch to targetPath.
+// The has_mode/has_owner/has_times debug keys are kept verbatim: they are
+// long-standing greppable keys on this verb, and renaming them to
+// single-word form would churn every dashboard filtering on them.
 func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) (err error) {
 	err = s.withOp(project, "apply-metadata-patch", []any{"path", targetPath, "has_mode", patch.HasMode, "has_owner", patch.HasOwner, "has_times", patch.HasTimes}, func() error {
 		if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
@@ -396,7 +419,15 @@ func UpdateFileFamily(repo *meta.RepoMetadata, inode uint64, mutate func(*meta.F
 	for _, name := range names {
 		repo.RemoveFile(name)
 	}
-	for name, clone := range updated {
+	// Deterministic write order: ranging over the map above would commit
+	// siblings in a random sequence per call (harmless today since index
+	// lists re-sort and size deltas commute, but needlessly
+	// non-reproducible across runs and intent logs).
+	for _, name := range names {
+		clone, ok := updated[name]
+		if !ok {
+			continue
+		}
 		repo.WriteFileDirect(name, clone)
 	}
 	return nil

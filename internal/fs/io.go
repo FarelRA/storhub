@@ -40,41 +40,48 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 		}
 		if size == file.Size {
 			// POSIX: even a no-op truncate updates mtime/ctime and, for
-			// non-admin callers, clears setuid+setgid (decision 1A).
+			// non-admin callers, clears setuid+setgid (see
+			// SanitizeWrittenFileModeForContext).
 			now := s.backend.Now()
-			sanitizedMode := SanitizeWrittenFileModeForContext(ctx, file.Mode)
 			if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-				if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
+				// Re-resolve against the live transaction state: the
+				// pre-transaction walk above is fast-fail only. A
+				// concurrent rename/replace of a symlink component must
+				// fail closed here, not authorize against the old chain.
+				liveClean, liveTraversed, err := StatResolveTracked(repo, filePath)
+				if err != nil {
 					return err
 				}
-				if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
+				if err := CheckWalkResolved(ctx, repo, liveTraversed); err != nil {
 					return err
 				}
-				current := repo.FindFile(cleanPath)
+				if err := CheckWriteAccessResolved(ctx, repo, liveClean, liveTraversed); err != nil {
+					return err
+				}
+				current := repo.FindFile(liveClean)
 				if current == nil {
-					return s.backend.FileNotFound(cleanPath)
+					return s.backend.FileNotFound(liveClean)
 				}
 				clone := current.Clone()
 				clone.Mode = SanitizeWrittenFileModeForContext(ctx, clone.Mode)
 				clone.ModifiedAt = now
 				clone.ChangedAt = now
-				repo.ReplaceFile(cleanPath, clone)
+				repo.ReplaceFile(liveClean, clone)
+				// Return the live clone, not a re-sanitized pre-transaction
+				// snapshot: a concurrent chmod between the two loads must
+				// not leave the stored and returned modes diverged.
+				result = &clone
 				return nil
 			}, fmt.Sprintf("storhub: truncate touch %s", cleanPath)); err != nil {
 				return err
 			}
-			clone := file.Clone()
-			clone.Mode = sanitizedMode
-			clone.ModifiedAt = now
-			clone.ChangedAt = now
-			result = &clone
 			return nil
 		}
 		if size < file.Size {
 			result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, size, file.Size-size, nil)
 			return err
 		}
-		result, err = s.zeroExtendFile(ctx, project, cleanPath, traversed, size)
+		result, err = s.zeroExtendFile(ctx, project, filePath, size)
 		return err
 	})
 	return result, err
@@ -87,12 +94,24 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 // no sparse representation. Requests beyond the cap fail with EFBIG rather
 // than burning unbounded backend work. True hole-aware chunks (zero ranges
 // without assets) need a storage-layer format change and are NOT done here.
+//
+// Boundary contract: CLI truncate, REST truncate, and FUSE setattr-grow all
+// funnel through this path, so every surface reports the same EFBIG for
+// over-cap growth (a deliberate deviation from truncate(2), which grows
+// sparsely to arbitrary size). The REST status mapping for EFBIG and the CLI
+// help text naming the limit live on those layers, not here.
 const maxZeroExtendBytes = 16 << 20
 
 // zeroExtendFile grows a file to targetSize with a single zero-filled
-// range patch through the backend's patch verb.
-func (s *Service) zeroExtendFile(ctx context.Context, project, cleanPath string, traversed []string, targetSize int64) (*meta.FileMeta, error) {
+// range patch through the backend's patch verb. filePath is the user path:
+// it is re-resolved against a fresh snapshot here so callers never hand a
+// stale resolution chain across the reload window.
+func (s *Service) zeroExtendFile(ctx context.Context, project, filePath string, targetSize int64) (*meta.FileMeta, error) {
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	cleanPath, traversed, err := StatResolveTracked(repo, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +195,10 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 			return errors.New("write offset must be non-negative")
 		}
 		if len(data) == 0 {
+			// Pure no-op by contract: a zero-length pwrite carries no bytes
+			// to store, so there is nothing to sanitize or stamp. Mode and
+			// timestamps flow through the next non-empty write or an
+			// explicit truncate/chmod instead.
 			clone := file.Clone()
 			result = &clone
 			return nil
@@ -183,11 +206,23 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 		if offset > file.Size {
 			// The hole is zero-filled in one capped patch, then the real
 			// data lands at offset.
-			if _, err := s.zeroExtendFile(ctx, project, cleanPath, traversed, offset); err != nil {
+			if _, err := s.zeroExtendFile(ctx, project, filePath, offset); err != nil {
 				return err
 			}
 			repo, _, err = s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 			if err != nil {
+				return err
+			}
+			// Re-resolve after the fill: the extension reloaded state, so
+			// the pre-transaction chain above is stale past this point.
+			cleanPath, traversed, err = StatResolveTracked(repo, filePath)
+			if err != nil {
+				return err
+			}
+			if err := CheckWalkResolved(ctx, repo, traversed); err != nil {
+				return err
+			}
+			if err := CheckWriteAccessResolved(ctx, repo, cleanPath, traversed); err != nil {
 				return err
 			}
 			file = repo.FindFile(cleanPath)

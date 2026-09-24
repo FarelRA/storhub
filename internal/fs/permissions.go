@@ -158,7 +158,7 @@ func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath st
 }
 
 // CheckReadAccessResolved is CheckReadAccess for a path that
-// ResolveAccessPath already turned into a concrete key: the DAC consumes
+// StatResolveTracked or LstatResolveTracked already turned into a concrete key: the DAC consumes
 // the walk's traversed chain instead of re-resolving the key component by
 // component. Callers that resolved a user path must prefer these
 // *Resolved variants; the plain forms remain for callers holding only a
@@ -223,15 +223,10 @@ func CheckWalk(ctx context.Context, repo *meta.RepoMetadata, targetPath string) 
 	return CheckWalkResolved(ctx, repo, traversed)
 }
 
-// CheckTraverse is the deprecated spelling of CheckWalk, kept so existing
-// callers (including out-of-package storage verbs) keep compiling.
-func CheckTraverse(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
-	return CheckWalk(ctx, repo, targetPath)
-}
-
 // CheckWalkResolved verifies execute permission on the directories a
 // resolution walk actually descended into, in walk order (root first).
-// Operations that resolved a user path with ResolveAccessPath must consume
+// Operations that resolved a user path with StatResolveTracked or
+// LstatResolveTracked must consume
 // the returned traversed list through this check: re-resolving only the
 // concrete key would miss the ancestors of an absolute link's own parent
 // chain (a 0700 directory containing "link -> /pub/x" must not leak
@@ -245,12 +240,6 @@ func CheckWalkResolved(ctx context.Context, repo *meta.RepoMetadata, traversed [
 		}
 	}
 	return nil
-}
-
-// CheckTraversal is the deprecated spelling of CheckWalkResolved, kept so
-// existing callers (including out-of-package storage verbs) keep compiling.
-func CheckTraversal(ctx context.Context, repo *meta.RepoMetadata, traversed []string) error {
-	return CheckWalkResolved(ctx, repo, traversed)
 }
 
 func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struct{}, dirPath string) error {
@@ -311,9 +300,14 @@ func SanitizeWrittenFileMode(mode uint32) uint32 {
 	return mode &^ 0o6000
 }
 
+// KeepOwnerID is the chown(2) "leave unchanged" sentinel: uid_t is
+// unsigned, so (uid_t)-1 on the wire is all-ones. One spelling shared by the
+// fs enforcer below and the posix chown verb.
+const KeepOwnerID = ^uint32(0)
+
 // SanitizeWrittenFileModeForContext clears setuid+setgid on data writes
-// for unprivileged callers (decision 1A). Admin is the CAP_FSETID
-// equivalent and keeps the bits.
+// for unprivileged callers (non-admin data writes clear setuid+setgid).
+// Admin is the CAP_FSETID equivalent and keeps the bits.
 func SanitizeWrittenFileModeForContext(ctx context.Context, mode uint32) uint32 {
 	if IdentityFromContext(ctx).Admin {
 		return mode
@@ -326,7 +320,6 @@ func SanitizeWrittenFileModeForContext(ctx context.Context, mode uint32) uint32 
 // to (Linux allows the owner the chgrp right, and a no-op uid value).
 // The all-ones value is the chown(2) "leave unchanged" sentinel.
 func CanChown(ctx context.Context, entry *EntryInfo, uid, gid uint32) error {
-	const keepOwner = ^uint32(0)
 	id := normalizeIdentity(IdentityFromContext(ctx))
 	if id.Admin {
 		return nil
@@ -334,10 +327,10 @@ func CanChown(ctx context.Context, entry *EntryInfo, uid, gid uint32) error {
 	if id.UID != entry.UID {
 		return syscall.EPERM
 	}
-	if uid != keepOwner && uid != entry.UID {
+	if uid != KeepOwnerID && uid != entry.UID {
 		return syscall.EPERM
 	}
-	if gid != keepOwner && gid != entry.GID && !identityInGroup(id, gid) {
+	if gid != KeepOwnerID && gid != entry.GID && !identityInGroup(id, gid) {
 		return syscall.EPERM
 	}
 	return nil

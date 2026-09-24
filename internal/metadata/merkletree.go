@@ -143,7 +143,7 @@ func NewTreeCache() *TreeCache {
 
 // Clone returns an isolated copy of the cache for one build attempt: all
 // cache writes replace whole entry pointers (never mutate in place), so
-// sharing the pointed-to entries is safe — the copy observes the same
+// sharing the pointed-to entries is safe: the copy observes the same
 // baseline while the build's putNodes land only in the copy. The caller
 // swaps the copy in on commit success and drops it on failure, which is
 // what keeps "cache hit" equivalent to "already stored upstream": a failed
@@ -166,8 +166,14 @@ func (c *TreeCache) Clone() *TreeCache {
 
 // metaLog reports operational events for the metadata package. The
 // package is a pure library with no logger plumbing, so events go through
-// the process-default logger tagged with the metadata component; messages
-// must never be silently dropped, and no payload bytes are ever logged.
+// the process-default logger tagged with the metadata component. This is a
+// deliberate layering trade: threading a logger through BuildTreeStream and
+// LoadTree options would let callers scope or silence metadata logs per
+// project, but every current caller (storage commit, load, migrate paths)
+// shares one process logger already, so the plumbing cost buys no
+// separation today. Revisit if a caller ever needs per-tree log routing.
+// Messages must never be silently dropped, and no payload bytes are ever
+// logged.
 func metaLog() *slog.Logger { return logging.WithComponent(slog.Default(), "metadata") }
 
 // ObjectSHA is the content address of an object's canonical bytes.

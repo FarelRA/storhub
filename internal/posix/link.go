@@ -9,9 +9,12 @@ import (
 	"syscall"
 )
 
-// SymlinkContext creates a symlink at linkPath pointing at target.
+// SymlinkContext creates a symlink at linkPath pointing at target. The
+// debug line logs the target length, not the target: symlink targets are
+// user-controlled bytes that can embed secrets (the xattr verbs apply the
+// same lengths-only discipline to values).
 func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath string) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "symlink", []any{"target", target, "path", linkPath}, func() error {
+	err = s.withOp(project, "symlink", []any{"target_len", len(target), "path", linkPath}, func() error {
 		if err := s.backend.ValidateProjectName(project); err != nil {
 			return err
 		}
@@ -74,22 +77,31 @@ func (s *Service) SymlinkContext(ctx context.Context, project, target, linkPath 
 		}
 		symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(repo, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
 		if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(current *meta.RepoMetadata) error {
-			if err := shfs.CheckWalkResolved(ctx, current, traversed); err != nil {
+			// Re-resolve against the live transaction state: the
+			// pre-transaction walk above is fast-fail only.
+			liveClean, liveChain, err := shfs.LstatResolveTracked(current, linkPath)
+			if err != nil {
 				return err
 			}
-			if err := shfs.CheckParentWriteResolved(ctx, current, cleanPath, traversed); err != nil {
+			if liveClean == "" {
+				return errors.New("symlink path is required")
+			}
+			if err := shfs.CheckWalkResolved(ctx, current, liveChain); err != nil {
 				return err
 			}
-			if err := shfs.RequireParentDirectory(current, cleanPath); err != nil {
+			if err := shfs.CheckParentWriteResolved(ctx, current, liveClean, liveChain); err != nil {
 				return err
 			}
-			if current.FindFile(cleanPath) != nil || current.HasDirectory(cleanPath) {
-				return shfs.AlreadyExists(cleanPath)
+			if err := shfs.RequireParentDirectory(current, liveClean); err != nil {
+				return err
 			}
-			symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(current, cleanPath, false, symlink.Mode, symlink.UID, symlink.GID)
+			if current.FindFile(liveClean) != nil || current.HasDirectory(liveClean) {
+				return shfs.AlreadyExists(liveClean)
+			}
+			symlink.Mode, symlink.UID, symlink.GID = shfs.ApplyParentInheritance(current, liveClean, false, symlink.Mode, symlink.UID, symlink.GID)
 			symlink.Inode = current.AllocateInode()
-			current.UpsertFile(cleanPath, symlink, now)
-			shfs.TouchParentDirectory(current, cleanPath, now)
+			current.UpsertFile(liveClean, symlink, now)
+			shfs.TouchParentDirectory(current, liveClean, now)
 			return nil
 		}, fmt.Sprintf("storhub: symlink %s -> %s", cleanPath, target)); err != nil {
 			return err
@@ -125,7 +137,10 @@ func (s *Service) ReadlinkContext(ctx context.Context, project, linkPath string)
 		if file.Symlink == "" {
 			return shfs.InvalidSymlink(cleanPath)
 		}
-		shfs.TouchFileAccessTime(ctx, s.backend, project, cleanPath, s.backend.Now())
+		// No atime bump: readlink leaves access times alone, matching the
+		// stat verbs in this tree (which never bump atime on read). Linux
+		// leaves readlink atime behavior implementation-defined, so the
+		// consistent choice is to not touch in either.
 		target = file.Symlink
 		return nil
 	}, nil)
@@ -145,14 +160,14 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		if err != nil {
 			return err
 		}
-		// link(2) does not follow a final symlink on either endpoint (the VFS
-		// refuses to hard link a symlink, which the EPERM branch below
-		// reproduces), so resolution is lstat-style for both.
-		sourcePath, sourceTraversed, err := shfs.LstatResolveTracked(repoPre, existingPath)
+		// link(2) does not follow a final symlink on either endpoint (storhub
+		// policy: hard links to symlinks are EPERM, see the branch below),
+		// so resolution is lstat-style for both.
+		sourcePath, _, err := shfs.LstatResolveTracked(repoPre, existingPath)
 		if err != nil {
 			return err
 		}
-		linkPath, linkTraversed, err := shfs.LstatResolveTracked(repoPre, newPath)
+		linkPath, _, err := shfs.LstatResolveTracked(repoPre, newPath)
 		if err != nil {
 			return err
 		}
@@ -164,7 +179,10 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 			// EPERM (hard links to directories are not permitted) - returning
 			// (nil, nil) for it would hand callers a nil entry to dereference.
 			if file := repoPre.FindFile(sourcePath); file != nil {
-				result = file
+				// Clone locally: FindFile returns a copy today, but the
+				// result must not depend on another package's doc comment.
+				clone := file.Clone()
+				result = &clone
 				return nil
 			}
 			if repoPre.HasDirectory(sourcePath) {
@@ -175,33 +193,59 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 		now := s.backend.Now()
 		var linked meta.FileMeta
 		if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
-			if err := shfs.CheckWalkResolved(ctx, repo, sourceTraversed); err != nil {
+			// Re-resolve both endpoints against the live transaction
+			// state: the pre-transaction walk above is fast-fail only. A
+			// concurrent rename/replace of a symlink component between
+			// the two must fail closed, not authorize the old chain.
+			sourceLive, sourceChain, err := shfs.LstatResolveTracked(repo, existingPath)
+			if err != nil {
 				return err
 			}
-			if err := shfs.CheckWalkResolved(ctx, repo, linkTraversed); err != nil {
+			linkLive, linkChain, err := shfs.LstatResolveTracked(repo, newPath)
+			if err != nil {
 				return err
 			}
-			if err := shfs.CheckReadAccessResolved(ctx, repo, sourcePath, sourceTraversed); err != nil {
+			if sourceLive == "" || linkLive == "" {
+				return errors.New("source and link paths are required")
+			}
+			if sourceLive == linkLive {
+				if file := repo.FindFile(sourceLive); file != nil {
+					linked = file.Clone()
+					return nil
+				}
+				if repo.HasDirectory(sourceLive) {
+					return syscall.EPERM
+				}
+				return s.backend.FileNotFound(sourceLive)
+			}
+			if err := shfs.CheckWalkResolved(ctx, repo, sourceChain); err != nil {
 				return err
 			}
-			if err := shfs.CheckParentWriteResolved(ctx, repo, linkPath, linkTraversed); err != nil {
+			if err := shfs.CheckWalkResolved(ctx, repo, linkChain); err != nil {
 				return err
 			}
-			if err := shfs.RequireParentDirectory(repo, linkPath); err != nil {
+			if err := shfs.CheckReadAccessResolved(ctx, repo, sourceLive, sourceChain); err != nil {
 				return err
 			}
-			if repo.FindFile(linkPath) != nil || repo.HasDirectory(linkPath) {
-				return shfs.AlreadyExists(linkPath)
+			if err := shfs.CheckParentWriteResolved(ctx, repo, linkLive, linkChain); err != nil {
+				return err
 			}
-			source := repo.FindFile(sourcePath)
+			if err := shfs.RequireParentDirectory(repo, linkLive); err != nil {
+				return err
+			}
+			if repo.FindFile(linkLive) != nil || repo.HasDirectory(linkLive) {
+				return shfs.AlreadyExists(linkLive)
+			}
+			source := repo.FindFile(sourceLive)
 			if source == nil {
-				if repo.HasDirectory(sourcePath) {
+				if repo.HasDirectory(sourceLive) {
 					// POSIX: hard links to directories are not permitted.
 					return syscall.EPERM
 				}
-				return s.backend.FileNotFound(sourcePath)
+				return s.backend.FileNotFound(sourceLive)
 			}
 			if source.Symlink != "" {
+				// Storhub policy: hard links to symlinks are EPERM.
 				return syscall.EPERM
 			}
 			linked = source.Clone()
@@ -215,8 +259,8 @@ func (s *Service) LinkContext(ctx context.Context, project, existingPath, newPat
 			if err := TouchInodeFamilyChangedAt(repo, source.Inode, now); err != nil {
 				return err
 			}
-			repo.UpsertFile(linkPath, linked, now)
-			shfs.TouchParentDirectory(repo, linkPath, now)
+			repo.UpsertFile(linkLive, linked, now)
+			shfs.TouchParentDirectory(repo, linkLive, now)
 			return nil
 		}, fmt.Sprintf("storhub: link %s to %s", sourcePath, linkPath)); err != nil {
 			return err

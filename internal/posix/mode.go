@@ -51,7 +51,6 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 		if err != nil {
 			return err
 		}
-		const keepOwner = ^uint32(0)
 		if err := shfs.CanChown(ctx, entryForAccess, uid, gid); err != nil {
 			return err
 		}
@@ -66,15 +65,16 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 			}); err != nil {
 				return err
 			}
-			// Decision 1A: chown clears setuid+setgid for unprivileged
-			// callers only; Admin (CAP_FSETID equivalent) keeps them.
-			// POSIX clears on directories as well.
+			// chown clears setuid+setgid for unprivileged callers only
+			// (non-admin data writes clear setuid+setgid, see
+			// shfs.SanitizeWrittenFileModeForContext); Admin (CAP_FSETID
+			// equivalent) keeps them. POSIX clears on directories as well.
 			keepBits := shfs.IdentityFromContext(ctx).Admin
 			applyOwner := func(current *meta.FileMeta) {
-				if uid != keepOwner {
+				if uid != shfs.KeepOwnerID {
 					current.UID = uid
 				}
-				if gid != keepOwner {
+				if gid != shfs.KeepOwnerID {
 					current.GID = gid
 				}
 				if !keepBits {
@@ -85,10 +85,10 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 			if file != nil {
 				return UpdateFileFamily(tx.repo, file.Inode, applyOwner)
 			}
-			if uid != keepOwner {
+			if uid != shfs.KeepOwnerID {
 				dir.UID = uid
 			}
-			if gid != keepOwner {
+			if gid != shfs.KeepOwnerID {
 				dir.GID = gid
 			}
 			if !keepBits {
@@ -103,14 +103,16 @@ func (s *Service) ChownContext(ctx context.Context, project, targetPath string, 
 }
 
 // ChtimesContext changes the access and modification times of targetPath.
+// Zero means "now" per field (a caller with only write permission may set
+// "now", not arbitrary timestamps); use ChtimesExplicitContext when the
+// epoch itself must be stored (its nil-means-omit contract keeps zero
+// settable).
 func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) (err error) {
 	err = s.withOp(project, "chtimes", []any{"path", targetPath, "atime", atime, "mtime", mtime}, func() error {
 		entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
 		if err != nil {
 			return err
 		}
-		// A caller with only write permission may set "now" (the verb's
-		// zero-means-now contract), not arbitrary timestamps.
 		var atimePtr, mtimePtr *time.Time
 		if atime != 0 {
 			t := time.Unix(0, atime)
@@ -131,17 +133,19 @@ func (s *Service) ChtimesContext(ctx context.Context, project, targetPath string
 			}); err != nil {
 				return err
 			}
-			atime = ChooseNonZeroTime(atime, now)
-			mtime = ChooseNonZeroTime(mtime, now)
+			// Resolve into locals: the parameters double as log args, so
+			// the zero-means-now mapping must not mutate them.
+			resolvedAtime := ChooseNonZeroTime(atime, now)
+			resolvedMtime := ChooseNonZeroTime(mtime, now)
 			if file != nil {
 				return UpdateFileFamily(tx.repo, file.Inode, func(current *meta.FileMeta) {
-					current.AccessedAt = atime
-					current.ModifiedAt = mtime
+					current.AccessedAt = resolvedAtime
+					current.ModifiedAt = resolvedMtime
 					current.ChangedAt = now
 				})
 			}
-			dir.AccessedAt = atime
-			dir.ModifiedAt = mtime
+			dir.AccessedAt = resolvedAtime
+			dir.ModifiedAt = resolvedMtime
 			dir.ChangedAt = now
 			tx.persistDir(dir)
 			return nil

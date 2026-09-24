@@ -238,7 +238,7 @@ func TestServiceWorkflowAndHelpers(t *testing.T) {
 	if data, err := svc.ReadFileAtContext(ctx, "demo", "docs/archive/final.txt", 99, 1); err != nil || len(data) != 0 {
 		t.Fatalf("expected empty read past EOF, got %q %v", data, err)
 	}
-	if info := EntryInfoFromFile(seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")); info.Path != "docs/readme.txt" || !EntryInfoFromDirectory(&meta.DirMeta{Inode: 2, Mode: 0o755}, "docs", 2).IsDir {
+	if info := EntryFromFile(seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")); info.Path != "docs/readme.txt" || !EntryFromDirectory(&meta.DirMeta{Inode: 2, Mode: 0o755}, "docs", 2).IsDir {
 		t.Fatal("entry helper conversion failed")
 	}
 	if DirEntryFromFile(*seeded, "docs/readme.txt", backend.repo.FileNLink("docs/readme.txt")).Path != "docs/readme.txt" || !DirEntryFromDirectory(meta.DirMeta{}, "docs/sub", 2).IsDir {
