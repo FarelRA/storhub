@@ -119,6 +119,12 @@ func TestMappedStatusErrnoMapping(t *testing.T) {
 	if status := mappedStatus(syscall.EINVAL); status != http.StatusBadRequest {
 		t.Fatalf("EINVAL must map to 400, got %d", status)
 	}
+	if status := mappedStatus(syscall.EFBIG); status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("EFBIG must map to 413, got %d", status)
+	}
+	if status := mappedStatus(fmt.Errorf("grow: %w", syscall.EFBIG)); status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("wrapped EFBIG must map to 413, got %d", status)
+	}
 }
 
 func TestShareDownloadSupportsHead(t *testing.T) {

@@ -617,10 +617,13 @@ func mappedStatus(err error) int {
 	if errors.Is(err, syscall.EINVAL) {
 		return http.StatusBadRequest
 	}
-	// Zero-extend cap: single grows beyond 16 MiB fail in storage with
-	// EFBIG (fs/io.go), which has no arm above and lands here as 500.
-	// The cap is deterministic per request, so a future pass should map
-	// it to 413/400 explicitly instead of the retry-inviting 500.
+	if errors.Is(err, syscall.EFBIG) {
+		return http.StatusRequestEntityTooLarge
+	}
+	// Zero-extend cap: a single grow beyond 16 MiB fails in storage with
+	// EFBIG (fs/io.go), a deterministic per-request ceiling, so it maps
+	// to 413 instead of the retry-inviting 500. FUSE surfaces the errno
+	// natively; only the REST translation needs the arm.
 	switch {
 	case errors.Is(err, shfs.ErrAlreadyExists),
 		errors.Is(err, shfs.ErrNotEmpty),

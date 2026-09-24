@@ -342,7 +342,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 
 	started := h.config.Now().UTC()
 	if h.projectLogger(project).Enabled(context.Background(), slog.LevelDebug) {
-		logging.Debug(h.projectLogger(project), "metadata update start", "project", project, "message", message)
+		logging.Debug(h.projectLogger(project), "metadata-update start", "project", project, "message", message)
 	}
 
 	if err := h.hydrateProjectForTx(ctx, project, pm); err != nil {
@@ -358,7 +358,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// CAS on the same token admit exactly one winner.
 	if err := h.checkRevisionGateLocked(pm, revisionGateFromContext(ctx)); err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "revision-gate", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata-update failed", "project", project, "step", "revision-gate", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
 
@@ -388,12 +388,12 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	beforeSize, err := candidate.SerializedSize()
 	if err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata-update failed", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, fmt.Errorf("size metadata: %w", err)
 	}
 	if err := fn(candidate); err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "apply", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata-update failed", "project", project, "step", "apply", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, err
 	}
 	// Op synthesis is deferred until after admission passes: appending
@@ -415,7 +415,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	afterSize, err := candidate.SerializedSize()
 	if err != nil {
 		pm.mu.Unlock()
-		logging.Error(h.projectLogger(project), "metadata update failed", "project", project, "step", "size", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
+		logging.Error(h.projectLogger(project), "metadata-update failed", "project", project, "step", "size", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "err", err)
 		return nil, fmt.Errorf("size metadata: %w", err)
 	}
 	admitVersion := pm.version
@@ -435,7 +435,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	}
 
 	if h.projectLogger(project).Enabled(context.Background(), slog.LevelDebug) {
-		logging.Debug(h.projectLogger(project), "metadata update complete", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started))
+		logging.Debug(h.projectLogger(project), "metadata-update complete", "project", project, "message", message, "elapsed", h.config.Now().UTC().Sub(started))
 	}
 
 	// Shared read-only pointer under the COW discipline (see the doc
