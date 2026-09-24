@@ -7,7 +7,6 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -21,7 +20,7 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	childPath := path.Join(parentPath, name)
 	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("lookup start", "path", parentPath, "child", name)
+		n.fs.debugOp("lookup start", "path", childPath)
 	}
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, childPath)
 	if err != nil {
@@ -238,17 +237,17 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	linkPath := path.Join(parentPath, name)
 	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("link start", "path", linkPath, "target", sourcePath)
+		n.fs.debugOp("link start", "path", linkPath, "src", sourcePath)
 	}
 	linked, err := n.fs.hub.LinkContext(ctx, n.fs.project, sourcePath, linkPath)
 	if err != nil {
-		n.fs.errorOp("link failed", "path", linkPath, "target", sourcePath, "err", err)
+		n.fs.errorOp("link failed", "path", linkPath, "src", sourcePath, "err", err)
 		return nil, errnoFromError(err)
 	}
 	if linked == nil {
 		// A hub that reports success without an entry (e.g. a
 		// directory source) must not be dereferenced by the constructor.
-		n.fs.errorOp("link failed", "path", linkPath, "target", sourcePath, "err", syscall.EPERM)
+		n.fs.errorOp("link failed", "path", linkPath, "src", sourcePath, "err", syscall.EPERM)
 		return nil, syscall.EPERM
 	}
 	nlink := n.fs.nlinkForEntry(ctx, linkPath)
@@ -256,7 +255,7 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 	ino := n.attachEntry(ctx, entry, out)
 	n.fs.publishEntry(parentPath, name)
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("link complete", "path", linkPath, "target", sourcePath, "inode", entry.Inode, "elapsed", time.Since(started))
+		n.fs.debugOp("link complete", "path", linkPath, "src", sourcePath, "inode", entry.Inode, "elapsed", time.Since(started))
 	}
 	return ino, 0
 }
@@ -311,10 +310,4 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 		mode |= syscall.S_IFREG
 	}
 	attr.Mode = mode
-}
-
-// entryInfoFromFile is kept for existing callers (including tests); it
-// delegates to the single shfs constructor.
-func entryInfoFromFile(file *metadata.FileMeta, path string, nlink int) *shfs.EntryInfo {
-	return shfs.EntryFromFile(file, path, nlink)
 }

@@ -34,8 +34,8 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// temp and commit zeros over remote data.
 	if writeState.poisoned {
 		writeState.mu.Unlock()
-		unlockOpMu(&writeState.opMu)
-		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "errno", syscall.EIO)
+		h.fs.unlockOpMu(&writeState.opMu)
+		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", syscall.EIO)
 		return 0, syscall.EIO
 	}
 	if h.flags&syscall.O_APPEND != 0 && off >= writeState.logicalSize {
@@ -46,13 +46,19 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		// honoring its offset rewrites the prefix identically and lands
 		// the tail once, while forcing it to EOF duplicates the prefix
 		// (observed kernel 7 vs server 11, reads truncated to garbage).
+		// Kernel-assigned O_APPEND offsets are authoritative across
+		// concurrent descriptions: the kernel tracks EOF from write
+		// responses for all open descriptions, so its offset encodes an
+		// ordering the overlay cannot reconstruct. Forcing every write
+		// to the overlay EOF breaks that agreement (proven by
+		// concurrent-append losing a worker's bytes while keeping size).
 		off = writeState.logicalSize
 	}
 	if writeState.temp == nil {
 		if err := writeState.ensureTempLocked(); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			unlockOpMu(&writeState.opMu)
+			h.fs.unlockOpMu(&writeState.opMu)
 			h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 			return 0, errno
 		}
@@ -62,7 +68,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		if err := writeState.temp.Truncate(off); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			unlockOpMu(&writeState.opMu)
+			h.fs.unlockOpMu(&writeState.opMu)
 			h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 			return 0, errno
 		}
@@ -72,7 +78,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err != nil {
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
-		unlockOpMu(&writeState.opMu)
+		h.fs.unlockOpMu(&writeState.opMu)
 		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 		return uint32(n), errno
 	}
@@ -82,7 +88,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		if err := writeState.temp.Truncate(end); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
-			unlockOpMu(&writeState.opMu)
+			h.fs.unlockOpMu(&writeState.opMu)
 			h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 			return uint32(n), errno
 		}
@@ -94,7 +100,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	if err := writeState.ensureDirtyBounded(ctx); err != nil {
 		errno := errnoFromError(err)
 		writeState.mu.Unlock()
-		unlockOpMu(&writeState.opMu)
+		h.fs.unlockOpMu(&writeState.opMu)
 		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 		return uint32(n), errno
 	}
@@ -109,13 +115,13 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		h.fs.debugOp("write complete", "path", writeState.path, "inode", h.inode, "off", off, "bytes", n)
 	}
 	writeState.mu.Unlock()
-	unlockOpMu(&writeState.opMu)
+	h.fs.unlockOpMu(&writeState.opMu)
 	if !syncWrite {
 		// Buffered path: durability waits for Flush/Fsync/Release, so
 		// this write pays zero added latency (no drain here).
 		return uint32(n), 0
 	}
-	// O_SYNC (decision: HONOR): commit plus drain synchronously per write
+	// O_SYNC (honored): commit plus drain synchronously per write
 	// before acknowledging, so the bytes are remote-durable on return.
 	// Cost is the point: correct but slow. O_DSYNC is treated identically
 	// (on linux; see syncWriteFlags for other platforms) because our
@@ -126,7 +132,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	// later fsync or close to retry); a drain-only failure publishes
 	// without quarantining (see drainProject).
 	if errno := h.commitAndDrain(ctx); errno != 0 {
-		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "errno", errno)
+		h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", errno)
 		return 0, errno
 	}
 	return uint32(n), 0
@@ -152,22 +158,22 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	ws.mu.Lock()
 	if ws.poisoned {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		// The overlay was quarantined; committing would upload zeros.
 		return syscall.EIO
 	}
 	if len(ws.dirtyRanges) == 0 && ws.logicalSize == ws.baseSize && !ws.hasPendingMetadataLocked() {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		return 0
 	}
 	if ws.deleted || handlePath == "" {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		// POSIX unlinked-open-handle semantics: writes via an open fd
 		// succeed and reads are served from the temp overlay; the data
 		// is discarded at Release (link count zero). Pinned by
-		// TestFUSEHandleRenameAndUnlinkSemantics — do NOT return an
+		// TestFUSEHandleRenameAndUnlinkSemantics: do NOT return an
 		// error here. Note: the emptiness test is exact, not
 		// TrimSpace-based: a file legitimately named " " must still
 		// commit its writes.
@@ -183,13 +189,13 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	ws.mu.Lock()
 	if errno != 0 {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		return errno
 	}
 	// Re-validate under the lock: the DAC check released it.
 	if ws.deleted || ws.poisoned {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		if ws.poisoned {
 			return syscall.EIO
 		}
@@ -209,12 +215,12 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	curStateDetached := ws.deleted || curStatePath == ""
 	if curHandleDetached || curStateDetached {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		return 0
 	}
 	if curHandlePath != handlePath || curStatePath != handlePath {
 		ws.mu.Unlock()
-		unlockOpMu(&ws.opMu)
+		h.fs.unlockOpMu(&ws.opMu)
 		return syscall.ENOENT
 	}
 	targetPath := handlePath
@@ -227,7 +233,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	// failure returns record nothing and emit nothing.
 	var notifies commitNotifies
 	errno = h.commitTemp(ctx, targetPath, baseSize, logicalSize, pending, &notifies)
-	unlockOpMu(&ws.opMu)
+	h.fs.unlockOpMu(&ws.opMu)
 	if errno == 0 {
 		notifies.emit(h.fs)
 	}
@@ -461,31 +467,46 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 		return syscall.EIO
 	}
 	edits := make([]shfs.RangeEdit, 0, len(planned))
+	// Bound resident memory per dirty span: a large span uploads as a
+	// run of copyPageSize-capped edits instead of one whole-span
+	// allocation. The run stays ascending and disjoint, so the single
+	// batched patch below applies it identically.
+	page := ws.fs.copyPageSize()
+	if page <= 0 {
+		page = defaultOverlayBufferSize
+	}
 	for _, dirty := range planned {
-		buf := make([]byte, dirty.End-dirty.Start)
-		n, err := ws.readIntoLocked(ctx, buf, dirty.Start)
-		if err != nil {
-			ws.mu.Unlock()
-			return errnoFromError(err)
+		for offset := dirty.Start; offset < dirty.End; {
+			end := offset + page
+			if end > dirty.End {
+				end = dirty.End
+			}
+			buf := make([]byte, end-offset)
+			n, err := ws.readIntoLocked(ctx, buf, offset)
+			if err != nil {
+				ws.mu.Unlock()
+				return errnoFromError(err)
+			}
+			// A short read is legal only when the missing tail lies past
+			// end-of-file, where POSIX holes read as zeros. Anything else is
+			// internal inconsistency: refuse to upload fabricated bytes.
+			if n < len(buf) && offset+int64(n) < logicalSize {
+				ws.mu.Unlock()
+				h.fs.errorOp("commit aborted", "path", targetPath, "inode", h.inode, "step", "patch-read", "start", offset, "end", end, "got", n, "want", len(buf))
+				return syscall.EIO
+			}
+			for j := n; j < len(buf); j++ {
+				buf[j] = 0
+			}
+			deleteSize := end - offset
+			if offset >= baseSize {
+				deleteSize = 0
+			} else if maxDelete := baseSize - offset; deleteSize > maxDelete {
+				deleteSize = maxDelete
+			}
+			edits = append(edits, shfs.RangeEdit{Start: offset, DeleteSize: deleteSize, Data: buf})
+			offset = end
 		}
-		// A short read is legal only when the missing tail lies past
-		// end-of-file, where POSIX holes read as zeros. Anything else is
-		// internal inconsistency: refuse to upload fabricated bytes.
-		if n < len(buf) && dirty.Start+int64(n) < logicalSize {
-			ws.mu.Unlock()
-			h.fs.errorOp("commit aborted", "path", targetPath, "inode", h.inode, "step", "patch-read", "start", dirty.Start, "end", dirty.End, "got", n, "want", len(buf))
-			return syscall.EIO
-		}
-		for j := n; j < len(buf); j++ {
-			buf[j] = 0
-		}
-		deleteSize := dirty.End - dirty.Start
-		if dirty.Start >= baseSize {
-			deleteSize = 0
-		} else if maxDelete := baseSize - dirty.Start; deleteSize > maxDelete {
-			deleteSize = maxDelete
-		}
-		edits = append(edits, shfs.RangeEdit{Start: dirty.Start, DeleteSize: deleteSize, Data: buf})
 	}
 	ws.mu.Unlock()
 

@@ -148,6 +148,13 @@ func New(hub Hub, project string, opts Options) (*Filesystem, error) {
 	if err != nil {
 		return nil, err
 	}
+	if dsyncOnlyFlag == 0 {
+		// This platform has no distinct O_DSYNC spelling, so an
+		// O_DSYNC-only open degrades to buffered durability (see
+		// syncWriteFlags). The degrade is undetectable per open, so
+		// it is logged once per mount instead of at each open.
+		logging.Debug(opts.Logger, "dsync degrades to buffered durability on this platform")
+	}
 	// Claim the directory before touching its contents. The sweep below
 	// deletes leftover temps unconditionally, so without the lock a second
 	// live mount sharing this cacheDir would silently destroy the first
@@ -233,6 +240,7 @@ func newBareFilesystem(hub Hub, project string, opts Options, cacheDir string, l
 		notifySlots:  make(chan struct{}, maxConcurrentNotifies),
 		pinned:       make(map[pinnedKey]*pinnedContent),
 		attaching:    make(map[*storhubNode]struct{}),
+		relCh:        make(chan struct{}),
 	}
 	fsys.root = &storhubNode{fs: fsys, inode: 1, isDir: true}
 	fsys.nodes[1] = fsys.root
@@ -370,7 +378,7 @@ func (s *Filesystem) Close() error {
 	// work is never lost silently.
 	for _, writeState := range writeStates {
 		if !writeState.opMu.TryLock() {
-			if !waitOpMuBounded(&writeState.opMu, closeOpMuTimeout) {
+			if !s.waitOpMuBounded(&writeState.opMu, closeOpMuTimeout) {
 				s.errorOp("close state busy past bound, leaving overlay for startup sweep", "inode", writeState.inode, "path", writeState.pathForLog())
 				continue
 			}
@@ -378,7 +386,7 @@ func (s *Filesystem) Close() error {
 		if writeState.hasUncommittedChanges() {
 			writeState.quarantineTempsReason(quarantineReasonClose)
 		}
-		unlockOpMu(&writeState.opMu)
+		s.unlockOpMu(&writeState.opMu)
 	}
 	for _, handle := range handles {
 		handle.closeTemp()

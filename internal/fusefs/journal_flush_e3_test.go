@@ -1,9 +1,10 @@
 package fusefs
 
-// Phase E3 (F5): explicit journal flush wired into the FUSE
-// fsync/Flush/Release drain sequence. Proven by event order on a
-// recording hub, never by timing: commit, then journal-flush, then
-// drain, all synchronously before the syscall returns (no 100ms tail).
+// Explicit journal flush wired into the FUSE fsync/Flush/Release drain
+// sequence (journal flush between commit and drain). Proven by event
+// order on a recording hub, never by timing: commit, then
+// journal-flush, then drain, all synchronously before the syscall
+// returns (no 100ms tail).
 
 import (
 	"context"
@@ -25,7 +26,7 @@ func (f *flushProbeHub) FlushJournals() {
 }
 
 // flushFixture mirrors syncDrainFixture but serves a hub exposing
-// FlushJournals, so the F5 wiring has something to call.
+// FlushJournals, so the flush wiring has something to call.
 func flushFixture(t *testing.T, flags uint32) (*Filesystem, *flushProbeHub, *storhubHandle) {
 	t.Helper()
 	probe := &flushProbeHub{drainProbeHub: &drainProbeHub{stubHub: &stubHub{chunkSize: 64}}}

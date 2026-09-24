@@ -6,6 +6,18 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
+// newTestFilesystem builds a bare Filesystem value for unit tests that
+// drive notify or broadcast paths without a mount: both notify fields
+// are always set, since beginNotify blocks forever on a nil slot channel
+// and panics on a nil pending map.
+func newTestFilesystem() *Filesystem {
+	return &Filesystem{
+		notifyQueued: make(map[notifyKey]struct{}),
+		notifySlots:  make(chan struct{}, 1),
+		relCh:        make(chan struct{}),
+	}
+}
+
 // mustMount builds a stub-backed Filesystem for tests, failing fast on
 // setup errors and closing the mount in cleanup. It replaces the pasted
 // New(&stubHub{chunkSize:4}…) + error-check triples.

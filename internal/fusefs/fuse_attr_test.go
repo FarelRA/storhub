@@ -83,7 +83,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 		t.Fatalf("unexpected filled entry out: %+v", out)
 	}
 	file := &meta.FileMeta{Symlink: "target", Inode: 9, Size: 2, Mode: 0o777, UID: 1, GID: 2, UploadedAt: now, ModifiedAt: now, AccessedAt: now, ChangedAt: now}
-	converted := entryInfoFromFile(file, "docs/file.txt", 1)
+	converted := shfs.EntryFromFile(file, "docs/file.txt", 1)
 	if !converted.IsSymlink || converted.Path != "docs/file.txt" {
 		t.Fatalf("unexpected file conversion: %+v", converted)
 	}

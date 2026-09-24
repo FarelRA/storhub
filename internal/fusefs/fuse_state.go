@@ -59,7 +59,13 @@ func (s *Filesystem) forgetNodeBookkeeping(n *storhubNode) {
 // inode; callers must hold s.mu for reading. Closure is read under each
 // handle's own lock: Releases run mutually concurrent (RELEASE is not
 // synchronized with close), so scanning h.closed bare races a racing
-// closeTemp on another handle of the same inode.
+// closeTemp on another handle of the same inode. Accepted cost: the scan
+// is O(open handles) under the FS write lock per kernel forget. A
+// per-inode open-handle refcount would avoid it, but the scan is
+// allocation-free and forgets are kernel-paced (one per evicted inode,
+// not per I/O), so measured forget latency stays in the microsecond
+// range at thousands of handles; revisit with a refcount if a profile
+// ever shows forgetNodeBookkeeping hot.
 func (s *Filesystem) hasOpenHandleForLocked(inode uint64) bool {
 	for _, handle := range s.handles {
 		if handle.inode == inode && !handle.isClosed() {
@@ -224,7 +230,7 @@ func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath
 			}
 		}
 		writeState.mu.Unlock()
-		unlockOpMu(&writeState.opMu)
+		s.unlockOpMu(&writeState.opMu)
 	}
 }
 
@@ -268,7 +274,7 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 			writeState.path = shfs.RemapPath(oldPath, newPath, writeState.path)
 		}
 		writeState.mu.Unlock()
-		unlockOpMu(&writeState.opMu)
+		s.unlockOpMu(&writeState.opMu)
 	}
 }
 
@@ -369,10 +375,8 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 	defer func() {
 		// go-fuse panics on malformed trees; degrade to "no cached child"
 		// loudly instead of taking the request goroutine down.
-		if recover() != nil {
-			if n.fs.debugEnabled() {
-				n.fs.debugOp("attachChild recovered from panic", "path", n.currentPath(), "inode", child.inode)
-			}
+		if r := recover(); r != nil {
+			n.fs.errorOp("attachChild failed", "path", n.currentPath(), "inode", child.inode, "err", r)
 			ino = nil
 		}
 	}()

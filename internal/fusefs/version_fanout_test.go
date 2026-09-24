@@ -388,7 +388,7 @@ func TestPushSubscriberDrivesDelivery(t *testing.T) {
 	}
 }
 
-// TestFanoutPushNoPollingGoroutine proves Phase E1's core claim: mounts
+// TestFanoutPushNoPollingGoroutine proves the push fan-out core claim: mounts
 // carry no polling goroutine. Eight mounts must add far fewer than eight
 // goroutines (the deleted ticker added exactly one each), publish
 // delivery must work on every one, and Close must return the census to

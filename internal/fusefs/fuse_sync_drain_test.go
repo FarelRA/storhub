@@ -1,6 +1,6 @@
 package fusefs
 
-// Phase 3 sync durability (fsync/O_SYNC/close drain) and commit
+// Sync durability (fsync/O_SYNC/close drain) and commit
 // notification ordering tests. All handle level: a recording fake hub
 // proves ordering by event sequence, never by timing.
 

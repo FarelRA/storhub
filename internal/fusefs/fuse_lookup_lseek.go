@@ -2,6 +2,7 @@ package fusefs
 
 import (
 	"context"
+	"sort"
 	"syscall"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -128,6 +129,8 @@ func (h *storhubHandle) lseekExtentsLocked(ws *inodeWriteState, size int64) []By
 	h.mu.Lock()
 	pin := h.pinned
 	h.mu.Unlock()
+	// Lock order: h.mu is a leaf lock, so taking it here while holding
+	// the state mutex preserves the leaf-last order (never the reverse).
 	var extents []ByteRange
 	if pin != nil {
 		extents = lseekChunkExtents(pin, size)
@@ -203,12 +206,12 @@ func mergeByteRanges(ranges []ByteRange) []ByteRange {
 
 // sortByteRanges orders spans by start offset, breaking ties by end.
 func sortByteRanges(ranges []ByteRange) {
-	for i := 1; i < len(ranges); i++ {
-		for j := i; j > 0 && (ranges[j].Start < ranges[j-1].Start ||
-			(ranges[j].Start == ranges[j-1].Start && ranges[j].End < ranges[j-1].End)); j-- {
-			ranges[j], ranges[j-1] = ranges[j-1], ranges[j]
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].Start != ranges[j].Start {
+			return ranges[i].Start < ranges[j].Start
 		}
-	}
+		return ranges[i].End < ranges[j].End
+	})
 }
 
 // checkOverlayCaller verifies that the current caller may drive overlay

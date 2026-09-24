@@ -300,7 +300,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	}
 	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("rename start", "old", oldPath, "new", newPath, "flags", flags)
+		n.fs.debugOp("rename start", "path", oldPath, "dst", newPath, "flags", flags)
 	}
 	oldEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, oldPath)
 	newEntry, _ := n.fs.hub.StatPathContext(ctx, n.fs.project, newPath)
@@ -319,12 +319,12 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	// snapshot: materialize before the metadata swap removes the path.
 	if newEntry != nil && (oldEntry == nil || newEntry.Inode != oldEntry.Inode) {
 		if err := n.fs.materializeHandlesForPath(ctx, newEntry.Inode, newPath); err != nil {
-			n.fs.errorOp("rename failed", "old", oldPath, "new", newPath, "flags", flags, "err", err)
+			n.fs.errorOp("rename failed", "path", oldPath, "dst", newPath, "flags", flags, "err", err)
 			return errnoFromError(err)
 		}
 	}
 	if err := n.fs.hub.RenameContext(ctx, n.fs.project, oldPath, newPath, renameOpts...); err != nil {
-		n.fs.errorOp("rename failed", "old", oldPath, "new", newPath, "flags", flags, "err", err)
+		n.fs.errorOp("rename failed", "path", oldPath, "dst", newPath, "flags", flags, "err", err)
 		return errnoFromError(err)
 	}
 	// The namespace moved: cached layouts keyed by either path are stale
@@ -355,7 +355,7 @@ func (n *storhubNode) Rename(ctx context.Context, name string, newParent gofusef
 	// the pre-rename tree until EntryTimeout expires.
 	n.fs.notifyNamespaceChange(oldPath, newPath)
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("rename complete", "old", oldPath, "new", newPath, "flags", flags, "elapsed", time.Since(started))
+		n.fs.debugOp("rename complete", "path", oldPath, "dst", newPath, "flags", flags, "elapsed", time.Since(started))
 	}
 	return 0
 }

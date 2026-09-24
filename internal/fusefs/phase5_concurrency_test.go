@@ -10,8 +10,8 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// F1: commit must fail closed when a concurrent rename rebind moved the path.
-func TestPhase5CommitFailsClosedAfterRebind(t *testing.T) {
+// Commit must fail closed when a concurrent rename rebind moved the path.
+func TestCommitFailsClosedAfterRebind(t *testing.T) {
 	t.Parallel()
 	var targets []string
 	hub := &stubHub{}
@@ -83,10 +83,10 @@ func TestPhase5CommitFailsClosedAfterRebind(t *testing.T) {
 	}
 }
 
-// F1 deadlock probe: rebind must not block forever against a commit holder.
+// Deadlock probe: rebind must not block forever against a commit holder.
 // It takes opMu, so holding opMu then rebinding from another goroutine must
 // wait, and releasing must let it proceed.
-func TestPhase5RebindSerializesOnOpMu(t *testing.T) {
+func TestRebindSerializesOnOpMu(t *testing.T) {
 	t.Parallel()
 	hub := &stubHub{}
 	fsys := mustMount(t, hub, "", DefaultOptions())
@@ -118,8 +118,8 @@ func TestPhase5RebindSerializesOnOpMu(t *testing.T) {
 	}
 }
 
-// F6: persistent stat-vs-pin mismatch must fail ENOENT, not open mixed identity.
-func TestPhase5OpenStatPinMismatchFailsClosed(t *testing.T) {
+// Persistent stat-vs-pin mismatch must fail ENOENT, not open mixed identity.
+func TestOpenStatPinMismatchFailsClosed(t *testing.T) {
 	t.Parallel()
 	hub := &stubHub{}
 	hub.statPath = func(_ context.Context, _, target string) (*shfs.EntryInfo, error) {
@@ -163,8 +163,8 @@ func TestPhase5OpenStatPinMismatchFailsClosed(t *testing.T) {
 	}
 }
 
-// F13: Close must not wait unboundedly past the documented per-state bound.
-func TestPhase5CloseBoundedOnBusyState(t *testing.T) {
+// Close must not wait unboundedly past the documented per-state bound.
+func TestCloseBoundedOnBusyState(t *testing.T) {
 	t.Parallel()
 	hub := &stubHub{}
 	fsys := mustMount(t, hub, "", DefaultOptions())
@@ -203,8 +203,8 @@ func TestPhase5CloseBoundedOnBusyState(t *testing.T) {
 	}
 }
 
-// F7: observability only, no behavior change.
-func TestPhase5NotifyObservability(t *testing.T) {
+// Notify observability only, no behavior change.
+func TestNotifyObservabilityGauges(t *testing.T) {
 	t.Parallel()
 	hub := &stubHub{}
 	fsys := mustMount(t, hub, "", DefaultOptions())
@@ -227,10 +227,10 @@ func TestPhase5NotifyObservability(t *testing.T) {
 	}
 }
 
-// H1 attempt: pinnedKey collision needs exact version match; monotonic
+// Pinned-key collision attempt: pinnedKey collision needs exact version match; monotonic
 // allocator never reuses inodes so delete-recreate mints a new key and the
 // stale pin cannot hit. Recorded as hypothesis with attempt noted.
-func TestPhase5H1PinCollisionAttempt(t *testing.T) {
+func TestPinCollisionAttempt(t *testing.T) {
 	t.Parallel()
 	k1 := pinnedKeyFor("p", "a/f", &metadata.FileMeta{Inode: 7, Size: 3, ModifiedAt: 100, ChangedAt: 100})
 	k2 := pinnedKeyFor("p", "a/f", &metadata.FileMeta{Inode: 7, Size: 3, ModifiedAt: 100, ChangedAt: 100})

@@ -25,6 +25,9 @@ func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (u
 	if stale != 0 {
 		return 0, stale
 	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("getxattr start", "path", targetPath, "attr", attr)
+	}
 	data, err := n.fs.hub.GetXAttrContext(ctx, n.fs.project, targetPath, attr)
 	if err != nil {
 		return 0, errnoFromError(err)
@@ -36,6 +39,9 @@ func (n *storhubNode) Getxattr(ctx context.Context, attr string, dest []byte) (u
 		return uint32(len(data)), syscall.ERANGE
 	}
 	copy(dest, data)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("getxattr complete", "path", targetPath, "attr", attr, "size", len(data))
+	}
 	return uint32(len(data)), 0
 }
 
@@ -44,6 +50,9 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 	targetPath, stale := n.safePath()
 	if stale != 0 {
 		return stale
+	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("setxattr start", "path", targetPath, "attr", attr, "size", len(data))
 	}
 	// Enforce the xattr resource caps at the FUSE boundary too
 	// (defense in depth; posix.Service.SetXAttrContext is the authority).
@@ -65,6 +74,9 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 		return errnoFromError(err)
 	}
 	n.invalidateSelf(targetPath)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("setxattr complete", "path", targetPath, "attr", attr, "size", len(data))
+	}
 	return 0
 }
 
@@ -73,6 +85,9 @@ func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, sysca
 	targetPath, stale := n.safePath()
 	if stale != 0 {
 		return 0, stale
+	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("listxattr start", "path", targetPath)
 	}
 	attrs, err := n.fs.hub.ListXAttrContext(ctx, n.fs.project, targetPath)
 	if err != nil {
@@ -89,6 +104,9 @@ func (n *storhubNode) Listxattr(ctx context.Context, dest []byte) (uint32, sysca
 		return uint32(len(payload)), syscall.ERANGE
 	}
 	copy(dest, payload)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("listxattr complete", "path", targetPath, "count", len(attrs))
+	}
 	return uint32(len(payload)), 0
 }
 
@@ -98,10 +116,16 @@ func (n *storhubNode) Removexattr(ctx context.Context, attr string) syscall.Errn
 	if stale != 0 {
 		return stale
 	}
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("removexattr start", "path", targetPath, "attr", attr)
+	}
 	if err := n.fs.hub.RemoveXAttrContext(ctx, n.fs.project, targetPath, attr); err != nil {
 		return errnoFromError(err)
 	}
 	// Same ctime-invalidation reasoning as Setxattr above.
 	n.invalidateSelf(targetPath)
+	if n.fs.debugEnabled() {
+		n.fs.debugOp("removexattr complete", "path", targetPath, "attr", attr)
+	}
 	return 0
 }

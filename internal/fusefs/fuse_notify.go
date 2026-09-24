@@ -86,6 +86,9 @@ func (w *ProjectVersionWatcher) Check() (cur uint64, changed bool) {
 	return cur, false
 }
 
+// Test hooks for kernel upcalls (overridden in tests). They live in
+// production code so tests can observe delivery without a mount; keep
+// this exact set, do not add more production surface for tests.
 var (
 	notifyEntryFunc  = func(node *storhubNode, name string) { _ = node.NotifyEntry(name) }
 	notifyDeleteFunc = func(parent *storhubNode, name string, child *storhubNode) {

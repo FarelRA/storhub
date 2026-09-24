@@ -150,7 +150,7 @@ type Filesystem struct {
 	// never start it). Stopped early in Close so no notification fires
 	// into teardown.
 	stopInvalPoll func()
-	// Notify observability (F7): parked-notify gauge plus counters.
+	// Notify observability (parked-notify gauge plus counters):
 	// notifyParked counts notifies currently blocked on a slot;
 	// notifyParkedTotal counts every slot wait observed; notifyCoalesced
 	// counts duplicates folded into a pending notify. Behavior is
@@ -158,6 +158,25 @@ type Filesystem struct {
 	notifyParked      atomic.Int64
 	notifyParkedTotal atomic.Uint64
 	notifyCoalesced   atomic.Uint64
+	// relMu guards relGen/relCh: the commit-release broadcast (every
+	// opMu release publishes one generation). Per-mount, so Close on
+	// one mount never wakes Close waiters on another and a wedged
+	// committer on one mount never churns another mount's waiters.
+	// The mutex is held only for the integer bump plus channel swap,
+	// never across network I/O, so signaling can never wedge a
+	// committer.
+	relMu  sync.Mutex
+	relGen uint64
+	relCh  chan struct{}
+	// relWaiters counts Close waiters parked (or about to park) in
+	// waitOpMuBounded. Releases skip the channel swap when no waiter
+	// exists, so uncontended commit-path unlocks cost one integer bump
+	// and zero allocations (allocation parity on the FUSE hot path is
+	// budget-gated). Registration happens before the first snapshot:
+	// any release after a failed TryLock observes the waiter, so no
+	// park can miss its wake; a wedged committer still falls back to
+	// the loud timeout.
+	relWaiters atomic.Int64
 }
 
 // maxConcurrentNotifies bounds in-flight kernel cache notifications per
@@ -226,53 +245,46 @@ func (s *Filesystem) ResetNodeForTest(path string) {
 // pid as decimal text).
 const mountLockFileName = ".storhub-mount.lock"
 
-// opReleaseMu guards opReleaseGen/opReleaseCh: the commit-release
-// broadcast (Phase E3, F4). The mutex is held only for the integer bump
-// plus channel swap, never across network I/O, so signaling can never
-// wedge a committer.
-var (
-	opReleaseMu  sync.Mutex
-	opReleaseGen uint64
-	opReleaseCh  = make(chan struct{})
-	// opReleaseWaiters counts Close waiters parked (or about to park)
-	// in waitOpMuBounded. Releases skip the channel swap when no
-	// waiter exists, so uncontended commit-path unlocks cost one
-	// integer bump and zero allocations (allocation parity on the
-	// FUSE hot path is budget-gated). Registration happens before
-	// the first snapshot: any release after a failed TryLock observes
-	// the waiter, so no park can miss its wake; a wedged committer
-	// still falls back to the loud timeout.
-	opReleaseWaiters atomic.Int64
-)
-
-// signalOpRelease publishes one commit-state generation. Every opMu
-// release on the inode commit path calls it right after unlocking
-// (see unlockOpMu). Channel-swap broadcast: waiters hold the previous
-// channel, which closes exactly once here, so no waiter can miss a
-// release that happened after its snapshot. A release with no waiter
-// only bumps the counter; a waiter that somehow misses a signal falls
-// back to the closeOpMuTimeout expiry in waitOpMuBounded, which is loud
-// (quarantine plus error log), never silent.
-func signalOpRelease() {
-	opReleaseMu.Lock()
-	opReleaseGen++
-	if opReleaseWaiters.Load() == 0 {
-		opReleaseMu.Unlock()
+// signalOpRelease publishes one commit-state generation on this mount.
+// Every opMu release on the inode commit path calls it right after
+// unlocking (see unlockOpMu). Channel-swap broadcast: waiters hold the
+// previous channel, which closes exactly once here, so no waiter can
+// miss a release that happened after its snapshot. A release with no
+// waiter only bumps the counter; a waiter that somehow misses a signal
+// falls back to the closeOpMuTimeout expiry in waitOpMuBounded, which is
+// loud (quarantine plus error log), never silent.
+func (s *Filesystem) signalOpRelease() {
+	if s == nil {
 		return
 	}
-	prev := opReleaseCh
-	opReleaseCh = make(chan struct{})
-	opReleaseMu.Unlock()
+	s.relMu.Lock()
+	if s.relCh == nil {
+		s.relCh = make(chan struct{})
+	}
+	s.relGen++
+	if s.relWaiters.Load() == 0 {
+		s.relMu.Unlock()
+		return
+	}
+	prev := s.relCh
+	s.relCh = make(chan struct{})
+	s.relMu.Unlock()
 	close(prev)
 }
 
 // opReleaseWait snapshots the current broadcast generation and channel.
 // The caller re-checks its lock after snapshotting, then parks on the
 // channel: any release after the snapshot closes it.
-func opReleaseWait() (<-chan struct{}, uint64) {
-	opReleaseMu.Lock()
-	defer opReleaseMu.Unlock()
-	return opReleaseCh, opReleaseGen
+func (s *Filesystem) opReleaseWait() (<-chan struct{}, uint64) {
+	if s == nil {
+		return nil, 0
+	}
+	s.relMu.Lock()
+	defer s.relMu.Unlock()
+	if s.relCh == nil {
+		s.relCh = make(chan struct{})
+	}
+	return s.relCh, s.relGen
 }
 
 // unlockOpMu releases an inode write-state opMu and publishes the
@@ -280,9 +292,9 @@ func opReleaseWait() (<-chan struct{}, uint64) {
 // short holders outside the commit network window) so a Close waiter
 // parked in waitOpMuBounded never sleeps past a release: a spurious
 // wakeup costs one TryLock, a missed one costs up to the loud timeout.
-func unlockOpMu(mu *sync.Mutex) {
+func (s *Filesystem) unlockOpMu(mu *sync.Mutex) {
 	mu.Unlock()
-	signalOpRelease()
+	s.signalOpRelease()
 }
 
 // waitOpMuParkedHook, when non-nil, runs each time waitOpMuBounded is
@@ -307,18 +319,18 @@ const closeOpMuTimeout = 1 * storcfg.PatienceUnit
 // commit end instead of a tick. Reports whether the lock was acquired
 // (caller must Unlock on true). The timeout is only the wedged-committer
 // backstop: expiry returns false and Close quarantines loudly.
-func waitOpMuBounded(mu *sync.Mutex, timeout time.Duration) bool {
+func (s *Filesystem) waitOpMuBounded(mu *sync.Mutex, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	if mu.TryLock() {
 		return true
 	}
 	// Register before the first snapshot so every release after the
 	// failed TryLock above observes this waiter and swaps the
-	// channel (see opReleaseWaiters). Unregistered on every return.
-	opReleaseWaiters.Add(1)
-	defer opReleaseWaiters.Add(-1)
+	// channel (see relWaiters). Unregistered on every return.
+	s.relWaiters.Add(1)
+	defer s.relWaiters.Add(-1)
 	for {
-		ch, _ := opReleaseWait()
+		ch, _ := s.opReleaseWait()
 		// Re-check after the snapshot: a release racing the snapshot
 		// already closed the previous channel, and the lock may be
 		// free now. Without this a release in the window parks us
@@ -354,16 +366,19 @@ func (w *inodeWriteState) pathForLog() string {
 // sites guard their debugOp calls with it so the variadic boxing and
 // slice build cost nothing in production: debugOp alone cannot avoid
 // that cost because arguments evaluate before the call. One branch per
-// site keeps the alloc-parity benchmark budgets exact.
+// site keeps the alloc-parity benchmark budgets exact. Accepted residual
+// cost: handle-path snapshots (one leaf mutex) and started timestamps
+// stay unconditional because error paths need them too; both are
+// nanosecond-scale and allocation-free.
 func (s *Filesystem) debugEnabled() bool {
 	return s != nil && s.opts.Debug
 }
 
 // debugOp logs a structured debug event through the mount logger. It is
-// gated on Options.Debug like the former debugf, so hot-path call sites
-// stay cheap in production; unlike debugf it keeps every field structured
-// (op plus key/value attrs) instead of collapsing them with fmt.Sprintf.
-// Never pass file bytes, only sizes, offsets, and paths.
+// gated on Options.Debug, so hot-path call sites stay cheap in
+// production; unlike unstructured formatting it keeps every field
+// structured (op plus key/value attrs) instead of collapsing them with
+// fmt.Sprintf. Never pass file bytes, only sizes, offsets, and paths.
 func (s *Filesystem) debugOp(op string, args ...any) {
 	if !s.opts.Debug {
 		return
@@ -384,10 +399,10 @@ func (s *Filesystem) log() *slog.Logger {
 }
 
 // errorOp logs a structured error event through the mount logger. It is
-// ungated like the former errorf: operational failures must never be
-// silently dropped, so errors log even when no logger was injected (via
-// the process-default fallback in log). Fields stay structured; never
-// pass file bytes, only sizes, offsets, paths, and errors.
+// ungated: operational failures must never be silently dropped, so
+// errors log even when no logger was injected (via the process-default
+// fallback in log). Fields stay structured; never pass file bytes, only
+// sizes, offsets, paths, and errors.
 func (s *Filesystem) errorOp(op string, args ...any) {
 	logging.Error(s.log(), op, args...)
 }
@@ -487,9 +502,11 @@ func validateProject(project string) error {
 }
 
 // normalizedChunkSize delegates to the chunking package's single clamping
-// definition.
+// definition. The adjusted flag is ignored: the hub chunk size comes
+// from validated storage config, so there is no caller decision to log.
 func normalizedChunkSize(chunkSize int64) int64 {
-	return chunking.NormalizedSize(chunkSize)
+	size, _ := chunking.NormalizedSize(chunkSize)
+	return size
 }
 
 func minInt64(a, b int64) int64 {

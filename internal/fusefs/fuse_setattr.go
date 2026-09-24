@@ -32,19 +32,19 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 	}
 	usedLocalSize, localSize, errno := n.setattrSize(ctx, targetPath, in, state)
 	if errno != 0 {
-		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "size", "errno", errno)
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "size", "err", errno)
 		return errno
 	}
 	if errno := n.setattrMode(ctx, targetPath, in, state); errno != 0 {
-		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "mode", "errno", errno)
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "mode", "err", errno)
 		return errno
 	}
 	if errno := n.setattrOwner(ctx, targetPath, in, state); errno != 0 {
-		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "owner", "errno", errno)
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "owner", "err", errno)
 		return errno
 	}
 	if errno := n.setattrTimes(ctx, targetPath, in, state); errno != 0 {
-		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "times", "errno", errno)
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "times", "err", errno)
 		return errno
 	}
 	return n.finishSetattr(ctx, targetPath, state, usedLocalSize, localSize, out, in.Valid)
@@ -123,7 +123,7 @@ func (n *storhubNode) detachedReply(base shfs.EntryInfo, state *inodeWriteState,
 // path (same verb DAC against the snapshot, same pending patch); the
 // commit discards it at Release, which is the POSIX fate of writes to
 // unlinked files. Without one (read-only survivor) mode/owner/times are
-// accepted and discarded — unobservable past close by definition — while
+// accepted and discarded, unobservable past close by definition, while
 // a size change is EINVAL (ftruncate needs a writable fd).
 //
 // Identity note: the opener-match check of the linked path is
@@ -131,7 +131,7 @@ func (n *storhubNode) detachedReply(base shfs.EntryInfo, state *inodeWriteState,
 // opened it, and a handleless call can only originate from an open fd
 // (no path exists to name), so fd ownership is the auth; the verb DAC
 // below is still enforced, and any staged change dies at Release.
-// Anything else — directories, no surviving view — keeps ESTALE.
+// Anything else (directories, no surviving view) keeps ESTALE.
 func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut, stale syscall.Errno) syscall.Errno {
 	if n.isDir {
 		return stale
@@ -148,7 +148,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		err := state.setSizeLocked(int64(size))
@@ -158,7 +158,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			n.fs.stagePrivClearForDataWrite(ctx, state, state.path)
 		}
 		state.mu.Unlock()
-		unlockOpMu(&state.opMu)
+		n.fs.unlockOpMu(&state.opMu)
 		if err != nil {
 			return errnoFromError(err)
 		}
@@ -175,13 +175,13 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				unlockOpMu(&state.opMu)
+				n.fs.unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			state.pending.HasMode = true
 			state.pending.Mode = mode & 0o7777
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 		}
 	}
 	uid, uidOK := in.GetUID()
@@ -198,7 +198,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				unlockOpMu(&state.opMu)
+				n.fs.unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			overlayBase := base
@@ -218,7 +218,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			// already carries the effective overlay mode.
 			stagePrivClearLocked(ctx, state, overlayBase.Mode)
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 		}
 	}
 	atime, atimeOK := in.GetATime()
@@ -235,7 +235,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.mu.Lock()
 			if state.poisoned {
 				state.mu.Unlock()
-				unlockOpMu(&state.opMu)
+				n.fs.unlockOpMu(&state.opMu)
 				return syscall.EIO
 			}
 			overlayBase := base
@@ -250,13 +250,13 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 			state.pending.ATime = atime
 			state.pending.MTime = mtime
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 		}
 	}
 	n.detachedReply(base, state, out)
 	n.fs.notifyKernelContentChanged(n.inode)
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("setattr detached", "inode", n.inode, "valid", in.Valid)
+		n.fs.debugOp("setattr", "inode", n.inode, "valid", in.Valid, "detached", true)
 	}
 	return 0
 }
@@ -300,7 +300,7 @@ func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fu
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 			return false, 0, syscall.EIO
 		}
 		err := state.setSizeLocked(int64(size))
@@ -314,7 +314,7 @@ func (n *storhubNode) setattrSize(ctx context.Context, targetPath string, in *fu
 			n.fs.stagePrivClearForDataWrite(ctx, state, targetPath)
 		}
 		state.mu.Unlock()
-		unlockOpMu(&state.opMu)
+		n.fs.unlockOpMu(&state.opMu)
 		if err != nil {
 			return false, 0, errnoFromError(err)
 		}
@@ -349,13 +349,13 @@ func (n *storhubNode) setattrMode(ctx context.Context, targetPath string, in *fu
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.pending.HasMode = true
 		state.pending.Mode = mode & 0o7777
 		state.mu.Unlock()
-		unlockOpMu(&state.opMu)
+		n.fs.unlockOpMu(&state.opMu)
 		return 0
 	}
 	if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
@@ -390,7 +390,7 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.overlayEntryLocked(entry)
@@ -410,7 +410,7 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 		// effective overlay mode via the overlay above.
 		stagePrivClearLocked(ctx, state, entry.Mode)
 		state.mu.Unlock()
-		unlockOpMu(&state.opMu)
+		n.fs.unlockOpMu(&state.opMu)
 		return 0
 	}
 	if !uidOK {
@@ -456,7 +456,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		state.mu.Lock()
 		if state.poisoned {
 			state.mu.Unlock()
-			unlockOpMu(&state.opMu)
+			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
 		state.overlayEntryLocked(entry)
@@ -470,7 +470,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 		state.pending.ATime = atime
 		state.pending.MTime = mtime
 		state.mu.Unlock()
-		unlockOpMu(&state.opMu)
+		n.fs.unlockOpMu(&state.opMu)
 		return 0
 	}
 	var atimePtr, mtimePtr *time.Time
@@ -495,7 +495,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, state *inodeWriteState, usedLocalSize bool, localSize int64, out *fuse.AttrOut, valid uint32) syscall.Errno {
 	entry, err := n.fs.hub.StatPathContext(ctx, n.fs.project, targetPath)
 	if err != nil {
-		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "finish", "errno", errnoFromError(err))
+		n.fs.errorOp("setattr failed", "path", targetPath, "inode", n.inode, "step", "finish", "err", errnoFromError(err))
 		return errnoFromError(err)
 	}
 	if usedLocalSize {

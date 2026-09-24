@@ -80,7 +80,7 @@ func pcRunScenario(t *testing.T, index, total int, sc test.Scenario) test.Result
 	}
 	// Teardown itself runs bounded: on a wedged mount Unmount/Close can
 	// block behind the same stuck requests that tripped the budget
-	// (commit-path deadlock family, owned by Phase 2). The lazy detach
+	// (commit-path deadlock family, owned by the earlier stateful-handle work). The lazy detach
 	// above already aborted the connection, so abandoning teardown only
 	// leaks reaping to process exit, never hangs the suite.
 	teardownDone := make(chan struct{})

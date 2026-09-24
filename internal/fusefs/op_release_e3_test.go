@@ -1,8 +1,8 @@
 package fusefs
 
-// Phase E3 (F4): commit-release broadcast plus Close-during-commit
-// acceptance. All cross-goroutine coordination is channel-driven and
-// budget-guarded; no sleeps.
+// Commit-release broadcast plus Close-during-commit acceptance. All
+// cross-goroutine coordination is channel-driven and budget-guarded; no
+// sleeps.
 
 import (
 	"runtime"
@@ -15,14 +15,15 @@ import (
 // the previous channel closes while the new one stays open.
 func TestOpReleaseBroadcastFiresOnSignal(t *testing.T) {
 	t.Parallel()
+	fs := newTestFilesystem()
 	// A waiter must be registered: releases skip the channel swap when
 	// nobody waits (zero-alloc uncontended path), so the close assertion
 	// below only holds with a waiter present.
-	opReleaseWaiters.Add(1)
-	defer opReleaseWaiters.Add(-1)
-	ch0, gen0 := opReleaseWait()
-	signalOpRelease()
-	ch1, gen1 := opReleaseWait()
+	fs.relWaiters.Add(1)
+	defer fs.relWaiters.Add(-1)
+	ch0, gen0 := fs.opReleaseWait()
+	fs.signalOpRelease()
+	ch1, gen1 := fs.opReleaseWait()
 	if gen1 != gen0+1 {
 		t.Fatalf("generation must bump once per signal, got %d -> %d", gen0, gen1)
 	}
@@ -43,19 +44,11 @@ func TestOpReleaseBroadcastFiresOnSignal(t *testing.T) {
 // generation still bumps, but the channel identity is unchanged and no
 // close fires.
 func TestSignalOpReleaseSkipsSwapWithoutWaiters(t *testing.T) {
-	// No t.Parallel: the assertion needs a waiter-free global. Other
-	// tests register briefly, so wait (budget-guarded) for them to drain
-	// instead of skipping.
-	deadline := time.Now().Add(10 * time.Second)
-	for opReleaseWaiters.Load() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("waiter count never drained, got %d", opReleaseWaiters.Load())
-		}
-		runtime.Gosched()
-	}
-	ch0, gen0 := opReleaseWait()
-	signalOpRelease()
-	ch1, gen1 := opReleaseWait()
+	t.Parallel()
+	fs := newTestFilesystem()
+	ch0, gen0 := fs.opReleaseWait()
+	fs.signalOpRelease()
+	ch1, gen1 := fs.opReleaseWait()
 	if gen1 != gen0+1 {
 		t.Fatalf("generation must bump once per signal, got %d -> %d", gen0, gen1)
 	}
@@ -68,6 +61,26 @@ func TestSignalOpReleaseSkipsSwapWithoutWaiters(t *testing.T) {
 	case <-ch1:
 		t.Fatal("no waiter: channel must stay open until a waiter registers and a signal fires")
 	default:
+	}
+}
+
+// The broadcast is per-mount: a commit release on one mount must neither
+// wake nor perturb Close waiters parked on another mount.
+func TestOpReleaseBroadcastIsPerMount(t *testing.T) {
+	t.Parallel()
+	a := newTestFilesystem()
+	b := newTestFilesystem()
+	a.relWaiters.Add(1)
+	defer a.relWaiters.Add(-1)
+	chA, genA := a.opReleaseWait()
+	b.signalOpRelease()
+	select {
+	case <-chA:
+		t.Fatal("signal on mount B woke a waiter parked on mount A")
+	default:
+	}
+	if _, genA2 := a.opReleaseWait(); genA2 != genA {
+		t.Fatalf("signal on mount B bumped mount A's generation: %d -> %d", genA, genA2)
 	}
 }
 
@@ -105,14 +118,15 @@ func awaitParked(t *testing.T, parked chan struct{}) {
 // hook proves the waiter is in its select before the fake committer
 // releases, so release-before-park luck cannot fake the pass.
 func TestWaitOpMuBoundedWakesOnCommitRelease(t *testing.T) {
+	fs := newTestFilesystem()
 	var mu sync.Mutex
 	mu.Lock()
 	parked := installParkHook(t)
 	acquired := make(chan bool, 1)
-	go func() { acquired <- waitOpMuBounded(&mu, closeOpMuTimeout) }()
+	go func() { acquired <- fs.waitOpMuBounded(&mu, closeOpMuTimeout) }()
 	awaitParked(t, parked)
 	mu.Unlock()
-	signalOpRelease() // every commit-path opMu release signals
+	fs.signalOpRelease() // every commit-path opMu release signals
 	releasedAt := time.Now()
 	select {
 	case ok := <-acquired:
@@ -131,12 +145,13 @@ func TestWaitOpMuBoundedWakesOnCommitRelease(t *testing.T) {
 // releases still fails CLOSED (false) at the budget, never parks forever.
 func TestWaitOpMuBoundedKeepsLoudBackstop(t *testing.T) {
 	t.Parallel()
+	fs := newTestFilesystem()
 	var mu sync.Mutex
 	mu.Lock()
 	defer mu.Unlock()
 	const budget = 100 * time.Millisecond
 	start := time.Now()
-	if waitOpMuBounded(&mu, budget) {
+	if fs.waitOpMuBounded(&mu, budget) {
 		t.Fatal("acquired a lock that was never released")
 	}
 	if d := time.Since(start); d < budget {
@@ -162,7 +177,7 @@ func TestCloseCompletesAtCommitEnd(t *testing.T) {
 	go func() { closed <- fsys.Close() }()
 	awaitParked(t, parked)
 	state.opMu.Unlock()
-	signalOpRelease()
+	fsys.signalOpRelease()
 	releasedAt := time.Now()
 	select {
 	case err := <-closed:
@@ -174,5 +189,36 @@ func TestCloseCompletesAtCommitEnd(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close did not complete after commit end")
+	}
+}
+
+// Parked waiter isolation across mounts: a Close waiter on mount A must
+// not be woken by commit releases on mount B, even though both share the
+// parked hook. The waiter only acquires when A's own committer releases.
+func TestWaitOpMuBoundedIgnoresOtherMountReleases(t *testing.T) {
+	a := newTestFilesystem()
+	b := newTestFilesystem()
+	var mu sync.Mutex
+	mu.Lock()
+	parked := installParkHook(t)
+	acquired := make(chan bool, 1)
+	go func() { acquired <- a.waitOpMuBounded(&mu, 2*time.Second) }()
+	awaitParked(t, parked)
+	b.signalOpRelease()
+	runtime.Gosched()
+	select {
+	case <-acquired:
+		t.Fatal("waiter on mount A completed on mount B's release")
+	default:
+	}
+	mu.Unlock()
+	a.signalOpRelease()
+	select {
+	case ok := <-acquired:
+		if !ok {
+			t.Fatal("waiter failed to acquire a released lock")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waiter did not wake on its own mount's release")
 	}
 }

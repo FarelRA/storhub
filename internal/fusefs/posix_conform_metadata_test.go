@@ -10,9 +10,27 @@ import (
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
+func (h *pcHub) dirEntryLocked(d *pcDir, target string) *shfs.EntryInfo {
+	return shfs.EntryFromDirectory(&meta.DirMeta{
+		Mode: d.mode, UID: d.uid, GID: d.gid, Inode: d.inode,
+		ModifiedAt: d.mtime, AccessedAt: d.atime, ChangedAt: d.ctime,
+	}, target, 1)
+}
+
 func (h *pcHub) ChmodContext(ctx context.Context, _ string, target string, mode uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Directories take chmod like production (no ErrIsDir): the mode
+	// lands in the dir table.
+	if d, ok := h.dirs[target]; ok {
+		entry := h.dirEntryLocked(d, target)
+		if err := shfs.CanChmod(ctx, entry); err != nil {
+			return err
+		}
+		d.mode = shfs.SanitizeChmodMode(ctx, entry, mode)
+		d.ctime = time.Now().UnixNano()
+		return nil
+	}
 	f, err := h.resolveLocked(target)
 	if err != nil {
 		return err
@@ -29,6 +47,24 @@ func (h *pcHub) ChmodContext(ctx context.Context, _ string, target string, mode 
 func (h *pcHub) ChownContext(ctx context.Context, _ string, target string, uid, gid uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Directories take chown like production (no ErrIsDir).
+	if d, ok := h.dirs[target]; ok {
+		entry := h.dirEntryLocked(d, target)
+		if err := shfs.CanChown(ctx, entry, uid, gid); err != nil {
+			return err
+		}
+		const keepOwner = ^uint32(0)
+		if uid != keepOwner {
+			d.uid = uid
+		}
+		if gid != keepOwner {
+			d.gid = gid
+		}
+		// POSIX chown clears setuid/setgid, mirroring the posix service.
+		d.mode &^= 0o6000
+		d.ctime = time.Now().UnixNano()
+		return nil
+	}
 	f, err := h.resolveLocked(target)
 	if err != nil {
 		return err
@@ -53,6 +89,33 @@ func (h *pcHub) ChownContext(ctx context.Context, _ string, target string, uid, 
 func (h *pcHub) ChtimesContext(ctx context.Context, _ string, target string, atime, mtime int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Directories take utimens like production (no ErrIsDir).
+	if d, ok := h.dirs[target]; ok {
+		now := time.Now().UnixNano()
+		var atimePtr, mtimePtr *time.Time
+		if atime != 0 {
+			t := time.Unix(0, atime)
+			atimePtr = &t
+		}
+		if mtime != 0 {
+			t := time.Unix(0, mtime)
+			mtimePtr = &t
+		}
+		entry := h.dirEntryLocked(d, target)
+		if err := shfs.CanSetTimesValues(ctx, entry, atimePtr, mtimePtr, now); err != nil {
+			return err
+		}
+		if atime == 0 {
+			atime = now
+		}
+		if mtime == 0 {
+			mtime = now
+		}
+		d.atime = atime
+		d.mtime = mtime
+		d.ctime = now
+		return nil
+	}
 	f, err := h.resolveLocked(target)
 	if err != nil {
 		return err
@@ -86,6 +149,22 @@ func (h *pcHub) ChtimesContext(ctx context.Context, _ string, target string, ati
 func (h *pcHub) ChtimesExplicitContext(ctx context.Context, _ string, target string, atime, mtime *time.Time) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Directories take explicit times like production (no ErrIsDir).
+	if d, ok := h.dirs[target]; ok {
+		now := time.Now().UnixNano()
+		entry := h.dirEntryLocked(d, target)
+		if err := shfs.CanSetTimesValues(ctx, entry, atime, mtime, now); err != nil {
+			return err
+		}
+		if atime != nil {
+			d.atime = atime.UnixNano()
+		}
+		if mtime != nil {
+			d.mtime = mtime.UnixNano()
+		}
+		d.ctime = now
+		return nil
+	}
 	f, err := h.resolveLocked(target)
 	if err != nil {
 		return err

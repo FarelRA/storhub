@@ -168,8 +168,8 @@ func TestDetachedHandleReadOnlyStat(t *testing.T) {
 	}
 }
 
-// TestRecreateNeverServesStalePin closes audit H1 (delete-recreate storm
-// asserting pin identity). The feared shape is a delete plus recreate
+// TestRecreateNeverServesStalePin covers the delete-recreate storm
+// (stale open-time pin identity). The feared shape is a delete plus recreate
 // cycle hitting a stale open-time pin: same path, same size, same
 // second-precision stamps. Three independent barriers make it
 // impossible, and this storm proves the observable behavior: (1) the

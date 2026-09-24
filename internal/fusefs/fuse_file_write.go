@@ -26,6 +26,13 @@ const (
 // rewrite chunk layout semantics the overlay cannot express, so they
 // return EOPNOTSUPP rather than pretending. A read-only handle has
 // nothing to allocate against and returns EBADF, matching POSIX.
+//
+// Access control is open-time plus commit-time, not per-call: the handle
+// could only be opened with write permission (see Open), and commit
+// re-checks write DAC under the flushing caller's identity before any
+// byte reaches the remote. A caller whose rights were revoked after open
+// can reserve local temp space but can never publish through it, so no
+// per-call re-check is needed here.
 func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
 	_ = ctx
 	// Load-then-use: the pointer is nilled under h.mu by Release, so
@@ -52,7 +59,7 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		return syscall.EOPNOTSUPP
 	}
 	writeState.opMu.Lock()
-	defer unlockOpMu(&writeState.opMu)
+	defer h.fs.unlockOpMu(&writeState.opMu)
 	writeState.mu.Lock()
 	defer writeState.mu.Unlock()
 	if writeState.poisoned {
@@ -70,16 +77,13 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 		writeState.logicalSize = end
 	}
 	if h.fs.debugEnabled() {
+		// Point event, not a start/complete pair: allocation is one
+		// synchronous local reservation, so a second line would carry
+		// no extra timing information.
 		h.fs.debugOp("fallocate", "path", h.handlePath(), "inode", h.inode, "off", start, "size", length, "mode", mode)
 	}
 	return 0
 }
-
-// retrieveKernelCache has been removed.
-// The kernel guarantees it sends FUSE_WRITE for dirty pages (including mmap)
-// before FUSE_RELEASE via filemap_write_and_wait_range in fuse_flush().
-// The opMu lock in commit() ensures all FUSE_WRITE handlers complete before
-// the commit runs, so dirtyRanges is always populated correctly.
 
 // Flush pushes dirty overlay data before the kernel releases the fd.
 // The mount enables writeback caching, so close(2) may be the only
@@ -95,6 +99,9 @@ func (h *storhubHandle) Flush(ctx context.Context) syscall.Errno {
 func (h *storhubHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	_ = flags
 	if h.fs.debugEnabled() {
+		// Point event, not a start/complete pair: the commit plus
+		// journal flush plus drain below is fully synchronous, so a
+		// second line would carry no extra timing information.
 		h.fs.debugOp("fsync", "path", h.handlePath(), "inode", h.inode)
 	}
 	return h.commitFlushDrain(ctx)
@@ -128,8 +135,8 @@ func (h *storhubHandle) flushAndDrain(ctx context.Context) syscall.Errno {
 	return h.drainProject(ctx)
 }
 
-// commitFlushDrain is commitAndDrain with the F5 explicit flush in the
-// middle (commit, journal fsync, drain). Same contract: a commit failure
+// commitFlushDrain is commitAndDrain with the journal fsync between
+// commit and drain in the middle. Same contract: a commit failure
 // leaves the overlay dirty for the caller's quarantine decision; a drain
 // failure is EIO with the overlay already published, so the caller must
 // not quarantine.

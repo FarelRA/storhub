@@ -227,7 +227,7 @@ func (s *Filesystem) quarantineFile(tempPath, targetPath, reason string, intent 
 }
 
 // RecoveryInventory replays the recovery directory: every quarantined
-// overlay from earlier commit failures or crash sweeps, newest last.
+// overlay from earlier commit failures or crash sweeps, oldest first.
 // Manifest-less files (pre-hardening leftovers, manual drops) are reported
 // with best-effort stat so nothing is silently hidden.
 func (s *Filesystem) RecoveryInventory() ([]RecoveryEntry, error) {
@@ -263,7 +263,12 @@ func readRecoveryInventory(recoveryDir string) ([]RecoveryEntry, error) {
 		}
 		out = append(out, RecoveryEntry{SavedPath: full, OrigTemp: name, Reason: "unknown", Size: size})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SavedPath < out[j].SavedPath })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].SavedPath < out[j].SavedPath
+	})
 	return out, nil
 }
 
@@ -329,13 +334,13 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 	defer stripe.Unlock()
 	live, err := hub.StatPathContext(ctx, project, target)
 	if err != nil || live == nil {
-		logging.Warn(logger, "recovery redrive refused: target unreadable, keeping quarantine", "target", target, "saved", saved)
+		logging.Warn(logger, "recovery redrive refused: target unreadable, keeping quarantine", "path", target, "saved", saved)
 		return
 	}
 	fp := entry.Fingerprint
 	if live.Size != fp.Size || live.Inode != fp.Inode || live.ModifiedAt != fp.ModifiedAt || live.ChangedAt != fp.ChangedAt {
 		logging.Warn(logger, "recovery redrive refused: target changed since quarantine, keeping quarantine",
-			"target", target, "saved", saved, "live_size", live.Size, "live_inode", live.Inode)
+			"path", target, "saved", saved, "live_size", live.Size, "live_inode", live.Inode)
 		return
 	}
 	// The fingerprint matched: the target is exactly what quarantine saw.
@@ -346,7 +351,7 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 	switch {
 	case entry.FullImage:
 		if _, err := hub.ReplaceFileContext(ctx, project, target, saved); err != nil {
-			logging.Warn(logger, "recovery redrive replace failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			logging.Warn(logger, "recovery redrive replace failed, keeping quarantine", "path", target, "saved", saved, "err", err)
 			return
 		}
 	case len(entry.Ranges) > 0:
@@ -355,11 +360,11 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 		}
 	case entry.LogicalSize != entry.BaseSize:
 		if _, err := hub.TruncateFileContext(ctx, project, target, entry.LogicalSize); err != nil {
-			logging.Warn(logger, "recovery redrive truncate failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			logging.Warn(logger, "recovery redrive truncate failed, keeping quarantine", "path", target, "saved", saved, "err", err)
 			return
 		}
 		if _, err := hub.StatPathContext(ctx, project, target); err != nil {
-			logging.Warn(logger, "recovery redrive truncate left no target, keeping quarantine", "target", target, "saved", saved, "err", err)
+			logging.Warn(logger, "recovery redrive truncate left no target, keeping quarantine", "path", target, "saved", saved, "err", err)
 			return
 		}
 	default:
@@ -370,7 +375,7 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 			// Data landed but the metadata patch did not: keep the entry
 			// (with its payload) so the next mount retries the patch
 			// instead of declaring victory on half-applied state.
-			logging.Warn(logger, "recovery redrive data landed but metadata patch failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+			logging.Warn(logger, "recovery redrive data landed but metadata patch failed, keeping quarantine", "path", target, "saved", saved, "err", err)
 			return
 		}
 	}
@@ -378,11 +383,11 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 	// quarantine data (the only copy) stays.
 	after, err := hub.StatPathContext(ctx, project, target)
 	if err != nil || after == nil {
-		logging.Warn(logger, "recovery redrive verify failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+		logging.Warn(logger, "recovery redrive verify failed, keeping quarantine", "path", target, "saved", saved, "err", err)
 		return
 	}
 	if err := os.Remove(saved); err != nil && !os.IsNotExist(err) {
-		logging.Warn(logger, "recovery redrive cleanup failed (data is committed; remove manually)", "target", target, "saved", saved, "err", err)
+		logging.Warn(logger, "recovery redrive cleanup failed (data is committed; remove manually)", "path", target, "saved", saved, "err", err)
 		return
 	}
 	if err := os.Remove(saved + ".json"); err != nil && !os.IsNotExist(err) {
@@ -390,24 +395,30 @@ func redriveRecoveryEntry(ctx context.Context, hub Hub, project string, entry Re
 		// inventories a manifest without data (kept, warned, never
 		// redriven: the redrive requires the payload to exist).
 		// Loud here so the orphan is removed, not wondered at.
-		logging.Warn(logger, "recovery redrive sidecar cleanup failed (payload committed; remove sidecar manually)", "target", target, "saved", saved+".json", "err", err)
+		logging.Warn(logger, "recovery redrive sidecar cleanup failed (payload committed; remove sidecar manually)", "path", target, "saved", saved+".json", "err", err)
 		return
 	}
-	logging.Warn(logger, "recovery redrive committed quarantined overlay", "target", target)
+	logging.Warn(logger, "recovery redrive committed quarantined overlay", "path", target)
 }
+
+// redrivePatchEditCap bounds one redrive patch edit: a huge recorded
+// span replays as a run of capped edits instead of one whole-span
+// allocation. It matches the mount I/O cap, so a redrive never holds
+// more than one in-flight window per span.
+const redrivePatchEditCap = mountMaxIOSize
 
 // redriveRanges replays recorded dirty spans from the saved temp through
 // the patch verb: each span's bytes are read from the temp at the recorded
-// offsets and patched over the same offsets. Reads use ReadAt per span so
-// a huge temp never loads fully into memory for a small dirty set. Spans
-// outside the temp file refuse the whole entry (a truncated temp must
-// never redrive partial ranges). Reports whether the caller may proceed
-// to verification.
+// offsets and patched over the same offsets. Reads use ReadAt per
+// capped chunk so a huge temp never loads fully into memory for a small
+// dirty set. Spans outside the temp file refuse the whole entry (a
+// truncated temp must never redrive partial ranges). Reports whether the
+// caller may proceed to verification.
 func redriveRanges(ctx context.Context, hub Hub, project string, entry RecoveryEntry, logger *slog.Logger) bool {
 	target, saved := entry.TargetPath, entry.SavedPath
 	f, err := os.Open(saved)
 	if err != nil {
-		logging.Warn(logger, "recovery redrive refused: payload unreadable, keeping quarantine", "target", target, "saved", saved, "err", err)
+		logging.Warn(logger, "recovery redrive refused: payload unreadable, keeping quarantine", "path", target, "saved", saved, "err", err)
 		return false
 	}
 	defer func() { _ = f.Close() }()
@@ -415,7 +426,7 @@ func redriveRanges(ctx context.Context, hub Hub, project string, entry RecoveryE
 	if info, err := f.Stat(); err == nil {
 		size = info.Size()
 	} else {
-		logging.Warn(logger, "recovery redrive refused: payload unstatable, keeping quarantine", "target", target, "saved", saved, "err", err)
+		logging.Warn(logger, "recovery redrive refused: payload unstatable, keeping quarantine", "path", target, "saved", saved, "err", err)
 		return false
 	}
 	edits := make([]shfs.RangeEdit, 0, len(entry.Ranges))
@@ -423,19 +434,26 @@ func redriveRanges(ctx context.Context, hub Hub, project string, entry RecoveryE
 		start, end := span[0], span[1]
 		if start < 0 || end < start || end > size {
 			logging.Warn(logger, "recovery redrive refused: span outside payload, keeping quarantine",
-				"target", target, "saved", saved, "span", span)
+				"path", target, "saved", saved, "span", span)
 			return false
 		}
-		edit := make([]byte, end-start)
-		if _, err := f.ReadAt(edit, start); err != nil {
-			logging.Warn(logger, "recovery redrive refused: span unreadable, keeping quarantine",
-				"target", target, "saved", saved, "span", span, "err", err)
-			return false
+		for offset := start; offset < end; {
+			chunkEnd := offset + redrivePatchEditCap
+			if chunkEnd > end {
+				chunkEnd = end
+			}
+			edit := make([]byte, chunkEnd-offset)
+			if _, err := f.ReadAt(edit, offset); err != nil {
+				logging.Warn(logger, "recovery redrive refused: span unreadable, keeping quarantine",
+					"path", target, "saved", saved, "span", span, "err", err)
+				return false
+			}
+			edits = append(edits, shfs.RangeEdit{Start: offset, DeleteSize: chunkEnd - offset, Data: edit})
+			offset = chunkEnd
 		}
-		edits = append(edits, shfs.RangeEdit{Start: start, DeleteSize: end - start, Data: edit})
 	}
 	if _, err := hub.PatchFileRangesContext(ctx, project, target, edits); err != nil {
-		logging.Warn(logger, "recovery redrive patch failed, keeping quarantine", "target", target, "saved", saved, "err", err)
+		logging.Warn(logger, "recovery redrive patch failed, keeping quarantine", "path", target, "saved", saved, "err", err)
 		return false
 	}
 	return true

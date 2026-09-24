@@ -66,10 +66,10 @@ func (n *storhubNode) CopyFileRange(ctx context.Context, fhIn gofusefs.FileHandl
 	}
 	started := time.Now()
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("copy_file_range start", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length)
+		n.fs.debugOp("copy start", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length)
 	}
 	if _, err := n.fs.hub.CloneRange(ctx, n.fs.project, srcPath, int64(offIn), dstPath, int64(offOut), int64(length)); err != nil {
-		n.fs.errorOp("copy_file_range failed", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length, "err", err)
+		n.fs.errorOp("copy failed", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length, "err", err)
 		return 0, errnoFromError(err)
 	}
 	// The destination content moved under every cached view: drop shared
@@ -87,7 +87,7 @@ func (n *storhubNode) CopyFileRange(ctx context.Context, fhIn gofusefs.FileHandl
 		n.fs.notifyKernelContentChanged(dstInode)
 	}
 	if n.fs.debugEnabled() {
-		n.fs.debugOp("copy_file_range complete", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length, "elapsed", time.Since(started))
+		n.fs.debugOp("copy complete", "src", srcPath, "src_off", offIn, "dst", dstPath, "dst_off", offOut, "len", length, "elapsed", time.Since(started))
 	}
 	return uint32(length), 0
 }

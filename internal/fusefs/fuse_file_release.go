@@ -66,9 +66,8 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 	if writeState != nil {
 		h.fs.releaseWriteState(writeState)
 	}
-	_ = ctx
 	if errno != 0 {
-		h.fs.errorOp("release failed", "path", releasePath, "inode", h.inode, "errno", errno, "elapsed", time.Since(started))
+		h.fs.errorOp("release failed", "path", releasePath, "inode", h.inode, "elapsed", time.Since(started), "err", errno)
 		return errno
 	}
 	if h.fs.debugEnabled() {

@@ -10,10 +10,7 @@ import (
 // pending mark clears before fn runs, so without a re-drive the kernel
 // keeps the stale entry until timeout (the fan-out flake mechanism).
 func TestNotifyAsyncRetriesPanickingDelivery(t *testing.T) {
-	fs := &Filesystem{
-		notifyQueued: make(map[notifyKey]struct{}),
-		notifySlots:  make(chan struct{}, 1),
-	}
+	fs := newTestFilesystem()
 	var calls atomic.Int32
 	done := make(chan struct{})
 	fs.notifyAsync(notifyKey{kind: notifyKindEntry, name: "f"}, "TestNotify", func() {

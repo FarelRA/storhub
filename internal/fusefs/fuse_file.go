@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/logging"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -164,11 +163,11 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		return nil, 0, errnoFromError(err)
 	}
 	if entry.IsDir {
-		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.EISDIR)
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", syscall.EISDIR)
 		return nil, 0, syscall.EISDIR
 	}
 	if entry.IsSymlink {
-		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ELOOP)
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", syscall.ELOOP)
 		return nil, 0, syscall.ELOOP
 	}
 	// Pin the content layout at open time, shared across handles that
@@ -185,7 +184,7 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 	}
 	file := repoMeta.FindFile(targetPath)
 	if file == nil {
-		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+		n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", syscall.ENOENT)
 		return nil, 0, syscall.ENOENT
 	}
 	// Close the stat-then-pin window: a REST rename, replace, or unlink
@@ -207,11 +206,11 @@ func (n *storhubNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHand
 		}
 		fileRetry := repoRetry.FindFile(targetPath)
 		if fileRetry == nil {
-			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", syscall.ENOENT)
 			return nil, 0, syscall.ENOENT
 		}
 		if fileRetry.Inode != entryRetry.Inode {
-			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "errno", syscall.ENOENT)
+			n.fs.errorOp("open failed", "path", targetPath, "inode", n.inode, "flags", flags, "err", syscall.ENOENT)
 			return nil, 0, syscall.ENOENT
 		}
 		entry = entryRetry
@@ -359,7 +358,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			writeState.mu.Lock()
 			if err := writeState.setSizeLocked(0); err != nil {
 				writeState.mu.Unlock()
-				unlockOpMu(&writeState.opMu)
+				s.unlockOpMu(&writeState.opMu)
 				s.releaseWriteState(writeState)
 				s.mu.Lock()
 				delete(s.handles, h.id)
@@ -372,7 +371,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 			// Open/Create).
 			s.stagePrivClearForDataWrite(ctx, writeState, writeState.path)
 			writeState.mu.Unlock()
-			unlockOpMu(&writeState.opMu)
+			s.unlockOpMu(&writeState.opMu)
 		}
 	}
 	// A read-only open never attaches to another writer's writeState:
@@ -400,7 +399,7 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 
 	// Network calls without lock. The fd may close under us while they
 	// run: RELEASE is not synchronized with close, so a racing Release
-	// can close (and remove) our temp before we Seek it — historically
+	// can close (and remove) our temp before we Seek it, historically
 	// surfacing as "file already closed" EIO on the concurrent unlink.
 	// Every exit below re-checks under h.mu and abandons the snapshot
 	// when the handle was released: no future read needs it, and the
@@ -416,12 +415,7 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 		if h.abandonMaterialize(temp) {
 			return nil
 		}
-		if rmErr := temp.Close(); rmErr != nil {
-			h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", rmErr)
-		}
-		if rmErr := os.Remove(temp.Name()); rmErr != nil {
-			h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", rmErr)
-		}
+		h.discardMaterializeTemp(temp, targetPath)
 		h.mu.Lock()
 		if h.temp == temp {
 			h.temp = nil
@@ -439,12 +433,7 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 			if h.abandonMaterialize(temp) {
 				return nil
 			}
-			if err := temp.Close(); err != nil {
-				logging.Error(h.fs.log(), "failed to close temp file after download error", "path", temp.Name(), "err", err)
-			}
-			if err := os.Remove(temp.Name()); err != nil {
-				logging.Error(h.fs.log(), "failed to remove temp file after download error", "path", temp.Name(), "err", err)
-			}
+			h.discardMaterializeTemp(temp, targetPath)
 			h.mu.Lock()
 			if h.temp == temp {
 				h.temp = nil
@@ -469,6 +458,19 @@ func (h *storhubHandle) materializePath(ctx context.Context, targetPath string) 
 		h.mu.Unlock()
 	}
 	return nil
+}
+
+// discardMaterializeTemp closes and removes a snapshot temp whose fetch
+// failed (stat or download error on a live handle). Single cleanup tail
+// for every materializePath failure path: failures log at Error, never
+// silently, so a missing snapshot always has a trace.
+func (h *storhubHandle) discardMaterializeTemp(temp *os.File, targetPath string) {
+	if err := temp.Close(); err != nil {
+		h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", err)
+	}
+	if err := os.Remove(temp.Name()); err != nil {
+		h.fs.errorOp("materialize cleanup failed", "path", targetPath, "temp", temp.Name(), "err", err)
+	}
 }
 
 // abandonMaterialize drops a snapshot temp fetched for a handle that was
@@ -517,14 +519,22 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (resul
 		// Serialize with commits on opMu (always opMu before mu): commit
 		// drops mu across its network window while mutating the plan,
 		// and a read straddling that window would serve half-old,
-		// half-new bytes.
+		// half-new bytes. Stall bound: a read on a dirty handle waits
+		// for the in-flight commit's full remote upload (minutes on
+		// slow links, by design: the overlay is the only copy of the
+		// bytes). Reads without their own write state avoid this via
+		// the short-mu-only readLiveOverlay path below, which never
+		// takes opMu.
 		writeState.opMu.Lock()
-		defer unlockOpMu(&writeState.opMu)
+		defer h.fs.unlockOpMu(&writeState.opMu)
 		writeState.mu.Lock()
 		defer writeState.mu.Unlock()
 		// Reading a poisoned overlay would serve zeros for ranges
 		// whose bytes are in recovery/ - fail instead of lying.
 		if writeState.poisoned {
+			// Lock order: h.mu is a leaf lock, so snapshotting the
+			// path here while holding opMu plus the state mutex
+			// preserves the leaf-last order (never the reverse).
 			h.fs.errorOp("read failed", "path", h.handlePath(), "inode", h.inode, "off", off, "len", len(dest), "err", syscall.EIO)
 			return nil, syscall.EIO
 		}
