@@ -67,8 +67,16 @@ describe('mimeForKind', () => {
   it('maps special cases and falls back to octet-stream', () => {
     expect(mimeForKind('image', 'svg')).toBe('image/svg+xml')
     expect(mimeForKind('audio', 'mp3')).toBe('audio/mpeg')
-    expect(mimeForKind('video', 'mkv')).toBe('video/mp4')
     expect(mimeForKind('text', '')).toBe('application/octet-stream')
+  })
+
+  it('labels video containers honestly instead of claiming mp4', () => {
+    expect(mimeForKind('video', 'mp4')).toBe('video/mp4')
+    expect(mimeForKind('video', 'm4v')).toBe('video/mp4')
+    expect(mimeForKind('video', 'mkv')).toBe('video/x-matroska')
+    expect(mimeForKind('video', 'mov')).toBe('video/quicktime')
+    expect(mimeForKind('video', 'avi')).toBe('video/x-msvideo')
+    expect(mimeForKind('video', 'webm')).toBe('video/webm')
   })
 })
 

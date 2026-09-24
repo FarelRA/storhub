@@ -69,6 +69,7 @@ function onKeydown(event: KeyboardEvent) {
     @pointermove="onPointerMove"
     @pointerup="endDrag"
     @pointercancel="endDrag"
+    @lostpointercapture="endDrag"
     @dblclick="resetPanel(panel); persist()"
     @keydown="onKeydown"
   >

@@ -12,11 +12,12 @@ import type {
 } from '~/utils/api-types'
 import { copyText } from '~/utils/clipboard'
 import { canDownloadWithoutToken } from '~/utils/download'
+import { blankForm } from '~/utils/modal-kinds'
 import { directLink, SHARE_TTL_5M, SHARE_TTL_5M_LABEL } from '~/utils/share-links'
 import { sharedState } from './console-state'
 import { useSelection } from './use-selection'
 import { usePreview } from './use-preview'
-import { useUploads, clearUploadCache } from './use-uploads'
+import { useUploads, abortUploads, clearUploadCache } from './use-uploads'
 import type { UploadItem } from './use-uploads'
 import { useModals } from './use-modals'
 import { useDeleteService } from './use-delete'
@@ -28,6 +29,11 @@ let inflight = 0
 // Generation guard: a slow response for an older selection must never
 // overwrite a newer one.
 let inspectSeq = 0
+
+// Generation guard for directory listings: concurrent refreshAll calls (nav
+// vs refresh) resolve last-writer-wins without this, repainting an older
+// listing over a newer one.
+let directorySeq = 0
 
 function encodeSegment(value: string): string {
   return encodeURIComponent(value)
@@ -48,6 +54,7 @@ export function useConsole() {
     shares,
     revisions,
     xattrs,
+    xattrsError,
     editorContent,
     editorDirty,
     editorETag,
@@ -117,7 +124,7 @@ export function useConsole() {
     return ok !== null
   }
 
-  // ---- Slices (god-composable split; this module stays a thin facade) -----
+  // ---- Slices (console-state split; this module stays a thin facade) -----
 
   const selection = useSelection()
   const preview = usePreview({
@@ -196,31 +203,40 @@ export function useConsole() {
   // ---- Loading -------------------------------------------------------------
 
   async function loadDirectory(path: string): Promise<boolean> {
+    const seq = ++directorySeq
     let nextPath = normalizePath(path)
     if (sharedMode.value && shareRootPath.value && !withinShareRoot(nextPath)) nextPath = shareRootPath.value
-    // Keep the current selection when merely re-listing the same directory
-    // (refresh after a mutation); navigating elsewhere resets the panes.
-    if (nextPath !== currentPath.value) selection.clearSelection()
+    // Navigating away abandons the old location: abort its uploads and drop
+    // its selection so the panes cannot act on the previous directory.
+    if (nextPath !== currentPath.value) {
+      abortUploads()
+      selection.clearSelection()
+    }
     currentPath.value = nextPath
     // Never leave the previous directory's rows under the new path: a failed
     // fetch must show an empty pane, not stale entries the user could act on.
     entries.value = []
-    return (
-      (await run('Directory', async () => {
-        const payload = await getJSON<{ entries?: DirEntry[] }>(url(projectURL('/children'), { path: nextPath }))
-        entries.value = payload.entries ?? []
-      })) !== null
-    )
+    const ok = await run('Directory', async () => {
+      const payload = await getJSON<{ entries?: DirEntry[] }>(url(projectURL('/children'), { path: nextPath }))
+      // A superseded listing resolves after its replacement: drop it instead
+      // of repainting older rows over the newer directory.
+      if (seq !== directorySeq) return false
+      entries.value = payload.entries ?? []
+      return true
+    })
+    return ok === true
   }
 
   async function loadXattrs(): Promise<void> {
     if (!selectedPath.value) {
       xattrs.value = []
+      xattrsError.value = false
       return
     }
     const target = selectedPath.value
     xattrs.value = []
-    await run('XAttrs', async () => {
+    xattrsError.value = false
+    const ok = await run('XAttrs', async () => {
       const payload = await getJSON<{ names?: string[] }>(url(projectURL('/xattrs'), { path: target }))
       const resolved = await Promise.all(
         (payload.names ?? []).map(async (name) => {
@@ -237,6 +253,9 @@ export function useConsole() {
       // Drop the result if the selection moved on while these requests ran.
       if (selectedPath.value === target) xattrs.value = resolved
     }, true)
+    // The outer list runs quiet, so a total failure would otherwise print
+    // "No attributes on this entry", indistinguishable from genuinely empty.
+    if (ok === null && selectedPath.value === target) xattrsError.value = true
   }
 
   async function inspectPath(path: string): Promise<void> {
@@ -246,7 +265,12 @@ export function useConsole() {
       return payload.entry ?? null
     })
     if (seq !== inspectSeq) return
-    if (ok === null) return
+    if (ok === null) {
+      // A failed stat must not leave the previous entry behind: selectEntry
+      // would then open/preview that stale entry (the wrong file).
+      selectedEntry.value = null
+      return
+    }
     selectedEntry.value = ok
     selectedPath.value = path
     editorDirty.value = false
@@ -361,6 +385,9 @@ export function useConsole() {
       toasts.error('Enter a project name first')
       return false
     }
+    // A project switch abandons the old location: stop its uploads before
+    // the first listing for the new project fires.
+    abortUploads()
     project.value = trimmed
     currentPath.value = ''
     selectedPath.value = ''
@@ -431,14 +458,11 @@ export function useConsole() {
       }
       return true
     } catch {
-      // A dead link must not strand the UI in shared mode: reset every
-      // piece of console state, drop the share fields, and restore the
-      // prior bearer so the login card and project input come back.
+      // A dead link must not strand the UI in shared mode: reset() drops
+      // every piece of console state including the share fields, then the
+      // prior bearer is restored so the login card and project input come
+      // back.
       reset()
-      shareRequested.value = false
-      shareToken.value = ''
-      shareId.value = ''
-      shareRootPath.value = ''
       token.value = priorToken
       principal.value = priorPrincipal
       toasts.error('This share link is invalid or has expired')
@@ -563,10 +587,32 @@ export function useConsole() {
     shares.value = []
     revisions.value = []
     xattrs.value = []
+    xattrsError.value = false
     editorContent.value = ''
     editorDirty.value = false
     editorETag.value = ''
     editorIsText.value = true
+    previewLoading.value = false
+    uploadProgress.value = {
+      active: false,
+      done: 0,
+      failed: 0,
+      total: 0,
+      current: '',
+      bytesDone: 0,
+      bytesTotal: 0,
+    }
+    // Share, modal, and progress state live here too: every sign-out,
+    // project switch, and dead-link recovery funnels through reset, so no
+    // caller needs ad-hoc cleanup for these fields afterwards.
+    shareRequested.value = false
+    shareToken.value = ''
+    shareRootPath.value = ''
+    shareId.value = ''
+    modalOpen.value = false
+    modalKind.value = 'mkdir'
+    modalForm.value = blankForm()
+    modalError.value = ''
     clearUploadCache()
     preview.clearPreview()
   }
@@ -673,6 +719,7 @@ export function useConsole() {
     shares,
     revisions,
     xattrs,
+    xattrsError,
     editorContent,
     editorDirty,
     busy,

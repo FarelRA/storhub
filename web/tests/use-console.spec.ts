@@ -141,6 +141,83 @@ describe('project health payload', () => {
   })
 })
 
+describe('inspectPath failure', () => {
+  it('clears the stale entry instead of keeping the previous file', async () => {
+    const c = useConsole()
+    c.selectedEntry.value = {
+      path: 'old.txt',
+      is_dir: false,
+      size: 3,
+      modified_at: 1,
+      created_at: 1,
+    }
+    const fetchMock = globalThis.fetch as unknown as { mockRejectedValueOnce: (error: unknown) => void }
+    fetchMock.mockRejectedValueOnce(new Error('boom'))
+    await c.inspectPath('new.txt')
+    expect(c.selectedEntry.value).toBeNull()
+  })
+})
+
+describe('loadXattrs error flag', () => {
+  it('marks a total list failure instead of reporting an empty list', async () => {
+    const c = useConsole()
+    c.selectedPath.value = 'f.txt'
+    c.xattrsError.value = false
+    const fetchMock = globalThis.fetch as unknown as { mockRejectedValueOnce: (error: unknown) => void }
+    fetchMock.mockRejectedValueOnce(new Error('denied'))
+    await c.loadXattrs()
+    expect(c.xattrs.value).toEqual([])
+    expect(c.xattrsError.value).toBe(true)
+  })
+
+  it('clears the flag on the next success', async () => {
+    const c = useConsole()
+    c.selectedPath.value = 'f.txt'
+    c.xattrsError.value = true
+    await c.loadXattrs()
+    expect(c.xattrsError.value).toBe(false)
+  })
+})
+
+describe('truncate validation', () => {
+  it('rejects exponential, empty, and fractional sizes without PATCHing', async () => {
+    const c = useConsole()
+    c.selectedPath.value = 'f.txt'
+    c.modalKind.value = 'truncate'
+    for (const bad of ['1e3', '', '  ', '-5', '12.5']) {
+      calls.length = 0
+      c.modalForm.value.text = bad
+      await c.submitModal()
+      expect(c.modalError.value).toContain('non-negative integer')
+      expect(calls.some(x => x.method === 'PATCH')).toBe(false)
+    }
+  })
+
+  it('accepts a plain digit string and PATCHes it verbatim', async () => {
+    const c = useConsole()
+    c.selectedPath.value = 'f.txt'
+    c.modalKind.value = 'truncate'
+    c.modalForm.value.text = '1024'
+    await c.submitModal()
+    expect(c.modalError.value).toBe('')
+    const call = calls.find(x => x.method === 'PATCH')
+    expect(call?.url).toContain('size=1024')
+  })
+})
+
+describe('utimes validation', () => {
+  it('requires both fields instead of defaulting a cleared field to now', async () => {
+    const c = useConsole()
+    c.selectedPath.value = 'f.txt'
+    c.modalKind.value = 'utimes'
+    c.modalForm.value.atime = '2026-01-01T00:00'
+    c.modalForm.value.mtime = ''
+    await c.submitModal()
+    expect(c.modalError.value).toContain('both atime and mtime')
+    expect(calls.some(x => x.url.includes('/ops/utimes'))).toBe(false)
+  })
+})
+
 describe('prune payload', () => {
   it('POSTs {scope, keep, dry_run:true} and skips the refresh for dry runs', async () => {
     const c = useConsole()

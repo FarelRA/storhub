@@ -1,8 +1,9 @@
+import type { AnyEntry } from '~/utils/api-types'
 import { sharedState } from './console-state'
 import { clearPreviewState } from './use-preview'
 
 /**
- * Selection model slice of the god-composable: single/multi/range select
+ * Selection model slice of the console composable: single/multi/range select
  * over the current directory listing. Operates on the shared state; the
  * useConsole facade re-exports these under their historic names.
  */
@@ -18,6 +19,7 @@ export function useSelection() {
     editorETag,
     editorIsText,
     xattrs,
+    xattrsError,
   } = sharedState()
 
   function clearSelection(): void {
@@ -29,6 +31,7 @@ export function useSelection() {
     editorDirty.value = false
     editorETag.value = ''
     xattrs.value = []
+    xattrsError.value = false
     editorIsText.value = true
     clearPreviewState()
   }
@@ -83,4 +86,32 @@ export function useSelection() {
   }
 
   return { clearSelection, isSelected, selectSingle, toggleSelect, selectRange, selectAll }
+}
+
+export interface SingleSelection {
+  path: string
+  entry: AnyEntry | null
+}
+
+/**
+ * The one focused entry, whether it arrives via the multi-select set or the
+ * single focus path: null while a multi-selection is active. Shared by every
+ * surface that acts on "the selected entry" (Shares panel buttons, revert
+ * actions). EntryList's menuTargets is deliberately separate: it derives
+ * row-menu targets from the open menu's entry, a different concept.
+ */
+export function useSingleSelection() {
+  const { entries, selectedEntry, selectedPath, selectedPaths } = sharedState()
+  return computed<SingleSelection | null>(() => {
+    if (selectedPaths.value.size === 1) {
+      const [only] = [...selectedPaths.value]
+      if (only === undefined) return null
+      const entry = entries.value.find(e => e.path === only) ?? selectedEntry.value
+      return { path: only, entry }
+    }
+    if (selectedPaths.value.size === 0 && selectedPath.value) {
+      return { path: selectedPath.value, entry: selectedEntry.value }
+    }
+    return null
+  })
 }

@@ -9,7 +9,6 @@ const { ask } = useConfirm()
 
 const props = defineProps<{
   entries: DirEntry[]
-  selectedPath: string
 }>()
 
 const emit = defineEmits<{
@@ -19,9 +18,10 @@ const emit = defineEmits<{
 
 const menu = useEntryMenu()
 const { openMenu, setKebabRef, toggleMenu, closeMenu } = menu
-const selection = useEntrySelection({
+const selection = useEntryKeyboard({
   getEntries: () => props.entries,
   openEntry: entry => emit('open', entry),
+  selectEntry: entry => emit('select', entry),
 })
 const {
   listRef,
@@ -29,7 +29,6 @@ const {
   isSelected,
   handleRowClick,
   handleRowDblClick,
-  handleKeydown,
   onTouchStart,
   onTouchEnd,
   onTouchMove,
@@ -65,8 +64,9 @@ async function shareEntry(entry: DirEntry) {
     toasts.error('Failed to create share link')
     return
   }
-  await copyText(shareLink(share))
-  toasts.success(`Share link copied (valid ${SHARE_TTL_5M_LABEL})`)
+  const ok = await copyText(shareLink(share))
+  if (ok) toasts.success(`Share link copied (valid ${SHARE_TTL_5M_LABEL})`)
+  else toasts.error('Clipboard unavailable')
 }
 
 async function removeEntry(entry: DirEntry) {
@@ -135,8 +135,6 @@ async function openMove(entry: DirEntry) {
   // Preserve bulk selection if this entry is part of it
   if (!consoleStore.selectedPaths.value.has(entry.path)) {
     consoleStore.selectSingle(entry.path)
-  } else if (consoleStore.selectedPaths.value.size === 0) {
-    consoleStore.selectSingle(entry.path)
   }
   consoleStore.openModal('move')
 }
@@ -144,8 +142,6 @@ async function openMove(entry: DirEntry) {
 async function openCopy(entry: DirEntry) {
   await consoleStore.focusEntry(entry)
   if (!consoleStore.selectedPaths.value.has(entry.path)) {
-    consoleStore.selectSingle(entry.path)
-  } else if (consoleStore.selectedPaths.value.size === 0) {
     consoleStore.selectSingle(entry.path)
   }
   consoleStore.openModal('copy')
@@ -160,7 +156,6 @@ async function openCopy(entry: DirEntry) {
     tabindex="0"
     role="listbox"
     aria-multiselectable="true"
-    @keydown="handleKeydown"
   >
     <li v-for="entry in entries" :key="entry.path" :data-path="entry.path" class="group relative">
       <div class="flex items-center gap-1">

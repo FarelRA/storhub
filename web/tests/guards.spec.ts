@@ -1,6 +1,7 @@
 /**
- * Guard specs for the wave-1 web fixes: the safety-critical predicates are
- * pure and pinned here, not behind the 1350-line composable harness.
+ * Guard specs for the preview/download predicates: the safety-critical
+ * predicates are pure and pinned here, not behind the console-composable
+ * harness.
  * saveFile's truncated-preview guard is pinned through usePreview with
  * stubbed deps (no fetch may fire for an incomplete preview).
  */

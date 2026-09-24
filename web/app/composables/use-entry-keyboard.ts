@@ -3,13 +3,14 @@ import { TIMEOUTS } from '~/utils/limits'
 import { useBreakpoint } from './use-breakpoint'
 
 /**
- * Row-selection slice of EntryList: desktop/mobile oracles, shift-anchor
+ * Row-interaction slice of EntryList: desktop/mobile oracles, shift-anchor
  * range select, full keyboard nav, and touch long-press. The list component
  * keeps rendering + the menu portal; everything stateful lives here.
  */
-export function useEntrySelection(opts: {
+export function useEntryKeyboard(opts: {
   getEntries: () => DirEntry[]
   openEntry: (entry: DirEntry) => void
+  selectEntry: (entry: DirEntry) => void
 }) {
   const consoleStore = useConsole()
   const { isDesktop, isCoarsePointer, hasNoHover, hasTouch } = useBreakpoint()
@@ -26,9 +27,12 @@ export function useEntrySelection(opts: {
   const listRef = ref<HTMLElement | null>(null)
 
   onMounted(() => {
+    // Single global registration: the template has no @keydown of its own,
+    // so one press fires exactly once (Escape stays idempotent either way).
     window.addEventListener('keydown', handleKeydown)
-    // Focus list for desktop keyboard navigation
-    if (!isMobile.value && listRef.value) {
+    // Only steal focus when a project is loaded: on a fresh load the login
+    // card is the actionable element, not the empty list.
+    if (!isMobile.value && listRef.value && consoleStore.project.value) {
       nextTick(() => listRef.value?.focus({ preventScroll: true }))
     }
   })
@@ -74,18 +78,37 @@ export function useEntrySelection(opts: {
     }
   }
 
+  // Stat the row so the detail/preview panes follow the highlight. Skipped
+  // when the gesture deselected the row (toggling the last item off clears
+  // the selection; re-statting it would resurrect stale panes).
+  function statIfSelected(entry: DirEntry) {
+    if (consoleStore.isSelected(entry.path)) opts.selectEntry(entry)
+  }
+
   function handleRowClick(entry: DirEntry, event: MouseEvent) {
     if (isMobile.value) {
       // Mobile: click is open when nothing selected, else toggle select
       if (selectedSet.value.size === 0) opts.openEntry(entry)
-      else handleSelect(entry, event)
+      else {
+        handleSelect(entry, event)
+        statIfSelected(entry)
+      }
       return
     }
     handleSelect(entry, event)
+    statIfSelected(entry)
   }
 
   function handleRowDblClick(entry: DirEntry) {
     if (!isMobile.value) opts.openEntry(entry)
+  }
+
+  // Every single-row keyboard move stats its target like a click does, so
+  // the detail panes never go stale behind a moved highlight. Multi-row
+  // gestures (select-all, Escape) intentionally stat nothing.
+  function moveTo(rows: DirEntry[], path: string) {
+    const target = rows.find(e => e.path === path)
+    if (target) statIfSelected(target)
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -122,6 +145,7 @@ export function useEntrySelection(opts: {
         shiftAnchor = null
         consoleStore.selectSingle(next.path)
       }
+      moveTo(rows, next.path)
       // Keep the newly selected row visible and keep keyboard focus on the list
       nextTick(() => {
         const row = document.querySelector<HTMLElement>(`[data-path="${CSS.escape(next.path)}"]`)
@@ -151,6 +175,7 @@ export function useEntrySelection(opts: {
       } else {
         consoleStore.selectSingle(first.path)
       }
+      moveTo(rows, first.path)
     } else if (event.key === 'End' || (event.key === 'ArrowDown' && (event.ctrlKey || event.metaKey))) {
       event.preventDefault()
       shiftAnchor = null
@@ -162,6 +187,7 @@ export function useEntrySelection(opts: {
       } else {
         consoleStore.selectSingle(last.path)
       }
+      moveTo(rows, last.path)
     }
   }
 

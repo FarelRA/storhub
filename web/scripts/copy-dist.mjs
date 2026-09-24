@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Copies `nuxt generate` output (.output/public) into the Go embed directory.
 // internal/rest/static/dist is git-ignored: release builds regenerate it from
 // source with a pinned bun, while Go-only checkouts carry only the committed

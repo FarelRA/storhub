@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { ToastKind } from '~/composables/use-toasts'
+
 const { toasts, dismiss } = useToasts()
 
-const styles: Record<string, string> = {
+const styles: Record<ToastKind, string> = {
   success: 'border-sage/60 text-sage',
   error: 'border-clay text-clay-soft',
   info: 'border-hair text-mist',

@@ -71,10 +71,16 @@
   .btn-sm {
     @apply min-h-8 rounded-md px-2.5 text-xs max-lg:min-h-9;
   }
+  .btn-xs {
+    @apply min-h-7 rounded-md px-2 text-[11px] max-lg:min-h-8;
+  }
   .input {
     @apply w-full rounded-lg border border-hair bg-surface px-3 py-2.5 text-parchment
       placeholder:text-mist/50 focus:border-ember focus:outline-none
       max-md:text-base;
+  }
+  .input-sm {
+    @apply px-2 py-1.5 text-xs;
   }
   .field-label {
     @apply mb-1.5 block text-xs font-medium tracking-wide text-mist uppercase;

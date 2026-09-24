@@ -4,7 +4,10 @@ const { previewKind, previewUrl, previewHex, previewMeta, editorContent, editorD
 
 async function downloadSelected() {
   const entry = selectedEntry.value
-  if (entry) await consoleStore.downloadEntry(entry)
+  // The pane button, unlike the row menu, never pre-filters by kind: only
+  // regular files have bytes worth downloading.
+  if (!entry || entry.is_dir || entry.is_symlink) return
+  await consoleStore.downloadEntry(entry)
 }
 
 // Transparency-friendly checkerboard behind images.

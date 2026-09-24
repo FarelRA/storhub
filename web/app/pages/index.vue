@@ -5,7 +5,6 @@ const consoleStore = useConsole()
 const {
   project,
   currentPath,
-  selectedPath,
   entries,
   busy,
   authEnabled,
@@ -382,7 +381,7 @@ async function onDrop(event: DragEvent) {
               :hint="project ? 'This directory is empty. Drop files to upload.' : 'Load a project to start browsing.'"
             />
             <div v-else class="min-h-0 flex-1 overflow-y-auto pr-1">
-              <EntryList :entries="entries" :selected-path="selectedPath" @select="onSelect" @open="onOpen" />
+              <EntryList :entries="entries" @select="onSelect" @open="onOpen" />
             </div>
           </section>
 

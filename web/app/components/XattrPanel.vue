@@ -2,7 +2,7 @@
 import { copyText } from '~/utils/clipboard'
 
 const consoleStore = useConsole()
-const { xattrs, selectedPath, canWrite } = consoleStore
+const { xattrs, xattrsError, selectedPath, canWrite } = consoleStore
 const toasts = useToasts()
 const { ask } = useConfirm()
 
@@ -32,7 +32,8 @@ async function removeFirst() {
       <button class="btn btn-sm" :disabled="!selectedPath" @click="consoleStore.loadXattrs()">Reload</button>
     </div>
 
-    <p v-if="!xattrs.length" class="text-sm text-mist">
+    <p v-if="xattrsError" class="text-sm text-clay-soft">Could not load attributes.</p>
+    <p v-else-if="!xattrs.length" class="text-sm text-mist">
       {{ selectedPath ? 'No attributes on this entry.' : 'Select an entry first.' }}
     </p>
 

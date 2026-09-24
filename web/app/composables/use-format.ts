@@ -10,7 +10,7 @@ export { normalizePath, parentPath } from '~/utils/path'
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const
 
 export function formatBytes(value: number | undefined | null): string {
-  if (value === undefined || value === null || Number.isNaN(value)) return '-'
+  if (value === undefined || value === null || !Number.isFinite(value)) return '-'
   if (value < 1024) return `${value} B`
   let amount = value
   let unit: (typeof BYTE_UNITS)[number] = 'B'

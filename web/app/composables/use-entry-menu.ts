@@ -17,7 +17,13 @@ export function useEntryMenu() {
   const kebabButtons = new Map<string, HTMLElement>()
 
   function setKebabRef(path: string, el: Element | { $el?: unknown } | null) {
-    if (el instanceof HTMLElement) kebabButtons.set(path, el)
+    if (el instanceof HTMLElement) {
+      kebabButtons.set(path, el)
+      return
+    }
+    // Vue passes null on unmount: drop the ref instead of accumulating a
+    // stale button per navigated directory.
+    if (el === null) kebabButtons.delete(path)
   }
 
   function toggleMenu(entry: DirEntry) {

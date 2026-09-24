@@ -38,7 +38,9 @@ export function mimeForKind(kind: PreviewKind, ext: string): string {
       if (ext === 'avif') return 'image/avif'
       return `image/${ext}`
     case 'video':
-      if (ext === 'mkv' || ext === 'mov' || ext === 'avi') return 'video/mp4'
+      if (ext === 'mkv') return 'video/x-matroska'
+      if (ext === 'mov') return 'video/quicktime'
+      if (ext === 'avi') return 'video/x-msvideo'
       if (ext === 'm4v') return 'video/mp4'
       return `video/${ext === 'mp4' ? 'mp4' : ext}`
     case 'audio':
@@ -107,11 +109,11 @@ export function classify(bytes: Uint8Array): PreviewKind {
 }
 
 /**
- * DUAL save gate, pure for testability (wave-2 specs target this, not the
- * 1350-line composable): a preview is saveable only when it is genuine text
- * AND carries a CAS token AND is complete. A truncated 64KB sniff window has
- * no etag and shown < total, so saving it can never overwrite a file with
- * its own prefix.
+ * Dual save gate, pure for testability (the save-gate predicate is extracted
+ * from use-preview so it is unit-testable without fetch): a preview is
+ * saveable only when it is genuine text AND carries a CAS token AND is
+ * complete. A truncated 64KB sniff window has no etag and shown < total, so
+ * saving it can never overwrite a file with its own prefix.
  */
 export function isPreviewSaveable(args: {
   editorIsText: boolean

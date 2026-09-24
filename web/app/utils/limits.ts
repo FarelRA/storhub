@@ -14,7 +14,7 @@ export const TIMEOUTS = {
 } as const
 
 export const ENTRY_MENU = {
-  /** min-w-56 plus padding: covers the longest labels ("Copy direct link"). */
+  /** min-w-56 (224px) plus padding and viewport margin: covers the longest labels ("Copy direct link"). */
   WIDTH_PX: 256,
   /** Viewport edge margin so the menu never kisses the screen border. */
   MARGIN_PX: 8,

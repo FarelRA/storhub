@@ -14,6 +14,12 @@ describe('formatBytes', () => {
   ])('formats %s as %s', (input, expected) => {
     expect(formatBytes(input as number | undefined)).toBe(expected)
   })
+
+  it('clamps non-finite input instead of rendering "Infinity PB"', () => {
+    expect(formatBytes(Number.POSITIVE_INFINITY)).toBe('-')
+    expect(formatBytes(Number.NEGATIVE_INFINITY)).toBe('-')
+    expect(formatBytes(Number.NaN)).toBe('-')
+  })
 })
 
 describe('normalizePath / parentPath', () => {

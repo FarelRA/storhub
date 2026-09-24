@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ open: boolean; width?: number }>()
+const props = defineProps<{ open: boolean; width?: number }>()
 const emit = defineEmits<{ close: [] }>()
 
 // Below lg the closed drawer is translated off-screen but still rendered;
@@ -8,7 +8,9 @@ const emit = defineEmits<{ close: [] }>()
 // the shared oracle so the drawer, the entry list, and the CSS agree.
 const { isDesktop } = useBreakpoint()
 
-useEscape(() => emit('close'))
+// Escape closes the drawer only when it is an overlay (mobile, open): on
+// desktop it is a static column, and a stacked modal owns Escape instead.
+useEscape(() => emit('close'), computed(() => !isDesktop.value && props.open))
 </script>
 
 <template>

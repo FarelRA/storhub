@@ -2,7 +2,7 @@
 // Rollback and per-path revert are admin-only endpoints on the server
 // (rest_auth.go denies non-admins), so the UI gates them with isAdmin,
 // not the broader canWrite.
-const { revisions, canWrite, isAdmin, rollbackRevision, revertPath, selectedPath } = useConsole()
+const { revisions, busy, canWrite, isAdmin, rollbackRevision, revertPath, selectedPath } = useConsole()
 const { ask } = useConfirm()
 
 async function rollback(sha: string) {
@@ -32,7 +32,8 @@ async function revertSelectedPath(sha: string) {
   <section class="space-y-3">
     <h2 class="font-mono text-xs font-semibold tracking-wide text-mist uppercase">Metadata revisions</h2>
 
-    <p v-if="!revisions.length" class="text-sm text-mist">No revisions loaded.</p>
+    <p v-if="busy && !revisions.length" class="text-sm text-mist" role="status">Loading revisions…</p>
+    <p v-else-if="!revisions.length" class="text-sm text-mist">No revisions loaded.</p>
 
     <p v-if="selectedPath" class="text-xs text-mist">
       Revert actions apply to the selected path: <code class="font-mono text-ember">{{ selectedPath }}</code>

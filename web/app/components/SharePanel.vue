@@ -1,31 +1,19 @@
 <script setup lang="ts">
 import { copyText } from '~/utils/clipboard'
 import { directLink, shareLink, SHARE_TTL_7D, SHARE_TTL_7D_LABEL } from '~/utils/share-links'
-import type { AnyEntry } from '~/utils/api-types'
 
 const consoleStore = useConsole()
 const { shares } = consoleStore
 const toasts = useToasts()
 const { ask } = useConfirm()
 
-// One selected entry, whether it arrives via the multi-select set or the
-// single focus path: null while a multi-selection is active.
-const singleSelection = computed<{ path: string; entry: AnyEntry | null } | null>(() => {
-  if (consoleStore.selectedPaths.value.size === 1) {
-    const [only] = [...consoleStore.selectedPaths.value]
-    if (only === undefined) return null
-    const entry = consoleStore.entries.value.find(e => e.path === only) ?? consoleStore.selectedEntry.value
-    return { path: only, entry }
-  }
-  if (consoleStore.selectedPaths.value.size === 0 && consoleStore.selectedPath.value) {
-    return { path: consoleStore.selectedPath.value, entry: consoleStore.selectedEntry.value }
-  }
-  return null
-})
+// The one focused entry, shared with every other "selected entry" surface.
+const singleSelection = useSingleSelection()
 
 async function copy(label: string, value: string) {
-  await copyText(value)
-  toasts.success(`${label} copied`)
+  const ok = await copyText(value)
+  if (ok) toasts.success(`${label} copied`)
+  else toasts.error('Clipboard unavailable')
 }
 
 // Both buttons mint 7-day shares (see share-links.ts for WHY the panel TTL

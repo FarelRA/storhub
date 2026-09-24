@@ -19,12 +19,25 @@ export interface UploadDeps {
 // ensured once per session. Module-level cache, not reactive state.
 const uploadedDirs = new Set<string>()
 
+// In-flight upload tracking: navigating away or switching projects aborts
+// the active XHR and bumps the generation so the stale batch drops its
+// trailing refresh instead of repainting the new location.
+let activeXHR: XMLHttpRequest | null = null
+let uploadGen = 0
+
+/** Abort any in-flight upload batch (navigation, project switch). */
+export function abortUploads(): void {
+  uploadGen += 1
+  activeXHR?.abort()
+  activeXHR = null
+}
+
 /** Forget ensured directories (project switch, sign-out, share recovery). */
 export function clearUploadCache(): void {
   uploadedDirs.clear()
 }
 
-/** XHR upload slice of the god-composable. */
+/** XHR upload slice of the console composable. */
 export function useUploads(deps: UploadDeps) {
   const { project, uploadProgress } = sharedState()
   const { token } = sharedState()
@@ -60,16 +73,19 @@ export function useUploads(deps: UploadDeps) {
   function putFileWithProgress(fullPath: string, file: File, onBytes: (loaded: number) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
+      activeXHR = xhr
       xhr.open('PUT', deps.url(deps.projectURL('/content'), { path: fullPath }))
       if (token.value) xhr.setRequestHeader('Authorization', `Bearer ${token.value}`)
       // A half-open connection must not pin the progress bar forever: give
       // the transfer a generous ceiling and fail loudly when it is hit.
       xhr.timeout = TIMEOUTS.UPLOAD_MS
       xhr.ontimeout = () => reject(new ApiError(408, 'upload timed out', null))
+      xhr.onabort = () => reject(new ApiError(0, 'upload aborted', null))
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) onBytes(event.loaded)
       }
       xhr.onload = () => {
+        if (activeXHR === xhr) activeXHR = null
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve()
           return
@@ -83,7 +99,10 @@ export function useUploads(deps: UploadDeps) {
         }
         reject(new ApiError(xhr.status, message, null))
       }
-      xhr.onerror = () => reject(new ApiError(0, 'network error during upload', null))
+      xhr.onerror = () => {
+        if (activeXHR === xhr) activeXHR = null
+        reject(new ApiError(0, 'network error during upload', null))
+      }
       xhr.send(file)
     })
   }
@@ -96,6 +115,8 @@ export function useUploads(deps: UploadDeps) {
    */
   async function uploadFiles(items: UploadItem[], baseDir: string): Promise<void> {
     if (!items.length || !deps.canWrite()) return
+    const gen = uploadGen
+    const startProject = project.value
     const bytesTotal = items.reduce((sum, item) => sum + item.file.size, 0)
     uploadProgress.value = {
       active: true,
@@ -109,6 +130,9 @@ export function useUploads(deps: UploadDeps) {
     let firstError = ''
     let baseBytes = 0
     for (const { file, relPath } of items) {
+      // The batch was aborted (navigation) or the project switched
+      // mid-batch: stop feeding files into the old location.
+      if (gen !== uploadGen || project.value !== startProject) break
       const cleanRel = normalizePath(relPath)
       if (!cleanRel) continue
       const fullPath = normalizePath(`${normalizePath(baseDir)}/${cleanRel}`)
@@ -131,6 +155,7 @@ export function useUploads(deps: UploadDeps) {
         })
         baseBytes += file.size
       } catch (error) {
+        if (gen !== uploadGen) break
         firstError ||= error instanceof Error ? error.message : String(error)
         uploadProgress.value = { ...uploadProgress.value, failed: uploadProgress.value.failed + 1 }
       }
@@ -141,6 +166,9 @@ export function useUploads(deps: UploadDeps) {
       }
     }
     uploadProgress.value = { ...uploadProgress.value, active: false, current: '' }
+    // A superseded batch must not repaint the new location: drop the
+    // trailing refresh and its toasts when navigation won the race.
+    if (gen !== uploadGen || project.value !== startProject) return
     await deps.refreshAll()
     const { done, failed, total } = uploadProgress.value
     if (failed === 0) toasts.success(`Uploaded ${done}/${total} · ${formatBytes(bytesTotal)}`)

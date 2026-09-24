@@ -39,7 +39,7 @@ export async function bulkRename(
   return ok
 }
 
-/** 15-kind modal state-machine slice of the god-composable. */
+/** 15-kind modal state-machine slice of the console composable. */
 export function useModals(deps: ModalDeps) {
   const {
     currentPath,
@@ -177,15 +177,19 @@ export function useModals(deps: ModalDeps) {
           break
         }
         case 'utimes': {
-          const atime = f.atime ? new Date(f.atime) : null
-          const mtime = f.mtime ? new Date(f.mtime) : null
+          // Both fields are required: the server rejects zero times, so a
+          // cleared field must not silently become "now" (which reads as
+          // "unchanged" to the user but writes the current time).
+          if (!f.atime || !f.mtime) throw new Error('both atime and mtime are required')
+          const atime = new Date(f.atime)
+          const mtime = new Date(f.mtime)
           for (const [name, date] of [['atime', atime], ['mtime', mtime]] as const) {
-            if (date && Number.isNaN(date.getTime())) throw new Error(`invalid ${name} timestamp`)
+            if (Number.isNaN(date.getTime())) throw new Error(`invalid ${name} timestamp`)
           }
           await deps.postOp('timestamps', 'utimes', {
             path: selectedPath.value,
-            atime: (atime ?? new Date()).toISOString(),
-            mtime: (mtime ?? new Date()).toISOString(),
+            atime: atime.toISOString(),
+            mtime: mtime.toISOString(),
           })
           break
         }
@@ -217,9 +221,12 @@ export function useModals(deps: ModalDeps) {
           break
         }
         case 'truncate': {
-          if (!Number.isInteger(Number(f.text)) || Number(f.text) < 0)
+          // Validate the raw string: Number('1e3') is 1000 and Number('') is
+          // 0, but the server's integer parser rejects both spellings.
+          const raw = f.text.trim()
+          if (!/^\d+$/.test(raw))
             throw new Error('size must be a non-negative integer')
-          await deps.patchOp('Truncate', { op: 'truncate', size: f.text })
+          await deps.patchOp('Truncate', { op: 'truncate', size: raw })
           break
         }
       }

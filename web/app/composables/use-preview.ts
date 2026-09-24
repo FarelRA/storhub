@@ -34,8 +34,8 @@ export function clearPreviewState(): void {
 }
 
 /**
- * Preview pipeline slice of the god-composable: ranged sniff classification,
- * media blob URLs, full-text reads, and the dual-gated save.
+ * Preview pipeline slice of the console composable: ranged sniff
+ * classification, media blob URLs, full-text reads, and the dual-gated save.
  */
 export function usePreview(deps: PreviewDeps) {
   const {
@@ -74,6 +74,7 @@ export function usePreview(deps: PreviewDeps) {
         editorContent.value = result.payload
         editorETag.value = result.etag
         editorIsText.value = true
+        editorDirty.value = false
         previewKind.value = 'text'
         clearPreviewState()
       })
@@ -104,18 +105,21 @@ export function usePreview(deps: PreviewDeps) {
       }
       const mediaKind = kindFromExtension(entry.path)
       if (mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio' || mediaKind === 'pdf') {
-        try {
-          const result = await deps.request<ArrayBuffer>(deps.url(deps.projectURL('/content'), { path: entry.path }), {
+        // Route through run() like every other fetch: an expired session
+        // must take the shared 401 sign-out path, not a generic toast.
+        const media = await deps.run('Preview', () =>
+          deps.request<ArrayBuffer>(deps.url(deps.projectURL('/content'), { path: entry.path }), {
             binary: true,
-          })
-          const blob = new Blob([result.payload], { type: mimeForKind(mediaKind, ext) })
-          previewUrl.value = URL.createObjectURL(blob)
-          previewKind.value = mediaKind
-          previewMeta.value = { shown: entry.size, total: entry.size }
-        } catch (error) {
+          }),
+        )
+        if (media === null) {
           previewKind.value = 'error'
-          toasts.error(`Media preview failed: ${error instanceof Error ? error.message : String(error)}`)
+          return
         }
+        const blob = new Blob([media.payload], { type: mimeForKind(mediaKind, ext) })
+        previewUrl.value = URL.createObjectURL(blob)
+        previewKind.value = mediaKind
+        previewMeta.value = { shown: entry.size, total: entry.size }
         return
       }
       // Sniff window: one ranged request, then classify by magic / UTF-8.
@@ -127,7 +131,12 @@ export function usePreview(deps: PreviewDeps) {
           headers: { Range: `bytes=0-${end}` },
         }),
       )
-      if (result === null) return
+      if (result === null) {
+        // A failed sniff must not leave the previous kind behind: the pane
+        // would render stale content against the new selection.
+        previewKind.value = 'error'
+        return
+      }
       const bytes = new Uint8Array(result.payload)
       previewMeta.value = { shown: bytes.byteLength, total: entry.size }
       const kind = classify(bytes)

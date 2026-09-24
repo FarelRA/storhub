@@ -44,6 +44,8 @@ export interface ConsoleSharedState {
   shares: Ref<Share[]>
   revisions: Ref<Revision[]>
   xattrs: Ref<XattrEntry[]>
+  /** True when the last xattr list fetch failed (vs genuinely empty). */
+  xattrsError: Ref<boolean>
   editorContent: Ref<string>
   editorDirty: Ref<boolean>
   /** ETag of the exact bytes in the editor: sent as If-Match on save. */
@@ -84,6 +86,7 @@ export function sharedState(): ConsoleSharedState {
       shares: useState<Share[]>('console-shares', () => []),
       revisions: useState<Revision[]>('console-revisions', () => []),
       xattrs: useState<XattrEntry[]>('console-xattrs', () => []),
+      xattrsError: useState<boolean>('console-xattrs-error', () => false),
       editorContent: useState<string>('console-editor-content', () => ''),
       editorDirty: useState<boolean>('console-editor-dirty', () => false),
       editorETag: useState<string>('console-editor-etag', () => ''),
