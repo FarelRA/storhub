@@ -14,6 +14,9 @@ permissions:
   contents: read
 
 jobs:
+  # Gate mirrors: nightly.yml and release.yml intentionally duplicate the
+  # gofmt/vet/test gates below (not a shared composite action) so the sweeps
+  # stay runnable if this file is refactored; keep all three in sync.
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -41,11 +44,22 @@ jobs:
           # internal/test is harness, not prod (scenario table,
           # oracle, runner: sleeps there drive expiry proofs under
           # test budgets, never ship). Any other hit is a
-          # regression: justify it in 22-event-purity-plan.md or route
+          # regression: justify it against the event-purity policy or route
           # it through the approved shape.
           hits=$(grep -rn --include='*.go' -E 'time\.Sleep|time\.NewTicker|[^.]Tick\(|AfterFunc' internal/ cmd/ storhub/ | grep -v _test | grep -v fuse_lock.go | grep -v 'internal/test/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
+            exit 1
+          fi
+      - name: span-guardrail
+        run: |
+          # Zero-heap gate: logging.Start performs no enabled-check itself,
+          # so every non-test file that starts a span must guard with
+          # Enabled before building args (see internal/logging/span.go).
+          # Finish call sites pass failures through unguarded by design.
+          missing=$(for f in $(grep -rln --include='*.go' 'logging\.Start(' internal/ cmd/ storhub/ | grep -v _test); do grep -L 'Enabled(' "$f"; done)
+          if [ -n "$missing" ]; then
+            echo "$missing"
             exit 1
           fi
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9

@@ -14,6 +14,9 @@ ARG VERSION=dev
 ENV CGO_ENABLED=0 \
     GOOS=$TARGETOS \
     GOARCH=$TARGETARCH
+# "v8" is a no-op arm on purpose: GOARM applies to 32-bit ARM only, but
+# the base image reports variant v8 on arm64, so match it explicitly
+# instead of exporting a bogus GOARM.
 RUN case "$TARGETVARIANT" in "" | "v8") ;; \
       *) export GOARM="${TARGETVARIANT#v}" ;; \
     esac; \

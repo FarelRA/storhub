@@ -94,49 +94,89 @@ func Error(logger *slog.Logger, msg string, args ...any) {
 	resolve(logger).Error(msg, args...)
 }
 
-// levelTable is the single source of truth for level vocabulary:
-// canonical name -> charm log level. The "warning" alias maps to warn
-// (matching slog.ParseLevel); unknown inputs fall back to info in
-// NormalizeLevel, while ValidLevel is the loud gate for typos.
-var levelTable = map[string]charmlog.Level{
-	LevelDebug: charmlog.DebugLevel,
-	LevelInfo:  charmlog.InfoLevel,
-	LevelWarn:  charmlog.WarnLevel,
-	"warning":  charmlog.WarnLevel,
-	LevelError: charmlog.ErrorLevel,
+// levelVocab is the single source of truth for level vocabulary: each
+// canonical name, its charm log level, and its accepted aliases ("warning"
+// maps to warn, matching slog.ParseLevel). levelTable and canonicalLevel
+// below derive from it so the vocabularies cannot drift.
+var levelVocab = []struct {
+	canonical string
+	level     charmlog.Level
+	aliases   []string
+}{
+	{LevelDebug, charmlog.DebugLevel, nil},
+	{LevelInfo, charmlog.InfoLevel, nil},
+	{LevelWarn, charmlog.WarnLevel, []string{"warning"}},
+	{LevelError, charmlog.ErrorLevel, nil},
 }
+
+// levelTable maps every accepted level spelling to its charm log level.
+var levelTable = func() map[string]charmlog.Level {
+	m := make(map[string]charmlog.Level, len(levelVocab)+1)
+	for _, v := range levelVocab {
+		m[v.canonical] = v.level
+		for _, a := range v.aliases {
+			m[a] = v.level
+		}
+	}
+	return m
+}()
 
 // canonicalLevel maps every accepted spelling (including aliases and "")
-// to its canonical level name. It derives from levelTable so the two
+// to its canonical level name. It derives from levelVocab so the two
 // vocabularies cannot drift.
-var canonicalLevel = map[string]string{
-	"":         LevelInfo,
-	LevelDebug: LevelDebug,
-	LevelInfo:  LevelInfo,
-	LevelWarn:  LevelWarn,
-	"warning":  LevelWarn,
-	LevelError: LevelError,
+var canonicalLevel = func() map[string]string {
+	m := map[string]string{"": LevelInfo}
+	for _, v := range levelVocab {
+		m[v.canonical] = v.canonical
+		for _, a := range v.aliases {
+			m[a] = v.canonical
+		}
+	}
+	return m
+}()
+
+// formatVocab is the single source of truth for format vocabulary, shaped
+// like levelVocab so formatTable and canonicalFormat derive from it.
+var formatVocab = []struct {
+	canonical string
+	formatter charmlog.Formatter
+	aliases   []string
+}{
+	{FormatPretty, charmlog.TextFormatter, nil},
+	{FormatText, charmlog.LogfmtFormatter, nil},
 }
 
-// formatTable is the single source of truth for format vocabulary:
-// canonical name -> charm formatter.
-var formatTable = map[string]charmlog.Formatter{
-	FormatPretty: charmlog.TextFormatter,
-	FormatText:   charmlog.LogfmtFormatter,
-}
+// formatTable maps every accepted format spelling to its charm formatter.
+var formatTable = func() map[string]charmlog.Formatter {
+	m := make(map[string]charmlog.Formatter, len(formatVocab))
+	for _, v := range formatVocab {
+		m[v.canonical] = v.formatter
+		for _, a := range v.aliases {
+			m[a] = v.formatter
+		}
+	}
+	return m
+}()
 
 // canonicalFormat maps every accepted spelling (including "") to its
-// canonical format name.
-var canonicalFormat = map[string]string{
-	"":           FormatPretty,
-	FormatPretty: FormatPretty,
-	FormatText:   FormatText,
-}
+// canonical format name. It derives from formatVocab.
+var canonicalFormat = func() map[string]string {
+	m := map[string]string{"": FormatPretty}
+	for _, v := range formatVocab {
+		m[v.canonical] = v.canonical
+		for _, a := range v.aliases {
+			m[a] = v.canonical
+		}
+	}
+	return m
+}()
 
 // NormalizeLevel maps a user-supplied level string to one of the canonical
 // levels. "warning" is accepted as an alias of "warn" (matching
-// slog.ParseLevel's vocabulary); unknown values fall back to info, which is
-// why config.Validate - not this function - is the loud gate for typos.
+// slog.ParseLevel's vocabulary); unknown values fall back to info. That
+// fallback is silent by design: Config.WithDefaults preserves unknown
+// values untouched so config.Validate, not this function, is the loud gate
+// for typos.
 func NormalizeLevel(level string) string {
 	if canonical, ok := canonicalLevel[strings.ToLower(strings.TrimSpace(level))]; ok {
 		return canonical
@@ -148,10 +188,8 @@ func parseLevel(level string) charmlog.Level {
 	if lv, ok := levelTable[strings.ToLower(strings.TrimSpace(level))]; ok {
 		return lv
 	}
-	// "" and unknown both mean info here; Validate rejects unknown loudly.
-	if strings.TrimSpace(level) == "" {
-		return charmlog.InfoLevel
-	}
+	// Unknown (and "") means info here; unknown values never arrive through
+	// Config, where WithDefaults preserves them so Validate rejects loudly.
 	return charmlog.InfoLevel
 }
 

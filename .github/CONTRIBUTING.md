@@ -32,6 +32,10 @@ JSON
 
 Notes:
 
+- `benchmark-budgets` runs in CI but is deliberately not in the required
+  contexts above: budget enforcement is timing-sensitive and advisory, so a
+  red budgets run deserves a look before merge but never blocks one on its
+  own. Promoting it to required needs an explicit maintainer decision.
 - `strict: true` requires branches to be up to date before merging.
 - Dependabot PRs only run the `ci` workflow if the repository settings allow
   it: Settings, Code security and analysis, Dependabot, "Automatically

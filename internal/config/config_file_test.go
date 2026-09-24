@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -16,48 +17,29 @@ func writeFileConfig(t *testing.T, content string) string {
 	return path
 }
 
-// assertDefaultEqual fails when got differs from Default() on any scalar
-// field. Func and pointer fields (Now, Sleep, HTTPClient, Logger) are
-// compared by presence so DeepEqual's func-value rules cannot false-fail.
+// assertDefaultEqual fails when got differs from Default() on any field.
+// It walks the Config struct with reflection so a future field is checked
+// automatically: scalar kinds compare by value, while func, pointer, and
+// interface fields (Now, Sleep, HTTPClient, Logger, LogOutput) compare by
+// presence, since func values have no meaningful equality.
 func assertDefaultEqual(t *testing.T, got Config) {
 	t.Helper()
 	want := Default()
-	if got.APIBaseURL != want.APIBaseURL ||
-		got.APIVersion != want.APIVersion ||
-		got.ChunkSize != want.ChunkSize ||
-		got.BufferSize != want.BufferSize ||
-		got.RepoDescription != want.RepoDescription ||
-		got.CreatePublicRepo != want.CreatePublicRepo ||
-		got.MaxRetries != want.MaxRetries ||
-		got.BaseRetryDelay != want.BaseRetryDelay ||
-		got.MaxRetryDelay != want.MaxRetryDelay ||
-		got.RevivalTimeout != want.RevivalTimeout ||
-		got.RateReserve != want.RateReserve ||
-		got.RateMaxWait != want.RateMaxWait ||
-		got.RatePointsPerMin != want.RatePointsPerMin ||
-		got.RateContentPerMin != want.RateContentPerMin ||
-		got.MaxConcurrentRequests != want.MaxConcurrentRequests ||
-		got.TransferThroughput != want.TransferThroughput ||
-		got.LogLevel != want.LogLevel ||
-		got.LogFormat != want.LogFormat ||
-		got.LogColor != want.LogColor ||
-		got.AtimePolicy != want.AtimePolicy ||
-		got.MaxTrackedProjects != want.MaxTrackedProjects ||
-		got.GitCacheDir != want.GitCacheDir ||
-		got.JournalDir != want.JournalDir ||
-		got.StrictConflicts != want.StrictConflicts ||
-		got.DisableGitBackend != want.DisableGitBackend ||
-		got.ObjectCacheMaxEntries != want.ObjectCacheMaxEntries ||
-		got.HistoryWarnObjects != want.HistoryWarnObjects ||
-		got.MaxConsecutiveCommitFailures != want.MaxConsecutiveCommitFailures {
-		t.Fatalf("config differs from Default(): got %+v want %+v", got, want)
-	}
-	if (got.HTTPClient == nil) != (want.HTTPClient == nil) ||
-		(got.Logger == nil) != (want.Logger == nil) ||
-		(got.LogOutput == nil) != (want.LogOutput == nil) ||
-		(got.Now == nil) != (want.Now == nil) ||
-		(got.Sleep == nil) != (want.Sleep == nil) {
-		t.Fatalf("config presence differs from Default(): got %+v want %+v", got, want)
+	gv, wv := reflect.ValueOf(got), reflect.ValueOf(want)
+	typ := gv.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		g, w := gv.Field(i), wv.Field(i)
+		k := g.Kind()
+		if k == reflect.Func || k == reflect.Pointer || k == reflect.Interface {
+			if g.IsNil() != w.IsNil() {
+				t.Fatalf("field %s presence differs from Default(): got %+v want %+v", name, got, want)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(g.Interface(), w.Interface()) {
+			t.Fatalf("field %s differs from Default(): got %v want %v", name, g.Interface(), w.Interface())
+		}
 	}
 }
 
@@ -183,4 +165,21 @@ func TestLoadFileEmptyFileIsNoop(t *testing.T) {
 		t.Fatalf("empty file must succeed, got %v", err)
 	}
 	assertDefaultEqual(t, got)
+}
+
+// TestReadFileConfigRejectsOversize pins the read backstop: a config file
+// past maxFileConfigBytes fails loudly instead of buffering whole.
+func TestReadFileConfigRejectsOversize(t *testing.T) {
+	t.Parallel()
+	big := make([]byte, maxFileConfigBytes+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	path := writeFileConfig(t, string(big))
+	if _, err := ReadFileConfig(path); err == nil {
+		t.Fatal("over-cap config file must fail loudly")
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("over-cap config file must fail loudly via LoadFile")
+	}
 }

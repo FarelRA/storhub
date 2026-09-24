@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -85,5 +86,23 @@ func TestResolveFallsBackToDefault(t *testing.T) {
 	t.Parallel()
 	if resolve(nil) != slog.Default() {
 		t.Fatal("nil logger must resolve to slog.Default()")
+	}
+}
+
+type ctxPinKey struct{}
+
+// TestEnabledIgnoresRequestContext pins the Enabled contract: no handler
+// built in this tree is context-sensitive, so a request-scoped context
+// carrying values must not change the answer. If a context-sensitive
+// handler is ever introduced, Enabled must take a ctx parameter instead.
+func TestEnabledIgnoresRequestContext(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := NewLogger(Options{Level: LevelWarn, Format: FormatText, Output: &buf})
+	ctx := context.WithValue(context.Background(), ctxPinKey{}, "request")
+	for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+		if got, want := Enabled(logger, level), logger.Enabled(ctx, level); got != want {
+			t.Fatalf("Enabled(logger, %v) = %v, handler with request ctx = %v", level, got, want)
+		}
 	}
 }

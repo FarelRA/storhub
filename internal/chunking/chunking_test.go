@@ -1,7 +1,9 @@
 package chunking
 
 import (
+	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,4 +116,59 @@ func (s *StreamingChunker) mustName(t *testing.T, i int) string {
 		t.Fatal(err)
 	}
 	return c.Name()
+}
+
+// TestNormalizedSizeReportsAdjustment pins the pure-helper contract: the
+// size clamps into range and the flag reports whether the input was
+// adjusted, so callers log the decision with their own logger.
+func TestNormalizedSizeReportsAdjustment(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in      int64
+		want    int64
+		changed bool
+	}{
+		{-5, DefaultChunkSize, true},
+		{0, DefaultChunkSize, true},
+		{4, 4, false},
+		{MaxReleaseAssetSize, MaxReleaseAssetSize, false},
+		{MaxReleaseAssetSize + 1, MaxReleaseAssetSize, true},
+	}
+	for _, tc := range cases {
+		got, changed := NormalizedSize(tc.in)
+		if got != tc.want || changed != tc.changed {
+			t.Fatalf("NormalizedSize(%d) = (%d, %v), want (%d, %v)", tc.in, got, changed, tc.want, tc.changed)
+		}
+	}
+}
+
+// recordSink is a slog.Handler capturing record messages for assertions.
+type recordSink struct {
+	records *[]string
+}
+
+func (s recordSink) Enabled(context.Context, slog.Level) bool { return true }
+func (s recordSink) Handle(_ context.Context, r slog.Record) error {
+	*s.records = append(*s.records, r.Message)
+	return nil
+}
+func (s recordSink) WithAttrs([]slog.Attr) slog.Handler { return s }
+func (s recordSink) WithGroup(string) slog.Handler      { return s }
+
+// TestNormalizedSizeEmitsNoLogs pins the layering fix: the pure helper must
+// not touch slog.Default, so embedding the library without configuring the
+// process logger emits no stderr traffic. The old code logged a Debug on
+// the default path and a Warn on the clamp path.
+func TestNormalizedSizeEmitsNoLogs(t *testing.T) {
+	t.Parallel()
+	var records []string
+	prev := slog.Default()
+	slog.SetDefault(slog.New(recordSink{records: &records}))
+	defer slog.SetDefault(prev)
+	_, _ = NormalizedSize(0)
+	_, _ = NormalizedSize(MaxReleaseAssetSize + 1)
+	_, _ = NormalizedSize(4)
+	if len(records) != 0 {
+		t.Fatalf("NormalizedSize must not log, got %v", records)
+	}
 }

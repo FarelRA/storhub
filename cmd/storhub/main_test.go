@@ -34,6 +34,8 @@ func TestMainHelpAndErrorExit(t *testing.T) {
 }
 
 func TestMainHelperProcess(_ *testing.T) {
+	// Never runs in-process: the error path reaches os.Exit via main(),
+	// which is only safe in this spawned helper process.
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}

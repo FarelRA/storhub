@@ -3,7 +3,7 @@
 [![CI](https://github.com/FarelRA/storhub/actions/workflows/ci.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/ci.yml)
 [![Nightly](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml/badge.svg)](https://github.com/FarelRA/storhub/actions/workflows/nightly.yml)
 
-StorHub is a Go library and CLI for storing files in GitHub repositories while exposing a logical filesystem-style view over that content. It stores file data as GitHub release assets and keeps the logical filesystem index in `.storhub/index.json`: a small version-5 manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/`.
+StorHub is a Go library and CLI for storing files in GitHub repositories while exposing a logical filesystem-style view over that content. It stores file data as GitHub release assets and keeps the logical filesystem index in `.storhub/index.json`: a small version-6 manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/`.
 
 ## Install
 
@@ -49,7 +49,7 @@ StorHub is not intended to replace a local SSD filesystem or a database storage 
 ## Key Features
 
 - Stores file content in GitHub release assets
-- Uses a version-5 split index (`.storhub/index.json` manifest plus content-addressed Merkle objects) as the logical source of truth
+- Uses a version-6 split index (`.storhub/index.json` manifest plus content-addressed Merkle objects) as the logical source of truth
 - Supports upload, replace, patch, append, truncate, and download
 - Exposes filesystem-style operations such as create, rename, readdir, stat, and delete
 - Tracks POSIX-like metadata including mode, uid, gid, timestamps, symlinks, hardlinks, and xattrs
@@ -164,7 +164,7 @@ command fails at runtime, and `2` when the command line itself is wrong
 
 Environment variables: `GITHUB_TOKEN` (authentication),
 `STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
-(default level is `info`, colors on), `STORHUB_API_BASE_URL`, and
+(library default level is `warn`, CLI default is `info`, colors on), `STORHUB_API_BASE_URL`, and
 `STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--authfile`).
 
 ### Rate limiting
@@ -235,12 +235,14 @@ Open `http://localhost:8080/` for the built-in web console (the REST API stays u
 
 The console is a Nuxt 4 + Tailwind CSS v4 SPA in `web/`, compiled ahead of time
 and embedded into the binary; no runtime CDN or external asset fetches. The
-built `internal/rest/static/dist` is committed, so plain `go build` always
-ships a working console. To change the console:
+built `internal/rest/static/dist` is git-ignored (only a placeholder ships
+with Go-only checkouts, which answer `/` with a clean `ui_not_built` 404);
+release and nightly workflows rebuild it from source with pinned bun before
+packaging. To change the console:
 
 ```bash
 cd web
-bun install          # bun >= 1.2; node 22 also works via npx equivalents
+bun install          # bun >= 1.2 (bun only; the toolchain never uses node/npm/npx)
 bun run dev          # dev server on :3000 proxying /api to :8080
 bun run test         # vitest
 bun run lint         # eslint
@@ -248,8 +250,9 @@ bun run typecheck    # vue-tsc
 bun run build:embed  # generate + copy bundle into internal/rest/static/dist
 ```
 
-Committing regenerated `dist` output alongside `web/` source changes keeps
-Go-only checkouts and `go build` working with a live console. The `web` CI
+Rebuilding `dist` via `bun run build:embed` after `web/` source changes keeps
+local `go build` working with a live console (the directory is git-ignored,
+so there is nothing to commit). The `web` CI
 job rebuilds the embed but only asserts the fresh bundle is non-empty
 (`index.html` plus at least one `_nuxt/*.js` chunk): the bundle is not
 hermetic (chunk hashes drift by CPU arch and toolchain, `index.html` embeds
@@ -563,7 +566,7 @@ Each example directory includes its own `README.md` explaining what it teaches, 
 At a high level:
 
 1. file content is chunked and stored as GitHub release assets
-2. the logical filesystem state lives in the metadata index, schema version 5: a small `.storhub/index.json` manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/<2-hex>/<62-hex>` (sha256). Object kinds are TreeNode (one directory), ChunkBucket (a range of chunk records), and ReleasesObject (the release catalog). The manifest is the only compare-and-swap point; objects are immutable and shared across revisions, so an unchanged subtree dedups to one object and a mutation rewrites only the chain from the changed node to the root
+2. the logical filesystem state lives in the metadata index, schema version 6: a small `.storhub/index.json` manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/<2-hex>/<62-hex>` (sha256). Object kinds are TreeNode (one directory), ChunkBucket (a range of chunk records), and ReleasesObject (the release catalog). The manifest is the only compare-and-swap point; objects are immutable and shared across revisions, so an unchanged subtree dedups to one object and a mutation rewrites only the chain from the changed node to the root
 3. projects created before v5 keep a single `.storhub/metadata.json` blob; the first write splits it into the v5 layout (the v4->v5 boundary is a write-time split, not a byte transform). Legacy revisions stay readable across that boundary (the grace window): a revision load tries the manifest first and falls back to the legacy blob, so history browsing and rollback keep working for migrated projects
 4. all path lookups, metadata inspection, links, timestamps, and revisions come from that index
 5. mounted FUSE access uses the same logical model underneath
@@ -646,8 +649,8 @@ Environment gates:
 CI runs every gate above except the FUSE and live smoke tests (runners have
 no usable FUSE setup, and live tests create real repositories), plus lint,
 cross-builds, and the console job (which rebuilds the embed and asserts only
-that the fresh bundle is non-empty, not that it matches the committed
-`internal/rest/static/dist` byte for byte).
+that the fresh bundle is non-empty, not that it matches any previously
+built `internal/rest/static/dist` byte for byte).
 `govulncheck` runs in the nightly workflow rather than per-push. See
 `.github/CONTRIBUTING.md` for the full local gate list and the one-time
 branch-protection runbook that makes the `ci` jobs required on `main`.

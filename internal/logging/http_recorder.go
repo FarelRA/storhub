@@ -12,8 +12,9 @@ import "net/http"
 // one owner for one job.
 type HTTPRecorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status      int
+	bytes       int
+	wroteHeader bool
 }
 
 // NewHTTPRecorder wraps w for status/byte capture. The default status is
@@ -23,8 +24,15 @@ func NewHTTPRecorder(w http.ResponseWriter) *HTTPRecorder {
 	return &HTTPRecorder{ResponseWriter: w, status: http.StatusOK}
 }
 
-// WriteHeader captures the status code.
+// WriteHeader captures the status code. Only the first call counts:
+// net/http keeps the first WriteHeader and logs superfluous repeats, so a
+// double-WriteHeader handler would otherwise log a status the client never
+// saw. Repeats are dropped without forwarding to avoid that noise.
 func (r *HTTPRecorder) WriteHeader(status int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }

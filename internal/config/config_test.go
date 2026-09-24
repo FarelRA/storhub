@@ -203,6 +203,35 @@ func TestWithDefaultsFillsEachFieldIndependently(t *testing.T) {
 	}
 }
 
+// TestWithDefaultsPreservesUnknownLogSettingsForValidate pins the loud
+// gate: an unknown level/format must survive WithDefaults untouched (with
+// no logger silently built at the fallback level) so Validate rejects it.
+// The old pipeline consumed the knobs into a fallback info logger before
+// Validate ran, so STORHUB_LOG_LEVEL=loud defaulted silently.
+func TestWithDefaultsPreservesUnknownLogSettingsForValidate(t *testing.T) {
+	t.Parallel()
+	cfg := Config{LogLevel: "loud"}.WithDefaults()
+	if cfg.LogLevel != "loud" {
+		t.Fatalf("unknown level must survive WithDefaults, got %q", cfg.LogLevel)
+	}
+	if cfg.Logger != nil {
+		t.Fatal("no logger may be built from an unknown level")
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "log level") {
+		t.Fatalf("unknown level must fail Validate naming it, got %v", err)
+	}
+	cfg = Config{LogFormat: "yaml"}.WithDefaults()
+	if cfg.LogFormat != "yaml" {
+		t.Fatalf("unknown format must survive WithDefaults, got %q", cfg.LogFormat)
+	}
+	if cfg.Logger != nil {
+		t.Fatal("no logger may be built from an unknown format")
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "log format") {
+		t.Fatalf("unknown format must fail Validate naming it, got %v", err)
+	}
+}
+
 // TestValidateRejectsUnknownLogSettings pins the loud-failure contract for
 // unknown log levels and formats after normalization.
 func TestValidateRejectsUnknownLogSettings(t *testing.T) {

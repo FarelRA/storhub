@@ -11,6 +11,8 @@ linters:
     - unused
   exclusions:
     rules:
+      # The console toolchain is bun (never node/npm), but bun still creates
+      # web/node_modules, so keep this revive exclusion scoped to that dir.
       - path: web/node_modules/
         linters: [revive]
 

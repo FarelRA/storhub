@@ -21,7 +21,26 @@ PINNED=""
 DRY_RUN=0
 
 usage() {
-	sed -n '2,12p' "$0"
+	# Heredoc, not self-slicing $0: under `curl|bash` $0 is `bash`, not
+	# this script, so the old `sed -n '2,12p' "$0"` printed the wrong
+	# file and its range cut off --uninstall/--help. Keep this block in
+	# sync with the header comment above.
+	cat <<'USAGE'
+StorHub installer: fetches the latest release (or the rolling nightly)
+for this platform, verifies the SHA256 checksum, and installs the binary.
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/FarelRA/storhub/main/scripts/install.sh | bash
+  bash install.sh [--version vX.Y.Z] [--dryrun] [--uninstall] [--help]
+
+Environment / flags:
+  GITHUB_TOKEN         required for private repos; optional otherwise
+  STORHUB_INSTALL_DIR  override install destination (default /usr/local/bin)
+  --version vX.Y.Z     pin a specific release instead of nightly/stable
+  --dryrun            resolve and print the install plan without downloading
+  --uninstall          remove the installed binary and exit
+  --help               print usage and exit
+USAGE
 }
 
 while [ $# -gt 0 ]; do
@@ -167,6 +186,8 @@ fetch_asset "$ASSET_ID" "${TMPDIR_DL}/storhub.tar.gz"
 fetch_asset "$CHECKSUM_ID" "${TMPDIR_DL}/checksums.txt"
 
 echo "==> verifying checksum"
+# Checksum filenames never contain spaces (goreleaser name_template), so
+# cutting on the first space is safe here.
 EXPECTED="$(grep "_${OS}_${ARCH}\.tar\.gz\$" "${TMPDIR_DL}/checksums.txt" | head -n1 | cut -d' ' -f1)"
 [ -n "$EXPECTED" ] || {
 	echo "install.sh: checksums.txt has no entry for ${OS}/${ARCH}" >&2
