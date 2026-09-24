@@ -160,7 +160,9 @@ func (s recordSink) WithGroup(string) slog.Handler      { return s }
 // process logger emits no stderr traffic. The old code logged a Debug on
 // the default path and a Warn on the clamp path.
 func TestNormalizedSizeEmitsNoLogs(t *testing.T) {
-	t.Parallel()
+	// NOT parallel: the process-global slog.Default swap below is
+	// process-wide, and parallel siblings (e.g. chunker planning tests)
+	// log through it; their records would pollute this assertion.
 	var records []string
 	prev := slog.Default()
 	slog.SetDefault(slog.New(recordSink{records: &records}))
