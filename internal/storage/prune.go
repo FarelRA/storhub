@@ -34,6 +34,14 @@ import (
 //	          pretending.
 //	all       history (where possible) + objects + assets.
 
+// Reclaim vocabulary: prune is the one operator-facing verb. The older
+// purge and chunk-GC entry points are prune sub-scopes under the hood:
+// the assets scope runs the classify-to-delete pipeline in cleanup_purge.go
+// and the chunks scope runs the catalog collector in cleanup_chunkgc.go.
+// On disk, reap reclaims orphaned cache directories (cachecleanup.go) and
+// sweep evicts idle in-memory entries (caches.go); neither deletes
+// operator data.
+
 // PruneScope selects what a prune run reclaims.
 type PruneScope string
 
@@ -100,7 +108,7 @@ type pruneFenceState struct {
 }
 
 // pruneFences keys fence states by hub: StorHub's struct cannot grow a
-// field from this workstream, so per-hub state hangs off the pointer here,
+// field from this file, so per-hub state hangs off the pointer here,
 // mirroring the degraded latch registry. Entries are never deleted when a
 // hub is garbage-collected (the key holds the pointer): acceptable for
 // process-lifetime hubs, worth a Shutdown cleanup later.
@@ -200,33 +208,26 @@ func (g *pruneFenceGuard) release() {
 	g.drop()
 }
 
-// PruneProject is the context-free CLI/embedder entry point: scope is one of
-// "objects", "assets", "history", or "all".
-func (h *StorHub) PruneProject(project, scope string, keep int, dryRun bool) (*PruneResult, error) {
-	return h.PruneContext(context.Background(), project, scope, keep, dryRun)
-}
-
 // PruneContext is the string-scoped entry point used by the REST layer (scope
-// is "objects"|"assets"|"history"|"chunks"|"all"); it adapts to the typed Prune.
+// is "objects"|"assets"|"history"|"chunks"|"all"); it adapts to the typed PruneReq.
 func (h *StorHub) PruneContext(ctx context.Context, project, scope string, keep int, dryRun bool) (*PruneResult, error) {
-	return h.Prune(ctx, project, PruneScope(scope), keep, dryRun)
+	return h.PruneReq(ctx, project, PruneRequest{Scope: PruneScope(scope), Keep: keep, DryRun: dryRun})
 }
 
 // PruneRequest is the flag-free prune invocation: scope selects what to
-// reclaim, keep is the history-compaction threshold (git only; keep > 1 is
-// rejected, keep < 1 clamps to 1 because "keep nothing" is unrepresentable:
-// the checkpoint must retain the current tree), dryRun reports without
-// deleting. It replaces the
-// boolean-flag Prune(..., keep, dryRun) 4-way switch with per-scope
-// methods sharing one validation front.
+// reclaim, keep is the history-compaction threshold (git only: compaction
+// runs only when manifest commits exceed keep and collapses every older
+// manifest into one checkpoint, so exactly one revision survives; keep > 1
+// is rejected, keep < 1 clamps to 1 because "keep nothing" is
+// unrepresentable), dryRun reports without deleting.
 type PruneRequest struct {
 	Scope  PruneScope
 	Keep   int
 	DryRun bool
 }
 
-// PruneReq runs a PruneRequest. Prune/PruneContext/PruneProject are thin
-// public-compat wrappers over it.
+// PruneReq runs a PruneRequest. PruneContext is the thin string-scoped
+// adapter over it for the REST layer.
 //
 // The whole run holds the project's prune write fence (see
 // PruneConflictError): mutations admitted while it is held fail loud in
@@ -300,17 +301,8 @@ func (h *StorHub) PruneReq(ctx context.Context, project string, req PruneRequest
 	return res, nil
 }
 
-// Prune runs the requested scope. keep is a history-compaction threshold
-// (git): compaction runs only when manifest commits exceed keep, and it
-// collapses every older manifest into ONE checkpoint commit, so exactly one
-// revision survives; keep > 1 is rejected because it would promise a
-// retention the checkpoint cannot provide. keep < 1 is clamped to 1:
-// "keep nothing" is unrepresentable because the checkpoint must retain the
-// current tree. dryRun reports without deleting.
-func (h *StorHub) Prune(ctx context.Context, project string, scope PruneScope, keep int, dryRun bool) (*PruneResult, error) {
-	return h.PruneReq(ctx, project, PruneRequest{Scope: scope, Keep: keep, DryRun: dryRun})
-}
-
+// pruneAssets is the assets scope: unreferenced release assets through the
+// classify-to-delete pipeline.
 func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneResult, guard *pruneFenceGuard) error {
 	started := h.config.Now().UTC()
 	logging.Debug(h.projectLogger(project), "prune assets start", "scope", "assets", "dry_run", res.DryRun)
@@ -343,10 +335,6 @@ func (h *StorHub) pruneAssets(ctx context.Context, project string, res *PruneRes
 		return fmt.Errorf("purge refused for project %s: uncommitted metadata changes pending; flush before purging", project)
 	}
 	releaseTasks, assetTasks, err := h.classifyUntracked(ctx, project)
-	if err != nil {
-		return err
-	}
-	releaseTasks, assetTasks, err = h.reverifyPurgePlan(ctx, project, releaseTasks, assetTasks)
 	if err != nil {
 		return err
 	}

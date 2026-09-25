@@ -35,12 +35,11 @@ func (h *StorHub) MkdirContext(ctx context.Context, project, dirPath string) (er
 	return err
 }
 
-// UnlinkContext deletes the file at filePath.
-func (h *StorHub) UnlinkContext(ctx context.Context, project, filePath string) (err error) {
-	started := h.logOpStart(project, "unlink", "path", filePath)
-	defer func() { h.logOpFinish(project, "unlink", started, err, "path", filePath) }()
-	err = h.DeleteFileContext(ctx, project, filePath)
-	return err
+// UnlinkContext deletes the file at filePath. It is the unlink spelling of
+// the canonical DeleteFileContext: a span-less alias, so one mutation keeps
+// one log span and one journal cause.
+func (h *StorHub) UnlinkContext(ctx context.Context, project, filePath string) error {
+	return h.DeleteFileContext(ctx, project, filePath)
 }
 
 // RmdirContext removes an empty directory.
@@ -328,13 +327,25 @@ func (h *StorHub) ChownContext(ctx context.Context, project, targetPath string, 
 	return err
 }
 
-// ChtimesContext sets atime and mtime as Unix nanoseconds.
+// ChtimesContext sets atime and mtime from Unix nanoseconds. Zero means now
+// per field; the epoch itself is settable only through
+// ChtimesExplicitContext. Both spellings run the one Explicit
+// implementation, so timestamp authorization lives in a single place.
 func (h *StorHub) ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) (err error) {
 	started := h.logOpStart(project, "chtimes", "path", targetPath, "atime", atime, "mtime", mtime)
 	defer func() {
 		h.logOpFinish(project, "chtimes", started, err, "path", targetPath, "atime", atime, "mtime", mtime)
 	}()
-	err = h.posixService().ChtimesContext(ctx, project, targetPath, atime, mtime)
+	now := h.config.Now().UnixNano()
+	resolve := func(value int64) *time.Time {
+		if value == 0 {
+			t := time.Unix(0, now)
+			return &t
+		}
+		t := time.Unix(0, value)
+		return &t
+	}
+	err = h.posixService().ChtimesExplicitContext(ctx, project, targetPath, resolve(atime), resolve(mtime))
 	return err
 }
 

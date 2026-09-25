@@ -158,7 +158,8 @@ func TestMigrationClobberDetectedAndRebased(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build rival tree: %v", err)
 	}
-	mb, err := meta.MarshalManifest(hub.buildManifest(project, rival, res, uint64(len(res.Objects))))
+	refs := &meta.TreeRefs{RootSHA: res.RootSHA, ChunkBuckets: res.ChunkBuckets, ReleasesSHA: res.ReleasesSHA}
+	mb, err := meta.MarshalManifest(hub.buildManifest(project, rival, refs, uint64(len(res.Objects))))
 	if err != nil {
 		t.Fatalf("marshal rival manifest: %v", err)
 	}

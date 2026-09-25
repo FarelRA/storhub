@@ -431,9 +431,11 @@ func (s *opStack) snapshot() []Op {
 	// mutating (rename coalescing, prune merging, collision remaps), and
 	// an in-flight commit reads this snapshot outside pm.mu. Sharing
 	// backing arrays or maps is a data race and can rewrite the committed
-	// message/rebase mid-flight. File/Dir carry chunk slices and xattr
-	// maps; Chunks is a catalog map; Members backs dir-rename delivery.
+	// message/rebase mid-flight. Payloads copy through cloneOpPayloads
+	// (the same copier replay uses); the remaining slice and pointer
+	// fields copy here.
 	for i := range out {
+		out[i] = cloneOpPayloads(out[i])
 		if out[i].Paths != nil {
 			out[i].Paths = append([]string(nil), out[i].Paths...)
 		}
@@ -442,21 +444,6 @@ func (s *opStack) snapshot() []Op {
 		}
 		if out[i].Members != nil {
 			out[i].Members = append([]string(nil), out[i].Members...)
-		}
-		if out[i].File != nil {
-			f := out[i].File.Clone()
-			out[i].File = &f
-		}
-		if out[i].Dir != nil {
-			d := out[i].Dir.Clone()
-			out[i].Dir = &d
-		}
-		if out[i].Chunks != nil {
-			m := make(map[int64]ChunkInfo, len(out[i].Chunks))
-			for k, v := range out[i].Chunks {
-				m[k] = v
-			}
-			out[i].Chunks = m
 		}
 		if out[i].Release != nil {
 			r := *out[i].Release
@@ -494,24 +481,5 @@ func (s *opStack) freeze() ([]Op, uint64) {
 
 func (s *opStack) maxSeq() uint64 { return s.seq }
 
-// foldOps coalesces a raw op sequence (journal DELTA lines, one per
-// appendWithDelta) through the same rules as live appends, so a replayed
-// journal yields exactly the stack the crashed process held. The rules are
-// deliberately identical to live appends: no cross-line rewrites live here:
-// convergence comes from replaying the identical append sequence, not from
-// fold-specific chain/delete handling. Journal lines carry Times=1 (see
-// journalAppend/journalRead); the fold accumulates Times exactly as live
-// coalescing does.
-//
-// Each delta also carries its append-time generation (Op.Gen), and append
-// tracks it line by line, merging only within one generation: the fold
-// reproduces the live stack exactly, including chains split by a commit
-// freeze mid-chain. The old per-delta snapshot-mark replay is deleted:
-// with the boundary in the structure, no mark is needed to steer merge
-// decisions, and legacy marked lines (SnapSeq>0, Gen 0) merge freely while
-// still replaying to the same tree as the old split fold
-// (TestJournalGenCompatSnapMarkedLinesConverge). Marks share numbering
-// with op seqs only historically; the fold still preserves the journaled
-// seqs (the stack counter fast-forwards to each line) because drain
-// targets and resolutions number by them: only the merge shape, order,
-// and numbering must match, which is what the equivalence tests pin.
+// The fold contract lives on foldOps in ops_replay.go; this note stays a
+// pointer so the two can never drift.

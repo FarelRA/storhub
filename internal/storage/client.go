@@ -227,7 +227,7 @@ func isReleaseFull(err error) bool {
 	return isValidation422(err, "", "file_count", "file_count", "1000", "too many")
 }
 
-func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
+func (h *StorHub) logOpStart(project, verb string, args ...any) time.Time {
 	// Full completeness: every op logs, including the high-volume
 	// read-only verbs. At Debug an idle mount is chatty by design;
 	// production stays quiet by running above Debug, not by carving
@@ -242,11 +242,11 @@ func (h *StorHub) logOpStart(project, op string, args ...any) time.Time {
 	if !logging.Enabled(h.logger, slog.LevelDebug) {
 		return h.config.Now().UTC()
 	}
-	logging.Start(h.projectLogger(project), op, args...)
+	logging.Start(h.projectLogger(project), verb, args...)
 	return h.config.Now().UTC()
 }
 
-func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, args ...any) {
+func (h *StorHub) logOpFinish(project, verb string, started time.Time, err error, args ...any) {
 	// Failures pass through unguarded so the Error "<op> failed" line is
 	// reachable at the default level; only the success path stays gated
 	// on Debug (hot-path alloc parity: success args are never boxed when
@@ -254,7 +254,7 @@ func (h *StorHub) logOpFinish(project, op string, started time.Time, err error, 
 	if err == nil && !logging.Enabled(h.logger, slog.LevelDebug) {
 		return
 	}
-	logging.Finish(h.projectLogger(project), op, started, err, args...)
+	logging.Finish(h.projectLogger(project), verb, started, err, args...)
 }
 
 // NewStorHubWithContext returns a hub bound to ctx: cancelling ctx shuts
@@ -438,6 +438,10 @@ func validateProject(project string) error {
 	return nil
 }
 
+// shortSHA is the single home of display truncation for content and
+// commit identifiers: 12 hex characters, shorter values pass through.
+// Every log line, commit message, and error string renders through it so
+// the width stays uniform across the tree.
 func shortSHA(value string) string {
 	if len(value) <= 12 {
 		return value
@@ -483,10 +487,6 @@ func defaultDirMode() uint32 {
 	return 0o755
 }
 
-func defaultOwnerIDs() (uint32, uint32) {
-	return implposix.DefaultOwnerIDs()
-}
-
 // NewFUSE mounts project with opts and returns the live filesystem.
 func (h *StorHub) NewFUSE(project string, opts fusefs.Options) (*fusefs.Filesystem, error) {
 	if opts.Logger == nil {
@@ -514,11 +514,4 @@ func (h *StorHub) fsService() *shfs.Service {
 
 func (h *StorHub) posixService() *implposix.Service {
 	return h.posixSvc
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -126,5 +126,3 @@ func commitTouchesPath(c *object.Commit, path string) (bool, error) {
 	}
 	return touched, nil
 }
-
-// squashHistory creates a single orphan commit with the current metadata content and force pushes it.

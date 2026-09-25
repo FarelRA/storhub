@@ -17,13 +17,12 @@ import (
 )
 
 // LockFileName marks a project cache directory as owned by a live
-// process; it stores the owning pid as text. Locks live in a sibling
+// process; it stores the owning pid as text. Locks live in an adjacent
 // .locks/ directory so the project dir itself stays an exact mirror of
 // remote state that go-git can clone into.
 const (
-	LockFileName    = ".storhub-lock"
-	locksDirName    = ".locks"
-	recoveryDirName = "recovery"
+	LockFileName = ".storhub-lock"
+	locksDirName = ".locks"
 )
 
 // legacyRunDirPattern matches pre-XDG roots dropped straight into the
@@ -281,9 +280,9 @@ func ReapOrphanedCachesForBaseAt(logger *slog.Logger, base string, now time.Time
 	objectsBase := filepath.Join(base, "objects")
 	reaped := reapOrphaned(logger, gitBase, os.TempDir())
 	reaped += reapOrphanedObjectCaches(logger, objectsBase, gitBase)
-	// Spool sweep by mtime: current path plus the pre-fix double-storhub
-	// shim (<base>/storhub/rest), which spoolBase() migrates at runtime
-	// but may still hold files when the symlink was never created.
+	// Spool sweep by mtime: the current path plus the pre-XDG
+	// <base>/storhub/rest dir, which the spool writer migrates at runtime
+	// but may still hold files stranded by a crash mid-migration.
 	reaped += reapSpoolDirAt(logger, filepath.Join(base, "rest"), spoolOrphanAge, now)
 	reaped += reapSpoolDirAt(logger, filepath.Join(base, "storhub", "rest"), spoolOrphanAge, now)
 	if logger != nil {

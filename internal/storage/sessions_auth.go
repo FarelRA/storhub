@@ -12,7 +12,10 @@ import (
 
 // sessions_auth.go: handle ownership, expiry, and table lookup.
 
-// expired reports whether the handle has been idle past its TTL.
+// expired reports whether the handle has been idle past its TTL. The
+// comparison is strict: a handle idle for exactly its TTL stays live.
+// The idle and max TTLs come from the hub policy, which defaults to the
+// package constants.
 func (s *openSession) expired(now time.Time) bool {
 	return now.Sub(s.lastUse) > s.ttl
 }
@@ -29,10 +32,10 @@ func (s *openSession) authorize(ctx context.Context) error {
 	if id.Admin {
 		return nil
 	}
-	if !s.hasOpener || id.UID == s.ownerUID {
+	if !s.hasOpener || id.UID == s.opener.UID {
 		return nil
 	}
-	return fmt.Errorf("session %s: %w (owner uid %d): %w", shortSHA(s.id), ErrSessionOwnerMismatch, s.ownerUID, syscall.EPERM)
+	return fmt.Errorf("session %s: %w (owner uid %d): %w", s.handleID, ErrSessionOwnerMismatch, s.opener.UID, syscall.EPERM)
 }
 
 // getLiveLocked resolves a handle id to its live session, sweeping it when
@@ -42,7 +45,7 @@ func (s *openSession) authorize(ctx context.Context) error {
 // (release s.mu first, then re-acquire in sh-then-s order).
 func (sh *sessionHubState) getLiveLocked(handleID string, now time.Time) (*openSession, error) {
 	s, ok := sh.byID[handleID]
-	if !ok || s.id != handleID {
+	if !ok || s.handleID != handleID {
 		return nil, newStaleSessionError(handleID, "unknown handle")
 	}
 	s.mu.Lock()
@@ -69,13 +72,13 @@ func (sh *sessionHubState) destroyLocked(s *openSession, quarantine bool) {
 		s.tmp = nil
 	}
 	if quarantine && s.path == "" && stagingHasBytes(s.tmpName) {
-		if quarantineSessionTemp(s.tmpName, s.id) == nil {
-			delete(sh.byID, s.id)
+		if quarantineSessionTemp(s.tmpName, s.handleID) == nil {
+			delete(sh.byID, s.handleID)
 			return
 		}
 	}
 	_ = os.Remove(s.tmpName)
-	delete(sh.byID, s.id)
+	delete(sh.byID, s.handleID)
 }
 
 // sweepExpiredLocked reaps idle handles. Runs on every open (no background

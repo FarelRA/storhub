@@ -2,10 +2,8 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
-	ghapi "github.com/FarelRA/storhub/internal/github"
 	"github.com/FarelRA/storhub/internal/logging"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
@@ -17,14 +15,12 @@ import (
 // idempotently before it, so a crash between object writes and the manifest
 // CAS leaves only unreferenced garbage for `storhub prune` to reclaim.
 
-// isNotFoundErr is the uniform NotFound check for backend reads (single-flight backend-error normalization:
-// the two inline styles: `!errors.As(...) || !NotFound` vs
-// `e.(*APIError)` type assertion: now have one home). It matches only the
-// APIError NotFound shape; git/sentinel NotFound goes through
-// isMetadataNotFound (workflows.go).
+// isNotFoundErr is the single NotFound dispatch for backend reads: it
+// recognizes every absence shape (API errors, git sentinels, OS errors)
+// through isMetadataNotFound, so git and REST absences never need
+// separate checks.
 func isNotFoundErr(err error) bool {
-	var apiErr *ghapi.APIError
-	return errors.As(err, &apiErr) && apiErr.NotFound()
+	return isMetadataNotFound(err)
 }
 
 // readIndexDoc fetches ONE index document (manifest or legacy blob) at a
@@ -169,17 +165,13 @@ func (h *StorHub) loadIndexTree(ctx context.Context, project string, data []byte
 // dirs + byBucket + full objects map per commit). Only genuinely-new
 // objects drive the running count and the upload set.
 //
-// The non-streaming BuildTree path is retained ONE release behind as the
-// fallback on streaming failure (do not delete yet): if BuildTreeStream
-// errors, publishIndex falls back to the old full-map build rather than
-// failing the commit.
+// A streaming-build failure fails the commit loud: there is no fallback
+// builder, so a streaming bug surfaces instead of succeeding silently
+// through an older path.
 func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
 	refs, objects, scratch, oerr := h.buildIndexStream(ctx, project, tree)
 	if oerr != nil {
-		// Fallback, one release behind: full-map build. Do not delete.
-		// (Per-object admission runs inside the stream's emit and in
-		// the fallback alike; both surface oversizeError.)
-		return h.publishIndexFull(ctx, project, tree, prevSHA, message, prevObjectCount)
+		return "", "", prevObjectCount, oerr
 	}
 	// Only streamed (genuinely new) objects drive the running count;
 	// cache-known objects are already upstream.
@@ -191,7 +183,7 @@ func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.R
 		for sha, data := range objects {
 			files[objectRepoPath(sha)] = data
 		}
-		manifest := h.buildManifestFromRefs(project, tree, refs, objectCount)
+		manifest := h.buildManifest(project, tree, refs, objectCount)
 		mb, merr := meta.MarshalManifest(manifest)
 		if merr != nil {
 			return "", "", prevObjectCount, merr
@@ -211,7 +203,7 @@ func (h *StorHub) publishIndex(ctx context.Context, project string, tree *meta.R
 		return "", "", prevObjectCount, werr
 	}
 	objectCount = prevObjectCount + uint64(written)
-	manifest := h.buildManifestFromRefs(project, tree, refs, objectCount)
+	manifest := h.buildManifest(project, tree, refs, objectCount)
 	mb, merr := meta.MarshalManifest(manifest)
 	if merr != nil {
 		return "", "", prevObjectCount, merr
@@ -276,11 +268,10 @@ func (h *StorHub) buildIndexStream(ctx context.Context, project string, tree *me
 // emitted by this build (uploaded before the manifest CAS) or skipped on
 // the previous baseline (uploaded by the commit that installed it), so
 // "cache hit" stays equivalent to "already stored upstream". A nil scratch
-// (full-build fallback, which populates no cache) resets the baseline to
-// empty instead of keeping stale entries: the next streaming build then
-// re-emits by object-cache membership, wasteful but never wrong. A missing
-// entry (evicted mid-commit) simply drops the cache: the next commit
-// rebuilds uncached.
+// resets the baseline to empty instead of keeping stale entries: the next
+// streaming build then re-emits by object-cache membership, wasteful but
+// never wrong. A missing entry (evicted mid-commit) simply drops the
+// cache: the next commit rebuilds uncached.
 func (h *StorHub) rememberTreeCache(project string, tree *RepoMetadata, scratch *meta.TreeCache) {
 	pm := h.lookupProjectMeta(project)
 	if pm == nil {
@@ -304,67 +295,6 @@ func (h *StorHub) rememberTreeCache(project string, tree *RepoMetadata, scratch 
 	pm.treeCache = scratch
 }
 
-// publishIndexFull is the pre-streaming full-map build, retained ONE
-// release behind as publishIndex's fallback (do not delete yet).
-func (h *StorHub) publishIndexFull(ctx context.Context, project string, tree *meta.RepoMetadata, prevSHA, message string, prevObjectCount uint64) (commitSHA, contentSHA string, newObjectCount uint64, err error) {
-	res, merr := meta.BuildTree(tree)
-	if merr != nil {
-		return "", "", prevObjectCount, fmt.Errorf("build index tree: %w", merr)
-	}
-	// Per-object admission: no single object may exceed the contents-API
-	// limit. A breach means one directory holds an enormous number of
-	// entries; the remedy is structural, not a ceiling raise.
-	for _, data := range res.Objects {
-		if len(data) > maxMetadataBytes {
-			return "", "", prevObjectCount, &oversizeError{size: len(data), limit: maxMetadataBytes}
-		}
-	}
-	// Objects genuinely new to this client (not cached) drive the running
-	// count; cached objects are already upstream.
-	newCount := h.countNewObjects(project, res.Objects)
-	objectCount := prevObjectCount + newCount
-
-	if repo := h.getGitRepo(project); repo != nil {
-		// Git: objects and manifest land in one commit (atomic).
-		files := make(map[string][]byte, len(res.Objects)+1)
-		for sha, data := range res.Objects {
-			files[objectRepoPath(sha)] = data
-		}
-		manifest := h.buildManifest(project, tree, res, objectCount)
-		mb, merr := meta.MarshalManifest(manifest)
-		if merr != nil {
-			return "", "", prevObjectCount, merr
-		}
-		files[indexFilePath] = mb
-		commitSHA, contentSHA, err = repo.writeCommitPushCASMulti(ctx, files, message, prevSHA)
-		if err == nil {
-			h.cacheObjects(project, res.Objects)
-		}
-		return commitSHA, contentSHA, objectCount, err
-	}
-
-	// REST: write objects idempotently, then CAS the manifest.
-	written, werr := h.writeObjects(ctx, project, res.Objects)
-	if werr != nil {
-		return "", "", prevObjectCount, werr
-	}
-	objectCount = prevObjectCount + uint64(written)
-	manifest := h.buildManifest(project, tree, res, objectCount)
-	mb, merr := meta.MarshalManifest(manifest)
-	if merr != nil {
-		return "", "", prevObjectCount, merr
-	}
-	// The manifest itself is a contents-API document too: a
-	// pathological bucket list can push it past the limit even when every
-	// object fits. Surfacing that as an oversizeError arms the size-ceiling marker
-	// instead of livelocking the retry loop on a bare 422.
-	if err := checkManifestSize(mb); err != nil {
-		return "", "", objectCount, err
-	}
-	commitSHA, contentSHA, err = h.gh.PutFileContent(ctx, h.owner, project, indexFilePath, mb, prevSHA, message)
-	return commitSHA, contentSHA, objectCount, err
-}
-
 // checkManifestSize bounds the serialized manifest against the contents-API
 // limit. Kept separate so the ceiling is testable without building a
 // pathologically large bucket list.
@@ -375,25 +305,10 @@ func checkManifestSize(mb []byte) error {
 	return nil
 }
 
-func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, res *meta.TreeResult, objectCount uint64) *meta.Manifest {
-	return &meta.Manifest{
-		Version:      meta.CurrentVersion,
-		Project:      project,
-		TreeRoot:     res.RootSHA,
-		ChunkBuckets: res.ChunkBuckets,
-		Releases:     res.ReleasesSHA,
-		ObjectCount:  objectCount,
-		NextInode:    tree.NextInode,
-		NextChunkID:  tree.NextChunkID,
-		Stats:        meta.ManifestStats{Files: tree.TotalFiles, Bytes: tree.TotalSize},
-		LastMod:      tree.LastMod,
-	}
-}
-
-// buildManifestFromRefs is buildManifest for the streaming path: TreeRefs
-// carries the same manifest references as TreeResult without the full
-// objects map.
-func (h *StorHub) buildManifestFromRefs(project string, tree *meta.RepoMetadata, refs *meta.TreeRefs, objectCount uint64) *meta.Manifest {
+// buildManifest renders the split manifest from one streaming build:
+// TreeRefs carries the same references as the old full-map result without
+// the whole objects map.
+func (h *StorHub) buildManifest(project string, tree *meta.RepoMetadata, refs *meta.TreeRefs, objectCount uint64) *meta.Manifest {
 	return &meta.Manifest{
 		Version:      meta.CurrentVersion,
 		Project:      project,
@@ -406,17 +321,6 @@ func (h *StorHub) buildManifestFromRefs(project string, tree *meta.RepoMetadata,
 		Stats:        meta.ManifestStats{Files: tree.TotalFiles, Bytes: tree.TotalSize},
 		LastMod:      tree.LastMod,
 	}
-}
-
-func (h *StorHub) countNewObjects(project string, objects map[string][]byte) uint64 {
-	cache := h.objectCacheFor(project)
-	var n uint64
-	for sha := range objects {
-		if !cache.contains(sha) {
-			n++
-		}
-	}
-	return n
 }
 
 func (h *StorHub) cacheObjects(project string, objects map[string][]byte) {

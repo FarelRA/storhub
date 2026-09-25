@@ -47,7 +47,7 @@ func TestPruneObjectsRemovesOrphans(t *testing.T) {
 	}
 
 	// Dry run reports it but deletes nothing.
-	dry, err := hub.Prune(ctx, "pruneobj", PruneObjects, 0, true)
+	dry, err := hub.PruneReq(ctx, "pruneobj", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry prune: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestPruneObjectsRemovesOrphans(t *testing.T) {
 	}
 
 	// Real prune removes the orphan and keeps every referenced object.
-	res, err := hub.Prune(ctx, "pruneobj", PruneObjects, 0, false)
+	res, err := hub.PruneReq(ctx, "pruneobj", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
 		}
 		return false
 	})
-	if _, err := hub.Prune(ctx, "c1sab", PruneObjects, 0, false); err == nil {
+	if _, err := hub.PruneReq(ctx, "c1sab", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false}); err == nil {
 		t.Fatal("prune must abort when a revision cannot be read, not prune against a partial union")
 	}
 	backend.intercept.Store(func(http.ResponseWriter, *http.Request) bool { return false })
@@ -122,7 +122,7 @@ func TestPruneObjectsAbortsWhenRevisionUnreadable(t *testing.T) {
 	if err != nil || len(files) != 2 {
 		t.Fatalf("tree broken after aborted prune: %v (%d files)", err, len(files))
 	}
-	res, err := hub.Prune(ctx, "c1sab", PruneObjects, 0, false)
+	res, err := hub.PruneReq(ctx, "c1sab", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 	if err != nil || res.DeletedObjects != 1 {
 		t.Fatalf("prune after cleared fault: %v (%+v)", err, res)
 	}
@@ -168,7 +168,7 @@ func TestPruneObjectsRefusesTruncatedListing(t *testing.T) {
 		}
 		return false
 	})
-	if _, err := hub.Prune(ctx, "cap", PruneObjects, 0, false); err == nil {
+	if _, err := hub.PruneReq(ctx, "cap", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false}); err == nil {
 		t.Fatal("prune must refuse a possibly truncated object enumeration")
 	} else if !strings.Contains(err.Error(), "cap") {
 		t.Fatalf("error must explain the listing cap, got %v", err)
@@ -215,7 +215,7 @@ func TestPrunePartialDeleteDropsCachedShas(t *testing.T) {
 		}
 		return false
 	})
-	if _, err := hub.Prune(ctx, "m1", PruneObjects, 0, false); err == nil {
+	if _, err := hub.PruneReq(ctx, "m1", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false}); err == nil {
 		t.Fatal("prune must surface the delete failure")
 	}
 	backend.intercept.Store(func(http.ResponseWriter, *http.Request) bool { return false })
@@ -234,7 +234,7 @@ func TestPrunePartialDeleteDropsCachedShas(t *testing.T) {
 	}
 
 	// A retry completes the reclaim.
-	res, err := hub.Prune(ctx, "m1", PruneObjects, 0, false)
+	res, err := hub.PruneReq(ctx, "m1", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("retry prune: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestPruneObjectsLegacyIsNoop(t *testing.T) {
 	// A legacy version-4 blob that has NOT been migrated: HEAD is a single
 	// blob, so there are no content-addressed objects to prune.
 	seedLegacyBlob(t, hub, "v1prune", "docs", "a.txt", 1)
-	res, err := hub.Prune(ctx, "v1prune", PruneObjects, 0, false)
+	res, err := hub.PruneReq(ctx, "v1prune", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune legacy: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestPruneObjectsUninitializedIsNoop(t *testing.T) {
 	if err := hub.EnsureRepoContext(ctx, "freshprune"); err != nil {
 		t.Fatalf("ensure repo: %v", err)
 	}
-	res, err := hub.Prune(ctx, "freshprune", PruneObjects, 0, false)
+	res, err := hub.PruneReq(ctx, "freshprune", PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune fresh: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestPruneHistoryRESTRefusesHonestly(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "resthist", "docs", "a.txt", 1)
-	res, err := hub.Prune(ctx, "resthist", PruneHistory, 1, false)
+	res, err := hub.PruneReq(ctx, "resthist", PruneRequest{Scope: PruneHistory, Keep: 1, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune history rest: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	seedMeta(t, hub, "restkeep", "docs", "a.txt", 1)
-	if _, err := hub.Prune(ctx, "restkeep", PruneHistory, 50, false); err == nil ||
+	if _, err := hub.PruneReq(ctx, "restkeep", PruneRequest{Scope: PruneHistory, Keep: 50, DryRun: false}); err == nil ||
 		!strings.Contains(err.Error(), "keep=50") {
 		t.Fatalf("REST: expected keep>1 rejection, got %v", err)
 	}
@@ -329,7 +329,7 @@ func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list index commits: %v", err)
 	}
-	if _, err := gith.Prune(ctx, "demo", PruneHistory, 50, false); err == nil ||
+	if _, err := gith.PruneReq(ctx, "demo", PruneRequest{Scope: PruneHistory, Keep: 50, DryRun: false}); err == nil ||
 		!strings.Contains(err.Error(), "keep=50") {
 		t.Fatalf("git: expected keep>1 rejection, got %v", err)
 	}
@@ -342,7 +342,7 @@ func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 	}
 
 	// A dry-run reports without claiming compaction.
-	dry, err := gith.Prune(ctx, "demo", PruneHistory, 1, true)
+	dry, err := gith.PruneReq(ctx, "demo", PruneRequest{Scope: PruneHistory, Keep: 1, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry history prune: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestPruneHistoryRejectsKeepAboveOne(t *testing.T) {
 
 	// keep < 1 is the documented coercion to 1; the real run compacts to
 	// exactly one checkpoint commit.
-	res, err := gith.Prune(ctx, "demo", PruneHistory, 0, false)
+	res, err := gith.PruneReq(ctx, "demo", PruneRequest{Scope: PruneHistory, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("history prune keep=0: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestPruneHistoryGitCompactsAndPreservesObjects(t *testing.T) {
 		t.Fatalf("expected >=2 manifest commits, got %d", len(before))
 	}
 
-	res, err := hub.Prune(ctx, "demo", PruneHistory, 1, false)
+	res, err := hub.PruneReq(ctx, "demo", PruneRequest{Scope: PruneHistory, Keep: 1, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune history git: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestPruneAssetsWiresPurge(t *testing.T) {
 		t.Fatalf("upload orphan asset: %v", err)
 	}
 
-	res, err := hub.Prune(ctx, "pa", PruneAssets, 0, false)
+	res, err := hub.PruneReq(ctx, "pa", PruneRequest{Scope: PruneAssets, Keep: 0, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune assets: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestPruneAllReclaimsObjectsAndAssets(t *testing.T) {
 		t.Fatalf("upload orphan asset: %v", err)
 	}
 
-	res, err := hub.Prune(ctx, "all", PruneAll, 1, false)
+	res, err := hub.PruneReq(ctx, "all", PruneRequest{Scope: PruneAll, Keep: 1, DryRun: false})
 	if err != nil {
 		t.Fatalf("prune all: %v", err)
 	}
@@ -621,10 +621,10 @@ func TestPruneContextScopeAdapter(t *testing.T) {
 		!strings.Contains(err.Error(), "unknown prune scope") {
 		t.Fatalf("expected unknown-scope error, got %v", err)
 	}
-	// The context-free CLI wrapper reaches the same adapter.
-	if _, err := hub.PruneProject("scope", "bogus", 1, false); err == nil ||
+	// The typed request form reaches the same validation.
+	if _, err := hub.PruneReq(ctx, "scope", PruneRequest{Scope: "bogus", Keep: 1}); err == nil ||
 		!strings.Contains(err.Error(), "unknown prune scope") {
-		t.Fatalf("PruneProject must surface the unknown-scope error, got %v", err)
+		t.Fatalf("PruneReq must surface the unknown-scope error, got %v", err)
 	}
 }
 
@@ -653,7 +653,7 @@ func TestPruneRefusesDirtyProject(t *testing.T) {
 	pm.mu.Unlock()
 
 	for _, scope := range []PruneScope{PruneObjects, PruneAssets, PruneHistory, PruneAll} {
-		if _, err := hub.Prune(ctx, "dirty", scope, 1, false); err == nil ||
+		if _, err := hub.PruneReq(ctx, "dirty", PruneRequest{Scope: scope, Keep: 1, DryRun: false}); err == nil ||
 			!strings.Contains(err.Error(), "prune refused") {
 			t.Fatalf("scope %s: expected prune refusal for a dirty project, got %v", scope, err)
 		}

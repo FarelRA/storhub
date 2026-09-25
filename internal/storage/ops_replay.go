@@ -43,6 +43,12 @@ func foldOps(ops []Op) []Op {
 // so replay is defensive by construction: deletes of missing entries are
 // no-ops, and an rmdir of a directory that gained upstream children is
 // skipped (data preservation) with a recorded resolution.
+//
+// Replay has two entry shapes on one engine: this plain applier (commit
+// apply-back, cold journal replay) and the conflict-resolving rebase in
+// rebase.go, which wraps the same per-op applier with a changed-since-base
+// policy and skip bookkeeping. Both build batch state through
+// newReplayBatch.
 func applyOps(meta *RepoMetadata, ops []Op) error {
 	return applyOpsWithResolutions(meta, ops, nil)
 }
@@ -148,9 +154,10 @@ func newReplayPlan(ops []Op) *replayPlan {
 }
 
 // opAssertPaths reports every path an op asserts a record for: rename-to,
-// file-state, and mkdir-with-record paths. Deletes, rmdirs, catalog ops,
-// xattrs, and record-less mkdirs assert nothing (an EnsureDirectory-only
-// mkdir keeps a live occupant, so it must not exempt it).
+// file-state, xattr-with-record, and mkdir-with-record paths. Deletes,
+// rmdirs, catalog ops, and record-less mkdirs/xattrs assert nothing (an
+// EnsureDirectory-only mkdir keeps a live occupant, so it must not exempt
+// it; a record-less xattr carries only a key string, never an entry).
 func opAssertPaths(op Op) []string {
 	switch op.Type {
 	case OpRename:
@@ -159,6 +166,10 @@ func opAssertPaths(op Op) []string {
 		}
 	case OpPutFile, OpSetattr, OpTruncate, OpPatch:
 		if len(op.Paths) > 0 {
+			return []string{op.Paths[0]}
+		}
+	case OpXattr:
+		if len(op.Paths) > 0 && (op.File != nil || op.Dir != nil) {
 			return []string{op.Paths[0]}
 		}
 	case OpMkdir:
@@ -243,9 +254,16 @@ func (p *replayPlan) unremove(op Op) {
 	p.liveValid = false
 }
 
+// newReplayBatch builds the shared per-batch replay state both replay
+// paths run on: the move/doom/target plan plus the identifier occupancy
+// index. One constructor keeps the two replays on identical batch state
+// instead of duplicating the setup.
+func newReplayBatch(meta *RepoMetadata, ops []Op) (*replayPlan, *collisionIndex) {
+	return newReplayPlan(ops), newCollisionIndex(meta)
+}
+
 func applyOpsWithResolutions(meta *RepoMetadata, ops []Op, resolutions *[]ConflictResolution) error {
-	plan := newReplayPlan(ops)
-	cidx := newCollisionIndex(meta)
+	plan, cidx := newReplayBatch(meta, ops)
 	for _, op := range ops {
 		if err := applyOneOpIndexed(meta, op, plan, resolutions, cidx); err != nil {
 			return err

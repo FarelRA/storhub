@@ -235,7 +235,7 @@ func TestChunkGCRefusesLiveSession(t *testing.T) {
 	if sh.byID == nil {
 		sh.byID = map[string]*openSession{}
 	}
-	sh.byID["test-handle-1"] = &openSession{id: "test-handle-1", project: project}
+	sh.byID["test-handle-1"] = &openSession{handleID: "test-handle-1", project: project}
 	sh.mu.Unlock()
 	t.Cleanup(func() {
 		sh.mu.Lock()

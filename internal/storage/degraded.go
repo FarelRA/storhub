@@ -14,7 +14,7 @@ import (
 // but never re-admit, because silent recovery would mask a sick backend.
 // Only an explicit ReEnableProject re-admits.
 //
-// The commit outcome hook lives in commit.go (owned by another workstream),
+// The commit outcome hook lives in commit.go (outside this file's scope),
 // so the latch arms lazily at mutation admission: the first mutation that
 // observes a streak at or past the threshold latches the project and is
 // itself refused. A streak that heals before any new mutation arrives

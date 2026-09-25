@@ -131,7 +131,7 @@ func TestPruneAssetsScopeRemovesOrphanedAssetsAndReleases(t *testing.T) {
 	backend.addAssetToRelease(t, "projectpurge", manualRelease.tag, "manual.bin", []byte("manual orphan"))
 	backend.addAssetToRelease(t, "projectpurge", trackedRelease, "extra.bin", []byte("extra orphan"))
 
-	result, err := hub.PruneProject("projectpurge", "assets", 0, false)
+	result, err := hub.PruneContext(context.Background(), "projectpurge", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestPruneAssetsScopeKeepsReleaseAfterPatchSpill(t *testing.T) {
 		t.Fatal("expected patch to spill into a second release")
 	}
 
-	result, err := hub.PruneProject("projectpurgespill", "assets", 0, false)
+	result, err := hub.PruneContext(context.Background(), "projectpurgespill", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestPruneAssetsScopePrunesUnreferencedChunks(t *testing.T) {
 		t.Fatalf("expected stale chunk records before purge, got %d", totalBefore)
 	}
 
-	if _, err := hub.PruneProject("projectprune", "assets", 0, false); err != nil {
+	if _, err := hub.PruneContext(context.Background(), "projectprune", "assets", 0, false); err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}
 

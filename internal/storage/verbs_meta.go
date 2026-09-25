@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -317,7 +318,7 @@ func (h *StorHub) LoadRepoMetadataReadonlyContext(ctx context.Context, project s
 // synthesis plus the atomic swap via publishTreeLocked).
 //
 // It returns the LIVE shared pointer, not a Clone: published trees are
-// immutable under the COW discipline (every mutation goes through cowTree +
+// immutable under the COW discipline (every mutation goes through cloneForWrite +
 // publishTreeLocked, and lock-free readers already rely on it), so handing
 // out the pointer is safe and avoids a full O(tree) Clone + RebuildIndexes
 // per transaction. Callers MUST treat the result as read-only: mutating it
@@ -373,7 +374,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 	// The blob ceiling is a legacy constraint: a split project has no
 	// single-blob size limit (admission is per-object at commit), so
 	// measuring the blob serialization must not reject growth on it.
-	candidate := cowTree(pm.meta)
+	candidate := cloneForWrite(pm.meta)
 	// Intent recording: the tracked mutators record what fn changes while
 	// it runs, so op synthesis after admission folds the recorded intents
 	// (O(changes)) instead of diffing the whole pre-transaction tree
@@ -419,7 +420,7 @@ func (h *StorHub) UpdateRepoMetadataContext(ctx context.Context, project string,
 		return nil, fmt.Errorf("size metadata: %w", err)
 	}
 	admitVersion := pm.version
-	if err := h.admitCandidateSplit(project, pm, candidate, int64(beforeSize), int64(afterSize), admitVersion, message, started); err != nil {
+	if err := h.admitCandidateSplit(project, pm, candidate, int64(beforeSize), int64(afterSize), admitVersion, message, started, false); err != nil {
 		pm.mu.Unlock()
 		return nil, err
 	}
@@ -497,7 +498,15 @@ func (h *StorHub) hydrateProjectForTx(ctx context.Context, project string, pm *p
 // the sizeCapped flag is re-read fresh below so a concurrent breach (or
 // relief) is honored. Caller holds pm.mu on entry; returns with pm.mu HELD
 // on every path (the caller unlocks on error).
-func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candidate *RepoMetadata, beforeSize, afterSize int64, admitVersion uint64, message string, started time.Time) error {
+func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candidate *RepoMetadata, beforeSize, afterSize int64, admitVersion uint64, message string, started time.Time, deleteEscape bool) error {
+	if deleteEscape {
+		// Named escape hatch for removals: deleting is the documented way
+		// back under the ceiling, so a removal is admitted without the
+		// fail-fast gate and without paying for the probe. The cap clears
+		// like any other shrink; a later oversize growth re-arms it.
+		pm.sizeCapped = false
+		return nil
+	}
 	if afterSize <= maxMetadataBytes {
 		pm.sizeCapped = false
 		return nil
@@ -509,7 +518,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 	// the project can always fold back under the ceiling.
 	if pm.sizeCapped && !shrinking {
 		logging.Error(h.projectLogger(project), "metadata update rejected: project is over the size ceiling; growth mutations fail fast", "project", project, "step", "admission-capped", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
-		return fmt.Errorf("metadata over size ceiling (%d bytes, max %d): growth is rejected until the tree fits again; delete entries or run `storhub prune`", afterSize, maxMetadataBytes)
+		return fmt.Errorf("metadata over size ceiling (%d bytes, max %d): growth is rejected until the tree fits again; delete entries or run `storhub prune`: %w", afterSize, maxMetadataBytes, &oversizeError{size: int(afterSize), limit: maxMetadataBytes})
 	}
 	if shrinking {
 		pm.sizeCapped = false
@@ -539,7 +548,7 @@ func (h *StorHub) admitCandidateSplit(project string, pm *projectMetadata, candi
 	if oversizeObject {
 		pm.sizeCapped = true
 		logging.Error(h.projectLogger(project), "metadata update rejected: single index object over ceiling", "project", project, "step", "admission", "message", message, "elapsed", h.config.Now().UTC().Sub(started), "bytes", afterSize, "max", maxMetadataBytes)
-		return fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run purge to shrink", maxMetadataBytes)
+		return fmt.Errorf("metadata too large: one directory serializes past %d bytes; distribute entries across subdirectories or run purge to shrink: %w", maxMetadataBytes, &oversizeError{size: int(afterSize), limit: maxMetadataBytes})
 	}
 	// The tree exceeds the old blob ceiling but splits into small
 	// objects: admitted under the split layout.
@@ -611,7 +620,7 @@ func (h *StorHub) DefaultFileMode(kind metadata.NodeKind) uint32 {
 
 // DefaultOwnerIDs returns the default uid and gid for new entries.
 func (h *StorHub) DefaultOwnerIDs() (uint32, uint32) {
-	return defaultOwnerIDs()
+	return uint32(os.Getuid()), uint32(os.Getgid())
 }
 
 // AtimePolicy returns the effective atime update policy.

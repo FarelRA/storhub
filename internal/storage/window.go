@@ -49,13 +49,11 @@ var errWindowSeekAhead = errors.New("window reader: seek ahead of mirrored bytes
 // spoolBase returns the upload-spool directory: <CacheBase>/rest (flat
 // upload-* files, no per-upload dirs).
 //
-// History: this was once <CacheBase>/storhub/rest (double "storhub":
-// CacheBase already ends in storhub via XDG). The old path migrates via a
-// symlink shim: if <base>/storhub/rest exists and <base>/rest does not,
-// it is renamed into place and a symlink is left at the old location so
-// older binaries still find their spools. New code writes only the new
-// path. NOTE: TestSpoolLayout pins the old path and must move to
-// <STORHUB_CACHE_DIR>/rest.
+// History: this was once <CacheBase>/storhub/rest. The old path migrates
+// its entries into place on first use and the empty old dir is removed;
+// no symlink is left behind, so the new path is the single truth. Files
+// stranded in the old dir by a crash mid-migration are still swept by the
+// orphan reaper, which reads both dirs.
 //
 // Config.CacheDir precedence (explicit > env > XDG > temp) and the
 // Config.SpoolBase/ObjectCacheDir/CacheBase accessors are the config
@@ -77,13 +75,14 @@ func spoolBase() (string, error) {
 }
 
 // migrateLegacySpoolDir moves entries from the pre-XDG <base>/storhub/rest
-// dir into place and leaves a symlink shim so older binaries still find
-// their spools. Best-effort: a failed entry move keeps the legacy dir.
+// dir into place and removes the emptied old dir, leaving no symlink: the
+// new path is the single truth. Best-effort: a failed entry move keeps
+// the legacy dir with its remaining files.
 func migrateLegacySpoolDir(base, rest string) {
 	legacy := filepath.Join(base, "storhub", "rest")
 	if info, err := os.Lstat(legacy); err == nil && info.IsDir() && !isSymlink(info) {
 		// Legacy dir from a previous version: migrate contents one entry
-		// at a time (best-effort), then leave a symlink shim.
+		// at a time (best-effort), then drop the emptied dir.
 		entries, _ := os.ReadDir(legacy)
 		moved := true
 		for _, e := range entries {
@@ -94,7 +93,6 @@ func migrateLegacySpoolDir(base, rest string) {
 		}
 		if moved {
 			_ = os.Remove(legacy)
-			_ = os.Symlink(rest, legacy)
 		}
 	}
 }

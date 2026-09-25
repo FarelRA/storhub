@@ -15,6 +15,16 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 	pm.version++
 }
 
+// healBaseTreeLocked repairs a nil rebase baseline left by a cold
+// hydrate: the live tree is the truth the pending ops were built on.
+// Published trees are immutable under copy-on-write discipline, so sharing
+// the pointer matches store practice with no clone. Caller holds pm.mu.
+func healBaseTreeLocked(pm *projectMetadata) {
+	if pm.baseTree == nil && pm.meta != nil {
+		pm.baseTree = pm.meta
+	}
+}
+
 // appendOpLocked records one metadata mutation in the project's op stack
 // and mirrors it to the crash-recovery journal. Caller holds pm.mu. The
 // journal receives the PRE-COALESCING DELTA (the op exactly as appended,
@@ -23,6 +33,13 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 // rename chains and rename-then-delete, which post-coalescing tails cannot
 // reproduce.
 //
+// Mutation contract: the intent funnel (synthesizeOpsFromIntents) is the
+// canonical synthesizer for transaction-level mutations. Ops appended here
+// directly are pre-synthesized singletons that bypass classification,
+// rename pairing, and admission: each such site calls
+// appendSynthesizedOpLocked and carries a comment naming why it cannot go
+// through the funnel. New mutation paths default to the funnel.
+//
 // Cap behavior is drop-never: crossing the op-count or either 64MiB byte
 // bound compacts the journal to the folded survivors (even though no commit
 // succeeded) and warns; the append site pokes the commit trigger directly
@@ -30,14 +47,7 @@ func markProjectDirtyLocked(pm *projectMetadata) {
 // warns: never fail-loud backpressure, never dropped acknowledged ops.
 func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	beforeBytes := pm.opStack.bytes
-	// Heal a nil rebase baseline left by a cold hydrate: every mutation
-	// funnels through here holding pm.mu after hydration, so the live
-	// tree is the truth the pending ops were built on. Sharing the
-	// pointer matches storeRepoMetadata practice; published trees are
-	// immutable under COW discipline, so no clone is needed.
-	if pm.baseTree == nil && pm.meta != nil {
-		pm.baseTree = pm.meta
-	}
+	healBaseTreeLocked(pm)
 	delta := pm.opStack.appendWithDelta(op)
 	lineBytes := h.journalAppend(project, delta)
 	if pm.opStack.bytes >= opStackMaxBytes || h.journalOverCap(project, pm.opStack.maxSeq(), lineBytes) {
@@ -66,6 +76,16 @@ func (h *StorHub) appendOpLocked(project string, pm *projectMetadata, op Op) {
 	}
 }
 
+// appendSynthesizedOpLocked is the marked escape hatch for ops that reach
+// the stack without passing the intent funnel: the op is already a complete
+// full-state assertion (sibling propagation, parent mtime fixups, atime
+// touches, upload and transfer writes), so classification and rename
+// pairing have nothing to fold. Every call site names its reason in a
+// comment. Caller holds pm.mu.
+func (h *StorHub) appendSynthesizedOpLocked(project string, pm *projectMetadata, op Op) {
+	h.appendOpLocked(project, pm, op)
+}
+
 // emitFamilySiblingsLocked records full-state ops for every hardlink
 // sibling an inode-family mutation touched (ReplaceInodeFamily propagates
 // identity across the family, TouchInodeFamilyChangedAt bumps them). The
@@ -91,7 +111,10 @@ func (h *StorHub) emitFamilySiblingsLocked(project string, pm *projectMetadata, 
 			continue
 		}
 		e := entry.Clone()
-		h.appendOpLocked(project, pm, Op{
+		// Pre-synthesized singleton: the sibling entry is already final
+		// state read from the candidate tree, with no intent recorded for
+		// it, so the funnel has nothing to fold.
+		h.appendSynthesizedOpLocked(project, pm, Op{
 			Type: OpSetattr, Paths: []string{path}, Cause: cause,
 			Timestamp: now, File: &e,
 			Chunks: chunkRecordsFor(tree, e.Chunks),
@@ -105,7 +128,9 @@ func (h *StorHub) emitParentDirOpLocked(project string, pm *projectMetadata, pat
 	parent := shfs.ParentPath(path)
 	if parent == "" {
 		root := pm.meta.Root.Clone()
-		h.appendOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{""}, Cause: cause, Timestamp: now, Dir: &root})
+		// Pre-synthesized singleton: a parent mtime fixup carries final
+		// state only, with no intent recorded for it.
+		h.appendSynthesizedOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{""}, Cause: cause, Timestamp: now, Dir: &root})
 		return
 	}
 	dir := pm.meta.GetDirectory(parent)
@@ -113,7 +138,8 @@ func (h *StorHub) emitParentDirOpLocked(project string, pm *projectMetadata, pat
 		return
 	}
 	d := dir.Clone()
-	h.appendOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{parent}, Cause: cause, Timestamp: now, Dir: &d})
+	// Pre-synthesized singleton: see the root branch above.
+	h.appendSynthesizedOpLocked(project, pm, Op{Type: OpSetattr, Paths: []string{parent}, Cause: cause, Timestamp: now, Dir: &d})
 }
 
 // startCommitLoopLocked starts pm's commit loop unless Shutdown has begun.
@@ -163,7 +189,7 @@ func (h *StorHub) revivalTimeout() time.Duration {
 }
 
 func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata) chan struct{} {
-	if ch, ok := markDirtyFastPath(pm); ok {
+	if ch, ok := markProjectDirtyFastLocked(pm); ok {
 		return ch
 	}
 	// Capture the old loop's completion channel under pm.mu: the revival
@@ -174,10 +200,10 @@ func (h *StorHub) markProjectDirtyLiveLocked(project string, pm *projectMetadata
 	return h.reviveEvictedProject(project, pm, stoppedCh)
 }
 
-// markDirtyFastPath marks pm dirty when its commit loop is live. Caller must
-// hold pm.mu. Returns ok=false when the instance was evicted and needs the
-// revival path.
-func markDirtyFastPath(pm *projectMetadata) (chan struct{}, bool) {
+// markProjectDirtyFastLocked marks pm dirty when its commit loop is live.
+// Caller must hold pm.mu. Returns ok=false when the instance was evicted
+// and needs the revival path.
+func markProjectDirtyFastLocked(pm *projectMetadata) (chan struct{}, bool) {
 	if pm.stopped {
 		return nil, false
 	}

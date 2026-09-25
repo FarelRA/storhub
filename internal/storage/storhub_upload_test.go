@@ -226,7 +226,7 @@ func TestDownloadRetriesInterruptedChunkStream(t *testing.T) {
 	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", assetID)) || failures.Load() != 0 {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/cdn/%d", assetID)) || failures.Load() != 0 {
 			return false
 		}
 		failures.Add(1)
@@ -325,7 +325,7 @@ func TestReadFileAtRetriesInterruptedRangeRead(t *testing.T) {
 	assetID := repoMeta.Chunks()[fileMeta.Chunks[0]].AssetID
 	var failures atomic.Int32
 	backend.intercept.Store(func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/releases/assets/%d", assetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, fmt.Sprintf("/cdn/%d", assetID)) || r.Header.Get("Range") == "" || failures.Load() != 0 {
 			return false
 		}
 		failures.Add(1)

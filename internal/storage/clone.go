@@ -15,9 +15,12 @@ import (
 // CloneRange copies the byte range [srcOff, srcOff+length) of one file onto
 // another file (or the same file) at dstOff, transferring zero bytes: every
 // destination record references the same release asset the source bytes
-// already live in. The whole-file clone is the full-range case
-// (srcOff 0, length equal to the source size); there is no separate entry
-// point.
+// already live in. A whole-file content copy is the full-range case
+// (srcOff 0, length equal to the source size). Whole-file duplication keeps
+// a second spelling with a different contract: CopyContext duplicates names
+// (files and directories, fresh inodes, replacing the destination) while
+// CloneRange splices byte ranges (files only, overwrite at dstOff). A
+// namespace copy is not a range splice, so the two verbs stay.
 //
 // Record construction (mirrors referenceFileRangeChunks in patch.go, with
 // fresh identifiers): a source chunk fully covered by the cloned range is

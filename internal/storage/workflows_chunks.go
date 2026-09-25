@@ -12,23 +12,20 @@ import (
 
 func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadURL string, planner *chunking.StreamingChunker, prepare func(remaining int) (string, string, error)) ([]ChunkInfo, error) {
 	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, planner.NumChunks(), prepare)
-	for i := 0; i < planner.NumChunks(); i++ {
+	err := sink.pumpParts(planner.NumChunks(), func(i int) (io.ReadSeeker, int64, int64, func(), error) {
 		chunk, err := planner.GetChunk(i)
 		if err != nil {
-			return sink.results, err
+			return nil, 0, 0, nil, err
 		}
-		if err := sink.put(chunk, chunk.Size(), chunk.Offset()); err != nil {
-			return sink.results, err
-		}
-	}
-	return sink.results, nil
+		return chunk, chunk.Size(), chunk.Offset(), func() {}, nil
+	})
+	return sink.results, err
 }
 
 // chunkSink uploads chunk payloads one at a time, accumulating ChunkInfos
 // and rotating to a fresh release whenever the server reports the current
 // one full. It is the single home of name-collision retries and
-// release-full rotation; every upload loop (planner windows, reader
-// windows, inline edits, rewritten ranges) funnels through put so a stale
+// release-full rotation; every upload source funnels through put so a stale
 // release choice can never strand an upload.
 //
 // Rotation terminates: each rotation invalidates the release cache and
@@ -36,11 +33,15 @@ func (h *StorHub) uploadChunks(ctx context.Context, project, releaseTag, uploadU
 // ceiling), so a repeat pick means a concurrent writer filled it in the
 // millisecond race window, and the next re-list observes that fill.
 type chunkSink struct {
-	hub        *StorHub
-	ctx        context.Context
-	project    string
-	namer      *assetNamer
-	total      int // planned chunk count, for remaining-slot computation
+	hub     *StorHub
+	ctx     context.Context
+	project string
+	namer   *assetNamer
+	// total is the planned part count, for remaining-slot computation.
+	// Sources are planner counts (bounded by the chunker at construction)
+	// or checked conversions of ceil(size/chunkSize), so int is safe; the
+	// release picker below takes int and widening would fork that contract.
+	total      int
 	results    []ChunkInfo
 	releaseTag string
 	uploadURL  string
@@ -58,6 +59,28 @@ func (h *StorHub) newChunkSink(ctx context.Context, project, releaseTag, uploadU
 		releaseTag: releaseTag, uploadURL: uploadURL,
 		prepare: prepare,
 	}
+}
+
+// pumpParts is the single upload loop: it opens each of count parts in
+// order and feeds it to put, which stays the only upload sink. Planned
+// file parts and spooled request-body parts differ only in their open
+// function, so both upload paths share this loop instead of hand-rolling
+// their own. A failed open aborts with nothing to release; a failed put
+// releases that part before aborting. Partial results stay in s.results
+// for the caller to compensate on error.
+func (s *chunkSink) pumpParts(count int, open func(i int) (reader io.ReadSeeker, size, offset int64, cleanup func(), err error)) error {
+	for i := 0; i < count; i++ {
+		reader, size, offset, cleanup, err := open(i)
+		if err != nil {
+			return err
+		}
+		if err := s.put(reader, size, offset); err != nil {
+			cleanup()
+			return err
+		}
+		cleanup()
+	}
+	return nil
 }
 
 // put uploads one chunk payload. The transport rewinds the reader per
@@ -116,6 +139,10 @@ func (s *chunkSink) put(reader io.ReadSeeker, size, offset int64) error {
 	}
 }
 
+// uploadAssetStreaming uploads one chunk payload under assetName, then
+// records it against the release asset count. It wraps the raw client
+// upload with the owner gate and the count bump, so callers never use the
+// raw call directly on this path.
 func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag, uploadURL, assetName string, reader io.ReadSeeker, size int64) (int64, error) {
 	if err := h.ensureOwner(ctx); err != nil {
 		return 0, err
@@ -128,7 +155,11 @@ func (h *StorHub) uploadAssetStreaming(ctx context.Context, project, releaseTag,
 	return assetID, nil
 }
 
-func (h *StorHub) downloadAssetStream(ctx context.Context, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
+// fetchAssetRange opens one closed [start, end] byte span of an asset for
+// reading. The closed convention matches the asset client below, which
+// renders it as a bytes=start-end header; callers pass end as
+// offset+size-1, never as an exclusive bound.
+func (h *StorHub) fetchAssetRange(ctx context.Context, project string, assetID, start, end int64) (io.ReadCloser, int64, error) {
 	if err := h.ensureOwner(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -157,7 +188,7 @@ func (h *StorHub) withAssetRangeReader(ctx context.Context, project string, chun
 	// downloadChunkWithRetry. Both open and read errors gate on
 	// isRetryableDownloadError, preserving the old two-branch (API error plus CDN error) semantics.
 	attempt := func() error {
-		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
+		reader, _, err := h.fetchAssetRange(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
 			return err
 		}

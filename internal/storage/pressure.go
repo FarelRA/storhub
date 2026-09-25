@@ -8,7 +8,9 @@ import (
 
 // Pressure counters: a hub-level registry of commit
 // pipeline pressure events for operators and degraded-mode
-// policy. All counters are monotonic except the per-project
+// policy. This registry only counts commit-pipeline events: API admission
+// pacing lives in the rate governor, and the sticky trip lives in the
+// degraded latch (degraded.go). All counters are monotonic except the per-project
 // consecutive-failure streak, which resets on success.
 //
 // Design notes for session/REST/CLI consumers of the pressure snapshot:
@@ -30,6 +32,10 @@ type pressureRegistry struct {
 	// Monotonic event totals.
 	capCrosses      uint64
 	forceRetryPokes uint64
+	// sweepRetryPokes counts backstop pokes from the manual sweep only,
+	// kept apart from forceRetryPokes (live crossing-mutation pokes) so
+	// operators can tell live pressure from backstop activity.
+	sweepRetryPokes uint64
 	commitSuccesses uint64
 	commitFailures  uint64
 	rebases         uint64
@@ -57,6 +63,7 @@ type pressureRegistry struct {
 type PressureSnapshot struct {
 	CapCrosses      uint64
 	ForceRetryPokes uint64
+	SweepRetryPokes uint64
 	CommitSuccesses uint64
 	CommitFailures  uint64
 	Rebases         uint64
@@ -78,12 +85,21 @@ func (p *pressureRegistry) noteCapCross() {
 	p.mu.Unlock()
 }
 
-// noteForceRetry records one force-retry poke: a crossing
-// mutation (or the sweep backstop) waking the commit loop
-// because the stack outgrew its residency bound.
+// noteForceRetry records one force-retry poke from a crossing mutation
+// waking the commit loop because the stack outgrew its residency bound.
+// The sweep backstop counts through noteSweepRetry instead.
 func (p *pressureRegistry) noteForceRetry() {
 	p.mu.Lock()
 	p.forceRetryPokes++
+	p.mu.Unlock()
+}
+
+// noteSweepRetry records one force-retry poke from the manual sweep
+// backstop. Counted apart from live crossing pokes so operators can
+// tell backstop activity from live pressure.
+func (p *pressureRegistry) noteSweepRetry() {
+	p.mu.Lock()
+	p.sweepRetryPokes++
 	p.mu.Unlock()
 }
 
@@ -155,6 +171,7 @@ func (p *pressureRegistry) snapshot() PressureSnapshot {
 	out := PressureSnapshot{
 		CapCrosses:            p.capCrosses,
 		ForceRetryPokes:       p.forceRetryPokes,
+		SweepRetryPokes:       p.sweepRetryPokes,
 		CommitSuccesses:       p.commitSuccesses,
 		CommitFailures:        p.commitFailures,
 		Rebases:               p.rebases,

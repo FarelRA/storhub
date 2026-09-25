@@ -452,7 +452,7 @@ func TestPruneChunksErrorReturnsNil(t *testing.T) {
 	// collect fails loud.
 	id := mustOpenSession(ctx, t, hub, proj, "", SessionReadWrite)
 	defer func() { _ = hub.CloseSession(ctx, id) }()
-	res, err := hub.Prune(ctx, proj, PruneChunks, 1, false)
+	res, err := hub.PruneReq(ctx, proj, PruneRequest{Scope: PruneChunks, Keep: 1, DryRun: false})
 	if err == nil {
 		t.Fatal("compaction under a live session must fail")
 	}

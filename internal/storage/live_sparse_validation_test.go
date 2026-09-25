@@ -103,7 +103,7 @@ func TestSparseZeroFileValidationMatrix(t *testing.T) {
 	if err := hub.DeleteFileContext(context.Background(), project, "twogb.bin"); err != nil {
 		t.Fatalf("hide two-gb.bin: %v", err)
 	}
-	purge, err := hub.PruneProject(project, "assets", 0, false)
+	purge, err := hub.PruneContext(context.Background(), project, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked: %v", err)
 	}

@@ -122,6 +122,12 @@ func (h *StorHub) PatchFileContext(ctx context.Context, project, fileName string
 // round-trip and the N-1 intermediate playlist states - on a slow link
 // that turns N+2 latency chains into one. Either the whole batch commits
 // or none of it does.
+//
+// The commit below is a direct metadata mutation, not a funnel
+// transaction: the journal records it as a patch op with its chunk catalog
+// (see the OpPatch assembly below), which crash replay and rebase read.
+// Refolding it through intent synthesis would re-emit the same bytes as a
+// generic put and change the recorded op shape.
 func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName string, edits []shfs.RangeEdit) (*FileMeta, error) {
 	var err error
 	started := h.logOpStart(project, "patch-file-ranges", "path", fileName, "edits", len(edits))
@@ -195,7 +201,7 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	// A patch shrinking to empty (or a no-op edit) mints no chunks and
 	// picks no release: the helper skips registration for the empty tag
 	// (EnsureRelease rejects it).
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
 	if allocErr != nil {
 		pm.mu.Unlock()
@@ -212,7 +218,10 @@ func (h *StorHub) PatchFileRangesContext(ctx context.Context, project, fileName 
 	patched.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, patched.Mode)
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
-	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
+	patched.AccessedAt = fileMeta.AccessedAt
+	if patched.AccessedAt == 0 {
+		patched.AccessedAt = now
+	}
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
@@ -257,7 +266,10 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	now := h.config.Now().UnixNano()
 	patched := fileMeta.Clone()
 
-	// Update metadata directly
+	// Update metadata directly: the journal records a patch op with its
+	// chunk catalog (see below), which crash replay and rebase read.
+	// Refolding through intent synthesis would re-emit the same bytes as
+	// a generic put and change the recorded op shape.
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
@@ -272,7 +284,7 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	// publish only on success. A patch shrinking to empty mints no chunks
 	// and picks no release: the helper skips registration for the empty tag
 	// (EnsureRelease rejects it).
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
 	if allocErr != nil {
 		pm.mu.Unlock()
@@ -284,7 +296,10 @@ func (h *StorHub) patchFileWithMetadataContext(ctx context.Context, project, cle
 	patched.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, patched.Mode)
 	patched.ModifiedAt = now
 	patched.ChangedAt = now
-	patched.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
+	patched.AccessedAt = fileMeta.AccessedAt
+	if patched.AccessedAt == 0 {
+		patched.AccessedAt = now
+	}
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()
@@ -330,7 +345,10 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	now := h.config.Now().UnixNano()
 	rewritten := fileMeta.Clone()
 
-	// Update metadata directly
+	// Update metadata directly: the journal records a put op with the
+	// rewrite cause and its chunk catalog (see below), which crash replay
+	// and rebase read. Refolding through intent synthesis would re-emit
+	// the same bytes under a derived cause and change the recorded shape.
 	pm := h.getOrCreateProjectMeta(project)
 	pm.mu.Lock()
 	if err := h.ensureMutableLocked(ctx, project, pm); err != nil {
@@ -345,7 +363,7 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	// publish only on success. A rewrite shrinking to empty mints no chunks
 	// and picks no release: the helper skips registration for the empty tag
 	// (EnsureRelease rejects it).
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	chunkIDs, allocErr := allocateChunkRecords(tree, newChunks, releaseTag, now)
 	if allocErr != nil {
 		pm.mu.Unlock()
@@ -357,7 +375,10 @@ func (h *StorHub) rewriteFileRangesWithMetadataContext(ctx context.Context, proj
 	rewritten.Mode = shfs.SanitizeWrittenFileModeForContext(ctx, rewritten.Mode)
 	rewritten.ModifiedAt = now
 	rewritten.ChangedAt = now
-	rewritten.AccessedAt = implposix.ChooseNonZeroTime(fileMeta.AccessedAt, now)
+	rewritten.AccessedAt = fileMeta.AccessedAt
+	if rewritten.AccessedAt == 0 {
+		rewritten.AccessedAt = now
+	}
 	current := tree.FindFile(cleanName)
 	if current == nil {
 		pm.mu.Unlock()

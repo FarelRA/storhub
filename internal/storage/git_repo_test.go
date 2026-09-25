@@ -188,7 +188,7 @@ func TestGitRepoLocalHarnessLifecycle(t *testing.T) {
 
 	// Squash collapses history for the file while keeping content.
 	before := len(revs)
-	if err := r.squashHistory(ctx, metadataFilePath, "squashed"); err != nil {
+	if err := r.squashHistoryCAS(ctx, metadataFilePath, "squashed", ""); err != nil {
 		t.Fatalf("squash: %v", err)
 	}
 	after, err := r.listFileCommits(ctx, metadataFilePath)

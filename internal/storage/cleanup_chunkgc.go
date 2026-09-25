@@ -59,14 +59,12 @@ func (h *StorHub) chunkGCHasLiveSession(project string) bool {
 
 // chunkGCRoots unions the live-tree file references with the pending-op
 // references (file payloads plus catalog keys). ops is the live stack
-// copy; callers holding pm.mu may pass the stack directly.
+// copy; callers holding pm.mu may pass the stack directly. File liveness
+// funnels through liveFileChunkIDs, the same traversal the asset
+// classifier uses, so the two orphan definitions agree on what a file
+// references.
 func chunkGCRoots(tree *RepoMetadata, ops []Op) map[int64]struct{} {
-	roots := make(map[int64]struct{})
-	for _, file := range tree.Files() {
-		for _, id := range file.Chunks {
-			roots[id] = struct{}{}
-		}
-	}
+	roots := liveFileChunkIDs(tree.Files())
 	for _, op := range ops {
 		if op.File != nil {
 			for _, id := range op.File.Chunks {

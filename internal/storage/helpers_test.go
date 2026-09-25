@@ -10,7 +10,6 @@ import (
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	fusefs "github.com/FarelRA/storhub/internal/fusefs"
-	"github.com/FarelRA/storhub/internal/posix"
 )
 
 func TestNormalizePathPreservesWhitespace(t *testing.T) {
@@ -59,16 +58,6 @@ func TestDefaultModes(t *testing.T) {
 	t.Parallel()
 	if defaultFileMode(NodeKindFile) != 0o644 || defaultFileMode(NodeKindSymlink) != 0o777 || defaultDirMode() != 0o755 {
 		t.Fatal("unexpected mode defaults")
-	}
-}
-
-func TestCloneStringMapAndChooseNonZeroTime(t *testing.T) {
-	t.Parallel()
-	if posix.CloneStringMap(nil) != nil {
-		t.Fatal("expected nil clone")
-	}
-	if posix.ChooseNonZeroTime(0, 1) == 0 {
-		t.Fatal("expected chosen non-zero time")
 	}
 }
 

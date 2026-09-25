@@ -124,7 +124,7 @@ type StaleSessionError struct {
 }
 
 func (e *StaleSessionError) Error() string {
-	return fmt.Sprintf("%s (handle %s): %s", ErrStaleSession, shortSHA(e.HandleID), e.Reason)
+	return fmt.Sprintf("%s (handle %s): %s", ErrStaleSession, e.HandleID, e.Reason)
 }
 
 func (e *StaleSessionError) Unwrap() error { return ErrStaleSession }
@@ -313,15 +313,15 @@ type SessionStat struct {
 // ID so distinct handles proceed in parallel once the table lock is
 // dropped across network I/O. Fields written after insert (path and
 // pending on link/relink, pin/revision/sizes/staging/dirty/applied/ranges/
-// lastUse/tmp) are guarded by mu. project/mode/ownerUID/hasOpener/ttl are
+// lastUse/tmp) are guarded by mu. project/mode/opener/hasOpener/ttl are
 // immutable after insert and safe to read under the table lock. destroyed
 // marks removal from the table; holders of mu check it after re-acquiring
 // the table lock.
 type openSession struct {
-	mu      sync.Mutex
-	id      string
-	project string
-	path    string
+	mu       sync.Mutex
+	handleID string
+	project  string
+	path     string
 	// pending is the ordered set of names staged bytes publish to on
 	// Close or Sync. Scratch handles grow it with LinkSession (append)
 	// and replace it with RelinkSession (exactly one name). Handles
@@ -331,7 +331,6 @@ type openSession struct {
 	// quarantine) keep working unchanged.
 	pending   []string
 	mode      OpenMode
-	ownerUID  uint32
 	hasOpener bool
 	// published records the pending names this handle already published
 	// in the current staged generation. A linked fan-out that fails
@@ -345,7 +344,8 @@ type openSession struct {
 	// privilege-clearing follow the opener even when someone else
 	// (necessarily the opener or an admin, per authorize) triggers the
 	// commit. Without this an admin closing a user's session would
-	// reassign its files to the admin.
+	// reassign its files to the admin. The owner UID is opener.UID
+	// (zero when no identity was present); it is derived, never stored.
 	opener       shfs.Identity
 	revision     string
 	pinned       FileMeta
@@ -360,7 +360,7 @@ type openSession struct {
 	created      bool
 	fullImage    bool
 	appendOnly   bool
-	ranges       []byteRange
+	ranges       []shfs.ByteRange
 	lastUse      time.Time
 	ttl          time.Duration
 	destroyed    bool
@@ -437,9 +437,9 @@ func (h *StorHub) ConfigureSessions(opts ...SessionHubOption) {
 	}
 }
 
-// newSessionID mints an opaque capability-shaped handle id: 128 bits of
+// newHandleID mints an opaque capability-shaped handle id: 128 bits of
 // crypto randomness rendered as hex.
-func newSessionID() (string, error) {
+func newHandleID() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("mint session handle: %w", err)
@@ -507,7 +507,7 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		if s.project == project {
 			projectCount++
 		}
-		if s.ownerUID == id.UID {
+		if s.opener.UID == id.UID {
 			userCount++
 		}
 	}
@@ -533,7 +533,6 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 	s := &openSession{
 		project:    project,
 		mode:       mode,
-		ownerUID:   id.UID,
 		hasOpener:  hasOpener,
 		opener:     id,
 		appendOnly: true,
@@ -579,14 +578,14 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		s.mu.Unlock()
 	}
 
-	handleID, herr := newSessionID()
+	handleID, herr := newHandleID()
 	if herr != nil {
 		_ = tmp.File.Close()
 		_ = os.Remove(tmp.Name)
 		err = herr
 		return "", err
 	}
-	s.id = handleID
+	s.handleID = handleID
 	sh.mu.Lock()
 	// Re-check caps under the lock: concurrent opens may have filled the
 	// table during the network window above. Sweep again (cheap, skips
@@ -597,7 +596,7 @@ func (h *StorHub) OpenSession(ctx context.Context, project, path string, mode Op
 		if other.project == project {
 			projectCount++
 		}
-		if other.ownerUID == id.UID {
+		if other.opener.UID == id.UID {
 			userCount++
 		}
 	}
@@ -657,10 +656,7 @@ func (h *StorHub) pinSessionTarget(ctx context.Context, s *openSession, path str
 				return err
 			}
 		} else {
-			if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
-				return err
-			}
-			if err := shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed); err != nil {
+			if err := checkCreateParentDAC(ctx, live, cleanName, traversed); err != nil {
 				return err
 			}
 		}
@@ -699,7 +695,10 @@ func newSessionTemp() (*sessionTempFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.CreateTemp(base, "session-*")
+	// Staging temps use a prefix of their own, separate from quarantined
+	// recoveries, so the quarantine scan never mistakes a live temp for
+	// one already collected.
+	f, err := os.CreateTemp(base, "scratch-*")
 	if err != nil {
 		return nil, fmt.Errorf("create session staging temp: %w", err)
 	}
@@ -727,7 +726,7 @@ func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) erro
 		// Pre-size sparsely: unrecorded spans (holes) stay holes and
 		// read back as zeros without ever being written.
 		if err := s.tmp.Truncate(s.baseSize); err != nil {
-			return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+			return fmt.Errorf("hydrate session %s: %w", s.handleID, err)
 		}
 		for off := int64(0); off < s.baseSize; {
 			end := off + hydrateWindowSize
@@ -736,10 +735,10 @@ func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) erro
 			}
 			data, err := h.ReadPinnedFileContext(ctx, s.project, &pinned, s.pinnedChunks, off, end-off)
 			if err != nil {
-				return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+				return fmt.Errorf("hydrate session %s: %w", s.handleID, err)
 			}
 			if _, err := s.tmp.WriteAt(data, off); err != nil {
-				return fmt.Errorf("hydrate session %s: %w", shortSHA(s.id), err)
+				return fmt.Errorf("hydrate session %s: %w", s.handleID, err)
 			}
 			off = end
 		}
@@ -751,14 +750,14 @@ func (h *StorHub) hydrateSessionLocked(ctx context.Context, s *openSession) erro
 // readStagedRange reads staged bytes from the temp.
 func (s *openSession) readStagedRange(start, end int64) ([]byte, error) {
 	if end < start {
-		return nil, fmt.Errorf("read staged session %s: inverted range [%d,%d)", shortSHA(s.id), start, end)
+		return nil, fmt.Errorf("read staged session %s: inverted range [%d,%d)", s.handleID, start, end)
 	}
 	buf := make([]byte, end-start)
 	if len(buf) == 0 {
 		return buf, nil
 	}
 	if _, err := io.ReadFull(io.NewSectionReader(s.tmp, start, int64(len(buf))), buf); err != nil {
-		return nil, fmt.Errorf("read staged session %s: %w", shortSHA(s.id), err)
+		return nil, fmt.Errorf("read staged session %s: %w", s.handleID, err)
 	}
 	return buf, nil
 }

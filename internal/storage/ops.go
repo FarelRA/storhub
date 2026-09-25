@@ -64,11 +64,14 @@ func (t *OpType) UnmarshalJSON(data []byte) error {
 // possible, and full-state assertions make replay idempotent (a journal
 // replayed after a crash that landed between commit and journal truncation
 // re-applies harmlessly).
+//
+// Identity numbering across the pipeline (revision, version, sha, seq,
+// gen) is defined once on commitSnapshot in commit_snapshot.go.
 type Op struct {
 	Seq       uint64   `json:"seq"`
 	Type      OpType   `json:"type"`
 	Paths     []string `json:"paths"` // scope: 1 path, 2 (from, to) for rename
-	Cause     string   `json:"cause"` // originating operation, e.g. "upload", "mkdir"
+	Cause     string   `json:"cause"` // closed set: verb lower-names (mkdir, upload), atime, prune, update
 	Timestamp int64    `json:"ts"`    // unix nanoseconds of the latest coalesced mutation
 	Times     int      `json:"times,omitempty"`
 
@@ -82,8 +85,8 @@ type Op struct {
 	FreedChunks   int         `json:"freed_chunks,omitempty"`   // del: chunk records the removed entry referenced
 	Tag           string      `json:"tag,omitempty"`            // release op
 	Release       *ReleaseRef `json:"release,omitempty"`        // release op: nil = delete the tag
-	RemovedChunks []int64     `json:"removed_chunks,omitempty"` // chunkprune op
-	XAttr         string      `json:"xattr,omitempty"`          // xattr op
+	RemovedChunks []int64     `json:"removed_chunks,omitempty"` // chunkprune op: catalog shrinkage records; user-facing retention stays prune
+	XAttr         string      `json:"xattr,omitempty"`          // xattr key for the xattr op (record-less; carries no File/Dir payload)
 
 	// Members carries the explicit subtree member from-paths for a
 	// directory rename, recorded at fold time from the candidate tree.
@@ -127,22 +130,9 @@ type ConflictResolution struct {
 	Note string
 }
 
-// opStack accumulates pending metadata operations with per-path coalescing:
-// fifty writes of one file collapse into one op carrying the final state
-// and a times counter, keeping stacks (and commit messages) proportional to
-// what changed, not to how many syscalls produced it.
-//
-// Coalescing lookups are indexed (path -> stack position) so bulk imports
-// of many distinct paths stay O(1) per append; a coalesce rebuilds the op
-// at the END of the stack, preserving replay-order semantics when renames
-// intervene. Rename chains and rename-then-delete collapse only when
-// adjacent, for the same reason.
-//
-// The stack is bounded twice: maxPendingOpsPerProject caps the op count and
-// opStackMaxBytes caps the serialized weight (each op carries full state
-// plus chunk catalog records, so a few ops on huge files can outweigh
-// thousands of tiny ones). Either bound crossing compacts the journal and
-// force-retries the commit: acknowledged ops are never dropped.
+// opStack accumulates pending metadata operations with per-path
+// coalescing. The full contract lives on the type in ops_stack.go; this
+// note stays a pointer so the two can never drift.
 
 func isStateClass(t OpType) bool {
 	switch t {
@@ -191,19 +181,6 @@ func cloneOpPayloads(op Op) Op {
 	return op
 }
 
-// collisionIndex snapshots inode occupancy once per replay batch so
-// remapOpCollisions stays O(1) per op instead of scanning the whole tree per
-// replayed op (bulk journal/cold replays were O(ops x tree)). The index is
-// updated incrementally as the batch applies (every handler records its
-// writes/removes/moves), so it tracks the live tree exactly without rescans:
-//
-//   - adds are exact: every materializing handler records its payload inode,
-//     and batch inodes are unique within the candidate domain (hardlink
-//     families share file inodes, which never remap);
-//   - removes drop by path, so a stale entry can only cause a spurious
-//     remap (fresh inode + note), never a missed collision;
-//   - subtree moves relocate index keys with the same prefix rule as
-//     remapSubtree.
-//
-// Chunk-ID collisions need no index: meta.Chunks() is already an O(1) map
-// lookup and stays live.
+// collisionIndex snapshots inode occupancy once per replay batch. The
+// full contract lives on the type in ops_apply.go; this note stays a
+// pointer so the two can never drift.

@@ -133,14 +133,12 @@ func opConflictKeys(op Op) []string {
 func rebaseWorkingTree(upstream *RepoMetadata, ops []Op, base map[string][16]byte, strict bool) (*RepoMetadata, []ConflictResolution, error) {
 	changed := changedByHash(base, upstream)
 	working := upstream.Clone()
-	// One shared replay plan for the batch: moves recorded by earlier
-	// renames resolve later from-references, and removals skipped by
-	// conflict resolution below (plan.unremove) reappear as live children
-	// for later rmdirs. One shared collision index likewise: identifier
-	// occupancy is snapshotted once and updated incrementally, not
-	// rescanned per op.
-	plan := newReplayPlan(ops)
-	cidx := newCollisionIndex(working)
+	// One shared replay batch for the whole conflict-resolving replay: moves
+	// recorded by earlier renames resolve later from-references, and
+	// removals skipped below (plan.unremove) reappear as live children for
+	// later rmdirs. The occupancy index likewise snapshots once and updates
+	// incrementally, not rescanned per op.
+	plan, cidx := newReplayBatch(working, ops)
 	var resolutions []ConflictResolution
 	for _, op := range ops {
 		conflictPath := ""

@@ -57,11 +57,13 @@ func quarantineSessionTemp(name, id string) error {
 	return nil
 }
 
-// QuarantineStaleSessionTemps collects session staging temps older than
+// QuarantineStaleSessionTemps collects orphaned staging temps older than
 // maxAge into the spool quarantine dir for manual recovery, never
 // auto-redriven. Call it at startup after a restart: live handles are
 // younger than their idle TTL, so with maxAge at or above the max TTL only
-// orphaned temps move. Returns how many files were quarantined.
+// orphaned temps move. It scans the live staging prefix plus the legacy
+// prefix minted before the split, and never touches quarantined
+// recoveries. Returns how many files were quarantined.
 func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, err error) {
 	started := h.config.Now().UTC()
 	logging.Debug(h.logger, "session-quarantine start", "max_age", maxAge)
@@ -88,7 +90,17 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, 
 			continue
 		}
 		name := e.Name()
-		if len(name) < 8 || name[:8] != "session-" {
+		if strings.HasSuffix(name, ".staged") {
+			continue
+		}
+		rest, ok := strings.CutPrefix(name, "scratch-")
+		if !ok {
+			rest, ok = strings.CutPrefix(name, "session-")
+			if !ok {
+				continue
+			}
+		}
+		if rest == "" {
 			continue
 		}
 		full := filepath.Join(base, name)
@@ -102,7 +114,7 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, 
 		// Pass the full source name as the quarantine identity: the old
 		// code passed the filename through shortSHA again, folding every
 		// swept temp back into the same 48-bit space as live handles.
-		if err := quarantineSessionTemp(full, strings.TrimPrefix(name, "session-")); err != nil {
+		if err := quarantineSessionTemp(full, rest); err != nil {
 			continue
 		}
 		moved++
@@ -110,11 +122,25 @@ func (h *StorHub) QuarantineStaleSessionTemps(maxAge time.Duration) (moved int, 
 	return moved, nil
 }
 
+// checkCreateParentDAC enforces create-time DAC for one resolved target:
+// the parent must exist and the caller must hold parent-write. Named-open
+// creates and link targets share it so both spell the same check.
+func checkCreateParentDAC(ctx context.Context, live *RepoMetadata, cleanName string, traversed []string) error {
+	if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
+		return err
+	}
+	return shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed)
+}
+
 // resolveLinkTarget validates a link/relink target without mutating:
 // shape, resolve, walk, parent presence, parent write, kind conflicts,
 // and target absence. Shared by LinkSession (append to the pending set)
 // and RelinkSession (replace the whole pending set). Caller holds s.mu;
 // metadata reads run under it like the rest of the session slow path.
+// The create-time parent check is shared with named opens through
+// checkCreateParentDAC: only the resolver differs (opens follow the
+// authed path so existing files stay openable; links use the
+// lstat-tracked path plus an absence check).
 func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path string) (string, error) {
 	if err := shfs.ValidateAccessPathShape(path); err != nil {
 		return "", err
@@ -136,10 +162,7 @@ func (h *StorHub) resolveLinkTarget(ctx context.Context, s *openSession, path st
 	if err := shfs.CheckWalkResolved(ctx, live, traversed); err != nil {
 		return "", err
 	}
-	if err := shfs.RequireParentDirectory(live, cleanName); err != nil {
-		return "", err
-	}
-	if err := shfs.CheckParentWriteResolved(ctx, live, cleanName, traversed); err != nil {
+	if err := checkCreateParentDAC(ctx, live, cleanName, traversed); err != nil {
 		return "", err
 	}
 	if live.HasDirectory(cleanName) {
@@ -172,21 +195,21 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) (err e
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "link", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "link", "err", aerr)
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-link start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	logging.Debug(h.projectLogger(s.project), "session-link start", "handle", shortSHA(s.handleID), "project", s.project, "path", path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-link failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-link failed", "handle", shortSHA(s.handleID), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-link complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "pending", len(s.pending), "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-link complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "pending", len(s.pending), "elapsed", elapsed)
 	}()
 	if s.path != "" && len(s.pending) == 0 {
-		return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
+		return fmt.Errorf("link session %s to %s: %w", s.handleID, path, ErrSessionLinked)
 	}
 	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {
@@ -194,7 +217,7 @@ func (h *StorHub) LinkSession(ctx context.Context, handleID, path string) (err e
 	}
 	for _, p := range s.pending {
 		if p == cleanName {
-			return fmt.Errorf("link session %s to %s: %w", shortSHA(s.id), path, ErrSessionLinked)
+			return fmt.Errorf("link session %s to %s: %w", s.handleID, path, ErrSessionLinked)
 		}
 	}
 	s.pending = append(s.pending, cleanName)
@@ -225,18 +248,18 @@ func (h *StorHub) RelinkSession(ctx context.Context, handleID, path string) (err
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "relink", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "relink", "err", aerr)
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-relink start", "handle", shortSHA(s.id), "project", s.project, "path", path)
+	logging.Debug(h.projectLogger(s.project), "session-relink start", "handle", shortSHA(s.handleID), "project", s.project, "path", path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-relink failed", "handle", shortSHA(s.id), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-relink failed", "handle", shortSHA(s.handleID), "project", s.project, "path", path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-relink complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-relink complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "elapsed", elapsed)
 	}()
 	cleanName, err := h.resolveLinkTarget(ctx, s, path)
 	if err != nil {

@@ -408,7 +408,7 @@ func TestLiveGitHubSmoke2GB(t *testing.T) {
 	if err := hub.DeleteFileContext(context.Background(), repoName, "live2gb.bin"); err != nil {
 		t.Fatalf("delete metadata entry: %v", err)
 	}
-	purge, err := hub.PruneProject(repoName, "assets", 0, false)
+	purge, err := hub.PruneContext(context.Background(), repoName, "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge untracked 2GB file: %v", err)
 	}

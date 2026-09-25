@@ -433,6 +433,19 @@ func lastAccessTime(pm *projectMetadata) time.Time {
 	return time.Unix(0, nano).UTC()
 }
 
+// CapacityStrainedError is the loud typed refusal a brand-new project
+// answers when the tracked-project table is at cap and nothing clean can
+// be evicted. Callers match with errors.As to tell a full table apart
+// from a degraded latch or a prune fence without matching message text.
+type CapacityStrainedError struct {
+	Project string
+	Cap     int
+}
+
+func (e *CapacityStrainedError) Error() string {
+	return fmt.Sprintf("too many tracked projects with unpushed metadata (cap %d): flush or retry before mutating a new project (%s)", e.Cap, e.Project)
+}
+
 // lookupOrInsert is the single double-checked-lock core behind
 // getOrCreateProjectMeta (read paths, admit unbounded) and
 // getOrCreateProjectMetaAdmitted (mutation paths, backpressure when at
@@ -498,7 +511,7 @@ func (h *StorHub) lookupOrInsert(project string, admit bool) (*projectMetadata, 
 	if admit && !admitted {
 		h.metaMu.Unlock()
 		h.releaseEvicted(evicted)
-		return nil, fmt.Errorf("too many tracked projects with unpushed metadata (cap %d): flush or retry before mutating a new project", h.config.MaxTrackedProjects)
+		return nil, &CapacityStrainedError{Project: project, Cap: h.config.MaxTrackedProjects}
 	}
 	_ = admitted // read path inserts regardless; fresh entries are evictable
 	pm = h.newProjectMetaLocked(project, now)
@@ -538,6 +551,19 @@ func (h *StorHub) evictIdleEntryLocked(project string) (string, bool) {
 		return "", false
 	}
 	return project, true
+}
+
+// evictIdleIfExpired drops the resident entry for project while it is
+// still clean and idle-past-the-TTL: the lock-taking wrapper over
+// evictIdleEntryLocked for the sweep backstop, which runs without the
+// cache lock held. The lookup path calls evictIdleEntryLocked directly
+// under its own write lock; both legs share the one predicate and the
+// one evictor, so the idle rule cannot drift between them.
+func (h *StorHub) evictIdleIfExpired(project string) bool {
+	h.metaMu.Lock()
+	defer h.metaMu.Unlock()
+	_, ok := h.evictIdleEntryLocked(project)
+	return ok
 }
 
 // getOrCreateProjectMeta returns the projectMetadata for a project, creating it if needed
@@ -665,6 +691,21 @@ func (h *StorHub) evictForCapacityLocked() (admitted bool, evicted []string) {
 // the pm.mu hold every caller already takes). Memory stays capped by
 // MaxTrackedProjects either way, so worst case without any timer is
 // bounded residency, not growth.
+//
+// Budget table (one bound per cache; shapes differ on purpose):
+//   - project table: entry count (MaxTrackedProjects). Count-only because
+//     entries are handles, not bytes: the tree underneath is bounded by
+//     the op-stack and object budgets below.
+//   - release list: entry count (2x tracked) + lazy TTL
+//     (releaseCacheTTL). TTL-miss, never a drop pass.
+//   - object cache: entry count + byte budget (1GiB). Dual bound because
+//     one index object can reach the 8MiB per-object ceiling, so
+//     count-only would still allow unbounded disk.
+//   - build cache: entry count (treeCacheMaxEntries), reset on exceed.
+//     Reset, not LRU: rebuild cost is re-marshal, never correctness.
+//   - op stack: op count (4096) + bytes; journal file: 64MiB.
+//   - size ceiling: 8MiB per object + manifest check (admission, not
+//     residency: growth past it is refused, never evicted).
 const metaCacheIdleTTL = 360 * storcfg.PatienceUnit
 
 // sweepCachesOnce is the manual cache-drain backstop, kept as a callable
@@ -685,8 +726,6 @@ const metaCacheIdleTTL = 360 * storcfg.PatienceUnit
 // markProjectDirtyLiveLocked revival swap (caches.go vs commit.go), and
 // a stale send wakes nobody.
 func (h *StorHub) sweepCachesOnce() {
-	now := h.config.Now()
-
 	type snapshot struct {
 		name string
 		pm   *projectMetadata
@@ -700,25 +739,17 @@ func (h *StorHub) sweepCachesOnce() {
 
 	var evicted []string
 	for _, s := range snap {
+		// Idle leg shares the lookup path's evictor: the entry is
+		// re-validated under both locks inside, so a use that raced
+		// the snapshot is served live instead of evicted. A replaced
+		// entry is judged as-is; eviction never drops unpushed work.
+		if h.evictIdleIfExpired(s.name) {
+			evicted = append(evicted, s.name)
+			continue
+		}
 		s.pm.mu.RLock()
-		idle := !s.pm.dirty && !s.pm.reviving && !s.pm.stopped
-		last := lastAccessTime(s.pm)
 		needFlush := s.pm.dirty && s.pm.opStack.needsForceFlush()
 		s.pm.mu.RUnlock()
-		idleClean := idle && !last.IsZero() && now.Sub(last) > metaCacheIdleTTL
-		if idleClean {
-			h.metaMu.Lock()
-			// Re-validate under both locks: the entry may have been
-			// mutated, revived, or evicted since the snapshot.
-			if cur, ok := h.metaCache[s.name]; ok && cur == s.pm {
-				if evictEntryLocked(h, s.name, s.pm) {
-					evicted = append(evicted, s.name)
-					h.metaMu.Unlock()
-					continue
-				}
-			}
-			h.metaMu.Unlock()
-		}
 		if needFlush {
 			// Re-read the live trigger under pm.mu; a revival may have
 			// swapped it since the snapshot. The non-blocking send
@@ -728,7 +759,7 @@ func (h *StorHub) sweepCachesOnce() {
 			trigger := s.pm.triggerCh
 			stillDirty := s.pm.dirty && s.pm.opStack.needsForceFlush()
 			if !stale && stillDirty {
-				h.pressure.noteForceRetry()
+				h.pressure.noteSweepRetry()
 				// Retry the failing commit; the stack can never be dropped
 				// (acknowledged mutations), only pushed.
 				select {

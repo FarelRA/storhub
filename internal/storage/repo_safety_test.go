@@ -101,7 +101,7 @@ func TestSquashHistorySyncsFromRemote(t *testing.T) {
 	if _, _, err := b.writeCommitPush(ctx, metadataFilePath, []byte(marker), "concurrent"); err != nil {
 		t.Fatalf("concurrent write: %v", err)
 	}
-	if err := a.squashHistory(ctx, metadataFilePath, "squashed"); err != nil {
+	if err := a.squashHistoryCAS(ctx, metadataFilePath, "squashed", ""); err != nil {
 		t.Fatalf("squash: %v", err)
 	}
 	data, err := a.readFileContentsNoLock(ctx, metadataFilePath)
@@ -158,7 +158,7 @@ func TestSquashHistoryCASRejectsStaleBase(t *testing.T) {
 		t.Fatalf("failed squash must not mutate history: before=%d after=%d", len(before), len(after))
 	}
 	// Fresh base succeeds and preserves the concurrent write.
-	if err := a.squashHistory(ctx, metadataFilePath, "fresh squash"); err != nil {
+	if err := a.squashHistoryCAS(ctx, metadataFilePath, "fresh squash", ""); err != nil {
 		t.Fatalf("fresh squash: %v", err)
 	}
 	data, err := a.readFileContentsNoLock(ctx, metadataFilePath)

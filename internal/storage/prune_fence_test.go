@@ -59,7 +59,7 @@ func TestPruneFenceRefusesWritesDuringPrune(t *testing.T) {
 
 	pruneDone := make(chan error, 1)
 	go func() {
-		_, err := hub.Prune(ctx, project, PruneObjects, 0, false)
+		_, err := hub.PruneReq(ctx, project, PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: false})
 		pruneDone <- err
 	}()
 	waitPruneFence(t, hub, project)
@@ -76,7 +76,7 @@ func TestPruneFenceRefusesWritesDuringPrune(t *testing.T) {
 			t.Fatalf("conflict project = %q, want %q", conflict.Project, project)
 		}
 	}
-	if _, err := hub.Prune(ctx, project, PruneObjects, 0, true); err == nil {
+	if _, err := hub.PruneReq(ctx, project, PruneRequest{Scope: PruneObjects, Keep: 0, DryRun: true}); err == nil {
 		t.Fatal("second prune during a running prune must fail loud, got nil")
 	} else {
 		var conflict *PruneConflictError

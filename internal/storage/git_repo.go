@@ -47,13 +47,9 @@ type gitRepo struct {
 	repo   *git.Repository
 }
 
+// newGitRepo is the single constructor; the commit clock stays nil here
+// and callers thread their clock through r.now after construction.
 func newGitRepo(cacheDir, owner, project, token string) *gitRepo {
-	return newGitRepoWithClock(cacheDir, owner, project, token, nil)
-}
-
-// newGitRepoWithClock is the clock-injectable constructor; the 4-arg
-// wrapper above is retained for test compatibility.
-func newGitRepoWithClock(cacheDir, owner, project, token string, now func() time.Time) *gitRepo {
 	key := gitCacheKey(owner, project)
 	return &gitRepo{
 		// cacheDir is the shared base (~/.cache/storhub/git); each
@@ -64,7 +60,6 @@ func newGitRepoWithClock(cacheDir, owner, project, token string, now func() time
 		owner:   owner,
 		project: project,
 		token:   token,
-		now:     now,
 	}
 }
 

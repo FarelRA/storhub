@@ -268,6 +268,17 @@ func (h *StorHub) releaseProjectResidue(project string) {
 	h.closeProjectJournal(project)
 }
 
+// Load-path map (two cores, thin adapters): every load funnels through
+// cachedMeta (shared-pointer cache read) or loadRepoMetadataFreshUnshared
+// (remote load + store). The four named entries each carry a distinct
+// contract worth keeping: loadRepoMetadata serves any resident entry,
+// loadRepoMetadataReadonly misses on unhydrated entries whose empty tree
+// is not remote truth, loadRepoMetadataFresh coalesces concurrent cold
+// misses onto one flight, and loadRepoMetadataFreshUnshared is the
+// uncoalesced remote read. Collapse them only with a flags argument that
+// preserves all four contracts; the names stay until every caller agrees
+// on the flags.
+
 // cachedMeta is the single home of the shared-pointer cache read:
 // requireHydrated=false serves any resident entry (loadRepoMetadata path),
 // requireHydrated=true misses on unhydrated entries whose EMPTY tree is not
@@ -318,13 +329,6 @@ func (h *StorHub) cachedRepoMetadataReadonly(project string) (*RepoMetadata, str
 // into maps the published tree still reads.
 func cloneForWrite(m *RepoMetadata) *RepoMetadata {
 	return m.Clone()
-}
-
-// cowTree returns a private, mutable copy of a published metadata tree
-// (historical spelling of cloneForWrite; kept while verb, transfer, and
-// cleanup call sites migrate, see out-of-scope note to W4).
-func cowTree(m *RepoMetadata) *RepoMetadata {
-	return cloneForWrite(m)
 }
 
 // ProjectVersion reports the per-project metadata version counter, the

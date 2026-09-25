@@ -50,7 +50,8 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	// other direct mutation site. Deliberately not the full
 	// ensureMutableLocked: its size-ceiling gate would refuse deletes on a
 	// capped project, and deleting is the documented escape hatch from
-	// capped state.
+	// capped state (the shared admission spells it admitCandidateSplit
+	// with deleteEscape).
 	if err := h.ensureHydratedLocked(ctx, project, pm); err != nil {
 		pm.mu.Unlock()
 		return err
@@ -91,7 +92,7 @@ func (h *StorHub) DeleteFileContext(ctx context.Context, project, fileName strin
 	// delete failed. All mutations apply to a private COW copy; the shared
 	// tree is swapped in only once they have all succeeded.
 	now := h.config.Now().UnixNano()
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	shfs.TouchParentDirectory(tree, cleanName, now)
 	if len(tree.FindFilesByInode(existing.Inode)) > 0 {
 		if err := implposix.TouchInodeFamilyChangedAt(tree, existing.Inode, now); err != nil {
@@ -154,7 +155,7 @@ func (h *StorHub) DeleteReleaseContext(ctx context.Context, project, tag string)
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))
 	}
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	if !tree.RemoveRelease(tag) {
 		pm.mu.Unlock()
 		return shfs.NotFound(fmt.Sprintf("release %s", tag))

@@ -242,8 +242,8 @@ func TestPressurePendingDepth(t *testing.T) {
 }
 
 // TestPressureSweepPokeCounted pins the backstop poke site: a
-// dirty project over the op-count cap gets one force-retry poke
-// from sweepCachesOnce.
+// dirty project over the op-count cap gets one sweep poke
+// from sweepCachesOnce, counted apart from live crossing pokes.
 func TestPressureSweepPokeCounted(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
@@ -266,8 +266,11 @@ func TestPressureSweepPokeCounted(t *testing.T) {
 	before := hub.PressureSnapshot()
 	hub.sweepCachesOnce()
 	after := hub.PressureSnapshot()
-	if got := after.ForceRetryPokes - before.ForceRetryPokes; got != 1 {
-		t.Fatalf("sweep force-retry delta = %d, want 1", got)
+	if got := after.SweepRetryPokes - before.SweepRetryPokes; got != 1 {
+		t.Fatalf("sweep retry delta = %d, want 1", got)
+	}
+	if got := after.ForceRetryPokes - before.ForceRetryPokes; got != 0 {
+		t.Fatalf("live force-retry delta = %d, want 0", got)
 	}
 }
 

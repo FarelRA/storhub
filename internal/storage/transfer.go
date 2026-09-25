@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 
@@ -199,7 +200,7 @@ func (h *StorHub) FinalizeReplaceChunksContext(ctx context.Context, project, fil
 	// delete live data. PrepareReplaceContext EnsureReleases only on a local
 	// clone that is discarded before this call. All mutations apply to a
 	// private COW copy; the shared tree is swapped in only on success.
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	chunkIDs, allocErr := allocateChunkRecords(tree, chunks, releaseTag, now)
 	if allocErr != nil {
 		pm.mu.Unlock()
@@ -264,7 +265,11 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 	}
 	ctx = gateRevisionFromOpts(ctx, opts)
 
-	size, hasSize := shfs.ApplyMutateOptions(opts).ExpectedSize()
+	mutOpts := shfs.ApplyMutateOptions(opts)
+	if err := mutOpts.ValidateSize(); err != nil {
+		return nil, err
+	}
+	size, hasSize := mutOpts.ExpectedSize()
 	if !hasSize {
 		return nil, fmt.Errorf("upload size unknown: pass fs.WithSize(n) (REST callers: Content-Length)")
 	}
@@ -276,49 +281,65 @@ func (h *StorHub) ReplaceFileFromReaderContext(ctx context.Context, project, fil
 		}
 		h.logOpFinish(project, "replace-file-reader", started, err, "path", filePath, "size", size, "result_size", resultSize)
 	}()
-	chunkSize, _ := chunking.NormalizedSize(h.ChunkSize())
-	requiredSlots := 0
-	if size > 0 {
-		requiredSlots = int((size + chunkSize - 1) / chunkSize)
+	requested := h.ChunkSize()
+	chunkSize, adjusted := chunking.NormalizedSize(requested)
+	if adjusted {
+		if requested <= 0 {
+			if logging.Enabled(h.projectLogger(project), slog.LevelDebug) {
+				logging.Debug(h.projectLogger(project), "chunk size default", "requested", requested, "used", chunkSize)
+			}
+		} else {
+			logging.Warn(h.projectLogger(project), "chunk size clamped", "requested", requested, "used", chunkSize)
+		}
+	}
+	requiredSlots, err := checkedChunkCount(size, chunkSize)
+	if err != nil {
+		return nil, err
 	}
 	releaseTag, uploadURL, err := h.PrepareReplaceContext(ctx, project, filePath, requiredSlots)
 	if err != nil {
 		return nil, err
 	}
 
-	// Stream the body straight into per-chunk GitHub uploads. Each window is
-	// tee-mirrored to a spool file so transport retries rewind from disk
-	// instead of re-reading the network; a failed window compensates by
-	// deleting earlier windows of this call, keeping metadata-atomicity.
-	// Name-collision retries and release-full rotation live in the sink.
-	totalChunks := 0
-	if size > 0 {
-		totalChunks = int((size + chunkSize - 1) / chunkSize)
-	}
+	// The body streams straight into per-chunk uploads through the shared
+	// sink loop: each part is tee-mirrored to a spool file so transport
+	// retries rewind from disk instead of re-reading the network. A failed
+	// part compensates by deleting earlier parts of this call, keeping
+	// metadata-atomicity. Name-collision retries and release-full rotation
+	// live in the sink.
 	prepare := func(remaining int) (string, string, error) {
 		return h.PrepareReplaceContext(ctx, project, filePath, remaining)
 	}
-	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, totalChunks, prepare)
-	var uploaded int64
-	for uploaded < size {
-		windowSize := min64(chunkSize, size-uploaded)
-
-		win, cleanup, werr := newWindowReader(body, windowSize)
+	sink := h.newChunkSink(ctx, project, releaseTag, uploadURL, requiredSlots, prepare)
+	if err := sink.pumpParts(requiredSlots, func(i int) (io.ReadSeeker, int64, int64, func(), error) {
+		offset := int64(i) * chunkSize
+		partSize := min(chunkSize, size-offset)
+		part, cleanup, werr := newWindowReader(body, partSize)
 		if werr != nil {
-			h.compensateDeleteAssets(ctx, project, sink.results)
-			return nil, werr
+			return nil, 0, 0, nil, werr
 		}
-
-		if err := sink.put(win, windowSize, uploaded); err != nil {
-			cleanup()
-			h.compensateDeleteAssets(ctx, project, sink.results)
-			return nil, err
-		}
-		cleanup()
-		uploaded += windowSize
+		return part, partSize, offset, cleanup, nil
+	}); err != nil {
+		h.compensateDeleteAssets(ctx, project, sink.results)
+		return nil, err
 	}
 
-	return h.FinalizeReplaceChunksContext(ctx, project, filePath, sink.releaseTag, uploaded, sink.results)
+	return h.FinalizeReplaceChunksContext(ctx, project, filePath, sink.releaseTag, size, sink.results)
+}
+
+// checkedChunkCount returns ceil(size/chunkSize) as an int for release-slot
+// planning. Non-positive sizes need no slots; the round-trip rejects counts
+// past the platform int range loud instead of wrapping. Callers pass a
+// NormalizedSize-clamped chunkSize, so chunkSize is always positive here.
+func checkedChunkCount(size, chunkSize int64) (int, error) {
+	if size <= 0 {
+		return 0, nil
+	}
+	count := (size + chunkSize - 1) / chunkSize
+	if count != int64(int(count)) {
+		return 0, fmt.Errorf("chunk count %d exceeds platform int range", count)
+	}
+	return int(count), nil
 }
 
 // uploadFileContext creates a file; replaceFileContext overwrites one.
@@ -390,7 +411,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 		return nil, shfs.AlreadyExists(cleanName)
 	}
 
-	planner, err := chunking.NewStreamingChunker(inputPath, cleanName, h.config.ChunkSize)
+	planner, err := chunking.NewStreamingChunker(inputPath, h.config.ChunkSize)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +499,7 @@ func (h *StorHub) putFileInner(ctx context.Context, project, fileName, inputPath
 	}
 	// All mutations apply to a private COW copy; the shared tree is swapped
 	// in only once every fallible step has succeeded.
-	tree := cowTree(pm.meta)
+	tree := cloneForWrite(pm.meta)
 	// Rotation may have spread this file's chunks across releases; the
 	// helper ensures every chunk's own release, not just the initial tag,
 	// so rotated chunks never strand outside the catalog where purge
@@ -543,7 +564,7 @@ func (h *StorHub) downloadChunkWithRetry(ctx context.Context, project string, ou
 	// (retry.go) owns the backoff/sleep shape. Open and copy errors share
 	// the isRetryableDownloadError gate, preserving the old semantics.
 	attempt := func() error {
-		reader, _, err := h.downloadAssetStream(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
+		reader, _, err := h.fetchAssetRange(ctx, project, chunk.AssetID, chunk.AssetOffset, chunk.AssetOffset+chunk.Size-1)
 		if err != nil {
 			return fmt.Errorf("download chunk %d: %w", chunk.AssetID, err)
 		}
@@ -586,6 +607,10 @@ func (h *StorHub) writeChunk(outFile *os.File, reader io.Reader, buf []byte, chu
 	}
 }
 
+// fileReadSegment is one chunk slice overlapping a read. start/end are
+// indexes into the caller result buffer, which is int-sized by
+// construction, so int is exact here: every index lies in
+// [0, end-offset] and end-offset never exceeds that buffer length.
 type fileReadSegment struct {
 	chunk metadata.ChunkInfo
 	start int
@@ -629,7 +654,7 @@ func overlappingFileSegments(file *metadata.FileMeta, repoChunks map[int64]metad
 	return segments
 }
 
-// compensateDeleteAssets best-effort removes windows uploaded by this call
+// compensateDeleteAssets best-effort removes chunks uploaded by this call
 // after a later failure; metadata was never committed, so these are pure
 // orphans. Individual failures are logged, not fatal - the original error
 // is what matters.

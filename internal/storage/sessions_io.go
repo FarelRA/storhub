@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"syscall"
 
+	shfs "github.com/FarelRA/storhub/internal/fs"
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
@@ -30,21 +31,21 @@ func (h *StorHub) ReadSession(ctx context.Context, handleID string, offset, leng
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "read", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "read", "err", aerr)
 		return nil, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-read start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length)
+	logging.Debug(h.projectLogger(s.project), "session-read start", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", length)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-read failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-read failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", length, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-read complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", length, "bytes", len(out), "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-read complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", length, "bytes", len(out), "elapsed", elapsed)
 	}()
 	if !s.mode.readable() {
-		return nil, fmt.Errorf("read session %s: handle not open for reading: %w", shortSHA(s.id), syscall.EBADF)
+		return nil, fmt.Errorf("read session %s: handle not open for reading: %w", s.handleID, syscall.EBADF)
 	}
 	if length == 0 || offset >= s.curSize {
 		s.lastUse = sh.now()
@@ -91,21 +92,21 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "write", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "write", "err", aerr)
 		return 0, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-write start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data))
+	logging.Debug(h.projectLogger(s.project), "session-write start", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", len(data))
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-write failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-write failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-write complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "bytes", wrote, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-write complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "offset", offset, "length", len(data), "bytes", wrote, "elapsed", elapsed)
 	}()
 	if !s.mode.writable() {
-		return 0, fmt.Errorf("write session %s: handle not open for writing: %w", shortSHA(s.id), syscall.EBADF)
+		return 0, fmt.Errorf("write session %s: handle not open for writing: %w", s.handleID, syscall.EBADF)
 	}
 	if len(data) == 0 {
 		s.lastUse = sh.now()
@@ -127,9 +128,9 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 		// offset-curSize bytes. A single far-offset write (e.g. 10 GiB
 		// on an empty stage) must not attempt a same-sized allocation.
 		if err := s.tmp.Truncate(offset); err != nil {
-			return 0, fmt.Errorf("write session %s: %w", shortSHA(s.id), err)
+			return 0, fmt.Errorf("write session %s: %w", s.handleID, err)
 		}
-		s.ranges = mergeByteRange(s.ranges, byteRange{start: s.curSize, end: offset})
+		s.ranges = shfs.MergeByteRanges(append(s.ranges, shfs.ByteRange{Start: s.curSize, End: offset}))
 		s.curSize = offset
 		s.fullImage = true
 		s.appendOnly = false
@@ -138,17 +139,17 @@ func (h *StorHub) WriteSession(ctx context.Context, handleID string, offset int6
 	for wrote < len(data) {
 		n, err := s.tmp.WriteAt(data[wrote:], offset+int64(wrote))
 		if err != nil {
-			return wrote, fmt.Errorf("write session %s: %w", shortSHA(s.id), err)
+			return wrote, fmt.Errorf("write session %s: %w", s.handleID, err)
 		}
 		if n == 0 {
-			return wrote, fmt.Errorf("write session %s: no progress", shortSHA(s.id))
+			return wrote, fmt.Errorf("write session %s: no progress", s.handleID)
 		}
 		wrote += n
 	}
 	if offset != curBefore {
 		s.appendOnly = false
 	}
-	s.ranges = mergeByteRange(s.ranges, byteRange{start: offset, end: offset + int64(wrote)})
+	s.ranges = shfs.MergeByteRanges(append(s.ranges, shfs.ByteRange{Start: offset, End: offset + int64(wrote)}))
 	if end := offset + int64(wrote); end > s.curSize {
 		s.curSize = end
 	}
@@ -175,21 +176,21 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "truncate", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "truncate", "err", aerr)
 		return aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-truncate start", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size)
+	logging.Debug(h.projectLogger(s.project), "session-truncate start", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "size", size)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-truncate failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-truncate failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-truncate complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-truncate complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "size", size, "elapsed", elapsed)
 	}()
 	if !s.mode.writable() {
-		return fmt.Errorf("truncate session %s: handle not open for writing: %w", shortSHA(s.id), syscall.EBADF)
+		return fmt.Errorf("truncate session %s: handle not open for writing: %w", s.handleID, syscall.EBADF)
 	}
 	if size == s.curSize {
 		s.lastUse = sh.now()
@@ -199,7 +200,7 @@ func (h *StorHub) TruncateSession(ctx context.Context, handleID string, size int
 		return err
 	}
 	if err := s.tmp.Truncate(size); err != nil {
-		return fmt.Errorf("truncate session %s: %w", shortSHA(s.id), err)
+		return fmt.Errorf("truncate session %s: %w", s.handleID, err)
 	}
 	s.curSize = size
 	s.dirty = true
@@ -226,18 +227,18 @@ func (h *StorHub) StatSession(ctx context.Context, handleID string) (stat Sessio
 	sh.mu.Unlock()
 	defer s.mu.Unlock()
 	if aerr := s.authorize(ctx); aerr != nil {
-		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "op", "stat", "err", aerr)
+		logging.Error(h.projectLogger(s.project), "session auth failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "op", "stat", "err", aerr)
 		return SessionStat{}, aerr
 	}
 	started := h.config.Now().UTC()
-	logging.Debug(h.projectLogger(s.project), "session-stat start", "handle", shortSHA(s.id), "project", s.project, "path", s.path)
+	logging.Debug(h.projectLogger(s.project), "session-stat start", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path)
 	defer func() {
 		elapsed := h.config.Now().UTC().Sub(started)
 		if err != nil {
-			logging.Error(h.projectLogger(s.project), "session-stat failed", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "elapsed", elapsed, "err", err)
+			logging.Error(h.projectLogger(s.project), "session-stat failed", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "elapsed", elapsed, "err", err)
 			return
 		}
-		logging.Debug(h.projectLogger(s.project), "session-stat complete", "handle", shortSHA(s.id), "project", s.project, "path", s.path, "size", stat.Size, "elapsed", elapsed)
+		logging.Debug(h.projectLogger(s.project), "session-stat complete", "handle", shortSHA(s.handleID), "project", s.project, "path", s.path, "size", stat.Size, "elapsed", elapsed)
 	}()
 	s.lastUse = sh.now()
 	stat = SessionStat{

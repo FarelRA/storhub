@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -25,10 +26,6 @@ func fileEqual(a, b FileMeta, ignoreChangedAt bool) bool {
 	if ignoreChangedAt {
 		a.ChangedAt, b.ChangedAt = 0, 0
 	}
-	return fileBodiesEqual(a, b)
-}
-
-func fileBodiesEqual(a, b FileMeta) bool {
 	if !chunksEqual(a.Chunks, b.Chunks) ||
 		a.Size != b.Size || a.Symlink != b.Symlink ||
 		a.UploadedAt != b.UploadedAt || a.ModifiedAt != b.ModifiedAt ||
@@ -54,10 +51,6 @@ func dirEqual(a, b DirMeta, ignoreTimes bool) bool {
 		a.ModifiedAt, b.ModifiedAt = 0, 0
 		a.ChangedAt, b.ChangedAt = 0, 0
 	}
-	return dirBodiesEqual(a, b)
-}
-
-func dirBodiesEqual(a, b DirMeta) bool {
 	if a.CreatedAt != b.CreatedAt || a.AccessedAt != b.AccessedAt ||
 		a.Mode != b.Mode || a.UID != b.UID || a.GID != b.GID || a.Inode != b.Inode ||
 		len(a.XAttrs) != len(b.XAttrs) {
@@ -89,14 +82,16 @@ func chunkRecordsFor(meta *RepoMetadata, ids []int64) map[int64]ChunkInfo {
 }
 
 // opSummaryCounts renders the per-class op counts for a commit summary
-// line, fixed order, non-zero classes only: "2 put, 1 del, 1 mkdir".
+// line, fixed order, non-zero classes only: "2 put, 1 del, 1 mkdir". The
+// put class derives from the op classifier: every state-class type except
+// mkdir, which keeps its own label.
 func opSummaryCounts(ops []Op) string {
 	order := []struct {
 		label string
 		match func(OpType) bool
 	}{
 		{"put", func(t OpType) bool {
-			return t == OpPutFile || t == OpTruncate || t == OpPatch || t == OpSetattr || t == OpXattr
+			return t != OpMkdir && isStateClass(t)
 		}},
 		{"del", isDeleteClass},
 		{"mkdir", func(t OpType) bool { return t == OpMkdir }},
@@ -236,6 +231,8 @@ func opMessageLine(op Op) string {
 
 // causeFromMessage extracts the operation word from a transaction message
 // ("storhub: mkdir /path" -> "mkdir") so op causes stay short and stable.
+// Committed messages (the multi-line "N ops (...)" summary) carry no cause
+// and fall back to "update" instead of leaking the count word.
 func causeFromMessage(message string) string {
 	m := strings.TrimSpace(message)
 	m = strings.TrimPrefix(m, "storhub:")
@@ -244,6 +241,9 @@ func causeFromMessage(message string) string {
 		m = m[:i]
 	}
 	if m == "" {
+		return "update"
+	}
+	if _, err := strconv.Atoi(m); err == nil {
 		return "update"
 	}
 	return m

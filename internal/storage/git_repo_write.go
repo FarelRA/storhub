@@ -260,13 +260,8 @@ func casConflict(err error, base plumbing.Hash) error {
 	return fmt.Errorf("push: %w", err)
 }
 
-// squashHistory creates a single orphan commit with the current metadata content and force pushes it.
-func (r *gitRepo) squashHistory(ctx context.Context, path, message string) error {
-	return r.squashHistoryCAS(ctx, path, message, "")
-}
-
-// squashHistoryCAS is squashHistory with compare-and-swap: it syncs from
-// remote BEFORE reading HEAD (so the squashed content is the latest remote
+// squashHistoryCAS collapses history into a single orphan commit with
+// compare-and-swap: it syncs from remote BEFORE reading HEAD (so the
 // truth, never a stale local copy), and the force-push carries a
 // force-with-lease on the post-sync HEAD instead of a blind force-push, so a
 // concurrent writer racing the squash is rejected with a 409 conflict rather

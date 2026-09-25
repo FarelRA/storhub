@@ -269,7 +269,7 @@ func (h *StorHub) commitProjectMetadata(ctx context.Context, project string, pm 
 	defer pm.commitMu.Unlock()
 
 	started := h.config.Now().UTC()
-	snap := h.snapshotCommitState(project, pm)
+	snap := h.freezeCommitBatch(project, pm)
 	if snap == nil {
 		return nil
 	}
@@ -340,8 +340,9 @@ const drainMaxRounds = 3
 // DrainProjectContext blocks until everything published before the call
 // has landed in the remote commit, or fails loudly. It is the shared
 // durability primitive behind fsync, O_SYNC, and the REST/CLI sync
-// opt-in. Semantics are fsync-class: pre-call data is durable on
-// success; a concurrent writer's later mutations may ride along in the
+// opt-in. It contains the other two drains: flushJournals (fsync only)
+// runs first, then the commitProjectMetadata loop below. Semantics are
+// fsync-class: pre-call data is durable on success; a concurrent writer's later mutations may ride along in the
 // same commit or wait for a later one, but they can never strand the
 // caller past drainMaxRounds. A clean project costs no network (the
 // commit is a cheap no-op); a failed push retains dirty state for retry

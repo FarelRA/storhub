@@ -332,7 +332,7 @@ func TestRegressionPurgeKeepsEmptyReleases(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	empty := backend.addRelease(t, "projectpurgeempty", "v-empty")
-	result, err := hub.PruneProject("projectpurgeempty", "assets", 0, false)
+	result, err := hub.PruneContext(context.Background(), "projectpurgeempty", "assets", 0, false)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}

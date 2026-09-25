@@ -1,5 +1,9 @@
 package storage
 
+// The dirty-range spelling below is the legacy one still used by the
+// rewrite path: new session dirty tracking uses the shared span type from
+// the filesystem layer with its merge, and this file stays until the
+// rewrite path migrates to it.
 type byteRange struct {
 	start int64
 	end   int64

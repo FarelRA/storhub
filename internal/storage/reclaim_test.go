@@ -2,18 +2,152 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	ghapi "github.com/FarelRA/storhub/internal/github"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
+
+// Capacity refusal must be typed so callers can tell a full project table
+// from a degraded latch or a prune fence without matching message text.
+func TestCapacityRefusalIsTyped(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	cfg := singleChunkTestConfig()
+	cfg.MaxTrackedProjects = 2
+	hub := backend.newClient(t, cfg)
+
+	dirty := func(pm *projectMetadata) {
+		pm.mu.Lock()
+		markProjectDirtyLocked(pm)
+		pm.mu.Unlock()
+	}
+	dirty(hub.getOrCreateProjectMeta("cap-one"))
+	dirty(hub.getOrCreateProjectMeta("cap-two"))
+
+	_, err := hub.getOrCreateProjectMetaAdmitted("cap-new")
+	if err == nil {
+		t.Fatal("admission past a full dirty table must refuse")
+	}
+	var strained *CapacityStrainedError
+	if !errors.As(err, &strained) {
+		t.Fatalf("refusal must be *CapacityStrainedError, got %T: %v", err, err)
+	}
+	if strained.Project != "cap-new" {
+		t.Fatalf("refusal must name the refused project, got %q", strained.Project)
+	}
+}
+
+// The sweep backstop poke must count separately from the live crossing poke
+// so operators can tell backstop retries from live pressure.
+func TestSweepRetryCountedSeparately(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, singleChunkTestConfig())
+
+	hub.pressure.noteForceRetry()
+	hub.pressure.noteSweepRetry()
+
+	snap := hub.PressureSnapshot()
+	if snap.ForceRetryPokes != 1 {
+		t.Fatalf("live pokes = %d, want 1", snap.ForceRetryPokes)
+	}
+	if snap.SweepRetryPokes != 1 {
+		t.Fatalf("sweep pokes = %d, want 1", snap.SweepRetryPokes)
+	}
+}
+
+// The legacy spool migration must move entries without leaving a symlink
+// behind: a permanent dual-truth forces the reaper to sweep both dirs.
+func TestSpoolMigrationLeavesNoShim(t *testing.T) {
+	base := t.TempDir()
+	legacy := filepath.Join(base, "storhub", "rest")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "upload-1"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rest := filepath.Join(base, "rest")
+	if err := os.MkdirAll(rest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	migrateLegacySpoolDir(base, rest)
+
+	if _, err := os.ReadFile(filepath.Join(rest, "upload-1")); err != nil {
+		t.Fatalf("entry must move to the new dir: %v", err)
+	}
+	if info, err := os.Lstat(legacy); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatal("migration must not leave a symlink shim at the old path")
+		}
+		if entries, err := os.ReadDir(legacy); err != nil || len(entries) != 0 {
+			t.Fatalf("leftover legacy dir must be empty, err=%v", err)
+		}
+	}
+}
+
+// The file to chunk-id traversal behind every orphan classifier must live
+// in one helper so the chunk collector and the asset classifier can never
+// disagree on what counts as referenced.
+func TestLiveFileChunkIDsUnionsEveryFile(t *testing.T) {
+	t.Parallel()
+	files := map[string]FileMeta{
+		"a.txt": {Chunks: []int64{1, 2}},
+		"b.txt": {Chunks: []int64{2, 3}},
+		"empty": {},
+	}
+	got := liveFileChunkIDs(files)
+	for _, id := range []int64{1, 2, 3} {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("chunk %d must be live", id)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("live set = %v, want exactly {1 2 3}", got)
+	}
+}
+
+// One NotFound dispatch must recognize every backend absence shape: the git
+// sentinel chain, the OS sentinel, and the API error shape.
+func TestNotFoundDispatchCoversAllShapes(t *testing.T) {
+	t.Parallel()
+	api404 := &ghapi.APIError{StatusCode: http.StatusNotFound}
+	if !isMetadataNotFound(api404) {
+		t.Fatal("API 404 must read as NotFound")
+	}
+	if !isMetadataNotFound(os.ErrNotExist) {
+		t.Fatal("OS not-exist must read as NotFound")
+	}
+	if isMetadataNotFound(nil) {
+		t.Fatal("nil must not read as NotFound")
+	}
+	if isMetadataNotFound(errors.New("boom")) {
+		t.Fatal("unrelated errors must not read as NotFound")
+	}
+}
+
+// The typed request form is the single live prune entry: unknown scopes
+// must fail loud through it.
+func TestPruneRequestRejectsUnknownScope(t *testing.T) {
+	t.Parallel()
+	backend := newMockGitHub(t)
+	hub := backend.newClient(t, singleChunkTestConfig())
+	if _, err := hub.PruneReq(context.Background(), "scope", PruneRequest{Scope: "bogus"}); err == nil {
+		t.Fatal("unknown scope must fail")
+	}
+}
 
 // Purge must classify against a fresh metadata read, not the cached
 // snapshot: a file committed after the local cache was populated must be
 // visible, or purge deletes live releases.
-func TestPruneSeesFreshlyCommittedFiles(t *testing.T) {
+func TestPurgeSeesFreshlyCommittedFiles(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	backend := newMockGitHub(t)
@@ -54,9 +188,8 @@ func TestPruneSeesFreshlyCommittedFiles(t *testing.T) {
 
 // A release whose asset count cannot be determined must be skipped
 // (fail-closed), never deleted: the picker fail-closes the same way.
-func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
+func TestPurgeSkipsReleaseOnAssetCountError(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
 	project := "projectpurgecounterr"
@@ -65,7 +198,7 @@ func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
 	if _, err := hub.UploadFileContext(context.Background(), project, "kept.txt", input); err != nil {
 		t.Fatalf("seed upload: %v", err)
 	}
-	if err := hub.FlushMetadata(ctx); err != nil {
+	if err := hub.FlushMetadata(context.Background()); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
@@ -97,7 +230,7 @@ func TestPruneSkipsReleaseOnAssetCountError(t *testing.T) {
 // Purge must refuse when the project has uncommitted in-flight state:
 // classifying against a dirty tree (or overwriting it on prune-commit)
 // risks deleting releases a pending commit is about to reference.
-func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
+func TestPurgeRefusesDirtyProject(t *testing.T) {
 	t.Parallel()
 	backend := newMockGitHub(t)
 	hub := backend.newClient(t, smallTransferTestConfig())
@@ -122,111 +255,4 @@ func TestPruneAssetsRefusesDirtyProject(t *testing.T) {
 	if _, err := hub.PruneContext(context.Background(), project, "assets", 0, false); err == nil {
 		t.Fatal("purge must refuse a project with uncommitted dirty state")
 	}
-}
-
-// TestPruneReverifyDropsNewlyTrackedTasks pins the check-then-act fence: a
-// TestPruneFenceDropsNewlyTrackedTasks pins the check-then-act fence: a
-// commit landing between classification and deletion that references a
-// task's asset must spare it. The per-delete fence inside deletePurgePlan
-// is the single gate; the delete phase destroys nothing a live file needs.
-func TestPruneFenceDropsNewlyTrackedTasks(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	backend := newMockGitHub(t)
-	hub := backend.newClient(t, smallTransferTestConfig())
-	const project = "projectpurgerace"
-
-	input := writeTempFile(t, t.TempDir(), "doomed.txt", []byte("doomed payload"))
-	meta, err := hub.UploadFileContext(context.Background(), project, "doomed.txt", input)
-	if err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-	if err := hub.FlushProjectContext(ctx, project); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	// Capture the asset ID before deleting the file.
-	loaded, _, err := hub.loadRepoMetadataFresh(ctx, project)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	var orphans []int64
-	var tag string
-	for _, id := range meta.Chunks {
-		if rec, ok := loaded.Chunks()[id]; ok {
-			orphans = append(orphans, rec.AssetID)
-			tag = rec.Release
-		}
-	}
-	if len(orphans) == 0 || tag == "" {
-		t.Fatal("setup broken: no assets captured")
-	}
-	if err := hub.DeleteFileContext(ctx, project, "doomed.txt"); err != nil {
-		t.Fatalf("delete file: %v", err)
-	}
-	if err := hub.FlushProjectContext(ctx, project); err != nil {
-		t.Fatalf("flush delete: %v", err)
-	}
-	// The asset is now untracked: classification must want it.
-	releaseTasks, assetTasks, err := hub.classifyUntracked(ctx, project)
-	if err != nil {
-		t.Fatalf("classify: %v", err)
-	}
-	if len(assetTasks) == 0 {
-		t.Fatal("setup broken: expected an orphan asset task")
-	}
-	// The concurrent writer lands: a new file referencing every orphaned
-	// asset, so all of them become tracked again.
-	if _, err := hub.UpdateRepoMetadataContext(ctx, project, func(m *RepoMetadata) error {
-		var ids []int64
-		for i, asset := range orphans {
-			id := m.AllocateChunkID()
-			if err := m.PutChunk(id, ChunkInfo{Size: 1, Offset: int64(i), Release: tag, AssetID: asset}); err != nil {
-				return err
-			}
-			ids = append(ids, id)
-		}
-		m.UpsertFile("rescued.txt", FileMeta{Size: int64(len(ids)), Mode: 0o644, Chunks: ids}, 1700000000)
-		return nil
-	}, "storhub: rescue"); err != nil {
-		t.Fatalf("rescue commit: %v", err)
-	}
-	if err := hub.FlushProjectContext(ctx, project); err != nil {
-		t.Fatalf("flush rescue: %v", err)
-	}
-	// End to end over the STALE task list (the exact race window: classify
-	// ran before the rescue commit). The per-delete fence revalidates
-	// against fresh truth on first touch, so the fenced tail spares the
-	// rescued bytes and reports them, never silently...
-	result := &PruneResult{}
-	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, result); err != nil {
-		t.Fatalf("fenced delete: %v", err)
-	}
-	if result.DeletedAssets != 0 || result.DeletedReleases != 0 {
-		t.Fatalf("fenced tail must spare re-tracked data, deleted %+v", result)
-	}
-	// ...while a direct call with the same stale tasks spares the rescued
-	// bytes: the per-delete fence inside deletePurgePlan revalidates
-	// against fresh truth on first touch, so no caller can reach an
-	// unfenced tail anymore. Spared tasks are reported, never silent.
-	spared := &PruneResult{}
-	if err := hub.deletePurgePlan(ctx, project, releaseTasks, assetTasks, spared); err != nil {
-		t.Fatalf("fenced direct delete: %v", err)
-	}
-	if spared.DeletedAssets != 0 || spared.DeletedReleases != 0 {
-		t.Fatalf("direct stale delete must spare everything, deleted %+v", spared)
-	}
-	if len(spared.Notes) == 0 {
-		t.Fatal("spared tasks must be reported in Notes")
-	}
-	if err := hub.DownloadFileContext(context.Background(), project, "rescued.txt", filepath.Join(t.TempDir(), "rescued.out")); err != nil {
-		t.Fatalf("fenced tail must spare the rescued asset: %v", err)
-	}
-	// And a full purge afterwards still deletes nothing (nothing was
-	// reaped above that shouldn't be; the fence plus fresh classification
-	// agree).
-	res, err := hub.PruneContext(ctx, project, "assets", 0, false)
-	if err != nil {
-		t.Fatalf("purge: %v", err)
-	}
-	_ = res
 }

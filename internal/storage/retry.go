@@ -52,8 +52,7 @@ func (h *StorHub) retryDelay(attempt int, apiErr *ghapi.APIError) time.Duration 
 	if delay <= 0 {
 		return 0
 	}
-	jitter := time.Duration(rand.Int64N(int64(delay/4 + 1)))
-	return delay + jitter
+	return addJitter(delay)
 }
 
 // boundedWait caps a NON-rate-limit server-provided wait hint
@@ -76,6 +75,10 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
+// addJitter is the single client-wait jitter: +0-25%, additive only, so a
+// wait never dips below what the accounting requires. Server-dictated
+// waits (rate-limit reset, rate-limited Retry-After) stay exact and never
+// pass through here; only client-computed waits are jittered.
 func addJitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -88,12 +91,12 @@ func addJitter(d time.Duration) time.Duration {
 }
 
 // withRetry is the single home of the backoff/sleep retry shape. It
-// replaces the three duplicated loops (purgeRetry in cleanup.go,
-// downloadChunkWithRetry and withAssetRangeReader in transfer.go /
-// workflows.go): same sleep-via-config, same retryDelay, different caps
-// supplied by the caller. isRetryable decides per-error; maxAttempts is
-// the total attempt count (including the first try). APIErrors sleep via
-// retryDelay; non-API retryable errors use exponential backoff.
+// replaces the three duplicated loops (the old purge retry, the chunk
+// download retry, and the asset range-reader retry): same sleep-via-config,
+// same retryDelay, different caps supplied by the caller. isRetryable decides
+// per-error; maxAttempts is the total attempt count (including the first
+// try). APIErrors sleep via retryDelay; non-API retryable errors use
+// exponential backoff.
 func (h *StorHub) withRetry(ctx context.Context, op string, maxAttempts int, isRetryable func(error) bool, fn func() error) error {
 	if maxAttempts <= 0 {
 		maxAttempts = 1
