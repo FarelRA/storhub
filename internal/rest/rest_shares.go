@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -573,6 +574,26 @@ func canonicalSharePath(raw string) (string, error) {
 	return clean, nil
 }
 
+// shareClock holds the share-lane clock (nil means the wall clock). Tests
+// shift it to pin expiry without sleeping; production never sets it. An
+// atomic cell keeps parallel suites race-free while one test moves time.
+var shareClock atomic.Value // func() time.Time
+
+func shareNow() time.Time {
+	if f, ok := shareClock.Load().(func() time.Time); ok && f != nil {
+		return f()
+	}
+	return time.Now()
+}
+
+// setShareClock swaps the share-lane clock and returns a restore func for
+// deferred cleanup.
+func setShareClock(f func() time.Time) func() {
+	prev, _ := shareClock.Load().(func() time.Time)
+	shareClock.Store(f)
+	return func() { shareClock.Store(prev) }
+}
+
 func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 	if h.shareSignKey == nil {
 		return nil, errForbidden("share signing key not configured (pass --sharekey or serve with an auth file)")
@@ -583,8 +604,8 @@ func (h *restHandler) parseShareToken(token string) (*shareClaims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return h.shareSignKey.Public(), nil
-	}, jwt.WithIssuer(restTokenIssuer), jwt.WithAudience(restTokenAudience), jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(time.Now))
-	if err != nil || !parsed.Valid || uc.Kind != "share" || uc.Project == "" {
+	}, jwt.WithIssuer(restTokenIssuer), jwt.WithAudience(restTokenAudience), jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithTimeFunc(shareNow))
+	if err != nil || !parsed.Valid || uc.Kind != tokenKindShare || uc.Project == "" {
 		return nil, errForbidden("invalid or expired share token")
 	}
 	return &shareClaims{
@@ -615,7 +636,7 @@ func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expi
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
+	now := shareNow().UTC()
 	expiresAt := now.Add(expiresIn)
 	claims := unifiedClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -625,7 +646,7 @@ func (h *restHandler) newShareRecord(project, sharePath string, isDir bool, expi
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 		},
-		Kind:    "share",
+		Kind:    tokenKindShare,
 		ID:      id,
 		Project: project,
 		Path:    sharePath,
@@ -668,7 +689,7 @@ func (h *restHandler) getLiveShare(shareID string) (*shareRecord, bool) {
 	if !ok {
 		return nil, false
 	}
-	if !record.ExpiresAt.After(time.Now()) {
+	if !record.ExpiresAt.After(shareNow()) {
 		return nil, false
 	}
 	cp := *record
@@ -681,7 +702,7 @@ func (h *restHandler) getLiveShare(shareID string) (*shareRecord, bool) {
 // hint). Revocation entries self-expire the same way: once the shadowed
 // JWT would fail its own exp check, remembering the ID adds nothing.
 func (h *restHandler) sweep() {
-	now := time.Now()
+	now := shareNow()
 	h.shares.mu.Lock()
 	defer h.shares.mu.Unlock()
 	for shareID, record := range h.shares.items {
@@ -711,7 +732,7 @@ func (h *restHandler) removeShare(shareID string) {
 // Pure read: expired entries are skipped, never deleted here; sweep()
 // reclaims them on writes.
 func (h *restHandler) projectShareResponses(project string, callerUID uint32, callerAdmin bool) []shareResponse {
-	now := time.Now()
+	now := shareNow()
 	h.shares.mu.RLock()
 	defer h.shares.mu.RUnlock()
 	shares := make([]shareResponse, 0)
@@ -722,7 +743,7 @@ func (h *restHandler) projectShareResponses(project string, callerUID uint32, ca
 		if record.Project != project {
 			continue
 		}
-		if !callerAdmin && callerUID != record.CreatorUID {
+		if !canManageShare(record, callerUID, callerAdmin) {
 			continue
 		}
 		cp := *record
@@ -735,6 +756,8 @@ func (h *restHandler) projectShareResponses(project string, callerUID uint32, ca
 // shareResponse builds the public shape. Redemption URLs are minted ONLY
 // from the signed token (creation responses carry it; listings cannot, so
 // their URL fields stay empty - the token is the credential).
+// Vocabulary: share names the capability in API paths and errors; link
+// names only the rendered console URL (the URL field).
 func (h *restHandler) shareResponse(record *shareRecord) shareResponse {
 	resp := shareResponse{ID: record.ID, Project: record.Project, Path: record.Path, ExpiresAt: record.ExpiresAt.UTC().Format(time.RFC3339), IsDir: record.IsDir}
 	if record.Token == "" {

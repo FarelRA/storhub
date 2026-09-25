@@ -9,7 +9,6 @@ import (
 	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
-	"github.com/FarelRA/storhub/internal/logging"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -202,6 +201,9 @@ func (h *restHandler) handleRmdir(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *restHandler) handleUnlink(w http.ResponseWriter, r *http.Request) {
+	// Route alias of DeleteFile: the wire token stays unlink while storage
+	// exposes a single delete verb, so this handler forwards to
+	// DeleteFileContext directly.
 	project := chi.URLParam(r, "project")
 	filePath, err := h.decodePathRequest(r, "path")
 	if err != nil {
@@ -280,6 +282,69 @@ func (h *restHandler) handleRename(w http.ResponseWriter, r *http.Request) {
 	h.respondWithNode(w, r, project, req.NewPath, http.StatusOK)
 }
 
+// copyRequest carries a server-side copy. src_path/dst_path are canonical;
+// src/dst are short aliases for src_path/dst_path (name aliases only: they
+// never select the range variant). src_off/dst_off/length select the range
+// variant: when any of them is present the request routes to CloneRange
+// (server-side range clone, zero bytes uploaded) instead of the whole-file
+// CopyContext. Absent offsets default to 0; an absent length means the
+// whole source file from src_off.
+type copyRequest struct {
+	SrcPath string `json:"src_path"`
+	DstPath string `json:"dst_path"`
+	Src     string `json:"src,omitempty"`
+	Dst     string `json:"dst,omitempty"`
+	SrcOff  *int64 `json:"src_off,omitempty"`
+	DstOff  *int64 `json:"dst_off,omitempty"`
+	Length  *int64 `json:"length,omitempty"`
+}
+
+// copySrcDst resolves the effective (src,dst) pair, preferring the
+// canonical fields and falling back to the short aliases.
+func copySrcDst(req copyRequest) (src, dst string, err error) {
+	src = strings.TrimSpace(req.SrcPath)
+	if src == "" {
+		src = strings.TrimSpace(req.Src)
+	}
+	dst = strings.TrimSpace(req.DstPath)
+	if dst == "" {
+		dst = strings.TrimSpace(req.Dst)
+	}
+	if src == "" || dst == "" {
+		return "", "", errBadRequest("src_path and dst_path are required")
+	}
+	return src, dst, nil
+}
+
+// copyRangeParams resolves the range-clone offsets: absent offsets default
+// to 0, and ok reports whether the request asks for the range variant at
+// all (any of src_off/dst_off/length present). Only those three fields
+// select the range path: the src/dst short aliases are name aliases, not
+// range selectors, so alias-only requests stay on whole-file CopyContext.
+// Negative values are 400 here so storage never sees them.
+func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok bool, err error) {
+	ok = req.SrcOff != nil || req.DstOff != nil || req.Length != nil
+	if req.SrcOff != nil {
+		if *req.SrcOff < 0 {
+			return 0, 0, nil, true, errBadRequest("src_off must be non-negative")
+		}
+		srcOff = *req.SrcOff
+	}
+	if req.DstOff != nil {
+		if *req.DstOff < 0 {
+			return 0, 0, nil, true, errBadRequest("dst_off must be non-negative")
+		}
+		dstOff = *req.DstOff
+	}
+	if req.Length != nil {
+		if *req.Length < 0 {
+			return 0, 0, nil, true, errBadRequest("length must be non-negative")
+		}
+		length = req.Length
+	}
+	return srcOff, dstOff, length, ok, nil
+}
+
 func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
 	var req copyRequest
@@ -287,24 +352,27 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if strings.TrimSpace(req.OldPath) != "" || strings.TrimSpace(req.NewPath) != "" {
-		logging.Warn(h.logger, "deprecated request fields", "project", project, "reason", "copy fields old_path/new_path used; send src_path/dst_path")
-	}
 	src, dst, cerr := copySrcDst(req)
 	if cerr != nil {
 		h.writeMappedError(w, cerr)
 		return
 	}
-	var err error
-	spanStarted := h.traceStart(r, "copy", project, src, "dst", dst)
-	defer h.traceFinish(r, "copy", project, src, spanStarted, &err, "dst", dst)
-	srcOff, dstOff, length, isRange, err := copyRangeParams(req)
-	if err != nil {
-		h.writeMappedError(w, err)
+	srcOff, dstOff, length, isRange, rerr := copyRangeParams(req)
+	if rerr != nil {
+		h.writeMappedError(w, rerr)
 		return
 	}
+	// One span for the route: the range variant rides variant=range on the
+	// copy span instead of opening a second span under another name.
+	variant := "full"
 	if isRange {
-		h.handleCloneRange(w, r, project, src, srcOff, dst, dstOff, length)
+		variant = "range"
+	}
+	var err error
+	spanStarted := h.traceStart(r, "copy", project, src, "dst", dst, "variant", variant)
+	defer h.traceFinish(r, "copy", project, src, spanStarted, &err, "dst", dst, "variant", variant)
+	if isRange {
+		err = h.handleCloneRange(w, r, project, src, srcOff, dst, dstOff, length)
 		return
 	}
 	// Copy reads the source and creates the destination; the guard sits on
@@ -336,9 +404,9 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCloneRange serves the range variant of POST /ops/copy: one
-// server-side CloneRange, zero bytes uploaded. The span name is
-// intentionally clone-range, not copy: it distinguishes range-clone spans
-// from whole-file copy spans on the same route. Outcome matrix:
+// server-side CloneRange, zero bytes uploaded. It runs under the caller's
+// copy span (variant=range), never its own: one route, one span.
+// Outcome matrix:
 // full clone: absent length resolves to the source size from src_off
 // (src_off 0 covers the whole file) and creates dst when missing;
 // range: an explicit [src_off, src_off+length) overwrites the dst span
@@ -347,35 +415,30 @@ func (h *restHandler) handleCopy(w http.ResponseWriter, r *http.Request) {
 // memmove snapshot semantics clone the pre-op bytes (cloning a span onto
 // itself is an exact no-op duplicate, still applied atomically).
 // The guard funnels through preconditionForUpdate on the source like the
-// sibling mutating endpoints: a revision token becomes backend
+// other mutating endpoints: a revision token becomes backend
 // compare-and-swap options enforced inside the core transaction (412 when
 // the project moved), any other token keeps start-of-request freshness.
-func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, project, src string, srcOff int64, dst string, dstOff int64, length *int64) {
-	var err error
-	spanStarted := h.traceStart(r, "clone-range", project, src, "dst", dst)
-	defer h.traceFinish(r, "clone-range", project, src, spanStarted, &err, "dst", dst)
+func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, project, src string, srcOff int64, dst string, dstOff int64, length *int64) error {
 	revOpts, ok := h.preconditionForUpdate(w, r, project, src)
 	if !ok {
-		err = errors.New("update precondition failed")
-		return
+		return errors.New("update precondition failed")
 	}
 	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
-		return
+		return err
 	}
 	resolved := length
 	if resolved == nil {
 		entry, serr := client.StatPathContext(r.Context(), project, src)
 		if serr != nil {
-			err = serr
 			h.writeMappedError(w, serr)
-			return
+			return serr
 		}
 		if entry.IsDir {
 			err = &restStatusError{status: http.StatusConflict, message: "clone source is a directory"}
 			h.writeMappedError(w, err)
-			return
+			return err
 		}
 		full := entry.Size - srcOff
 		if full < 0 {
@@ -385,15 +448,13 @@ func (h *restHandler) handleCloneRange(w http.ResponseWriter, r *http.Request, p
 	}
 	if _, err = client.CloneRange(r.Context(), project, src, srcOff, dst, dstOff, *resolved, revOpts...); err != nil {
 		h.writeMappedError(w, err)
-		return
+		return err
 	}
 	if !h.maybeDrain(w, r, project) {
-		if err == nil {
-			err = errors.New("drain failed")
-		}
-		return
+		return errors.New("drain failed")
 	}
 	h.respondWithNode(w, r, project, dst, http.StatusCreated)
+	return nil
 }
 
 func (h *restHandler) handleLink(w http.ResponseWriter, r *http.Request) {
@@ -562,6 +623,9 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
+	// Route alias of Chtimes: the wire token stays utimes while storage
+	// exposes Chtimes, so this handler forwards UnixNano stamps to
+	// ChtimesContext directly.
 	project := chi.URLParam(r, "project")
 	var req utimesRequest
 	if err := h.decodeJSON(r, &req, false); err != nil {

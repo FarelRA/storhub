@@ -274,7 +274,7 @@ func (a *restConformAdapter) Open(path string, mode test.OpenMode, disp test.Cre
 		// Creation intent travels in disp, like O_CREAT: CreateNever
 		// reports the missing path, while CreateIfMissing creates it
 		// before opening. OpenReadOnly never creates.
-		if disp == test.CreateNever || mode == test.OpenReadOnly {
+		if disp == test.CreateNever || mode == test.OpenReadOnly || mode == test.OpenPath {
 			return nil, fmt.Errorf("open %s: %w", path, test.ErrNotFound)
 		}
 		if err := a.CreateFile(path, 0o644, false); err != nil {

@@ -171,41 +171,34 @@ func (h *restHandler) handleContentReplace(w http.ResponseWriter, r *http.Reques
 }
 
 // checkReplacePreconditions stats the target and enforces If-Match /
-// If-None-Match semantics. ok=false means the handler already answered.
+// If-None-Match semantics through the shared create funnel, then applies
+// the replace-only type rule (directories answer 409). ok=false means the
+// handler already answered. A missing target with If-Match answers 412
+// here (there is no state to match), matching the create endpoints.
 func (h *restHandler) checkReplacePreconditions(w http.ResponseWriter, r *http.Request, project, filePath string) (entry *shfs.EntryInfo, exists bool, revOpts []shfs.MutateOption, ok bool) {
-	entry, exists, err := h.lookupOptional(r, project, filePath)
+	exists, revOpts, ok = h.preconditionForCreate(w, r, project, filePath)
+	if !ok {
+		return nil, false, nil, false
+	}
+	if !exists {
+		return nil, false, revOpts, true
+	}
+	client, err := h.clientFor(r)
 	if err != nil {
 		h.writeMappedError(w, err)
 		return nil, false, nil, false
 	}
-	revOpts, revErr := h.mutationPrecondition(r, project, filePath)
-	if revErr != nil {
-		h.writeMappedError(w, revErr)
+	entry, err = client.StatPathContext(r.Context(), project, filePath)
+	if err != nil {
+		h.writeMappedError(w, err)
 		return nil, false, nil, false
 	}
-	if exists {
-		// Type conflicts hold under both If-Match flavors.
-		if entry.IsDir {
-			h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)})
-			return nil, false, nil, false
-		}
-		if revOpts == nil {
-			if err := h.requireMatch(r.Header.Get("If-Match"), restEntryETag(entry)); err != nil {
-				if !isPreconditionHeaderEmpty(err) {
-					h.writeMappedError(w, err)
-					return nil, false, nil, false
-				}
-			}
-			if matchEntityTag(r.Header.Get("If-None-Match"), "*") {
-				h.writeMappedError(w, errPreconditionFailed("resource already exists"))
-				return nil, false, nil, false
-			}
-		}
-	} else if r.Header.Get("If-Match") != "" {
-		h.writeMappedError(w, errPreconditionFailed("resource does not exist"))
+	// Type conflicts hold under both If-Match flavors.
+	if entry.IsDir {
+		h.writeMappedError(w, &restStatusError{status: http.StatusConflict, message: fmt.Sprintf("path is a directory: %s", filePath)})
 		return nil, false, nil, false
 	}
-	return entry, exists, revOpts, true
+	return entry, true, revOpts, true
 }
 
 // createReplacePlaceholder ensures a regular file exists for the body

@@ -30,7 +30,13 @@ import (
 //	POST   /handles/{h}/sync         commit without closing -> 200 stat document
 //	POST   /handles/{h}/link         {path} -> 200 stat document
 //	POST   /handles/{h}/close        commit and destroy -> 200 {handle, status}
+//	POST   /handles/{h}/discard      forget without committing -> 200 {handle, status}
 //	DELETE /handles/{h}              alias of close -> 204
+//
+// Close keeps two spellings on purpose: POST answers a JSON ack for
+// clients that track handle state, DELETE answers 204 like every other
+// successful delete. Both commit then destroy; discard is the separate
+// verb for abandoning staged work.
 //
 // Transfer contract: writes carry base64 data inside a JSON body capped at
 // 32 KiB (see decodeJSON), so one write stages roughly 24 KiB decoded;
@@ -70,6 +76,7 @@ func (h *restHandler) registerSessionRoutes(r chi.Router) {
 	r.Post("/{handle}/link", h.handleSessionLink)
 	r.Post("/{handle}/relink", h.handleSessionRelink)
 	r.Post("/{handle}/close", h.handleSessionClosePost)
+	r.Post("/{handle}/discard", h.handleSessionDiscard)
 	r.Delete("/{handle}", h.handleSessionCloseDelete)
 }
 
@@ -543,6 +550,35 @@ func (h *restHandler) handleSessionCloseDelete(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleSessionDiscard answers POST .../discard with a JSON ack: the
+// handle is forgotten without committing anything. Unlike close it never
+// drains: discarded bytes were never published, so there is nothing to
+// land remotely.
+func (h *restHandler) handleSessionDiscard(w http.ResponseWriter, r *http.Request) {
+	handle := chi.URLParam(r, "handle")
+	if strings.TrimSpace(handle) == "" {
+		h.writeMappedError(w, errBadRequest("handle is required"))
+		return
+	}
+	client, err := h.clientFor(r)
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+	spanStarted := h.traceStart(r, "session-discard", "", handle)
+	defer h.traceFinish(r, "session-discard", "", handle, spanStarted, &err)
+	discarder, ok := client.(sessionDiscarder)
+	if !ok {
+		h.writeError(w, http.StatusNotImplemented, "not_implemented", "discard unsupported by backend")
+		return
+	}
+	if err = discarder.DiscardSession(r.Context(), handle); err != nil {
+		h.writeSessionError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, sessionCloseResponse{Handle: handle, Status: "discarded"})
+}
+
 // closeSession stats the handle for its project, closes (committing), then
 // honors ?sync=1 by draining the project, reusing the maybeDrain pattern.
 // False means the handler already answered.
@@ -650,6 +686,20 @@ func (c *authorizedClient) CloseSession(ctx context.Context, handleID string) er
 	return c.base.CloseSession(ctx, handleID)
 }
 
+// sessionDiscarder is the discard half of the session contract. It stays
+// an assertion (not a Client method) so the shared Client surface does not
+// grow for one verb: wrappers that speak discard satisfy it structurally.
+type sessionDiscarder interface {
+	DiscardSession(context.Context, string) error
+}
+
+func (c *authorizedClient) DiscardSession(ctx context.Context, handleID string) error {
+	if discarder, ok := c.base.(sessionDiscarder); ok {
+		return discarder.DiscardSession(ctx, handleID)
+	}
+	return &restStatusError{status: http.StatusNotImplemented, message: "discard unsupported by backend"}
+}
+
 // Session verbs on the share lane are denied like every other mutation:
 // share visitors are read-only, and the chokepoint test requires each Client
 // method to answer a zero-argument call with an access-denied error.
@@ -687,5 +737,9 @@ func (readOnlyShare) RelinkSession(_ context.Context, _, _ string) error {
 }
 
 func (readOnlyShare) CloseSession(_ context.Context, _ string) error {
+	return errReadOnly()
+}
+
+func (readOnlyShare) DiscardSession(_ context.Context, _ string) error {
 	return errReadOnly()
 }

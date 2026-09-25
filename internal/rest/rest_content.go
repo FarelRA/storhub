@@ -46,87 +46,6 @@ type pathRequest struct {
 	Path string `json:"path"`
 }
 
-// renameRequest and other mutation shapes live in rest_mutations.go with
-// their handlers; copyRequest stays here because copySrcDst documents the
-// legacy alias at the type.
-
-// copyRequest carries a server-side copy. src_path/dst_path are canonical;
-// old_path/new_path are a deprecated legacy alias kept for wire
-// compatibility: they warn-but-work this release and will be removed in a
-// future version. New clients must send src_path/dst_path.
-//
-// src/dst are short aliases for src_path/dst_path (name aliases only: they
-// never select the range variant). src_off/dst_off/length
-// select the range variant: when any of them is present the request routes
-// to CloneRange (server-side range clone, zero bytes uploaded) instead of
-// the whole-file CopyContext. Absent offsets default to 0; an absent
-// length means the whole source file from src_off.
-type copyRequest struct {
-	SrcPath string `json:"src_path"`
-	DstPath string `json:"dst_path"`
-	// Deprecated: use SrcPath/DstPath instead. Kept as a fallback alias.
-	OldPath string `json:"old_path"`
-	// Deprecated: use DstPath instead. Kept as a fallback alias.
-	NewPath string `json:"new_path"`
-	Src     string `json:"src,omitempty"`
-	Dst     string `json:"dst,omitempty"`
-	SrcOff  *int64 `json:"src_off,omitempty"`
-	DstOff  *int64 `json:"dst_off,omitempty"`
-	Length  *int64 `json:"length,omitempty"`
-}
-
-// copySrcDst resolves the effective (src,dst) pair, preferring the
-// canonical fields and falling back to the short and deprecated aliases.
-func copySrcDst(req copyRequest) (src, dst string, err error) {
-	src = strings.TrimSpace(req.SrcPath)
-	if src == "" {
-		src = strings.TrimSpace(req.Src)
-	}
-	if src == "" {
-		src = strings.TrimSpace(req.OldPath)
-	}
-	dst = strings.TrimSpace(req.DstPath)
-	if dst == "" {
-		dst = strings.TrimSpace(req.Dst)
-	}
-	if dst == "" {
-		dst = strings.TrimSpace(req.NewPath)
-	}
-	if src == "" || dst == "" {
-		return "", "", errBadRequest("src_path and dst_path are required")
-	}
-	return src, dst, nil
-}
-
-// copyRangeParams resolves the range-clone offsets: absent offsets default
-// to 0, and ok reports whether the request asks for the range variant at
-// all (any of src_off/dst_off/length present). Only those three fields
-// select the range path: the src/dst short aliases are name aliases, not
-// range selectors, so alias-only requests stay on whole-file CopyContext.
-// Negative values are 400 here so storage never sees them.
-func copyRangeParams(req copyRequest) (srcOff, dstOff int64, length *int64, ok bool, err error) {
-	ok = req.SrcOff != nil || req.DstOff != nil || req.Length != nil
-	if req.SrcOff != nil {
-		if *req.SrcOff < 0 {
-			return 0, 0, nil, true, errBadRequest("src_off must be non-negative")
-		}
-		srcOff = *req.SrcOff
-	}
-	if req.DstOff != nil {
-		if *req.DstOff < 0 {
-			return 0, 0, nil, true, errBadRequest("dst_off must be non-negative")
-		}
-		dstOff = *req.DstOff
-	}
-	if req.Length != nil {
-		if *req.Length < 0 {
-			return 0, 0, nil, true, errBadRequest("length must be non-negative")
-		}
-		length = req.Length
-	}
-	return srcOff, dstOff, length, ok, nil
-}
-
 // handleNodeGet serves GET/HEAD /nodes: stat one node with ETag/304 support.
 func (h *restHandler) handleNodeGet(w http.ResponseWriter, r *http.Request) {
 	project := chi.URLParam(r, "project")
@@ -693,6 +612,12 @@ func (h *restHandler) requireMatch(header, eTag string) error {
 // setRevisionHeader publishes the project's current metadata revision as a
 // response header so clients can obtain CAS tokens for later If-Match use.
 // Best effort: a revision fetch failure never fails the read.
+//
+// Revision representation rule: headers carry concurrency tokens, bodies
+// carry history pointers. If-Match takes attribute ETags or the current
+// metadata revision (compare-and-swap); X-StorHub-Revision and ETag publish
+// those tokens back in headers; commit_sha bodies name history commits for
+// rollback and revert, never concurrency.
 func (h *restHandler) setRevisionHeader(w http.ResponseWriter, r *http.Request, project string) {
 	client, err := h.clientFor(r)
 	if err != nil {
@@ -750,6 +675,11 @@ func inlineSafeContentType(contentType string) bool {
 }
 
 func parseByteRange(header string, size int64) (start, end int64, partial bool, err error) {
+	// Range spellings differ by endpoint by design: only GET /content
+	// speaks the HTTP Range header (closed bytes=a-b on the wire, half-open
+	// [start,end) in code). Session reads take offset/length query
+	// parameters and copy-range takes src_off/dst_off/length body fields;
+	// neither parses this header.
 	if size < 0 {
 		return 0, 0, false, fmt.Errorf("invalid object size")
 	}

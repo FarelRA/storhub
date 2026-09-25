@@ -20,6 +20,14 @@ const (
 	restTokenAudience   = "storhubrest"
 )
 
+// tokenKindAuth and tokenKindShare name the two capabilities minted on the
+// single signing key. The kind selects the lane: full identity for auth,
+// one project path for shares.
+const (
+	tokenKindAuth  = "auth"
+	tokenKindShare = "share"
+)
+
 // dummyPasswordHash lazily builds a valid bcrypt hash of a value nobody
 // logs in with; unknown users are verified against it so login timing does
 // not enumerate usernames.
@@ -55,7 +63,6 @@ type User struct {
 type restAuthenticator struct {
 	realm    string
 	users    map[string]User
-	key      []byte
 	edKey    ed25519.PrivateKey
 	tokenTTL time.Duration
 	now      func() time.Time
@@ -77,6 +84,9 @@ type restPrincipal struct {
 // unifiedClaims is the normalized shape: one EdDSA key, kind distinguishes
 // capabilities. Auth tokens carry identity, share tokens carry project/path.
 // Both use the same issuer/audience and are verified by the same key.
+// Wire keys stay abbreviated (usr/gid/prj/pth/dir map the Go fields
+// Username/PrimaryGID/Project/Path/IsDir); login JSON keeps the long names.
+// The abbreviation is frozen: old tokens must keep verifying.
 type unifiedClaims struct {
 	jwt.RegisteredClaims
 	Kind       string   `json:"kind"`
@@ -97,8 +107,10 @@ type restLoginRequest struct {
 }
 
 type restLoginResponse struct {
-	Token     string        `json:"token"`
-	TokenType string        `json:"token_type"`
+	Token     string `json:"token"`
+	TokenType string `json:"token_type"`
+	// ExpiresIn carries seconds. New lifetime fields use expires_in_seconds;
+	// the login spelling is frozen for existing clients.
 	ExpiresIn int64         `json:"expires_in"`
 	Principal restPrincipal `json:"principal"`
 }
@@ -155,7 +167,7 @@ func newAuthenticator(opts AuthOptions) (*restAuthenticator, error) {
 	}
 	seed := sha256.Sum256(opts.TokenSigningKey)
 	edKey := ed25519.NewKeyFromSeed(seed[:32])
-	return &restAuthenticator{realm: opts.Realm, users: users, key: append([]byte(nil), opts.TokenSigningKey...), edKey: edKey, tokenTTL: opts.TokenTTL, now: opts.Now, verify: verifyPassword}, nil
+	return &restAuthenticator{realm: opts.Realm, users: users, edKey: edKey, tokenTTL: opts.TokenTTL, now: opts.Now, verify: verifyPassword}, nil
 }
 
 func (a *restAuthenticator) login(username, password string) (restPrincipal, string, time.Duration, error) {
@@ -169,7 +181,7 @@ func (a *restAuthenticator) login(username, password string) (restPrincipal, str
 	if user.Disabled || !a.verify(password, user.PasswordHash) {
 		return restPrincipal{}, "", 0, errors.New("invalid credentials")
 	}
-	principal := restPrincipal{Kind: "auth", Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin}
+	principal := restPrincipal{Kind: tokenKindAuth, Username: user.Username, UID: user.UID, PrimaryGID: user.PrimaryGID, Groups: append([]uint32(nil), user.Groups...), Admin: user.Admin}
 	token, err := a.signToken(principal)
 	return principal, token, a.tokenTTL, err
 }
@@ -184,7 +196,7 @@ func (a *restAuthenticator) signToken(principal restPrincipal) (string, error) {
 			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(a.tokenTTL)),
 		},
-		Kind:       "auth",
+		Kind:       tokenKindAuth,
 		Username:   principal.Username,
 		UID:        principal.UID,
 		PrimaryGID: principal.PrimaryGID,
@@ -208,11 +220,11 @@ func (a *restAuthenticator) parseToken(token string) (*restPrincipal, error) {
 		jwt.WithValidMethods([]string{"EdDSA"}),
 		jwt.WithTimeFunc(a.now),
 	)
-	if err != nil || !parsed.Valid || uc.Kind != "auth" {
+	if err != nil || !parsed.Valid || uc.Kind != tokenKindAuth {
 		return nil, errors.New("invalid bearer token")
 	}
 	return &restPrincipal{
-		Kind:       "auth",
+		Kind:       tokenKindAuth,
 		Username:   uc.Username,
 		UID:        uc.UID,
 		PrimaryGID: uc.PrimaryGID,

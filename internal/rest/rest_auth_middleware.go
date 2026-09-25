@@ -118,12 +118,15 @@ func (h *restHandler) authPrincipal(r *http.Request, auth *restAuthenticator, to
 // sharePrincipal verifies a share JWT and returns the nobody-visitor
 // context scoped to the shared path. fatal=true means the handler already
 // answered (share-management forbidden); ok=false means "not a share token".
+// The visitor context comes from the shared redemption builder, so the
+// credential lane and the public lane cannot drift on revocation.
 func (h *restHandler) sharePrincipal(r *http.Request, auth *restAuthenticator, basePath, token string, w http.ResponseWriter) (context.Context, bool, bool) {
 	claims, err := h.parseShareToken(token)
 	if err != nil {
 		return nil, false, false
 	}
-	if h.isRevoked(claims.ID) {
+	ctx, live := h.shareRedemptionContext(r, claims)
+	if !live {
 		h.writeUnauthorized(w, r, auth, "invalid bearer token")
 		return nil, false, true
 	}
@@ -132,9 +135,7 @@ func (h *restHandler) sharePrincipal(r *http.Request, auth *restAuthenticator, b
 		h.writeMappedError(w, errForbidden("share links cannot manage shares"))
 		return nil, false, true
 	}
-	// Share links act as an unauthenticated read-only visitor.
-	identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
-	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path)), true, false
+	return ctx, true, false
 }
 
 func (h *restHandler) writeUnauthorized(w http.ResponseWriter, r *http.Request, auth *restAuthenticator, message string) {

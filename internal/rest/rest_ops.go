@@ -21,7 +21,7 @@ type revertPathRequest struct {
 }
 
 type pruneRequest struct {
-	// Scope is one of objects|assets|history|all (empty means all).
+	// Scope is one of objects|assets|history|chunks|all (empty means all).
 	Scope  string `json:"scope,omitempty"`
 	Keep   int    `json:"keep,omitempty"`
 	DryRun bool   `json:"dry_run,omitempty"`
@@ -90,7 +90,8 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 	started := time.Now().UTC()
 	var req pruneRequest
 	// A bodyless POST means the old bare purge: assets scope, keep=0,
-	// dry_run=false. A body selects any scope (objects|assets|history|all).
+	// dry_run=false. A body selects any scope
+	// (objects|assets|history|chunks|all).
 	if err := h.decodeJSON(r, &req, true); err != nil {
 		h.writeMappedError(w, err)
 		return
@@ -158,6 +159,8 @@ func (h *restHandler) handlePrune(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *restHandler) handleEnable(w http.ResponseWriter, r *http.Request) {
+	// Route alias of ReEnableProject: the wire token stays enable while the
+	// client method carries the Re prefix.
 	project := chi.URLParam(r, "project")
 	started := time.Now().UTC()
 	var err error
@@ -248,6 +251,8 @@ func (h *restHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *restHandler) handleRevertPath(w http.ResponseWriter, r *http.Request) {
+	// Route token revert drives RevertPath: the handler is named for the
+	// storage verb, not the token.
 	project := chi.URLParam(r, "project")
 	var req revertPathRequest
 	if err := h.decodeJSON(r, &req, false); err != nil {

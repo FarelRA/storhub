@@ -54,15 +54,34 @@ func (h *restHandler) handleShareInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// shareRedemptionContext mirrors what authMiddleware does for a share token
-// used as a Bearer credential: the redemption routes run as the
-// unauthenticated "nobody" visitor, scoped to the shared path. Without this
-// the fs layer falls back to the SERVER PROCESS identity (and UID 0
-// normalizes to admin), so a share would grant more than "what path
-// permissions grant" - the exact drift this policy exists to prevent.
-func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaims) context.Context {
+// shareTokenFromRequest returns the presented share credential in one
+// precedence: ?token= query, then the Authorization header, then the path
+// segment. Query stays first because mailed console links carry it; the
+// path segment stays last because it names the redemption spelling the
+// info route documents. Auth tokens never pass here: the middleware lane
+// rejects auth JWTs in query strings so they cannot leak into logs.
+func shareTokenFromRequest(r *http.Request, pathToken string) string {
+	if token := strings.TrimSpace(queryFirstParam(r.URL.RawQuery, "token")); token != "" {
+		return token
+	}
+	if token := requestBearerToken(r); token != "" {
+		return token
+	}
+	return strings.TrimSpace(pathToken)
+}
+
+// shareRedemptionContext builds the nobody-visitor context scoped to the
+// shared path: the single builder behind middleware redemption,
+// single-file download, and sub-capability derivation. Revoked shares
+// fail here, so no lane can forget the check: ok=false means the link is
+// dead, and each caller answers in its own shape (401 on the credential
+// lane, 404 on the public lane).
+func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaims) (context.Context, bool) {
+	if h.isRevoked(claims.ID) {
+		return nil, false
+	}
 	identity := shfs.WithIdentity(r.Context(), shfs.Identity{UID: nobodyUID, GID: nobodyGID})
-	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path))
+	return context.WithValue(identity, clientCtxKey, newRestrictedClient(h.client, claims.Project, claims.Path)), true
 }
 
 // ---- Signed single-file download links -------------------------------------
@@ -75,20 +94,16 @@ func (h *restHandler) shareRedemptionContext(r *http.Request, claims *shareClaim
 
 func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request) {
 	// Same single pathway as info: the token is the credential, in three
-	// spellings: ?token= query (existing links), Authorization: Bearer
-	// header, or the {token} path segment itself (the redemption spelling
-	// the info route uses). Query wins when present; the path segment
-	// stops being decorative. Shares are always download-capable after
-	// normalization; no dl flag check.
-	token := queryFirstParam(r.URL.RawQuery, "token")
-	if token == "" {
-		token = requestBearerToken(r)
-	}
-	if token == "" {
-		token = chi.URLParam(r, "token")
-	}
+	// spellings unified by shareTokenFromRequest. Shares are always
+	// download-capable after normalization; no dl flag check.
+	token := shareTokenFromRequest(r, chi.URLParam(r, "token"))
 	claims, cerr := h.parseShareToken(token)
-	if cerr != nil || h.isRevoked(claims.ID) {
+	if cerr != nil {
+		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
+		return
+	}
+	redemption, ok := h.shareRedemptionContext(r, claims)
+	if !ok {
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
@@ -100,7 +115,7 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 	var err error
 	spanStarted := h.traceStart(r, "share-download", claims.Project, targetPath)
 	defer h.traceFinish(r, "share-download", claims.Project, targetPath, spanStarted, &err)
-	r = r.WithContext(h.shareRedemptionContext(r, claims))
+	r = r.WithContext(redemption)
 	h.serveDownloadPath(w, r, claims.Project, targetPath)
 }
 
@@ -113,7 +128,8 @@ func (h *restHandler) serveShareDownload(w http.ResponseWriter, r *http.Request)
 // documents), or the path segment carries the signed JWT itself (the
 // redemption spelling the info/download routes use). The two never mix
 // silently: an ID in the path must match the presented token's ID, and a
-// JWT in the path must verify on its own.
+// JWT in the path must verify on its own. Credential order is the shared
+// shareTokenFromRequest precedence.
 func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) {
 	// The span opens first: verification, path checks, and the stat below
 	// are the bulk of the work, and early 404/403/400 answers carry spans
@@ -123,42 +139,35 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 	var err error
 	spanStarted := h.traceStart(r, "share-derive", "", rawToken)
 	defer h.traceFinish(r, "share-derive", "", rawToken, spanStarted, &err)
-	parentToken := queryFirstParam(r.URL.RawQuery, "token")
-	if parentToken == "" {
-		parentToken = requestBearerToken(r)
-	}
-	claims, perr := h.parseShareToken(parentToken)
+	token := shareTokenFromRequest(r, rawToken)
+	claims, perr := h.parseShareToken(token)
 	err = perr
-	if err != nil || h.isRevoked(claims.ID) {
-		// Fall back to the redemption spelling: the path segment itself
-		// is the signed parent JWT (no query or header credential).
-		if parentToken == "" {
-			if pathClaims, qerr := h.parseShareToken(rawToken); qerr == nil && !h.isRevoked(pathClaims.ID) {
-				claims, err = pathClaims, nil
-			}
-		}
+	var redemption context.Context
+	var live bool
+	if err == nil {
+		redemption, live = h.shareRedemptionContext(r, claims)
 	}
-	if err != nil || h.isRevoked(claims.ID) {
+	if err != nil || !live {
 		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
 		return
 	}
 	// Only the share's own token can derive children: the {token} path
 	// segment must match the presented token's ID when it names an ID.
-	// (When the path segment was the JWT itself it is already the
-	// verified parent, so the ID comparison below is skipped.)
+	// (When the path segment supplied the credential itself it already is
+	// the verified parent, so the comparison is skipped.)
 	// The mismatch answers 403, not the 404 the share-management plane
 	// uses against ID enumeration: presenting a valid parent token
 	// already proves read access to that share, so confirming its ID
 	// leaks nothing new.
-	if parentToken != "" && rawToken != "" && rawToken != claims.ID {
+	if rawToken != "" && rawToken != token && rawToken != claims.ID {
 		err = errForbidden("share id mismatch")
 		h.writeMappedError(w, err)
 		return
 	}
 	// Derivation reads through the same nobody-identity, path-scoped client
 	// as redemption: the visitor's DAC, not the server's.
-	r = r.WithContext(h.shareRedemptionContext(r, claims))
+	r = r.WithContext(redemption)
 	var req shareRequest
 	if derr := h.decodeJSON(r, &req, false); derr != nil {
 		err = derr
@@ -181,7 +190,7 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	remaining := time.Until(claims.ExpiresAt.Time)
+	remaining := claims.ExpiresAt.Sub(shareNow())
 	if remaining <= 0 {
 		err = &restStatusError{status: http.StatusNotFound, message: "share not found"}
 		h.writeError(w, http.StatusNotFound, "not_found", "share not found")
@@ -217,7 +226,7 @@ func (h *restHandler) handleShareDerive(w http.ResponseWriter, r *http.Request) 
 		h.writeMappedError(w, err)
 		return
 	}
-	w.Header().Set("Location", h.opts.BasePath+"/shares/"+url.PathEscape(record.ID))
+	w.Header().Set("Location", h.opts.BasePath+"/projects/"+url.PathEscape(claims.Project)+"/shares/"+url.PathEscape(record.ID))
 	created := h.shareResponse(record)
 	created.Token = record.Token
 	h.writeJSON(w, http.StatusCreated, created)

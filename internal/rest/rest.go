@@ -31,7 +31,10 @@ import (
 )
 
 const (
-	defaultRESTBasePath      = "/api/v1"
+	defaultRESTBasePath = "/api/v1"
+	// defaultRESTStreamChunk pages streamed byte reads. It is a read page
+	// size, independent of the asset chunk size the hub splits uploads
+	// into: tuning one never retunes the other.
 	defaultRESTStreamChunk   = 1 << 20
 	defaultRESTPatchBodySize = 8 << 20
 	defaultRESTShareTTL      = 7 * 24 * 720 * storcfg.PatienceUnit // 7 days
@@ -50,7 +53,10 @@ type Options struct {
 	BasePath string
 	// DefaultProject pins the console to a single project when the server
 	// was started as `storhub serve <project> ...`.
-	DefaultProject   string
+	DefaultProject string
+	// StreamChunkSize pages streamed byte reads (content and session
+	// windows). It is a read page size, independent of the hub asset
+	// chunk size.
 	StreamChunkSize  int64
 	MaxPatchBodySize int64
 	ShareTTL         time.Duration
@@ -499,7 +505,9 @@ func (h *restHandler) writeMappedError(w http.ResponseWriter, err error) {
 // traceStart logs the Debug "<op> start" half of one handler span through
 // the canonical logging.Start core and returns the clock read the deferred
 // traceFinish needs for elapsed. The component attr carries the rest
-// namespace, so the op name stays bare. targetPath is a project-relative
+// namespace, so the op name stays bare. Storage verbs open a nested span
+// per call below this one: the two systems layer (request, then verb),
+// they never duplicate an op. targetPath is a project-relative
 // path from the request (never a token or secret); extra carries
 // endpoint-specific attrs such as scope.
 func (h *restHandler) traceStart(r *http.Request, op, project, targetPath string, extra ...any) time.Time {
@@ -591,6 +599,12 @@ func mappedStatus(err error) int {
 			return http.StatusNotFound
 		case apiErr.RateLimited:
 			return http.StatusTooManyRequests
+		case apiErr.StatusCode == http.StatusConflict:
+			// Backend compare-and-swap failures (stale metadata, prune
+			// and squash races, non-fast-forward pushes) stay conflicts
+			// on the wire: the client decided on a moved state and must
+			// re-read, never retry blindly against a gateway error.
+			return http.StatusConflict
 		default:
 			// Every other upstream answer is GitHub's failure, not this
 			// server's: surface it as a gateway-class error.
@@ -771,8 +785,8 @@ func parseBoolStrict(raw, field string) (bool, error) {
 }
 
 // parsePruneScope validates a purge scope against the storage constants
-// (the single source of the objects|assets|history|all set). Empty means
-// "all". Unknown scopes answer 400 with the known set as guidance.
+// (the single source of the objects|assets|history|chunks|all set). Empty
+// means "all". Unknown scopes answer 400 with the known set as guidance.
 func parsePruneScope(raw string) (storage.PruneScope, error) {
 	scope := strings.TrimSpace(raw)
 	if scope == "" {

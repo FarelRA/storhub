@@ -23,13 +23,13 @@ type authorizedClient struct {
 }
 
 func (c *authorizedClient) CreateFileContext(ctx context.Context, project, filePath string) (*metadata.FileMeta, error) {
-	if err := c.requireCreate(ctx, project, filePath); err != nil {
+	if err := c.requireParentWrite(ctx, project, filePath); err != nil {
 		return nil, err
 	}
 	return c.base.CreateFileContext(ctx, project, filePath)
 }
 func (c *authorizedClient) MkdirContext(ctx context.Context, project, dirPath string) error {
-	if err := c.requireCreate(ctx, project, dirPath); err != nil {
+	if err := c.requireParentWrite(ctx, project, dirPath); err != nil {
 		return err
 	}
 	return c.base.MkdirContext(ctx, project, dirPath)
@@ -78,7 +78,7 @@ func (c *authorizedClient) CopyContext(ctx context.Context, project, srcPath, ds
 			return errForbidden("permission denied")
 		}
 	}
-	if err := c.requireCreate(ctx, project, dstPath); err != nil {
+	if err := c.requireParentWrite(ctx, project, dstPath); err != nil {
 		return err
 	}
 	return c.base.CopyContext(ctx, project, srcPath, dstPath)
@@ -105,7 +105,7 @@ func (c *authorizedClient) CloneRange(ctx context.Context, project, src string, 
 			return nil, errForbidden("permission denied")
 		}
 	}
-	if err := c.requireCreate(ctx, project, dst); err != nil {
+	if err := c.requireParentWrite(ctx, project, dst); err != nil {
 		return nil, err
 	}
 	return c.base.CloneRange(ctx, project, src, srcOff, dst, dstOff, length, opts...)
@@ -188,7 +188,7 @@ func (c *authorizedClient) StatFSContext(ctx context.Context, project string) (*
 	return c.base.StatFSContext(ctx, project)
 }
 func (c *authorizedClient) SymlinkContext(ctx context.Context, project, target, linkPath string) (*metadata.FileMeta, error) {
-	if err := c.requireCreate(ctx, project, linkPath); err != nil {
+	if err := c.requireParentWrite(ctx, project, linkPath); err != nil {
 		return nil, err
 	}
 	return c.base.SymlinkContext(ctx, project, target, linkPath)
@@ -210,7 +210,7 @@ func (c *authorizedClient) LinkContext(ctx context.Context, project, existingPat
 	if err := c.requireNodeRead(ctx, project, existingPath); err != nil {
 		return nil, err
 	}
-	if err := c.requireCreate(ctx, project, newPath); err != nil {
+	if err := c.requireParentWrite(ctx, project, newPath); err != nil {
 		return nil, err
 	}
 	return c.base.LinkContext(ctx, project, existingPath, newPath)
@@ -373,10 +373,19 @@ func (c *authorizedClient) DeleteProjectContext(ctx context.Context, project str
 	return c.base.DeleteProjectContext(ctx, project)
 }
 
-// DrainProjectContext forwards the sync drain to the base client. The
-// mutation endpoints already gated the write itself; the drain only waits
-// for that committed work to land, so no additional check applies.
+// DrainProjectContext waits for published work to land. Like StatFSContext
+// it needs a readable root: the drain moves no bytes itself, but an
+// unreadable project must not accept even a no-op drain from outsiders.
+// Writers keep ?sync=1 working because creating under the root implies a
+// readable root for every non-dropbox layout.
 func (c *authorizedClient) DrainProjectContext(ctx context.Context, project string) error {
+	entry, err := c.base.StatPathContext(ctx, project, "")
+	if err != nil {
+		return err
+	}
+	if !c.canReadMetadata(entry) {
+		return errForbidden("permission denied")
+	}
 	return c.base.DrainProjectContext(ctx, project)
 }
 
@@ -385,10 +394,6 @@ const (
 	permWrite = 2
 	permExec  = 1
 )
-
-func (c *authorizedClient) requireCreate(ctx context.Context, project, filePath string) error {
-	return c.requireParentWrite(ctx, project, filePath)
-}
 
 func (c *authorizedClient) requireNodeRead(ctx context.Context, project, filePath string) error {
 	if err := c.requireTraverse(ctx, project, filePath); err != nil {
