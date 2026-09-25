@@ -342,10 +342,9 @@ func (m *RepoMetadata) migrateV1(data []byte) error {
 				Inode:      f.Inode,
 				XAttrs:     xattrMapFromStrings(f.XAttrs),
 			}
-			if symlink != "" {
-				fileMeta.Size = int64(len(symlink))
-				fileMeta.Chunks = nil
-			}
+			// Link residue converges through the same normalizer live writes
+			// use: a symlink carries target-sized, chunkless state.
+			fileMeta.Normalize()
 			if fileMeta.Inode == 0 {
 				fileMeta.Inode = m.allocateInode()
 			}
@@ -413,7 +412,7 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	out := docTopV3{
 		V: 3, Project: in.Project,
 		TotalFiles: in.TotalFiles, TotalSize: in.TotalSize, LastMod: in.LastMod,
-		Root:     dirV2ToV3(in.Root),
+		Root:     docDirV3{docDirV2: in.Root},
 		Dirs:     make(map[string]docDirV3, len(in.Dirs)),
 		Files:    make(map[string]docFileV3, len(in.Files)),
 		Chunks:   in.Chunks,
@@ -421,14 +420,14 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	}
 	maxInode := out.Root.Inode
 	for path, d := range in.Dirs {
-		dv3 := dirV2ToV3(d)
+		dv3 := docDirV3{docDirV2: d}
 		if dv3.Inode > maxInode {
 			maxInode = dv3.Inode
 		}
 		out.Dirs[path] = dv3
 	}
 	for path, f := range in.Files {
-		fv3 := fileV2ToV3(f)
+		fv3 := docFileV3{docFileV2: f}
 		if fv3.Inode > maxInode {
 			maxInode = fv3.Inode
 		}
@@ -445,14 +444,6 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 	out.NextInode = maxInode + 1
 	out.NextChunkID = maxChunk + 1
 	return json.Marshal(out)
-}
-
-func dirV2ToV3(d docDirV2) docDirV3 {
-	return docDirV3{docDirV2: d}
-}
-
-func fileV2ToV3(f docFileV2) docFileV3 {
-	return docFileV3{docFileV2: f}
 }
 
 // ---------------------------------------------------------------------------
@@ -565,15 +556,9 @@ func fileV3ToV4(f docFileV3, lastMod int64) FileMeta {
 		Mode: modeOrDefault(f.Mode, kind, false), UID: f.UID, GID: f.GID,
 		Inode: f.Inode, XAttrs: f.XAttrs.Clone(),
 	}
-	if out.Symlink != "" {
-		// v1/v2-era links could carry stale size/chunk residue; the v4
-		// contract is pure link data.
-		out.Size = int64(len(out.Symlink))
-		out.Chunks = []int64{}
-	}
-	if out.Chunks == nil {
-		out.Chunks = []int64{}
-	}
+	// v1/v2-era links could carry stale size/chunk residue; converge through
+	// the same normalizer live writes use (pure link data).
+	out.Normalize()
 	return out
 }
 

@@ -81,14 +81,14 @@ func removeSubtreeWith(m *RepoMetadata, path string, childDirs, childFiles map[s
 // taking its attributes from src when src still has it (so a restored file
 // lands in the directory it lived in) and a plain default otherwise.
 func ensureAncestors(dst, src *RepoMetadata, path string, now int64, holders *holderIndex) {
-	segments := strings.Split(path, "/")
-	cur := ""
-	for _, seg := range segments[:len(segments)-1] {
-		if cur == "" {
-			cur = seg
-		} else {
-			cur = cur + "/" + seg
-		}
+	// Ancestors walk top-down through parentPath, the single splitter, so
+	// this traversal cannot disagree with groupByParent or the build.
+	ancestors := []string{}
+	for dir := parentPath(path); dir != ""; dir = parentPath(dir) {
+		ancestors = append(ancestors, dir)
+	}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		cur := ancestors[i]
 		if dst.HasDirectory(cur) {
 			continue
 		}

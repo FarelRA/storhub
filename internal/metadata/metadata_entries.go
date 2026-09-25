@@ -133,15 +133,15 @@ func (m *RepoMetadata) EnsureRelease(tag string, createdAt int64) (*ReleaseRef, 
 }
 
 // UpsertFile stores the file entry, preserving identity across updates.
-func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
-	name = normalizeStoredPath(name)
+func (m *RepoMetadata) UpsertFile(path string, file FileMeta, createdAt int64) {
+	path = normalizeStoredPath(path)
 	// Clone the caller's value so later mutations of its slices cannot
 	// alias into stored metadata.
 	file = file.Clone()
-	if parent := parentPath(name); parent != "" {
+	if parent := parentPath(path); parent != "" {
 		m.EnsureDirectory(parent, createdAt)
 	}
-	existing, existed := m.files[name]
+	existing, existed := m.files[path]
 	if existed {
 		if (file.Symlink == "") != (existing.Symlink == "") {
 			// Type change (regular file <-> symlink): the old node identity
@@ -154,10 +154,10 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 		initializeNewFileIdentity(m, &file, createdAt)
 	}
 	file.Normalize()
-	m.files[name] = file
-	m.trackFilePut(name, putTransition(existing, existed, file))
+	m.files[path] = file
+	m.trackFilePut(path, putTransition(existing, existed, file))
 	m.statsFilePut(putTransition(existing, existed, file))
-	m.recordFilePut(name, existing, existed)
+	m.recordFilePut(path, existing, existed)
 }
 
 // FindFile returns a SNAPSHOT of the entry: the pointer targets a copy of
@@ -165,9 +165,9 @@ func (m *RepoMetadata) UpsertFile(name string, file FileMeta, createdAt int64) {
 // and maps inside - Chunks, XAttrs - still share backing storage; clone
 // before mutating those.) Apply changes through UpsertFile or an
 // UpdateRepoMetadataContext transaction.
-func (m *RepoMetadata) FindFile(name string) *FileMeta {
-	name = normalizeStoredPath(name)
-	if file, ok := m.files[name]; ok {
+func (m *RepoMetadata) FindFile(path string) *FileMeta {
+	path = normalizeStoredPath(path)
+	if file, ok := m.files[path]; ok {
 		return &file
 	}
 	return nil
@@ -176,14 +176,14 @@ func (m *RepoMetadata) FindFile(name string) *FileMeta {
 // SetFileAtime updates atime in place. FindFile returns a pointer to a
 // copy (map values are not addressable), so mutating its result silently
 // drops the write; use this setter for mutations.
-func (m *RepoMetadata) SetFileAtime(name string, atime int64) bool {
-	name = normalizeStoredPath(name)
-	if file, ok := m.files[name]; ok {
+func (m *RepoMetadata) SetFileAtime(path string, atime int64) bool {
+	path = normalizeStoredPath(path)
+	if file, ok := m.files[path]; ok {
 		original := file
 		file.AccessedAt = atime
-		m.files[name] = file
-		m.sizePutFile(name, putTransition(original, true, file))
-		m.recordFilePut(name, original, true)
+		m.files[path] = file
+		m.sizePutFile(path, putTransition(original, true, file))
+		m.recordFilePut(path, original, true)
 		return true
 	}
 	return false
@@ -219,17 +219,17 @@ func (m *RepoMetadata) FindFilesByInode(inode uint64) []string {
 // new-node path of UpsertFile. The stored value is treated as immutable
 // from here on (callers pass a private clone); the derived indexes and size
 // cache are maintained incrementally for the replacement.
-func (m *RepoMetadata) WriteFileDirect(name string, file FileMeta) {
-	name = normalizeStoredPath(name)
-	existing, existed := m.files[name]
+func (m *RepoMetadata) WriteFileDirect(path string, file FileMeta) {
+	path = normalizeStoredPath(path)
+	existing, existed := m.files[path]
 	// Clone the caller's value (mirroring UpsertFile): without this a
 	// caller-retained Chunks slice aliases the stored entry.
 	file = file.Clone()
 	file.Normalize()
-	m.files[name] = file
-	m.trackFilePut(name, putTransition(existing, existed, file))
+	m.files[path] = file
+	m.trackFilePut(path, putTransition(existing, existed, file))
 	m.statsFilePut(putTransition(existing, existed, file))
-	m.recordFilePut(name, existing, existed)
+	m.recordFilePut(path, existing, existed)
 }
 
 // WriteDirDirect stores a directory entry verbatim, mirroring
@@ -245,16 +245,16 @@ func (m *RepoMetadata) WriteDirDirect(path string, dir DirMeta) {
 }
 
 // RemoveFile deletes the file key, reporting whether it existed.
-func (m *RepoMetadata) RemoveFile(name string) bool {
-	name = normalizeStoredPath(name)
-	old, ok := m.files[name]
+func (m *RepoMetadata) RemoveFile(path string) bool {
+	path = normalizeStoredPath(path)
+	old, ok := m.files[path]
 	if !ok {
 		return false
 	}
-	delete(m.files, name)
-	m.trackFileRemove(name, old)
+	delete(m.files, path)
+	m.trackFileRemove(path, old)
 	m.statsFileRemove(old)
-	m.recordFileRemove(name, old)
+	m.recordFileRemove(path, old)
 	return true
 }
 
@@ -388,8 +388,8 @@ func (m *RepoMetadata) AllFiles() []FileMeta {
 
 // FileChunks resolves a file's chunk IDs to chunk records in stored order
 // (which Normalize keeps sorted by data offset).
-func (m *RepoMetadata) FileChunks(name string) []ChunkInfo {
-	file, ok := m.files[normalizeStoredPath(name)]
+func (m *RepoMetadata) FileChunks(path string) []ChunkInfo {
+	file, ok := m.files[normalizeStoredPath(path)]
 	if !ok {
 		return nil
 	}
@@ -415,9 +415,9 @@ func (m *RepoMetadata) DirNLink(path string) int {
 	return 2 + len(m.derived.childDirs[path])
 }
 
-// FileNLink returns the hardlink count of the named file.
-func (m *RepoMetadata) FileNLink(name string) int {
-	file, ok := m.files[normalizeStoredPath(name)]
+// FileNLink returns the hardlink count of the file at path.
+func (m *RepoMetadata) FileNLink(path string) int {
+	file, ok := m.files[normalizeStoredPath(path)]
 	if !ok {
 		return 0
 	}
@@ -433,18 +433,14 @@ func (m *RepoMetadata) NLink(inode uint64) int {
 // ReplaceFile overwrites a stored file entry verbatim (no identity
 // preservation). Returns false when the path holds no file entry. Use this
 // for authoritative rewrites such as metadata-mutation callbacks; prefer
-// UpsertFile for create/update flows where identity carries over.
-func (m *RepoMetadata) ReplaceFile(name string, file FileMeta) bool {
-	name = normalizeStoredPath(name)
-	existing, ok := m.files[name]
-	if !ok {
+// UpsertFile for create/update flows where identity carries over. Single
+// verbatim writer: the body is WriteFileDirect (the existed gate is the
+// only difference), so index, stats, size, and recorder handling cannot
+// drift between the two.
+func (m *RepoMetadata) ReplaceFile(path string, file FileMeta) bool {
+	if m.FindFile(path) == nil {
 		return false
 	}
-	replacement := file.Clone()
-	replacement.Normalize()
-	m.files[name] = replacement
-	m.trackFilePut(name, putTransition(existing, true, replacement))
-	m.statsFilePut(putTransition(existing, true, replacement))
-	m.recordFilePut(name, existing, true)
+	m.WriteFileDirect(path, file)
 	return true
 }

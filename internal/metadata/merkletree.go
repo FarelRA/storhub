@@ -25,12 +25,11 @@ import (
 // subdirectories by child sha, so an unchanged subtree dedups to one object
 // and a mutation rewrites only the chain from the changed node to the root.
 
-// ChunkBucketSize is the number of chunk IDs packed into one bucket object.
-// Bucketing by id/ChunkBucketSize keeps objects small and gives append
-// locality: freshly allocated chunks land in the highest bucket, so older
-// buckets stay immutable and dedup across commits.
-
-// ChunkBucketSize is the fixed content bucket width for tree streaming.
+// ChunkBucketSize is the fixed content bucket width for tree streaming:
+// the number of chunk IDs packed into one bucket object. Bucketing by
+// id/ChunkBucketSize keeps objects small and gives append locality: freshly
+// allocated chunks land in the highest bucket, so older buckets stay
+// immutable and dedup across commits.
 const ChunkBucketSize = 65536
 
 // Manifest is the v6 index manifest: the single contended CAS point of a
@@ -81,13 +80,12 @@ type ReleasesObject struct {
 	Releases map[string]ReleaseRef `json:"r"`
 }
 
-// TreeResult is the object set produced by BuildTree plus the manifest
-// references into it.
+// TreeResult is the object set produced by BuildTree: the manifest
+// references (the same TreeRefs shape BuildTreeStream returns, embedded so
+// the two entries cannot drift) plus the materialized objects.
 type TreeResult struct {
-	RootSHA      string
-	ChunkBuckets []string
-	ReleasesSHA  string
-	Objects      map[string][]byte
+	TreeRefs
+	Objects map[string][]byte
 }
 
 // TreeRefs are the manifest references produced by one (streaming) build.
@@ -198,14 +196,11 @@ func ObjectPath(sha string) string {
 // still accepts (and migrates to nanoseconds on load). A version-5 document
 // WITHOUT a tree root is a current blob, not a manifest.
 func IsManifest(data []byte) bool {
-	probe, err := probeVersion(data)
+	kind, _, err := classifyDocument(data)
 	if err != nil {
 		return false
 	}
-	if probe.V == nil || probe.TreeRoot == "" {
-		return false
-	}
-	return *probe.V == maxMetadataVersion || *probe.V == maxBlobVersion
+	return kind == kindManifest
 }
 
 // ParseManifest decodes a manifest. Version 6 is current; version 5 is the
@@ -219,11 +214,8 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
-	if m.Version != maxMetadataVersion && m.Version != maxBlobVersion {
+	if kind, _, cerr := classifyDocument(data); cerr != nil || kind != kindManifest {
 		return nil, fmt.Errorf("manifest version %d is not %d", m.Version, maxMetadataVersion)
-	}
-	if m.TreeRoot == "" {
-		return nil, fmt.Errorf("manifest has no tree root")
 	}
 	if !isContentSHA(m.TreeRoot) {
 		return nil, fmt.Errorf("manifest tree root %q is not a sha256 content address", m.TreeRoot)

@@ -206,8 +206,10 @@ func (m *RepoMetadata) Chunks() map[int64]ChunkInfo { return m.chunks }
 // it.
 func (m *RepoMetadata) Releases() map[string]ReleaseRef { return m.releases }
 
-// Chunk returns one chunk record and whether it exists.
-func (m *RepoMetadata) Chunk(id int64) (ChunkInfo, bool) {
+// GetChunk returns one chunk record and whether it exists. Single form:
+// chunk catalog reads go through GetChunk (the planner's GetChunk is a
+// different type's method, not this catalog).
+func (m *RepoMetadata) GetChunk(id int64) (ChunkInfo, bool) {
 	c, ok := m.chunks[id]
 	return c, ok
 }

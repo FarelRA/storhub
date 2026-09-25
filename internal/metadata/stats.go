@@ -57,7 +57,7 @@ func (m *RepoMetadata) countAsset(tag string, delta int) {
 }
 
 // sortIDsByOffset orders chunk ids by data offset in place. It is the one
-// backing sort behind SortFileChunks (single file) and sortFileChunksByOffset
+// backing sort behind SortFileChunks (single file) and sortAllFileChunksByOffset
 // (whole tree); missing ids resolve to the zero ChunkInfo, matching the
 // chunksOffsetSorted fast-path check.
 func sortIDsByOffset(chunks map[int64]ChunkInfo, ids []int64) {

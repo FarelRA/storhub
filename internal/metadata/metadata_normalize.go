@@ -52,7 +52,7 @@ func (m *RepoMetadata) Normalize(project string, now int64) {
 			m.sizePutFile(path, putTransition(original, true, file))
 		}
 	}
-	m.sortFileChunksByOffset()
+	m.sortAllFileChunksByOffset()
 	for tag, ref := range m.releases {
 		if ref.CreatedAt == 0 {
 			original := ref
@@ -186,7 +186,7 @@ func (f *FileMeta) Normalize() {
 		f.Chunks = make([]int64, 0)
 	}
 	// Stored chunk order is by data offset, a RepoMetadata-level invariant
-	// enforced by sortFileChunksByOffset; sorting by id here would break it
+	// enforced by sortAllFileChunksByOffset; sorting by id here would break it
 	// for standalone callers.
 	if f.Symlink != "" {
 		f.Chunks = make([]int64, 0)

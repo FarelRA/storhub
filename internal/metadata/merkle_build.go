@@ -51,7 +51,7 @@ func buildTreeStream(meta *RepoMetadata, cache *TreeCache, known func(sha string
 	if err := checkTreeParents(meta); err != nil {
 		return nil, err
 	}
-	filesByParent := groupTreeFiles(meta)
+	filesByParent := groupFileNamesByParent(meta)
 	dirs := sortedTreeDirs(meta)
 	nodeSHA, err := emitTreeNodes(meta, cache, known, emit, dirs, filesByParent)
 	if err != nil {
@@ -110,9 +110,11 @@ func checkTreeParents(meta *RepoMetadata) error {
 	return nil
 }
 
-// groupTreeFiles buckets file entries by parent directory, keyed by base
-// name within the node.
-func groupTreeFiles(meta *RepoMetadata) map[string]map[string]FileMeta {
+// groupFileNamesByParent buckets file entries by parent directory, keyed by
+// base name within the node. The base-name keys distinguish it from the
+// generic groupByParent (index.go), which groups full paths: the names mark
+// different key shapes, not interchangeable helpers.
+func groupFileNamesByParent(meta *RepoMetadata) map[string]map[string]FileMeta {
 	filesByParent := make(map[string]map[string]FileMeta, len(meta.files))
 	for p, f := range meta.files {
 		parent := parentPath(p)
@@ -210,7 +212,7 @@ func nodeInputsEqual(cached *cachedNode, meta DirMeta, files map[string]FileMeta
 	return stringMapEqual(cached.subdirs, subdirs)
 }
 
-// fileMapsEqual compares node file entries by content: nil and empty maps
+// fileMapEqual compares node file entries by content: nil and empty maps
 // are EQUAL. encoding/json omits both nil and len-0 maps under omitempty,
 // so the two serialize to identical bytes and distinguishing them only
 // causes spurious cache misses and re-emits.
@@ -313,9 +315,7 @@ func BuildTree(meta *RepoMetadata) (*TreeResult, error) {
 		return nil, err
 	}
 	return &TreeResult{
-		RootSHA:      refs.RootSHA,
-		ChunkBuckets: refs.ChunkBuckets,
-		ReleasesSHA:  refs.ReleasesSHA,
-		Objects:      objects,
+		TreeRefs: *refs,
+		Objects:  objects,
 	}, nil
 }

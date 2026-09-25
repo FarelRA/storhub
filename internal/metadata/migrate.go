@@ -9,12 +9,11 @@ import (
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
-// CurrentVersion is the newest document version this build reads and writes
+// CurrentVersion is the newest metadata schema the code reads and writes
 // (6, the split layout). The pure blob migrators below only ever produce
 // maxBlobVersion (5); the 5->6 step is a write-time layout split, not a bytes
-// transform.
-
-// CurrentVersion is the newest metadata schema the code reads and writes.
+// transform. The alias stays while storage and tests still name it; it goes
+// once they use maxMetadataVersion directly.
 const CurrentVersion = maxMetadataVersion
 
 // versionProbe is the single version/shape envelope for every JSON document
@@ -41,17 +40,48 @@ func probeVersion(data []byte) (versionProbe, error) {
 // the migrator alone - the main parser never sees version detection. A
 // split-index manifest is distinguished from a blob by IsManifest, not here.
 func detectVersion(data []byte) (int, error) {
-	probe, err := probeVersion(data)
+	_, version, err := classifyDocument(data)
 	if err != nil {
 		return 0, err
 	}
+	if version == 0 {
+		return 0, errors.New("metadata payload has no version field; refusing to guess the schema")
+	}
+	return version, nil
+}
+
+// docKind names the two JSON document shapes the package reads: a blob is
+// one versioned single document (v1-v5, plus a rootless v6 callers reject as
+// a truncated manifest); a manifest is a split-index root (v5 seconds-era,
+// still read, or v6 current) carrying a non-empty tree root.
+type docKind int
+
+const (
+	kindUnknown docKind = iota
+	kindBlob
+	kindManifest
+)
+
+// classifyDocument reports a document's shape and version in one place so
+// the accept sets of IsManifest, ParseManifest, Migrate, and detectVersion
+// cannot drift. UnmarshalJSON (json.go) still probes directly and adopts
+// this on its next touch.
+func classifyDocument(data []byte) (docKind, int, error) {
+	probe, err := probeVersion(data)
+	if err != nil {
+		return kindUnknown, 0, err
+	}
+	if probe.TreeRoot != "" && probe.V != nil &&
+		(*probe.V == maxMetadataVersion || *probe.V == maxBlobVersion) {
+		return kindManifest, *probe.V, nil
+	}
 	switch {
 	case probe.V != nil:
-		return *probe.V, nil
+		return kindBlob, *probe.V, nil
 	case probe.Version != nil:
-		return *probe.Version, nil
+		return kindBlob, *probe.Version, nil
 	default:
-		return 0, errors.New("metadata payload has no version field; refusing to guess the schema")
+		return kindUnknown, 0, nil
 	}
 }
 
@@ -77,12 +107,15 @@ var migrators = [...]func([]byte) ([]byte, error){
 // this file can observe an older schema shape. The upgraded document persists
 // when the next mutation commits it (as a version-6 split).
 func Migrate(data []byte) ([]byte, int, error) {
-	if IsManifest(data) {
-		return nil, maxMetadataVersion, fmt.Errorf("metadata version %d is the split-index manifest; load it via ParseManifest, not Migrate", maxMetadataVersion)
-	}
-	from, err := detectVersion(data)
+	kind, from, err := classifyDocument(data)
 	if err != nil {
 		return nil, 0, err
+	}
+	if kind == kindManifest {
+		return nil, maxMetadataVersion, fmt.Errorf("metadata version %d is the split-index manifest; load it via ParseManifest, not Migrate", maxMetadataVersion)
+	}
+	if from == 0 {
+		return nil, 0, errors.New("metadata payload has no version field; refusing to guess the schema")
 	}
 	if from > maxMetadataVersion {
 		return nil, from, fmt.Errorf("metadata version %d is newer than supported version %d", from, maxMetadataVersion)

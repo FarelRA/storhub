@@ -42,7 +42,9 @@ func normalizeStoredPathErr(value string) (string, error) {
 // (the checked primary) wherever a caller can act on the error; escaping
 // paths pass through here silently and are rejected by Validate at the
 // boundary instead. Cross-package callers cannot use either (both are
-// unexported); in-package call sites migrate as their signatures allow.
+// unexported); in-package call sites migrate as their signatures allow
+// (validateStoredPathKey already uses the Err form; the void entry-point
+// family keeps this form until its signatures can carry errors).
 func normalizeStoredPath(value string) string {
 	cleaned, err := normalizeStoredPathErr(value)
 	if err != nil {

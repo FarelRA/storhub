@@ -12,12 +12,11 @@ import (
 	"github.com/FarelRA/storhub/internal/logging"
 )
 
-// LoadTree reconstructs a flat RepoMetadata from a manifest, fetching each
-// referenced object through getObject (which the caller backs with the
-// content-addressed cache + repo). Every object is verified against its
-// content address here, so a bit-rotted cache entry cannot poison the tree
-// even if the fetch layer returns it unchecked. The returned tree is not yet
-// normalized; callers Normalize/RecomputeStats as they do after any load.
+// LoadTree reconstructs a flat RepoMetadata from a manifest. It shares the
+// parallel engine with LoadTreeParallel (one body, one error wording table);
+// the sequential walk is gone, so there is nothing for the two names to
+// disagree on. The returned tree is not yet normalized; callers
+// Normalize/RecomputeStats as they do after any load.
 func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
 	started := time.Now()
 	buckets := 0
@@ -25,86 +24,12 @@ func LoadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 		buckets = len(manifest.ChunkBuckets)
 	}
 	logging.Debug(metaLog(), "metadata load start", "buckets", buckets)
-	meta, err := loadTree(manifest, getObject)
+	meta, err := loadTreeParallel(manifest, getObject)
 	if err != nil {
 		logging.Error(metaLog(), "metadata load failed", "elapsed", time.Since(started), "err", err)
 		return nil, err
 	}
 	logging.Debug(metaLog(), "metadata load complete", "files", len(meta.files), "dirs", len(meta.dirs), "chunks", len(meta.chunks), "releases", len(meta.releases), "elapsed", time.Since(started))
-	return meta, nil
-}
-
-// loadTree is the load body behind the logging wrapper above.
-func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*RepoMetadata, error) {
-	if manifest == nil {
-		return nil, fmt.Errorf("nil manifest")
-	}
-	meta := newBareRepoMetadata()
-	meta.Version = maxMetadataVersion
-	meta.Project = manifest.Project
-	meta.NextInode = manifest.NextInode
-	meta.NextChunkID = manifest.NextChunkID
-	meta.LastMod = manifest.LastMod
-	if err := loadNode(meta, "", manifest.TreeRoot, getObject, map[string]bool{}); err != nil {
-		return nil, err
-	}
-	for _, sha := range manifest.ChunkBuckets {
-		data, err := getObject(sha)
-		if err != nil {
-			return nil, fmt.Errorf("load chunk bucket %s: %w", shortObj(sha), err)
-		}
-		if err := verifyObject(sha, data, "chunk bucket"); err != nil {
-			return nil, err
-		}
-		var b ChunkBucket
-		if err := json.Unmarshal(data, &b); err != nil {
-			return nil, fmt.Errorf("decode chunk bucket %s: %w", shortObj(sha), err)
-		}
-		for id, info := range b.Chunks {
-			// Buckets are content-addressed by id range: a mis-bucketed
-			// or duplicated id is corruption, not data. (Negative ids
-			// can quotient-match bucket 0 under truncating division, so
-			// they are rejected outright.)
-			if id < 0 {
-				return nil, fmt.Errorf("chunk bucket %s: negative chunk id %d", shortObj(sha), id)
-			}
-			if id/ChunkBucketSize != b.Index {
-				return nil, fmt.Errorf("chunk bucket %s: chunk id %d does not belong to bucket index %d", shortObj(sha), id, b.Index)
-			}
-			if _, dup := meta.chunks[id]; dup {
-				return nil, fmt.Errorf("chunk bucket %s: duplicate chunk id %d", shortObj(sha), id)
-			}
-			meta.chunks[id] = info
-		}
-	}
-	if manifest.Releases != "" {
-		data, err := getObject(manifest.Releases)
-		if err != nil {
-			return nil, fmt.Errorf("load releases %s: %w", shortObj(manifest.Releases), err)
-		}
-		if err := verifyObject(manifest.Releases, data, "releases"); err != nil {
-			return nil, err
-		}
-		var rel ReleasesObject
-		if err := json.Unmarshal(data, &rel); err != nil {
-			return nil, fmt.Errorf("decode releases: %w", err)
-		}
-		for tag, ref := range rel.Releases {
-			meta.releases[tag] = ref
-		}
-	}
-	if manifest.Version < maxMetadataVersion {
-		// Seconds-era manifest: its objects carry seconds timestamps. The
-		// reason/from/to vocabulary matches the migration line in migrate.go
-		// (load-path convention, not storage-verb step/message).
-		logging.Warn(metaLog(), "metadata timestamp fallback", "reason", "seconds-era manifest, migrating timestamps to nanoseconds", "from", manifest.Version, "to", maxMetadataVersion)
-		migrateTreeTimesToNano(meta)
-	}
-	meta.RecomputeStats()
-	// Reconcile the allocation counters against the content actually loaded:
-	// a stale or regressed manifest must not yield a tree whose counters sit
-	// behind live ids (callers of LoadTree may never Normalize).
-	meta.reconcileCounters()
 	return meta, nil
 }
 
@@ -117,50 +42,12 @@ func loadTree(manifest *Manifest, getObject func(sha string) ([]byte, error)) (*
 // levels is the deepest addressable tree, and this limit never rejects one.
 const maxLoadTreeDepth = 4096
 
-// loadNode recursively loads a directory node and its subtree. chain is
-// the sha chain from the root to this node's parent: a sha repeating on
-// its OWN ancestor chain is a corrupt cycle, but the same object shared
-// by two paths (BuildTree dedups structurally identical subtrees to one
-// object) is legitimate sharing and is applied once per path.
-func loadNode(meta *RepoMetadata, dirPath, sha string, getObject func(string) ([]byte, error), chain map[string]bool) error {
-	if sha == "" {
-		return fmt.Errorf("empty node sha at %q", dirPath)
-	}
-	if len(chain) > maxLoadTreeDepth {
-		return fmt.Errorf("tree depth exceeds %d levels at %q", maxLoadTreeDepth, dirPath)
-	}
-	if chain[sha] {
-		return fmt.Errorf("cycle in tree objects at %q (sha %s)", dirPath, shortObj(sha))
-	}
-	chain[sha] = true
-	defer delete(chain, sha)
-	data, err := getObject(sha)
-	if err != nil {
-		return fmt.Errorf("load tree node %q: %w", dirPath, err)
-	}
-	if err := verifyObject(sha, data, fmt.Sprintf("tree node %q", dirPath)); err != nil {
-		return err
-	}
-	var node TreeNode
-	if err := json.Unmarshal(data, &node); err != nil {
-		return fmt.Errorf("decode tree node %q: %w", dirPath, err)
-	}
-	if dirPath == "" {
-		meta.Root = node.Meta
-	} else {
-		meta.dirs[dirPath] = node.Meta
-	}
-	for name, f := range node.Files {
-		meta.files[joinStored(dirPath, name)] = f
-	}
-	for name, child := range node.Subdirs {
-		if err := loadNode(meta, joinStored(dirPath, name), child, getObject, chain); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// depthExceeded is the single encoding of the loader depth bound: depth is
+// the directory depth (chain length minus the node's own sha).
+func depthExceeded(depth int) bool { return depth > maxLoadTreeDepth }
 
+// joinStored joins a directory path and an entry name into a stored path.
+// It is the joiner; parentPath (helpers.go) stays the single splitter.
 func joinStored(dirPath, name string) string {
 	if dirPath == "" {
 		return name
@@ -184,6 +71,9 @@ func nodeDepth(p string) int {
 	return strings.Count(p, "/") + 1
 }
 
+// shortObj truncates a content sha for load error wordings. The storage
+// layer has its own display truncator (shortSHA, owned there); this one
+// stays local so metadata errors read identically with or without storage.
 func shortObj(sha string) string {
 	if len(sha) > 12 {
 		return sha[:12]
@@ -365,9 +255,9 @@ func (l *parallelTreeLoader) loadSubtree(dirPath, sha string, chain []string) {
 	if l.stop.Load() {
 		return
 	}
-	// Depth bound mirrors the sequential loader: len(chain)-1 is the
+	// Depth bound mirrors the old sequential loader: len(chain)-1 is the
 	// directory depth (chain ends in this node's own sha).
-	if len(chain)-1 > maxLoadTreeDepth {
+	if depthExceeded(len(chain) - 1) {
 		l.fail(fmt.Errorf("tree depth exceeds %d levels at %q", maxLoadTreeDepth, dirPath))
 		return
 	}

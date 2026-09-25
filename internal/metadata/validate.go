@@ -12,10 +12,11 @@ const (
 	modeTypeDir  = 0o040000
 )
 
-// sortFileChunksByOffset enforces the stored-order invariant every reader
+// sortAllFileChunksByOffset enforces the stored-order invariant every reader
 // relies on: a file's chunk IDs are ordered by data offset, so binary search
-// over FileChunks is valid.
-func (m *RepoMetadata) sortFileChunksByOffset() {
+// over FileChunks is valid. Whole-tree granularity; SortFileChunks is the
+// single-file entry point. Both sort through sortIDsByOffset.
+func (m *RepoMetadata) sortAllFileChunksByOffset() {
 	for path, file := range m.files {
 		if len(file.Chunks) < 2 {
 			continue
@@ -337,7 +338,13 @@ func validateStoredPathKey(path string) error {
 	if path == ".." || strings.HasPrefix(path, "../") || strings.Contains(path, "/../") {
 		return fmt.Errorf("stored path escapes root: %q", path)
 	}
-	if cleaned := normalizeStoredPath(path); cleaned != path {
+	// Checked normalizer, not the silent total: an escaping or
+	// non-canonical key fails here with the offending value in context.
+	// normalizeStoredPathErr agrees with the silent form on every
+	// non-escaping input, so canonical keys are unaffected.
+	if cleaned, err := normalizeStoredPathErr(path); err != nil {
+		return err
+	} else if cleaned != path {
 		return fmt.Errorf("stored path %q is not canonical (normalizes to %q)", path, cleaned)
 	}
 	return nil
