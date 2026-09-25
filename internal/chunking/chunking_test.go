@@ -16,7 +16,7 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	chunker, err := NewStreamingChunker(path, "blob", 4)
+	chunker, err := NewStreamingChunker(path, 4)
 	if err != nil {
 		t.Fatalf("new chunker: %v", err)
 	}
@@ -32,8 +32,8 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read chunk: %v", err)
 	}
-	if string(buf) != "efgh" || chunk.Offset() != 4 || chunk.Size() != 4 || chunk.Name() != "blob.part002" || chunk.Index() != 1 {
-		t.Fatalf("unexpected chunk: data=%q offset=%d size=%d name=%q index=%d", buf, chunk.Offset(), chunk.Size(), chunk.Name(), chunk.Index())
+	if string(buf) != "efgh" || chunk.Offset() != 4 || chunk.Size() != 4 {
+		t.Fatalf("unexpected chunk: data=%q offset=%d size=%d", buf, chunk.Offset(), chunk.Size())
 	}
 	if _, err := chunk.Seek(0, io.SeekStart); err != nil {
 		t.Fatalf("seek chunk: %v", err)
@@ -41,7 +41,7 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 	if _, err := chunker.GetChunk(99); err == nil {
 		t.Fatal("expected out-of-range error")
 	}
-	clamped, err := NewStreamingChunker(path, "blob", MaxReleaseAssetSize+1)
+	clamped, err := NewStreamingChunker(path, MaxReleaseAssetSize+1)
 	if err != nil {
 		t.Fatalf("new clamped chunker: %v", err)
 	}
@@ -53,14 +53,14 @@ func TestStreamingChunkerReadsAndClampsChunkSizes(t *testing.T) {
 
 func TestChunkerErrorEdges(t *testing.T) {
 	t.Parallel()
-	if _, err := NewStreamingChunker(filepath.Join(t.TempDir(), "missing.bin"), "blob", 4); err == nil {
+	if _, err := NewStreamingChunker(filepath.Join(t.TempDir(), "missing.bin"), 4); err == nil {
 		t.Fatal("expected missing file error")
 	}
 	path := filepath.Join(t.TempDir(), "empty.bin")
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatalf("write empty file: %v", err)
 	}
-	chunker, err := NewStreamingChunker(path, "blob", 4)
+	chunker, err := NewStreamingChunker(path, 4)
 	if err != nil {
 		t.Fatalf("new empty chunker: %v", err)
 	}
@@ -76,7 +76,9 @@ func TestChunkerErrorEdges(t *testing.T) {
 	}
 }
 
-func TestChunkNameWidthPast999(t *testing.T) {
+// Past-999 coverage now pins offset geometry: every reader must cover
+// exactly its own slice with no gaps or overlaps.
+func TestChunkOffsetsAcrossManyChunks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wide.bin")
@@ -84,7 +86,7 @@ func TestChunkNameWidthPast999(t *testing.T) {
 	if err := os.WriteFile(path, buf, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chunker, err := NewStreamingChunker(path, "w", 1)
+	chunker, err := NewStreamingChunker(path, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,30 +94,15 @@ func TestChunkNameWidthPast999(t *testing.T) {
 	if got := chunker.NumChunks(); got != 1000 {
 		t.Fatalf("expected 1000 chunks, got %d", got)
 	}
-	first, err := chunker.GetChunk(0)
-	if err != nil {
-		t.Fatal(err)
+	for _, i := range []int{0, 1, 998, 999} {
+		c, err := chunker.GetChunk(i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Offset() != int64(i) || c.Size() != 1 {
+			t.Fatalf("chunk %d covers offset=%d size=%d, want offset=%d size=1", i, c.Offset(), c.Size(), i)
+		}
 	}
-	last, err := chunker.GetChunk(999)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Name() != "w.part0001" || last.Name() != "w.part1000" {
-		t.Fatalf("width-4 padding wrong: %q %q", first.Name(), last.Name())
-	}
-	// Lexicographic order must equal numeric order across the boundary.
-	if first.Name() >= chunker.mustName(t, 999) {
-		t.Fatal("padding does not preserve order")
-	}
-}
-
-func (s *StreamingChunker) mustName(t *testing.T, i int) string {
-	t.Helper()
-	c, err := s.GetChunk(i)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c.Name()
 }
 
 // TestNormalizedSizeReportsAdjustment pins the pure-helper contract: the

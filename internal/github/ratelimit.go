@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"sync"
@@ -207,20 +206,6 @@ func (k requestClass) content() bool { return k == requestContent || k == reques
 // endpoint and therefore skips hourly pacing and budget accounting.
 func (k requestClass) assetUpload() bool { return k == requestUpload }
 
-// classifyFlags maps a legacy (content, assetUpload) flag pair onto a
-// class. It serves the compat acquire wrapper below and the existing
-// test suite, which still drives admission through acquire; new code
-// classifies once via classifyRequest (client.go) and calls acquireClass.
-func classifyFlags(content, assetUpload bool) requestClass {
-	if assetUpload {
-		return requestUpload
-	}
-	if content {
-		return requestContent
-	}
-	return requestRead
-}
-
 // readPointReserve returns the point-window share reserved for reads:
 // 10 percent of the window, at least 1 and at most all-but-one so a
 // tiny test window still admits one content request. Content classes
@@ -265,12 +250,6 @@ func (g *rateGovernor) GovernorStats() (readWaits, contentWaits, readDenied, con
 	return g.readWaits, g.contentWaits, g.readDenied, g.contentDenied
 }
 
-// triple is how the pre-enum governor tests drive admission. New code
-// calls acquireClass with a classified requestClass instead.
-func (g *rateGovernor) acquire(ctx context.Context, cost int64, content, assetUpload bool) (func(), error) {
-	return g.acquireClass(ctx, cost, classifyFlags(content, assetUpload))
-}
-
 // acquireClass blocks until one request of the given class may be sent
 // and returns a release func for the concurrency slot. It fails with an
 // *APIError when the required wait exceeds maxWait - honest refusal beats
@@ -310,7 +289,7 @@ func (g *rateGovernor) acquireClass(ctx context.Context, cost int64, class reque
 		}
 		g.mu.Unlock()
 		logging.Warn(g.logger, "rate limit throttle", "wait", wait.Round(time.Millisecond), "cost", cost, "class", class.String())
-		if err := g.sleep(ctx, throttleJitter(wait)); err != nil {
+		if err := g.sleep(ctx, addJitter(wait)); err != nil {
 			return nil, err
 		}
 	}
@@ -403,25 +382,6 @@ func (g *rateGovernor) broadcastSlotReleaseLocked() {
 	}
 	close(g.slotWake)
 	g.slotWake = make(chan struct{})
-}
-
-// throttleJitter spreads client-side pacing waits to keep fleets of
-// StorHub processes from waking in lockstep against the same budget
-// reset: +0-25%, additive only. Additive (never subtractive) so a wait
-// never dips below what the budget accounting requires: pacing slower
-// is always safe, pacing faster is not. Server-dictated waits (hourly
-// reset, rate-limit Retry-After/Reset) stay exact: the server owns the
-// resume instant, and fuzzing it would either arrive early (wasted call)
-// or sleep past maxWait incorrectly. maxWait denial is evaluated on the
-// unjittered wait inside reserve; the jittered sleep may overshoot
-// maxWait by up to 25%, which is bounded and ctx-cancellable. Zero-safe.
-// The global rand is auto-seeded since Go 1.20, so no explicit seed is
-// needed for jitter.
-func throttleJitter(d time.Duration) time.Duration {
-	if d <= 0 {
-		return d
-	}
-	return d + time.Duration(rand.Int63n(int64(d)/4+1))
 }
 
 // rollback undoes a committed zero-wait reservation whose request never

@@ -3,13 +3,16 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 )
 
-// Release is one GitHub release with its assets.
+// Release is one GitHub release with its assets. The wire spells the tag
+// `tag_name`; every local and parameter spelling in this package is `tag`
+// for the string and `release` for the struct.
 type Release struct {
 	ID        int64   `json:"id"`
 	TagName   string  `json:"tag_name"`
@@ -19,7 +22,8 @@ type Release struct {
 	Assets    []Asset `json:"assets"`
 }
 
-// Asset is one GitHub release asset file.
+// Asset is one GitHub release asset file. IDs are int64: 0 means missing
+// and is only ever returned alongside an error, never as a stored ID.
 type Asset struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
@@ -64,7 +68,7 @@ func (c *Client) RepoExists(ctx context.Context, owner, project string) (bool, e
 	resp, err := c.doJSON(ctx, http.MethodGet, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil)
 	if err != nil {
 		var apiErr *APIError
-		if errorAs(err, &apiErr) && apiErr.NotFound() {
+		if errors.As(err, &apiErr) && apiErr.NotFound() {
 			return false, nil
 		}
 		return false, err
@@ -141,23 +145,19 @@ func (c *Client) deleteByURL(ctx context.Context, endpoint string) error {
 	return nil
 }
 
-// DeleteRepo deletes the owner/project repository.
+// DeleteRepo deletes the owner/project repository through the single
+// retryable-delete profile. Real GitHub 404s a DELETE for an unknown
+// repo, and the delete is retryable, so a lost response after the first
+// delete landed re-sends against a repo that is already gone: gone IS
+// success for an idempotent delete, and reporting failure would wedge
+// DeleteProject on a retry loop against a deleted project.
 func (c *Client) DeleteRepo(ctx context.Context, owner, project string) error {
-	resp, err := c.doJSONWithRetryable(ctx, http.MethodDelete, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)), nil, true)
-	if err != nil {
-		// Real GitHub 404s a DELETE for an unknown repo. The delete is
-		// retryable, so a lost response after the first delete landed
-		// re-sends against a repo that is already gone: gone IS success
-		// for an idempotent delete, and reporting failure would wedge
-		// DeleteProject on a retry loop against a deleted project.
-		var apiErr *APIError
-		if errorAs(err, &apiErr) && apiErr.NotFound() {
-			return nil
-		}
-		return err
+	err := c.deleteByURL(ctx, c.apiURL(fmt.Sprintf("/repos/%s/%s", owner, project)))
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.NotFound() {
+		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	return nil
+	return err
 }
 
 // FindAssetIDByName returns the asset ID for name in the tagged release.

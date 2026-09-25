@@ -277,9 +277,8 @@ func (c *Client) sendOnce(ctx context.Context, method, endpoint string, bodyFact
 	if class == requestUpload || noFollow {
 		// Sized transfers are bounded by transferDeadline below, not
 		// by the client-wide timeout that amputates large payloads.
-		// Applies on top of noFollow too: the legacy direct-200
-		// streaming path (no redirect) must not stay bounded by the
-		// 5-minute client timeout either.
+		// Applies on top of noFollow too: a large raw content read
+		// must not stay bounded by the client timeout either.
 		noTimeout := *client
 		noTimeout.Timeout = 0
 		client = &noTimeout
@@ -492,17 +491,26 @@ const (
 	secondaryBackoffMaxShift = 10
 )
 
-// retryDelay dispatches to the rate-limit vs generic wait calculators.
-// It is kept (same name, same values) because governor and client tests
-// pin it directly; new code may call rateWait/backoffWait explicitly.
-func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
+// RetryDelay is the single retry-delay math shared by every layer: rate
+// rejections wait on the server-dictated instant honored exactly against
+// now (the caller's injected clock, never the wall), anything else backs
+// off exponentially within base/max. Storage and chunk transfer adopt
+// this instead of mirroring the branches.
+func RetryDelay(attempt int, apiErr *APIError, base, limit time.Duration, now time.Time) time.Duration {
 	if apiErr != nil && apiErr.RateLimited {
-		return c.rateWait(attempt, apiErr)
+		return RateWait(attempt, apiErr, now)
 	}
-	return c.backoffWait(attempt, apiErr)
+	return BackoffWait(attempt, apiErr, base, limit)
 }
 
-// rateWait computes the wait before the next attempt for rate-limit
+// retryDelay dispatches to the rate-limit vs generic wait calculators.
+// It is kept (same name, same values) because governor and client tests
+// pin it directly; new code may call RateWait/BackoffWait explicitly.
+func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
+	return RetryDelay(attempt, apiErr, c.baseRetryDelay, c.maxRetryDelay, c.now())
+}
+
+// RateWait computes the wait before the next attempt for rate-limit
 // rejections, following GitHub's documented guidance instead of the
 // generic exponential backoff: primary exhaustion means waiting for
 // x-ratelimit-reset (the doRequest caller refuses waits beyond maxWait),
@@ -513,14 +521,16 @@ func (c *Client) retryDelay(attempt int, apiErr *APIError) time.Duration {
 // secondary rejections wait at least one minute with exponential growth.
 // Every branch is bounded and jittered so a hostile header or a
 // synchronized fleet cannot stall or thunder-herd callers.
-func (c *Client) rateWait(attempt int, apiErr *APIError) time.Duration {
+//
+// now is the caller's clock: the client passes its injectable now() so
+// fake-clock tests freeze reset waits together with the governor.
+func RateWait(attempt int, apiErr *APIError, now time.Time) time.Duration {
 	if !apiErr.RateLimitReset.IsZero() {
 		// Wait for the documented reset exactly: the server dictates the
 		// resume instant, so jitter/caps here only overshoot it. Pinned
 		// by TestResetWaitUsesClientClock: the floor only prevents a hot
-		// loop when the clock has already passed reset. The client's
-		// single (injectable) clock keeps fake-clock tests honest.
-		return nonNegativeDelay(apiErr.RateLimitReset.Sub(c.now()))
+		// loop when the clock has already passed reset.
+		return nonNegativeDelay(apiErr.RateLimitReset.Sub(now))
 	}
 	if apiErr.RetryAfter > 0 {
 		return nonNegativeDelay(apiErr.RetryAfter)
@@ -531,26 +541,21 @@ func (c *Client) rateWait(attempt int, apiErr *APIError) time.Duration {
 	return addJitter(minDuration(secondaryBackoffBase<<attempt, secondaryBackoffCap))
 }
 
-// backoffWait computes the wait for non-rate-limit retries: a plain
-// Retry-After hint bounded by maxRetryDelay (so a hostile or
-// misconfigured header cannot stall callers invisibly for minutes),
-// otherwise exponential backoff with jitter. Rate-limit waits do not
-// pass through here: they are honored exactly and refused up front by
-// the maxWait ceiling in doRequest.
-func (c *Client) backoffWait(attempt int, apiErr *APIError) time.Duration {
+// BackoffWait computes the wait for non-rate-limit retries: a plain
+// Retry-After hint bounded by max (so a hostile or misconfigured header
+// cannot stall callers invisibly for minutes), otherwise exponential
+// backoff with jitter from base. Rate-limit waits do not pass through
+// here: they are honored exactly and refused up front by the maxWait
+// ceiling in doRequest.
+func BackoffWait(attempt int, apiErr *APIError, base, limit time.Duration) time.Duration {
 	if apiErr != nil && apiErr.RetryAfter > 0 {
-		return c.boundedWait(nonNegativeDelay(apiErr.RetryAfter))
+		return BoundedWait(nonNegativeDelay(apiErr.RetryAfter), limit)
 	}
-	base := float64(c.baseRetryDelay)
-	delay := time.Duration(base * math.Pow(2, float64(attempt)))
-	if delay > c.maxRetryDelay {
-		delay = c.maxRetryDelay
+	delay := time.Duration(float64(base) * math.Pow(2, float64(attempt)))
+	if delay > limit {
+		delay = limit
 	}
-	if delay <= 0 {
-		return 0
-	}
-	jitter := time.Duration(rand.Int63n(int64(delay/4 + 1)))
-	return delay + jitter
+	return addJitter(delay)
 }
 
 func minDuration(a, b time.Duration) time.Duration {
@@ -690,11 +695,11 @@ func IsTimeout(err error) bool {
 		return strings.Contains(err.Error(), "Client.Timeout exceeded")
 	}
 	var urlErr *url.Error
-	if errorAs(err, &urlErr) && urlErr.Timeout() {
+	if errors.As(err, &urlErr) && urlErr.Timeout() {
 		return true
 	}
 	var netErr net.Error
-	if errorAs(err, &netErr) && netErr.Timeout() {
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 	return strings.Contains(err.Error(), "Client.Timeout exceeded")
@@ -723,11 +728,11 @@ func isRetryableNetworkError(err error) bool {
 		return IsTimeout(err)
 	}
 	var dnsErr *net.DNSError
-	if errorAs(err, &dnsErr) && dnsErr.IsNotFound {
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 		return false
 	}
 	var netErr net.Error
-	if errorAs(err, &netErr) {
+	if errors.As(err, &netErr) {
 		return true
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) {
@@ -740,21 +745,17 @@ func isRetryableNetworkError(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
 }
 
-func errorAs(err error, target any) bool {
-	return err != nil && errors.As(err, target)
-}
-
-// boundedWait caps non-rate-limit server-provided wait hints (a plain
-// Retry-After on a 5xx) at maxRetryDelay so a hostile or misconfigured
-// header cannot stall callers invisibly for minutes. Rate-limit waits do
-// not pass through here: they are honored exactly and refused up front by
+// BoundedWait caps non-rate-limit server-provided wait hints (a plain
+// Retry-After on a 5xx) at max so a hostile or misconfigured header
+// cannot stall callers invisibly for minutes. Rate-limit waits do not
+// pass through here: they are honored exactly and refused up front by
 // the maxWait ceiling in doRequest.
-func (c *Client) boundedWait(d time.Duration) time.Duration {
+func BoundedWait(d, limit time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	if c.maxRetryDelay > 0 && d > c.maxRetryDelay {
-		return c.maxRetryDelay
+	if limit > 0 && d > limit {
+		return limit
 	}
 	return d
 }

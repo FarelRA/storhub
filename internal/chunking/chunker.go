@@ -2,7 +2,7 @@
 // upload to GitHub releases and reassembles them on download.
 //
 // A StreamingChunker walks a local file sequentially and hands out
-// ChunkReaders, each covering one chunksized window of the file. Chunk
+// ChunkReaders, each covering one chunk of the file. Chunk
 // sizes are clamped to the release-asset ceiling; a zero size means "use
 // the default". Empty files yield zero chunks: NumChunks()==0 and every
 // GetChunk index is out of range - there is nothing to store, and callers
@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -32,21 +31,19 @@ const (
 	DefaultBufferSize = 1 * 1024 * 1024
 )
 
-// ChunkReader reads one chunksized window of the underlying file. It is a
-// section reader: Seek is supported, Read stops at the window end, and the
-// window's wire name/index travel with it via Name/Index.
+// ChunkReader reads one chunk of the underlying file. It is a
+// section reader: Seek is supported for transport rewinds, and Read stops
+// at the chunk end.
 type ChunkReader struct {
 	// mu serializes Read against Seek: the GitHub uploader rewinds via
 	// Seek(0) before a transport retry, but the previous attempt's request
 	// body may still be draining on net/http's persistConn writeLoop.
 	// Without this lock the rewind races that leftover read (and the
 	// rewind's effect can be clobbered mid-retry).
-	mu        sync.Mutex
-	reader    *io.SectionReader
-	offset    int64
-	size      int64
-	chunkName string
-	index     int
+	mu     sync.Mutex
+	reader *io.SectionReader
+	offset int64
+	size   int64
 }
 
 func (c *ChunkReader) Read(p []byte) (int, error) {
@@ -55,43 +52,30 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-// Seek moves the window cursor; see ChunkReader.
+// Seek moves the chunk cursor; see ChunkReader.
 func (c *ChunkReader) Seek(offset int64, whence int) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reader.Seek(offset, whence)
 }
 
-// Size reports the window length in bytes (the final chunk may be short).
+// Size reports the chunk length in bytes (the final chunk may be short).
 func (c *ChunkReader) Size() int64 {
 	return c.size
 }
 
-// Offset reports the window start within the source file.
+// Offset reports the chunk start within the source file.
 func (c *ChunkReader) Offset() int64 {
 	return c.offset
 }
 
-// Name reports the asset name this chunk uploads under (baseName.partNNN,
-// zero-padded to keep lexicographic == numeric order).
-func (c *ChunkReader) Name() string {
-	return c.chunkName
-}
-
-// Index reports this chunk's zero-based position in upload order.
-func (c *ChunkReader) Index() int {
-	return c.index
-}
-
-// StreamingChunker plans fixed-size windows over one open file. It is not
+// StreamingChunker plans fixed-size chunks over one open file. It is not
 // safe for concurrent use; each GetChunk reader seeks its own section.
 type StreamingChunker struct {
 	file      *os.File
 	fileSize  int64
-	baseName  string
 	chunkSize int64
 	numChunks int
-	nameWidth int
 }
 
 // NormalizedSize clamps a configured chunk size into the legal range:
@@ -115,9 +99,9 @@ func NormalizedSize(chunkSize int64) (int64, bool) {
 	return chunkSize, false
 }
 
-// NewStreamingChunker opens filePath and plans chunk windows for it.
+// NewStreamingChunker opens filePath and plans its chunks.
 // chunkSize is clamped through NormalizedSize.
-func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*StreamingChunker, error) {
+func NewStreamingChunker(filePath string, chunkSize int64) (*StreamingChunker, error) {
 	started := time.Now()
 	requested := chunkSize
 	chunkSize, adjusted := NormalizedSize(chunkSize)
@@ -160,12 +144,8 @@ func NewStreamingChunker(filePath, baseName string, chunkSize int64) (*Streaming
 	return &StreamingChunker{
 		file:      file,
 		fileSize:  info.Size(),
-		baseName:  baseName,
 		chunkSize: chunkSize,
 		numChunks: int(count),
-		// Zero-pad chunk names to a width that keeps lexicographic order
-		// equal to numeric order even past 999 parts.
-		nameWidth: len(strconv.FormatInt(count, 10)),
 	}, nil
 }
 
@@ -181,15 +161,15 @@ func (s *StreamingChunker) GetChunk(index int) (*ChunkReader, error) {
 		size = s.fileSize - offset
 	}
 	return &ChunkReader{
-		reader:    io.NewSectionReader(s.file, offset, size),
-		offset:    offset,
-		size:      size,
-		chunkName: fmt.Sprintf("%s.part%0*d", s.baseName, max(s.nameWidth, 3), index+1),
-		index:     index,
+		reader: io.NewSectionReader(s.file, offset, size),
+		offset: offset,
+		size:   size,
 	}, nil
 }
 
 // NumChunks reports ceil(fileSize/chunkSize): zero for an empty file.
+// Construction rejects counts past MaxInt32, so int is safe on every
+// platform without a further checked conversion.
 func (s *StreamingChunker) NumChunks() int {
 	return s.numChunks
 }

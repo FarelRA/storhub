@@ -133,3 +133,64 @@ func TestDownloadAssetStreamRejectsInvalidRange(t *testing.T) {
 		t.Fatalf("no request should be made for an invalid range, got %d", n)
 	}
 }
+
+// TestSharedRetryDelayCoversEveryWaitBranch pins the exported retry-delay
+// math other layers adopt: server-dictated waits honored exactly against
+// the injected clock, client-computed waits bounded and jittered.
+func TestSharedRetryDelayCoversEveryWaitBranch(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	base := 10 * time.Millisecond
+	limit := 160 * time.Millisecond
+
+	reset := &APIError{StatusCode: 429, RateLimited: true, RateLimitReset: now.Add(90 * time.Second)}
+	if got := RetryDelay(0, reset, base, limit, now); got != 90*time.Second {
+		t.Fatalf("reset wait must be honored exactly, got %v", got)
+	}
+
+	hint := &APIError{StatusCode: 429, RateLimited: true, RetryAfter: 5 * time.Second}
+	if got := RetryDelay(0, hint, base, limit, now); got != 5*time.Second {
+		t.Fatalf("rate-limited hint must be honored exactly, got %v", got)
+	}
+
+	bare := &APIError{StatusCode: 429, RateLimited: true}
+	if got := RetryDelay(0, bare, base, limit, now); got < time.Minute || got > 75*time.Second {
+		t.Fatalf("bare secondary wait must sit in [60s,75s], got %v", got)
+	}
+
+	plain := &APIError{StatusCode: 503, RetryAfter: time.Hour}
+	if got := RetryDelay(0, plain, base, limit, now); got != limit {
+		t.Fatalf("plain hint must be capped at max, got %v", got)
+	}
+
+	if got := RetryDelay(3, nil, base, limit, now); got < 80*time.Millisecond || got > 200*time.Millisecond {
+		t.Fatalf("plain backoff attempt 3 must sit in [80ms,200ms], got %v", got)
+	}
+
+	if got := BoundedWait(time.Hour, limit); got != limit {
+		t.Fatalf("BoundedWait must cap at max, got %v", got)
+	}
+	if got := BoundedWait(-time.Second, limit); got != 0 {
+		t.Fatalf("BoundedWait must floor negative waits, got %v", got)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	c := NewClient("token", retryTaxonomyConfig(server, nil))
+	for attempt := 0; attempt < 4; attempt++ {
+		// Jitter draws differ per call, so method and export must agree
+		// on bounds, not bits: both compute the same secondary backoff.
+		floor := 60 * time.Second << attempt
+		ceiling := floor + floor/4
+		for _, got := range []time.Duration{
+			c.retryDelay(attempt, bare),
+			RetryDelay(attempt, bare, c.baseRetryDelay, c.maxRetryDelay, c.now()),
+		} {
+			if got < floor || got > ceiling {
+				t.Fatalf("secondary backoff attempt %d must sit in [%v,%v], got %v", attempt, floor, ceiling, got)
+			}
+		}
+	}
+}

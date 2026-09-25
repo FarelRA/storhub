@@ -118,12 +118,12 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			logging.Warn(c.logger, "fresh asset URL rejected; retrying resolution", "asset", assetID, "status", status)
 			continue
 		}
-		// Non-redirect response: treat it as the final answer (also keeps
-		// test servers that stream bytes directly working unchanged). Error
+		// The octet-stream endpoint answers with a signed-URL redirect;
+		// anything else is a server talking out of contract. Error
 		// statuses never reach here: doRequest already converted every
 		// >=400 response into an *APIError.
-		logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", resp.ContentLength, "elapsed", time.Now().UTC().Sub(started))
-		return resp.Body, resp.ContentLength, nil
+		_ = resp.Body.Close()
+		return nil, 0, fmt.Errorf("download asset %d: expected redirect, got status %d", assetID, resp.StatusCode)
 	}
 	return nil, 0, fmt.Errorf("download asset %d: exhausted cdn re-resolution attempts", assetID)
 }

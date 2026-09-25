@@ -243,7 +243,7 @@ func TestUploadAssetBurstSurvivesLowHourlySnapshot(t *testing.T) {
 	// budget is healthy. Asset uploads must not draw from the hourly bucket,
 	// so a burst against a low snapshot must fire with zero throttle sleeps.
 	// NOTE: the clock-advancing sleep is load-bearing: a recording no-op
-	// sleep sends acquire() into an infinite WARN-spinning loop (2026-09-09:
+	// sleep sends admission into an infinite WARN-spinning loop (2026-09-09:
 	// 8.7M lines in 17s, OOM-killed the go process twice). Never use a
 	// frozen clock with throttle-asserting tests.
 	var posts atomic.Int32
@@ -407,7 +407,7 @@ func TestDownloadAssetStreamReresolvesOn618(t *testing.T) {
 	}
 }
 
-func TestDownloadAssetStreamDirect200Legacy(t *testing.T) {
+func TestAssetDownloadRejectsNonRedirectResponse(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Range") != "bytes=0-4" {
@@ -418,14 +418,8 @@ func TestDownloadAssetStreamDirect200Legacy(t *testing.T) {
 	}))
 	defer server.Close()
 	c := NewClient("t", retryTaxonomyConfig(server, nil))
-	body, _, err := c.DownloadAssetStream(context.Background(), "o", "p", 7, 0, 4)
-	if err != nil {
-		t.Fatalf("legacy direct download: %v", err)
-	}
-	data, _ := io.ReadAll(body)
-	_ = body.Close()
-	if string(data) != "12345" {
-		t.Fatalf("body=%q", data)
+	if _, _, err := c.DownloadAssetStream(context.Background(), "o", "p", 7, 0, 4); err == nil {
+		t.Fatal("a non-redirect asset response must surface an error, not bytes")
 	}
 }
 

@@ -51,7 +51,10 @@ type deleteFileRequest struct {
 	SHA     string `json:"sha"`
 }
 
-// ContentEntry is one item in a contents-API directory listing.
+// ContentEntry is one item in a contents-API directory listing. It names
+// the same object the git layer calls a tree entry and the REST layer a
+// directory entry: Type "file"/"dir" here. The structs stay per-backend
+// (the wire shapes differ); this comment is the map, not a merge.
 type ContentEntry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`

@@ -216,14 +216,14 @@ func TestAcquireCtxDoneRollsBackReservation(t *testing.T) {
 	cfg := storcfg.Default()
 	cfg.MaxConcurrentRequests = 1
 	g := newRateGovernor(cfg, nil, func(context.Context, time.Duration) error { return nil })
-	rel, err := g.acquire(context.Background(), 5, true, false)
+	rel, err := g.acquireClass(context.Background(), 5, requestContent)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	defer rel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := g.acquire(ctx, 5, true, false); !errors.Is(err, context.Canceled) {
+	if _, err := g.acquireClass(ctx, 5, requestContent); !errors.Is(err, context.Canceled) {
 		t.Fatalf("slot-blocked acquire on canceled ctx must fail canceled, got %v", err)
 	}
 	if got := g.winPoints; got != 5 {

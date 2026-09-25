@@ -142,7 +142,7 @@ func TestAssetURLCacheUsesGovernorClock(t *testing.T) {
 	}
 }
 
-// The acquire() call must not park the concurrency slot while sleeping
+// Admission must not park the concurrency slot while sleeping
 // out a throttle wait. A throttled waiter holding a slot
 // head-of-line-blocks cheap requests behind it.
 func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
@@ -170,7 +170,7 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 	// Fill the per-minute point window BEFORE anyone holds the slot, so
 	// the next acquire must throttle. (With concurrency 1, filling
 	// while a holder parks the slot would deadlock the filler.)
-	rel, err := g.acquire(context.Background(), 1, false, false)
+	rel, err := g.acquireClass(context.Background(), 1, requestRead)
 	if err != nil {
 		t.Fatalf("window-fill acquire: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 
 	// Holder takes the only slot and keeps it. Its own throttle sleep
 	// is the baseline: the waiter must add one more while parked.
-	relA, err := g.acquire(context.Background(), 1, false, false)
+	relA, err := g.acquireClass(context.Background(), 1, requestRead)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestAcquireDoesNotHoldSlotWhileThrottled(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := g.acquire(ctx, 1, false, false)
+		_, err := g.acquireClass(ctx, 1, requestRead)
 		done <- err
 	}()
 

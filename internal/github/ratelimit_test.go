@@ -68,17 +68,17 @@ func TestGovernorObserveAndLocalAccounting(t *testing.T) {
 	if !snap.seen || snap.limit != 5000 || snap.remaining != 100 {
 		t.Fatalf("snapshot after observe: %+v", snap)
 	}
-	release, err := h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
+	release, err := h.g.acquireClass(context.Background(), methodCost(http.MethodGet), requestRead)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
+	release, err = h.g.acquireClass(context.Background(), methodCost(http.MethodGet), requestRead)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	release()
-	release, _ = h.g.acquire(context.Background(), methodCost(http.MethodGet), false, false)
+	release, _ = h.g.acquireClass(context.Background(), methodCost(http.MethodGet), requestRead)
 	release()
 	if left := h.g.snapshot().remaining; left != 97 {
 		t.Fatalf("local accounting drift: remaining=%d, want 97", left)
@@ -89,7 +89,7 @@ func TestGovernorReserveFloorDeniesWhenFailFast(t *testing.T) {
 	t.Parallel()
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 0 })
 	h.observe(5000, 10, 40*time.Minute)
-	_, err := h.g.acquire(context.Background(), 1, false, false)
+	_, err := h.g.acquireClass(context.Background(), 1, requestRead)
 	apiErr, ok := err.(*APIError)
 	if !ok {
 		t.Fatalf("expected *APIError, got %v", err)
@@ -107,7 +107,7 @@ func TestGovernorReserveFloorWaitsUntilReset(t *testing.T) {
 	h := newGovHarness(func(c *storcfg.Config) { c.RateMaxWait = 15 * time.Minute })
 	resetIn := 5 * time.Minute
 	h.observe(5000, 10, resetIn)
-	release, err := h.g.acquire(context.Background(), 1, false, false)
+	release, err := h.g.acquireClass(context.Background(), 1, requestRead)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -123,12 +123,12 @@ func TestGovernorPointsWindowThrottlesWrites(t *testing.T) {
 		c.RatePointsPerMin = 6
 		c.RateMaxWait = time.Hour
 	})
-	release, err := h.g.acquire(context.Background(), 5, false, false)
+	release, err := h.g.acquireClass(context.Background(), 5, requestRead)
 	if err != nil || release == nil {
 		t.Fatalf("first write should pass: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 5, false, false)
+	release, err = h.g.acquireClass(context.Background(), 5, requestRead)
 	if err != nil {
 		t.Fatalf("second write should wait, not fail: %v", err)
 	}
@@ -144,17 +144,17 @@ func TestGovernorContentWindowCapsUploadsOnly(t *testing.T) {
 		c.RateContentPerMin = 1
 		c.RateMaxWait = time.Hour
 	})
-	release, err := h.g.acquire(context.Background(), 5, true, false)
+	release, err := h.g.acquireClass(context.Background(), 5, requestContent)
 	if err != nil {
 		t.Fatalf("first upload: %v", err)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 1, false, false)
+	release, err = h.g.acquireClass(context.Background(), 1, requestRead)
 	if err != nil || len(h.sleeps) != 0 {
 		t.Fatalf("reads must not draw from the content window: err=%v sleeps=%v", err, h.sleeps)
 	}
 	release()
-	release, err = h.g.acquire(context.Background(), 5, true, false)
+	release, err = h.g.acquireClass(context.Background(), 5, requestContent)
 	if err != nil {
 		t.Fatalf("second upload must wait, not fail: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestGovernorDormantWithoutServerBudget(t *testing.T) {
 	t.Parallel()
 	h := newGovHarness(nil)
 	for i := 0; i < 20; i++ {
-		release, err := h.g.acquire(context.Background(), 1, false, false)
+		release, err := h.g.acquireClass(context.Background(), 1, requestRead)
 		if err != nil {
 			t.Fatalf("request %d failed without budget data: %v", i, err)
 		}
@@ -179,21 +179,22 @@ func TestGovernorDormantWithoutServerBudget(t *testing.T) {
 	}
 }
 
-// TestThrottleJitterBounds pins the jitter contract: additive-only (never
+// TestPacingJitterBounds pins the jitter contract: additive-only (never
 // below the budgeted wait, so pacing never overspends), capped at +25%,
-// and zero-safe. Bounds are on rand.Int63n's range, so they hold with
-// probability 1: no flake window.
-func TestThrottleJitterBounds(t *testing.T) {
+// and zero-safe. Negative waits floor to zero instead of sleeping a
+// meaningless duration. Bounds are on rand.Int63n's range, so they hold
+// with probability 1: no flake window.
+func TestPacingJitterBounds(t *testing.T) {
 	t.Parallel()
-	if got := throttleJitter(0); got != 0 {
+	if got := addJitter(0); got != 0 {
 		t.Fatalf("zero wait must stay zero, got %v", got)
 	}
-	if got := throttleJitter(-time.Second); got != -time.Second {
-		t.Fatalf("negative wait must pass through, got %v", got)
+	if got := addJitter(-time.Second); got != 0 {
+		t.Fatalf("negative wait must floor to zero, got %v", got)
 	}
 	const d = 40 * time.Second
 	for i := 0; i < 1000; i++ {
-		if got := throttleJitter(d); got < d || got > d+d/4 {
+		if got := addJitter(d); got < d || got > d+d/4 {
 			t.Fatalf("jitter out of [d, 1.25d]: got %v", got)
 		}
 	}
