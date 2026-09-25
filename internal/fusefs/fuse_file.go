@@ -60,11 +60,11 @@ func (h *storhubHandle) handlePath() string {
 	return h.path
 }
 
-// snapshotWriteState returns the handle's write state under h.mu. Release
+// loadWriteState returns the handle's write state under h.mu. Release
 // nils the pointer under the same lock, so every other reader must load it
 // this way: a plain read races the Release write. h.mu is a leaf lock; the
 // caller must release it before taking opMu or the state mutex.
-func (h *storhubHandle) snapshotWriteState() *inodeWriteState {
+func (h *storhubHandle) loadWriteState() *inodeWriteState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.writeState
@@ -337,7 +337,7 @@ func (s *Filesystem) newHandle(ctx context.Context, inode uint64, targetPath str
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND|syscall.O_TRUNC) != 0 {
 		writeState, err := s.acquireWriteState(ctx, inode, h.path, bootstrap)
 		if err != nil {
-			h.closeTemp()
+			h.closeHandleTemp()
 			s.mu.Lock()
 			delete(s.handles, h.id)
 			s.mu.Unlock()
@@ -515,7 +515,7 @@ func (h *storhubHandle) Read(ctx context.Context, dest []byte, off int64) (resul
 			}
 		}
 	}()
-	if writeState := h.snapshotWriteState(); writeState != nil {
+	if writeState := h.loadWriteState(); writeState != nil {
 		// Serialize with commits on opMu (always opMu before mu): commit
 		// drops mu across its network window while mutating the plan,
 		// and a read straddling that window would serve half-old,

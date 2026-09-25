@@ -157,7 +157,7 @@ func (w *inodeWriteState) createRangeSnapshotLocked(ctx context.Context, ranges 
 	})
 }
 
-func (w *inodeWriteState) closeTemp() {
+func (w *inodeWriteState) closeWriteTemp() {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -190,7 +190,7 @@ func (w *inodeWriteState) closeTemp() {
 // quarantineTemps moves the overlay temp (the only copy of uncommitted
 // written data) into the recovery directory; the re-downloadable base snapshot
 // is discarded as usual. Marks the state closed so a later closeTemp is a no-op.
-func (w *inodeWriteState) quarantineTemps() {
+func (w *inodeWriteState) quarantineWriteTemp() {
 	w.quarantineTempsReason(quarantineReasonCommitFailure)
 }
 

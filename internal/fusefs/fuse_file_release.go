@@ -23,12 +23,12 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		// errno, but a successful close(2) may still have been reported
 		// for earlier fsync-less writes). Preserve the overlay for manual
 		// recovery instead of deleting it.
-		h.quarantineTemps()
+		h.quarantineHandleTemp()
 		// Load-then-use: commit above already snapshotted the same
 		// pointer, and a concurrent op may hold it too; the state
 		// outlives the handle via refs and the registry.
-		if writeState := h.snapshotWriteState(); writeState != nil && h.fs.soleWriteStateRef(writeState) {
-			writeState.quarantineTemps()
+		if writeState := h.loadWriteState(); writeState != nil && h.fs.soleWriteStateRef(writeState) {
+			writeState.quarantineWriteTemp()
 		}
 	} else if drainErrno := h.flushAndDrain(ctx); drainErrno != 0 {
 		// The commit published but the drain did not confirm remote
@@ -37,10 +37,10 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 		// dirty state for retry; quarantining here would double-replay
 		// the same bytes via redrive plus the quarantined overlay.
 		// Cleanup follows the success path (close, do not preserve).
-		h.closeTemp()
+		h.closeHandleTemp()
 		errno = drainErrno
 	} else {
-		h.closeTemp()
+		h.closeHandleTemp()
 	}
 	h.fs.mu.Lock()
 	delete(h.fs.handles, h.id)
@@ -78,7 +78,7 @@ func (h *storhubHandle) Release(ctx context.Context) syscall.Errno {
 
 // quarantineTemps moves this handle's temp snapshot into the recovery
 // directory instead of deleting it. Used on commit failure.
-func (h *storhubHandle) quarantineTemps() {
+func (h *storhubHandle) quarantineHandleTemp() {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -102,7 +102,7 @@ func (h *storhubHandle) quarantineTemps() {
 	}
 }
 
-func (h *storhubHandle) closeTemp() {
+func (h *storhubHandle) closeHandleTemp() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {

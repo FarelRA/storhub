@@ -48,7 +48,7 @@ type inodeWriteState struct {
 	logicalSize int64
 	// Vocabulary: dirty names uncommitted byte spans (dirtyRanges),
 	// pending names the uncommitted metadata patch (pending), overlay
-	// names the temp file staging the bytes. overlayEntryLocked applies
+	// names the temp file staging the bytes. applyPendingLocked applies
 	// the pending patch plus the logical size onto an entry.
 	dirtyRanges       []ByteRange
 	tempAuthoritative bool
@@ -98,7 +98,7 @@ func (s *Filesystem) applyPendingSize(entry *shfs.EntryInfo) {
 	if state.deleted {
 		return
 	}
-	state.overlayEntryLocked(entry)
+	state.applyPendingLocked(entry)
 }
 
 func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, targetPath string, bootstrap *writeBootstrap) (*inodeWriteState, error) {
@@ -127,7 +127,7 @@ func (s *Filesystem) acquireWriteState(ctx context.Context, inode uint64, target
 			delete(s.writeStates, inode)
 		}
 		s.mu.Unlock()
-		state.closeTemp()
+		state.closeWriteTemp()
 		return nil, err
 	}
 	return state, nil
@@ -168,7 +168,7 @@ func (s *Filesystem) releaseWriteState(state *inodeWriteState) {
 	}
 	s.mu.Unlock()
 	if shouldClose {
-		state.closeTemp()
+		state.closeWriteTemp()
 	}
 }
 

@@ -64,7 +64,7 @@ func TestLogicalSizeSetterMovesTempAndRanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	ws.opMu.Lock()
 	ws.mu.Lock()
 	defer func() {
@@ -111,7 +111,7 @@ func TestOverlayTruncateLogsChosenPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	ws.opMu.Lock()
 	ws.mu.Lock()
 	setErr := ws.setSizeLocked(4)
@@ -136,7 +136,7 @@ func TestSetSizeRegrowUsesOverlayPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handle: %v", err)
 	}
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	ws.opMu.Lock()
 	ws.mu.Lock()
 	if err := ws.setSizeLocked(16); err != nil {

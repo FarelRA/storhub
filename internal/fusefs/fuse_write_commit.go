@@ -12,7 +12,7 @@ import (
 func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	// Load-then-use: Release nils the pointer under h.mu, so snapshot
 	// it once here and use only the local below.
-	writeState := h.snapshotWriteState()
+	writeState := h.loadWriteState()
 	if writeState == nil {
 		// No write state exists for this handle: only read-oriented
 		// materialized snapshots (e.g. displaced handles) land here. The
@@ -141,7 +141,7 @@ func (h *storhubHandle) commit(ctx context.Context) syscall.Errno {
 	// Load-then-use: Release nils the pointer under h.mu, so snapshot
 	// it once here and thread ws through every helper below. h.mu is
 	// released before opMu/mu are taken, preserving the leaf order.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		// Read-only or detached handle: provably nothing to commit.
 		return 0
@@ -315,7 +315,7 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 	// Load-then-use under h.mu: Release nils the pointer concurrently.
 	// commit holds opMu across this whole frame and Release nils only
 	// after its own commit, so the snapshot cannot go nil mid-frame.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		return syscall.EIO
 	}
@@ -365,7 +365,7 @@ func (h *storhubHandle) commitTemp(ctx context.Context, targetPath string, baseS
 func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath string, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	// Load-then-use under h.mu; see commitTemp for why this cannot go
 	// nil mid-frame.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		return syscall.EIO
 	}
@@ -407,7 +407,7 @@ func (h *storhubHandle) commitChunkRewrite(ctx context.Context, targetPath strin
 func (h *storhubHandle) commitReplace(ctx context.Context, targetPath string, logicalSize int64, _ []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	// Load-then-use under h.mu; see commitTemp for why this cannot go
 	// nil mid-frame.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		return syscall.EIO
 	}
@@ -461,7 +461,7 @@ func (w *inodeWriteState) removeDirtyRangeLocked(start, end int64) {
 func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, baseSize, logicalSize int64, planned []ByteRange, pending shfs.MetadataPatch, notifies *commitNotifies) syscall.Errno {
 	// Load-then-use under h.mu; see commitTemp for why this cannot go
 	// nil mid-frame.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		return syscall.EIO
 	}
@@ -590,7 +590,7 @@ func (h *storhubHandle) commitPostUpdate(ctx context.Context, targetPath string,
 	}
 	// Load-then-use under h.mu; see commitTemp for why this cannot go
 	// nil mid-frame.
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	if ws == nil {
 		return syscall.EIO
 	}

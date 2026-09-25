@@ -37,7 +37,7 @@ func (h *storhubHandle) Allocate(ctx context.Context, off uint64, size uint64, m
 	_ = ctx
 	// Load-then-use: the pointer is nilled under h.mu by Release, so
 	// snapshot it first and use only the local below.
-	writeState := h.snapshotWriteState()
+	writeState := h.loadWriteState()
 	if writeState == nil {
 		return syscall.EBADF
 	}

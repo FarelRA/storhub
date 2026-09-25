@@ -57,7 +57,7 @@ func (n *storhubNode) Setattr(ctx context.Context, f gofusefs.FileHandle, in *fu
 func (n *storhubNode) handleBase(handle *storhubHandle) (shfs.EntryInfo, *inodeWriteState, bool) {
 	// Load-then-use under h.mu: Release nils the pointer concurrently,
 	// and the state outlives the handle via refs and the registry.
-	if state := handle.snapshotWriteState(); state != nil && state.inode == n.inode {
+	if state := handle.loadWriteState(); state != nil && state.inode == n.inode {
 		if base, ok := state.cachedBaseEntry(); ok {
 			return base, state, true
 		}
@@ -105,11 +105,11 @@ func (n *storhubNode) detachedReply(base shfs.EntryInfo, state *inodeWriteState,
 	entry := base
 	if state != nil {
 		state.mu.Lock()
-		state.overlayEntryLocked(&entry)
+		state.applyPendingLocked(&entry)
 		state.mu.Unlock()
 	} else if shared := n.fs.writeStateForInode(n.inode); shared != nil {
 		shared.mu.Lock()
-		shared.overlayEntryLocked(&entry)
+		shared.applyPendingLocked(&entry)
 		shared.mu.Unlock()
 	}
 	entry.Path = ""
@@ -202,7 +202,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 				return syscall.EIO
 			}
 			overlayBase := base
-			state.overlayEntryLocked(&overlayBase)
+			state.applyPendingLocked(&overlayBase)
 			if !uidOK {
 				uid = overlayBase.UID
 			}
@@ -239,7 +239,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 				return syscall.EIO
 			}
 			overlayBase := base
-			state.overlayEntryLocked(&overlayBase)
+			state.applyPendingLocked(&overlayBase)
 			if !atimeOK {
 				atime = time.Unix(0, overlayBase.AccessedAt)
 			}
@@ -274,7 +274,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 func (n *storhubNode) setattrOverlayState(ctx context.Context, f gofusefs.FileHandle) (*inodeWriteState, syscall.Errno) {
 	// Load-then-use under h.mu: Release nils the pointer concurrently.
 	if handle, ok := f.(*storhubHandle); ok {
-		if ws := handle.snapshotWriteState(); ws != nil {
+		if ws := handle.loadWriteState(); ws != nil {
 			if errno := handle.checkOverlayCaller(ctx); errno != 0 {
 				return nil, errno
 			}
@@ -393,7 +393,7 @@ func (n *storhubNode) setattrOwner(ctx context.Context, targetPath string, in *f
 			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
-		state.overlayEntryLocked(entry)
+		state.applyPendingLocked(entry)
 		if !uidOK {
 			uid = entry.UID
 		}
@@ -459,7 +459,7 @@ func (n *storhubNode) setattrTimes(ctx context.Context, targetPath string, in *f
 			n.fs.unlockOpMu(&state.opMu)
 			return syscall.EIO
 		}
-		state.overlayEntryLocked(entry)
+		state.applyPendingLocked(entry)
 		if !atimeOK {
 			atime = time.Unix(0, entry.AccessedAt)
 		}
@@ -505,7 +505,7 @@ func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, stat
 	}
 	if state != nil && !n.isDir {
 		state.mu.Lock()
-		state.overlayEntryLocked(entry)
+		state.applyPendingLocked(entry)
 		state.mu.Unlock()
 	}
 	fillAttr(&out.Attr, entry)

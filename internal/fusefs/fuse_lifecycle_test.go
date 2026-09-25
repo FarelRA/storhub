@@ -372,7 +372,7 @@ func TestChunkRewriteCommitCleansRangeSnapshot(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(rewrittenInput), "inoderanges") {
 		t.Fatalf("backend must receive an inoderanges* snapshot, got %q", rewrittenInput)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 	assertCacheDirClean(t, cacheDir)
 }
 

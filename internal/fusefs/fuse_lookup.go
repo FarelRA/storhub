@@ -85,13 +85,13 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 // handleless stat falls back to the shared state via applyPendingSize.
 // Every stat route (lookup, getattr, readdir-plus) funnels here, so all
 // of them observe the same staged mode/owner/times/size. The overlay
-// mechanics themselves (overlayEntryLocked, applyPendingSize) live with
+// mechanics themselves (applyPendingLocked, applyPendingSize) live with
 // the write path; this is the read-side funnel over them.
 func (s *Filesystem) overlayEntry(f gofusefs.FileHandle, inode uint64, entry *shfs.EntryInfo) {
 	if handle, ok := f.(*storhubHandle); ok {
-		if ws := handle.snapshotWriteState(); ws != nil && ws.inode == inode {
+		if ws := handle.loadWriteState(); ws != nil && ws.inode == inode {
 			ws.mu.Lock()
-			ws.overlayEntryLocked(entry)
+			ws.applyPendingLocked(entry)
 			ws.mu.Unlock()
 			return
 		}

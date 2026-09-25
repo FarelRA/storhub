@@ -365,7 +365,7 @@ func (w *inodeWriteState) hasPendingMetadataLocked() bool {
 	return w.pending.HasMode || w.pending.HasOwner || w.pending.HasTimes
 }
 
-func (w *inodeWriteState) overlayEntryLocked(entry *shfs.EntryInfo) {
+func (w *inodeWriteState) applyPendingLocked(entry *shfs.EntryInfo) {
 	if entry == nil {
 		return
 	}

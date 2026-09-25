@@ -40,7 +40,7 @@ func TestCommitPatchStreamsBoundedEdits(t *testing.T) {
 	if n, errno := h.Write(ctx, want, 0); errno != 0 || n != size {
 		t.Fatalf("write: n=%d errno=%v", n, errno)
 	}
-	ws := h.snapshotWriteState()
+	ws := h.loadWriteState()
 	ws.mu.Lock()
 	planned := ws.plannedRangesLocked()
 	ws.mu.Unlock()

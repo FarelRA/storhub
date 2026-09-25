@@ -63,7 +63,7 @@ func TestWriteStateAndRangeHelpers(t *testing.T) {
 	if total := totalByteRanges([]ByteRange{{Start: 0, End: 2}, {Start: 5, End: 7}}); total != 4 {
 		t.Fatalf("unexpected total bytes: %d", total)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 	if _, err := os.Stat(temp.Name()); !os.IsNotExist(err) {
 		t.Fatalf("expected temp cleanup, got %v", err)
 	}
@@ -108,7 +108,7 @@ func TestRefreshBaseSnapshotLockedUpdatesCachedBase(t *testing.T) {
 	if string(got) != "abXYef" {
 		t.Fatalf("unexpected refreshed base temp: %q", got)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 }
 
 func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
@@ -143,7 +143,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempForFullyDirtyFile(t *testing.T) {
 	if string(got) != "abcdef" {
 		t.Fatalf("unexpected committed snapshot: %q", got)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 }
 
 func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T) {
@@ -179,7 +179,7 @@ func TestCreateCommittedSnapshotUsesWorkingTempAfterTruncateToZero(t *testing.T)
 	if string(got) != "abcdef" {
 		t.Fatalf("unexpected committed snapshot after truncate: %q", got)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 }
 
 func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
@@ -214,7 +214,7 @@ func TestCreateCommittedSnapshotZeroFillsSparseAuthoritativeTemp(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("unexpected sparse committed snapshot: %v", got)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 }
 
 func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.T) {
@@ -246,7 +246,7 @@ func TestReplaceInputPathLockedReusesWorkingTempForAuthoritativeData(t *testing.
 	if inputPath != working.Name() {
 		t.Fatalf("expected working temp path %q, got %q", working.Name(), inputPath)
 	}
-	state.closeTemp()
+	state.closeWriteTemp()
 }
 
 func TestSequentialWriteCommitReplacesFile(t *testing.T) {

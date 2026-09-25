@@ -392,7 +392,7 @@ func (s *Filesystem) Close() error {
 		s.unlockOpMu(&writeState.opMu)
 	}
 	for _, handle := range handles {
-		handle.closeTemp()
+		handle.closeHandleTemp()
 	}
 	// Release the ownership claim last so the directory stays exclusively
 	// ours for the whole teardown, including temp quarantine above. The

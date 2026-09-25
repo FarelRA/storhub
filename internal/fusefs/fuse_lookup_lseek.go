@@ -95,7 +95,7 @@ func (h *storhubHandle) Lseek(ctx context.Context, off uint64, whence uint32) (u
 // file. Callers must not hold h.mu or any state mutex.
 func (h *storhubHandle) lseekView() (int64, []ByteRange) {
 	// Load-then-use under h.mu: Release nils the pointer concurrently.
-	if ws := h.snapshotWriteState(); ws != nil {
+	if ws := h.loadWriteState(); ws != nil {
 		ws.mu.Lock()
 		defer ws.mu.Unlock()
 		size := ws.logicalSize
