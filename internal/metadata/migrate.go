@@ -10,10 +10,10 @@ import (
 )
 
 // CurrentVersion is the newest metadata schema the code reads and writes
-// (6, the split layout). The pure blob migrators below only ever produce
-// maxBlobVersion (5); the 5->6 step is a write-time layout split, not a bytes
-// transform. The alias stays while storage and tests still name it; it goes
-// once they use maxMetadataVersion directly.
+// (6, the split layout). It is the exported accessor for the internal
+// ceiling: embedders name this, never the blob-only maxBlobVersion (5).
+// The pure blob migrators below only ever produce maxBlobVersion; the
+// 5->6 step is a write-time layout split, not a bytes transform.
 const CurrentVersion = maxMetadataVersion
 
 // versionProbe is the single version/shape envelope for every JSON document

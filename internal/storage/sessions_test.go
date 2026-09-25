@@ -581,6 +581,18 @@ func TestParseOpenMode(t *testing.T) {
 	}
 }
 
+func TestOpenModeStringIsDebugOnly(t *testing.T) {
+	t.Parallel()
+	// String renders debug spellings ("rw", "r+w", "+create") that are
+	// deliberately not fopen inputs: the mapping is one-way by design.
+	// ("r" alone is both, a valid fopen input and the read-only bit.)
+	for _, debug := range []string{"rw", "r+w", "w+create+trunc", "none"} {
+		if _, err := ParseOpenMode(debug); err == nil {
+			t.Fatalf("debug spelling %q must not parse as a mode", debug)
+		}
+	}
+}
+
 func TestSessionCommitAsOpenerNotCloser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

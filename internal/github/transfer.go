@@ -43,14 +43,14 @@ func (c *Client) UploadAsset(ctx context.Context, uploadURL, assetName string, r
 	}
 	assetID, err := c.uploadAssetAttempt(ctx, endpoint, assetName, reader, size)
 	if err == nil {
-		logging.Debug(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started))
+		logging.Debug(c.logger, "upload asset complete", "asset", assetName, "size", size, "elapsed", time.Since(started))
 		return assetID, nil
 	}
 	// Fail loudly: silently reusing a pre-existing asset with the same name
 	// would hand the caller an unverified ID (possibly stale or partial
 	// content) as if the fresh bytes had been stored. Callers that want
 	// name-based reuse can compose FindAssetIDByName themselves.
-	logging.Error(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Now().UTC().Sub(started), "err", err)
+	logging.Error(c.logger, "upload asset failed", "asset", assetName, "size", size, "elapsed", time.Since(started), "err", err)
 	return 0, fmt.Errorf("upload asset: %w", err)
 }
 
@@ -82,7 +82,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 		if cached {
 			body, size, status, err := c.fetchCDNRange(ctx, cdnURL.url, rangeHeader, end-start+1)
 			if err == nil {
-				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Now().UTC().Sub(started))
+				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Since(started))
 				return body, size, nil
 			}
 			if !isCDNRejection(status) {
@@ -108,7 +108,7 @@ func (c *Client) DownloadAssetStream(ctx context.Context, owner, project string,
 			c.storeAssetURL(assetID, location)
 			body, size, status, fetchErr := c.fetchCDNRange(ctx, location, rangeHeader, end-start+1)
 			if fetchErr == nil {
-				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Now().UTC().Sub(started))
+				logging.Debug(c.logger, "download asset complete", "asset", assetID, "size", size, "elapsed", time.Since(started))
 				return body, size, nil
 			}
 			if !isCDNRejection(status) || attempt > 0 {

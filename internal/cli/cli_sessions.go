@@ -250,10 +250,11 @@ func (a *App) newSessionAppendCmd() *cobra.Command {
 visible only to this handle until sync or close.
 
 Single-appender scope: the end offset is read then written in two
-steps (no server-side append primitive exists on the session manager),
-so two handles appending concurrently can stage at the same offset and
-one commit wins. Concurrent appenders must coordinate outside the
-session (e.g. one writer, or separate handles merged later).`,
+steps (the server forces end-offset writes only for sessions opened
+in append mode, and this command accepts any mode), so two handles
+appending concurrently can stage at the same offset and one commit
+wins. Concurrent appenders must coordinate outside the session (e.g.
+one writer, or separate handles merged later).`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runSessionAppend,
 	}
@@ -274,12 +275,12 @@ func (a *App) runSessionAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Read-then-write, not a server-side append: the session manager
-	// exposes only positional WriteSession (no atomic append primitive),
-	// and adding one would need storage changes. The single-appender
-	// scope is documented on newSessionAppendCmd; concurrent appenders
-	// race on the stat size and fail loud at commit instead of
-	// interleaving silently.
+	// Read-then-write: the server forces end-offset writes only for
+	// sessions opened in append mode, while this command must work on a
+	// handle opened in any mode, so it stats the staged end first. The
+	// single-appender scope is documented on newSessionAppendCmd;
+	// concurrent appenders race on the stat size and fail loud at
+	// commit instead of interleaving silently.
 	stat, err := hub.StatSession(cmd.Context(), handle)
 	if err != nil {
 		return err
