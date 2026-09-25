@@ -33,10 +33,8 @@ func (n *storhubNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		n.fs.errorOp("lookup failed", "path", childPath, "err", err)
 		return nil, errnoFromError(err)
 	}
-	n.fs.applyPendingSize(entry)
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	fillEntryOut(out, entry, n.fs.opts)
+	n.fs.overlayEntry(nil, entry.Inode, entry)
+	ino := n.attachEntry(ctx, entry, out)
 	if n.fs.debugEnabled() {
 		n.fs.debugOp("lookup complete", "path", childPath, "inode", entry.Inode, "elapsed", time.Since(started))
 	}
@@ -71,7 +69,7 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	// Overlay staged mode/owner/times/size exactly as finishSetattr
 	// does, so fstat on an open fd observes pre-commit fchmod/fchown
 	// instead of the last committed stat.
-	n.fs.applyOverlayForGetattr(f, n.inode, entry)
+	n.fs.overlayEntry(f, n.inode, entry)
 	fillAttr(&out.Attr, entry)
 	out.SetTimeout(n.fs.opts.AttrTimeout)
 	if n.fs.debugEnabled() {
@@ -80,13 +78,16 @@ func (n *storhubNode) Getattr(ctx context.Context, f gofusefs.FileHandle, out *f
 	return 0
 }
 
-// applyOverlayForGetattr overlays the live write state onto a linked-file
-// stat result. The calling handle's own state wins: it may still be
-// referenced after unregistering from the inode map (e.g. a quarantined
-// state), where the shared lookup below would miss it. Otherwise the
-// shared state for the inode covers another handle's staged patch, and a
-// handleless getattr falls back to applyPendingSize.
-func (s *Filesystem) applyOverlayForGetattr(f gofusefs.FileHandle, inode uint64, entry *shfs.EntryInfo) {
+// overlayEntry overlays the live write state onto a stat result: the
+// calling handle's own state wins (it may be unregistered from the inode
+// map, where the shared lookup below would miss it), otherwise the shared
+// state for the inode covers another handle's staged patch, and a
+// handleless stat falls back to the shared state via applyPendingSize.
+// Every stat route (lookup, getattr, readdir-plus) funnels here, so all
+// of them observe the same staged mode/owner/times/size. The overlay
+// mechanics themselves (overlayEntryLocked, applyPendingSize) live with
+// the write path; this is the read-side funnel over them.
+func (s *Filesystem) overlayEntry(f gofusefs.FileHandle, inode uint64, entry *shfs.EntryInfo) {
 	if handle, ok := f.(*storhubHandle); ok {
 		if ws := handle.snapshotWriteState(); ws != nil && ws.inode == inode {
 			ws.mu.Lock()
@@ -99,6 +100,10 @@ func (s *Filesystem) applyOverlayForGetattr(f gofusefs.FileHandle, inode uint64,
 }
 
 func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	// Usage figures carry no per-user content, but the call still runs
+	// through the caller injector so context markers (suppressed atime,
+	// identity where the kernel supplied one) travel uniformly.
+	ctx = n.fs.callerContext(ctx)
 	stats, err := n.fs.hub.StatFSContext(ctx, n.fs.project)
 	if err != nil {
 		return errnoFromError(err)
@@ -107,7 +112,7 @@ func (n *storhubNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 	// Report a quota-style view where total = used + free, so df
 	// never shows free space exceeding the filesystem size (the old
 	// Bfree = 1<<30 with Blocks = used+1 produced negative usage).
-	usedBlocks := uint64(maxInt64(stats.Bytes/4096, 0))
+	usedBlocks := uint64(max(stats.Bytes/4096, 0))
 	freeBlocks := uint64(1 << 30)
 	out.Bsize = 4096
 	out.Blocks = usedBlocks + freeBlocks
@@ -164,7 +169,7 @@ func (n *storhubNode) Mknod(ctx context.Context, name string, mode uint32, dev u
 	_ = dev
 	switch mode & syscall.S_IFMT {
 	case 0, syscall.S_IFREG:
-		inode, _, _, errno := n.Create(ctx, name, syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY, mode&0o7777, out)
+		inode, _, _, errno := n.Create(ctx, name, syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY, permBits(mode), out)
 		return inode, errno
 	case syscall.S_IFIFO, syscall.S_IFCHR, syscall.S_IFBLK, syscall.S_IFSOCK:
 		return nil, syscall.ENOTSUP
@@ -263,6 +268,8 @@ func (n *storhubNode) Link(ctx context.Context, target gofusefs.InodeEmbedder, n
 // nlinkForEntry reports the hard-link count for a freshly created entry.
 // A metadata load failure is logged and reported as 1 rather than silently
 // fabricated as 0; getattr refreshes the value on the next lookup anyway.
+// The int-to-uint32 conversion happens once at the EntryFrom* boundary,
+// so this stays int and every renderer keeps uint32.
 // The caller's context is propagated: a background context would
 // fall back to the process identity on a surface that must carry the
 // kernel caller.
@@ -281,6 +288,10 @@ func (s *Filesystem) nlinkForEntry(ctx context.Context, entryPath string) int {
 	return 1
 }
 
+// fillEntryOut renders one EntryInfo into the kernel entry cache line.
+// EntryFrom* (storage to EntryInfo) and Fill* (EntryInfo to kernel wire)
+// are the two converter layers: storage builds the view, this package
+// renders it, and neither re-spells the other's mapping.
 func fillEntryOut(out *fuse.EntryOut, entry *shfs.EntryInfo, opts Options) {
 	if out == nil || entry == nil {
 		return
@@ -290,10 +301,13 @@ func fillEntryOut(out *fuse.EntryOut, entry *shfs.EntryInfo, opts Options) {
 	out.SetEntryTimeout(opts.EntryTimeout)
 }
 
+// fillAttr renders one EntryInfo into kernel attributes. Timestamps are
+// stored as int64 nanos and cross the wire as time.Time: this is the one
+// place that conversion happens, so every attr route agrees on it.
 func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	attr.Ino = entry.Inode
-	attr.Size = uint64(maxInt64(entry.Size, 0))
-	attr.Blocks = uint64(maxInt64((entry.Size+511)/512, 0))
+	attr.Size = uint64(max(entry.Size, 0))
+	attr.Blocks = uint64(max((entry.Size+511)/512, 0))
 	attr.Owner = fuse.Owner{Uid: entry.UID, Gid: entry.GID}
 	attr.Nlink = entry.NLink
 	attr.Blksize = 4096
@@ -301,7 +315,7 @@ func fillAttr(attr *fuse.Attr, entry *shfs.EntryInfo) {
 	mtime := time.Unix(0, entry.ModifiedAt)
 	ctime := time.Unix(0, entry.ChangedAt)
 	attr.SetTimes(&atime, &mtime, &ctime)
-	mode := entry.Mode & 0o7777
+	mode := permBits(entry.Mode)
 	if entry.IsDir {
 		mode |= syscall.S_IFDIR
 	} else if entry.IsSymlink {

@@ -13,6 +13,9 @@ type storhubNode struct {
 	gofusefs.Inode
 	fs    *Filesystem
 	inode uint64
+	// kind spans file/symlink only (the wire omits a dir kind), so
+	// isDir is load-bearing rather than derivable: directory nodes
+	// carry an empty kind.
 	kind  metadata.NodeKind
 	isDir bool
 }
@@ -93,23 +96,18 @@ type TestNode = storhubNode
 // TestHandle is the handle half of the integration-test seam; see TestNode.
 type TestHandle = storhubHandle
 
-// Invalidate drops cached kernel entries after external mutation.
-func (s *Filesystem) Invalidate() {
-	// Snapshot the nodes under the lock, but issue kernel notifications
-	// after releasing it: NotifyContent writes to the FUSE connection and
-	// must not run while filesystem bookkeeping is locked.
-	s.mu.RLock()
-	nodes := make([]*storhubNode, 0, len(s.nodes))
-	for ino, node := range s.nodes {
-		if ino == 1 {
-			continue
-		}
-		nodes = append(nodes, node)
-	}
-	s.mu.RUnlock()
-	for _, node := range nodes {
-		safeNotifyContent(node)
-	}
+// Invalidations reports how many kernel-cache invalidation requests this
+// filesystem has issued. Every namespace or attribute mutation must move
+// this counter; the 60s entry/attr timeouts turn a missed invalidation
+// into a minute of stale reads.
+//
+// Two networks share this counter, deliberately split: mutation paths
+// push entry/content notifications synchronously (notifyEntryForPath and
+// friends), while the fan-out subscription pulls cross-mount publishes
+// through pollInvalidationsOnce. Push covers our own writes, fan-out
+// covers everyone else's; neither subsumes the other.
+func (s *Filesystem) Invalidations() uint64 {
+	return s.invalCount.Load()
 }
 
 func (s *Filesystem) pathForInode(inode uint64) string {
@@ -121,13 +119,13 @@ func (s *Filesystem) pathForInode(inode uint64) string {
 	return ""
 }
 
-// safePath resolves the node's current path for hub operations. A
-// pathless node is normally the root (inode 1); any other pathless node
-// has been deleted or renamed away, and "" would make every hub call
-// below silently address the root directory. Such nodes report
-// ESTALE instead.
+// safePath resolves the node's current path for hub operations: the one
+// spelling every operation uses. A pathless node is normally the root
+// (inode 1); any other pathless node has been deleted or renamed away,
+// and "" would make every hub call below silently address the root
+// directory. Such nodes report ESTALE instead.
 func (n *storhubNode) safePath() (string, syscall.Errno) {
-	targetPath := n.currentPath()
+	targetPath := n.fs.pathForInode(n.inode)
 	if targetPath == "" && n.inode != 1 {
 		return "", syscall.ESTALE
 	}
@@ -144,14 +142,18 @@ func (s *Filesystem) nodeForPathLocked(targetPath string) *storhubNode {
 	return nil
 }
 
-func (s *Filesystem) rememberPath(inode uint64, targetPath string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Filesystem) rememberPathLocked(inode uint64, targetPath string) {
 	if s.inodePaths[inode] == nil {
 		s.inodePaths[inode] = make(map[string]struct{})
 	}
 	s.inodePaths[inode][targetPath] = struct{}{}
 	s.pathToInode[targetPath] = inode
+}
+
+func (s *Filesystem) rememberPath(inode uint64, targetPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rememberPathLocked(inode, targetPath)
 }
 
 func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
@@ -181,57 +183,70 @@ func (s *Filesystem) dropPath(inode uint64, targetPath string) string {
 	return ""
 }
 
-func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath string) {
+// repathHandles rewrites handle paths after a namespace move: every
+// handle matching match follows remap to its replacement. An empty
+// replacement detaches the handle into unlinked-but-open semantics: reads
+// keep serving its own snapshot instead of silently switching to the
+// replacement's content. When the inode instead keeps a registered path
+// (a hardlink survived the unlink), handles follow it so writes through
+// open fds land in the surviving name (POSIX). Handles snapshot under a
+// read lock first; handle locks are leaf locks, so the graph stays
+// acyclic.
+func (s *Filesystem) repathHandles(match func(inode uint64, path string) bool, remap func(string) string) {
 	s.mu.RLock()
 	handles := make([]*storhubHandle, 0, len(s.handles))
 	for _, handle := range s.handles {
-		if handle.inode == inode {
-			handles = append(handles, handle)
-		}
+		handles = append(handles, handle)
 	}
-	writeState := s.writeStates[inode]
 	s.mu.RUnlock()
 	for _, handle := range handles {
 		handle.mu.Lock()
-		if handle.path == oldPath {
-			if newPath != "" {
-				// The inode still has a registered path (a hardlink
-				// survived the unlink, or the rename target's inode kept
-				// another link): follow it instead of detaching, so
-				// writes through open fds land in the surviving name
-				// (POSIX).
-				handle.path = newPath
+		if match(handle.inode, handle.path) {
+			if next := remap(handle.path); next != "" {
+				handle.path = next
 			} else {
-				// The path now belongs to a different inode and nothing
-				// references this one anymore. Detach like an
-				// unlinked-but-open file: reads keep serving the handle's
-				// own snapshot instead of silently switching to the
-				// replacement's content.
 				handle.path = ""
 				handle.deleted = true
 			}
 		}
 		handle.mu.Unlock()
 	}
-	if writeState != nil {
-		// Serialize path rebinding against in-flight commits: commit
-		// holds opMu across its DAC window plus network window, so
-		// taking opMu here (order opMu before mu, matching commit)
-		// closes the stale-path race. Snapshot was taken without
-		// holding opMu, so no lock cycle with committers.
-		writeState.opMu.Lock()
-		writeState.mu.Lock()
-		if writeState.path == oldPath {
-			if newPath != "" {
-				writeState.path = newPath
+}
+
+// repathWriteStates rewrites write-state paths the same way repathHandles
+// rewrites handle paths. Lock order is always opMu before mu, matching
+// commit: commit holds opMu across its DAC window plus network window, so
+// taking opMu here closes the stale-path race, and the snapshot above was
+// taken without holding opMu, so no lock cycle with committers. The order
+// is stated here once for every path rebind.
+func (s *Filesystem) repathWriteStates(match func(inode uint64, path string) bool, remap func(string) string) {
+	s.mu.RLock()
+	states := make([]*inodeWriteState, 0, len(s.writeStates))
+	for _, state := range s.writeStates {
+		states = append(states, state)
+	}
+	s.mu.RUnlock()
+	for _, state := range states {
+		state.opMu.Lock()
+		state.mu.Lock()
+		if match(state.inode, state.path) {
+			if next := remap(state.path); next != "" {
+				state.path = next
 			} else {
-				writeState.path = ""
-				writeState.deleted = true
+				state.path = ""
+				state.deleted = true
 			}
 		}
-		writeState.mu.Unlock()
-		s.unlockOpMu(&writeState.opMu)
+		state.mu.Unlock()
+		s.unlockOpMu(&state.opMu)
 	}
+}
+
+func (s *Filesystem) rebindHandlesAfterPathChange(inode uint64, oldPath, newPath string) {
+	match := func(id uint64, path string) bool { return id == inode && path == oldPath }
+	remap := func(string) string { return newPath }
+	s.repathHandles(match, remap)
+	s.repathWriteStates(match, remap)
 }
 
 func (s *Filesystem) remapPaths(oldPath, newPath string) {
@@ -247,35 +262,11 @@ func (s *Filesystem) remapPaths(oldPath, newPath string) {
 			}
 		}
 	}
-	handles := make([]*storhubHandle, 0, len(s.handles))
-	for _, handle := range s.handles {
-		handles = append(handles, handle)
-	}
 	s.mu.Unlock()
-	for _, handle := range handles {
-		handle.mu.Lock()
-		if shfs.IsParentOrSame(oldPath, handle.path) {
-			handle.path = shfs.RemapPath(oldPath, newPath, handle.path)
-		}
-		handle.mu.Unlock()
-	}
-	s.mu.RLock()
-	writeStates := make([]*inodeWriteState, 0, len(s.writeStates))
-	for _, writeState := range s.writeStates {
-		writeStates = append(writeStates, writeState)
-	}
-	s.mu.RUnlock()
-	for _, writeState := range writeStates {
-		// Same opMu-before-mu order as commit, closing the directory
-		// remap race the same way as the single-path rebind above.
-		writeState.opMu.Lock()
-		writeState.mu.Lock()
-		if shfs.IsParentOrSame(oldPath, writeState.path) {
-			writeState.path = shfs.RemapPath(oldPath, newPath, writeState.path)
-		}
-		writeState.mu.Unlock()
-		s.unlockOpMu(&writeState.opMu)
-	}
+	match := func(_ uint64, path string) bool { return shfs.IsParentOrSame(oldPath, path) }
+	remap := func(path string) string { return shfs.RemapPath(oldPath, newPath, path) }
+	s.repathHandles(match, remap)
+	s.repathWriteStates(match, remap)
 }
 
 func (s *Filesystem) materializeHandlesForPath(ctx context.Context, inode uint64, targetPath string) error {
@@ -318,23 +309,11 @@ func (s *Filesystem) materializeHandlesForPath(ctx context.Context, inode uint64
 	return nil
 }
 
-// Invalidations reports how many kernel-cache invalidation requests this
-// filesystem has issued. Every namespace or attribute mutation must move
-// this counter; the 60s entry/attr timeouts turn a missed invalidation
-// into a minute of stale reads.
-func (s *Filesystem) Invalidations() uint64 {
-	return s.invalCount.Load()
-}
-
 func (s *Filesystem) ensureNode(_ context.Context, entry *shfs.EntryInfo) *storhubNode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if node := s.nodes[entry.Inode]; node != nil {
-		if s.inodePaths[entry.Inode] == nil {
-			s.inodePaths[entry.Inode] = make(map[string]struct{})
-		}
-		s.inodePaths[entry.Inode][entry.Path] = struct{}{}
-		s.pathToInode[entry.Path] = entry.Inode
+		s.rememberPathLocked(entry.Inode, entry.Path)
 		return node
 	}
 	node := &storhubNode{fs: s, inode: entry.Inode, kind: entry.Kind, isDir: entry.IsDir}
@@ -351,11 +330,9 @@ func (n *storhubNode) stableAttr() gofusefs.StableAttr {
 	} else if n.kind == metadata.NodeKindSymlink {
 		mode = syscall.S_IFLNK
 	}
+	// Gen stays 1: the backend has no inode generation, identity is the
+	// inode number alone. The mount root pins the same Gen in Mount.
 	return gofusefs.StableAttr{Mode: mode, Ino: n.inode, Gen: 1}
-}
-
-func (n *storhubNode) currentPath() string {
-	return n.fs.pathForInode(n.inode)
 }
 
 func (s *Filesystem) callerContext(ctx context.Context) context.Context {
@@ -376,7 +353,7 @@ func (n *storhubNode) attachChild(ctx context.Context, child *storhubNode) (ino 
 		// go-fuse panics on malformed trees; degrade to "no cached child"
 		// loudly instead of taking the request goroutine down.
 		if r := recover(); r != nil {
-			n.fs.errorOp("attachChild failed", "path", n.currentPath(), "inode", child.inode, "err", r)
+			n.fs.errorOp("attachChild failed", "path", n.fs.pathForInode(n.inode), "inode", child.inode, "err", r)
 			ino = nil
 		}
 	}()

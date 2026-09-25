@@ -64,15 +64,15 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 		}
 	}
 	if off > writeState.logicalSize {
-		writeState.markDirtyLocked(writeState.logicalSize, off)
-		if err := writeState.temp.Truncate(off); err != nil {
+		oldSize := writeState.logicalSize
+		if err := writeState.setLogicalSizeLocked(off); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
 			h.fs.unlockOpMu(&writeState.opMu)
 			h.fs.errorOp("write failed", "path", h.handlePath(), "inode", h.inode, "off", off, "err", err)
 			return 0, errno
 		}
-		writeState.logicalSize = off
+		writeState.markDirtyLocked(oldSize, off)
 	}
 	n, err := writeState.temp.WriteAt(data, off)
 	if err != nil {
@@ -84,8 +84,7 @@ func (h *storhubHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	}
 	end := off + int64(n)
 	if end > writeState.logicalSize {
-		writeState.logicalSize = end
-		if err := writeState.temp.Truncate(end); err != nil {
+		if err := writeState.setLogicalSizeLocked(end); err != nil {
 			errno := errnoFromError(err)
 			writeState.mu.Unlock()
 			h.fs.unlockOpMu(&writeState.opMu)
@@ -495,9 +494,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 				h.fs.errorOp("commit aborted", "path", targetPath, "inode", h.inode, "step", "patch-read", "start", offset, "end", end, "got", n, "want", len(buf))
 				return syscall.EIO
 			}
-			for j := n; j < len(buf); j++ {
-				buf[j] = 0
-			}
+			zeroSpan(buf[n:])
 			deleteSize := end - offset
 			if offset >= baseSize {
 				deleteSize = 0
@@ -553,13 +550,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 	}
 	ws.mu.Unlock()
 	ws.mu.Lock()
-	if err := ws.refreshBaseSnapshotLocked(); err != nil {
-		h.fs.errorOp("commit cache refresh failed", "path", targetPath, "inode", h.inode, "err", err)
-		ws.clearBaseSnapshotLocked()
-	}
-	ws.baseSize = logicalSize
-	ws.dirtyRanges = nil
-	ws.tempAuthoritative = false
+	ws.commitCacheRefreshLocked(logicalSize)
 	if err := ws.temp.Truncate(logicalSize); err != nil {
 		h.fs.errorOp("commit failed", "path", targetPath, "inode", h.inode, "err", err)
 		ws.mu.Unlock()
@@ -578,6 +569,7 @@ func (h *storhubHandle) commitPatch(ctx context.Context, targetPath string, base
 // Caller must hold w.mu.
 func (w *inodeWriteState) commitCacheRefreshLocked(logicalSize int64) {
 	if err := w.refreshBaseSnapshotLocked(); err != nil {
+		w.fs.errorOp("commit cache refresh failed", "path", w.path, "err", err)
 		w.clearBaseSnapshotLocked()
 	}
 	w.baseSize = logicalSize

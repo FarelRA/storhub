@@ -121,7 +121,7 @@ func (s *Filesystem) notifyEntryForPath(dirPath, name string) {
 }
 
 func (n *storhubNode) notifyEntry(name string) {
-	n.fs.notifyEntryForPath(n.currentPath(), name)
+	n.fs.notifyEntryForPath(n.fs.pathForInode(n.inode), name)
 }
 
 func (n *storhubNode) notifyDelete(name string, childInode uint64) {

@@ -57,8 +57,10 @@ func (n *storhubNode) loadDir(ctx context.Context) ([]fuse.DirEntry, map[string]
 }
 
 // attachEntry registers entry under n and fills the kernel's entry cache
-// line. It is the shared ensure+attach+fill tail of Mkdir/Create/Symlink/
-// Link.
+// line. It is the single entry-to-inode tail shared by lookup and every
+// creation route (Mkdir/Create/Symlink/Link): register, attach, fill.
+// A nil attach (detached tree, tests driving nodes without a mount)
+// returns nil with no error, matching the node lookup route.
 func (n *storhubNode) attachEntry(ctx context.Context, entry *shfs.EntryInfo, out *fuse.EntryOut) *gofusefs.Inode {
 	child := n.fs.ensureNode(ctx, entry)
 	ino := n.attachChild(ctx, child)
@@ -168,7 +170,8 @@ func (d *storhubDirHandle) Releasedir(_ context.Context, _ uint32) {}
 // Lookup implements gofusefs.FileLookuper: READDIRPLUS asks the directory
 // handle, not the node, to fill each child's EntryOut. The snapshot
 // already carries the attributes, so the fill is a map hit instead of a
-// hub stat; a name newer than the snapshot falls back to the live Lookup.
+// hub stat; a name newer than the snapshot falls back to the live node
+// route, which is the authority when the two disagree.
 func (d *storhubDirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
 	if errno := d.ensureLoaded(ctx); errno != 0 {
 		return nil, errno
@@ -178,16 +181,8 @@ func (d *storhubDirHandle) Lookup(ctx context.Context, name string, out *fuse.En
 		return d.n.Lookup(ctx, name, out)
 	}
 	n := d.n
-	n.fs.applyPendingSize(entry)
-	child := n.fs.ensureNode(ctx, entry)
-	ino := n.attachChild(ctx, child)
-	if ino == nil {
-		// The bridge adds the returned inode to the tree unconditionally;
-		// a nil child would panic there. Report the failure instead.
-		return nil, syscall.EIO
-	}
-	fillEntryOut(out, entry, n.fs.opts)
-	return ino, 0
+	n.fs.overlayEntry(nil, entry.Inode, entry)
+	return n.attachEntry(ctx, entry, out), 0
 }
 
 func (n *storhubNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {

@@ -42,20 +42,23 @@ type inodeWriteState struct {
 	// recovery directory: the temp no longer holds the data the dirty
 	// ranges claim, so every further write/read/commit must fail EIO
 	// instead of uploading zeros over remote content.
-	poisoned          bool
-	refs              int
-	baseSize          int64
-	logicalSize       int64
+	poisoned    bool
+	refs        int
+	baseSize    int64
+	logicalSize int64
+	// Vocabulary: dirty names uncommitted byte spans (dirtyRanges),
+	// pending names the uncommitted metadata patch (pending), overlay
+	// names the temp file staging the bytes. overlayEntryLocked applies
+	// the pending patch plus the logical size onto an entry.
 	dirtyRanges       []ByteRange
 	tempAuthoritative bool
 	pending           shfs.MetadataPatch
 }
 
-// ByteRange is one dirty byte span within a write handle.
-type ByteRange struct {
-	Start int64
-	End   int64
-}
+// ByteRange is one dirty byte span within a write handle. It aliases the
+// shared fs span: dirty ranges, chunk planning, and read windows all use
+// this one type instead of parallel Start/End structs.
+type ByteRange = shfs.ByteRange
 
 // maxDirtyRanges caps the disjoint dirty-range count per inode. Past the
 // cap the ranges coalesce into one authoritative span (see
@@ -143,9 +146,8 @@ func (w *inodeWriteState) materializeBootstrap(size int64) error {
 	w.temp = temp
 	w.tempPath = temp.Name()
 	w.baseSize = size
-	w.logicalSize = size
 	w.tempAuthoritative = size == 0
-	if err := w.temp.Truncate(size); err != nil {
+	if err := w.setLogicalSizeLocked(size); err != nil {
 		return err
 	}
 	return nil
@@ -203,8 +205,7 @@ func (w *inodeWriteState) materialize(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	w.baseSize = entry.Size
-	w.logicalSize = entry.Size
-	truncErr := w.temp.Truncate(entry.Size)
+	truncErr := w.setLogicalSizeLocked(entry.Size)
 	w.mu.Unlock()
 	if truncErr != nil {
 		return truncErr

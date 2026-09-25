@@ -7,7 +7,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	meta "github.com/FarelRA/storhub/internal/metadata"
@@ -60,7 +59,7 @@ func TestLockAndErrorHelpers(t *testing.T) {
 	if errnoFromError(errors.New("some other issue")) != syscall.EIO {
 		t.Fatal("expected default errno mapping")
 	}
-	if normalizedChunkSize(0) <= 0 || minInt64(1, 2) != 1 || maxInt64(1, 2) != 2 || durationPtr(time.Second) == nil {
+	if normalizedChunkSize(0) <= 0 || minInt64(1, 2) != 1 || maxInt64(1, 2) != 2 || permBits(0o100644) != 0o644 {
 		t.Fatal("unexpected helper values")
 	}
 	if err := validateProject(strings.Repeat("a", 101)); err == nil {
@@ -131,7 +130,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 	if _, errno := node.Getxattr(context.Background(), "user.demo", nil); errno != syscall.ENODATA {
 		t.Fatalf("expected missing xattr errno, got %v", errno)
 	}
-	if errno := node.Setxattr(context.Background(), "user.demo", []byte("value"), xattrReplace); errno != syscall.ENODATA {
+	if errno := node.Setxattr(context.Background(), "user.demo", []byte("value"), uint32(shfs.XAttrReplace)); errno != syscall.ENODATA {
 		t.Fatalf("expected replace on missing attr to fail, got %v", errno)
 	}
 	if errno := node.Setxattr(context.Background(), "user.demo", []byte("value"), 0); errno != 0 {
@@ -147,7 +146,7 @@ func TestFillAndNodeAttributeHelpers(t *testing.T) {
 	if _, errno := node.Getxattr(context.Background(), "user.demo", make([]byte, 2)); errno != syscall.ERANGE {
 		t.Fatalf("expected small getxattr buffer error, got %v", errno)
 	}
-	if errno := node.Setxattr(context.Background(), "user.demo", []byte("value"), xattrCreate); errno != syscall.EEXIST {
+	if errno := node.Setxattr(context.Background(), "user.demo", []byte("value"), uint32(shfs.XAttrCreate)); errno != syscall.EEXIST {
 		t.Fatalf("expected create on existing attr to fail, got %v", errno)
 	}
 	if size, errno := node.Listxattr(context.Background(), nil); errno != 0 || size == 0 {

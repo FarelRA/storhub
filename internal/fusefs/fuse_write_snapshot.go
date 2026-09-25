@@ -43,15 +43,11 @@ func (w *inodeWriteState) writeWorkingRangeToLocked(out *os.File, start, end int
 			return err
 		}
 		if n == 0 {
-			for i := range buf[:want] {
-				buf[i] = 0
-			}
+			zeroSpan(buf[:want])
 			n = int(want)
 		}
 		if int64(n) < want {
-			for i := n; i < int(want); i++ {
-				buf[i] = 0
-			}
+			zeroSpan(buf[n:want])
 			n = int(want)
 		}
 		if _, err := out.WriteAt(buf[:n], offset); err != nil {

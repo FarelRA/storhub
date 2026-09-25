@@ -64,10 +64,10 @@ func (n *storhubNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 	// there is no separate Get-then-set TOCTOU window. errnoFromError maps
 	// the transaction's EEXIST / XAttrNotFound back to the FUSE errno.
 	var mode shfs.XAttrMode
-	if flags&xattrCreate != 0 {
+	if flags&uint32(shfs.XAttrCreate) != 0 {
 		mode |= shfs.XAttrCreate
 	}
-	if flags&xattrReplace != 0 {
+	if flags&uint32(shfs.XAttrReplace) != 0 {
 		mode |= shfs.XAttrReplace
 	}
 	if err := n.fs.hub.SetXAttrContext(ctx, n.fs.project, targetPath, attr, data, mode); err != nil {

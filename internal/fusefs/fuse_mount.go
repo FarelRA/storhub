@@ -254,13 +254,16 @@ func (s *Filesystem) Mount(mountPoint string) error {
 	if s.debugEnabled() {
 		s.debugOp("mount start", "project", s.project, "target", mountPoint, "allow_other", s.opts.AllowOther, "cache_dir", s.cacheDir)
 	}
+	entryTimeout, attrTimeout, negativeTimeout := s.opts.EntryTimeout, s.opts.AttrTimeout, s.opts.NegativeTimeout
 	options := &gofusefs.Options{
-		EntryTimeout:    durationPtr(s.opts.EntryTimeout),
-		AttrTimeout:     durationPtr(s.opts.AttrTimeout),
-		NegativeTimeout: durationPtr(s.opts.NegativeTimeout),
+		EntryTimeout:    &entryTimeout,
+		AttrTimeout:     &attrTimeout,
+		NegativeTimeout: &negativeTimeout,
 		NullPermissions: true,
-		RootStableAttr:  &gofusefs.StableAttr{Ino: 1, Gen: 1},
-		Logger:          log.New(os.Stderr, "storhub/go-fuse: ", log.LstdFlags|log.Lmicroseconds),
+		// Gen pins 1 to match stableAttr: the backend has no inode
+		// generation, identity is the inode number alone.
+		RootStableAttr: &gofusefs.StableAttr{Ino: 1, Gen: 1},
+		Logger:         log.New(os.Stderr, "storhub/go-fuse: ", log.LstdFlags|log.Lmicroseconds),
 	}
 	options.Debug = s.opts.Debug
 	options.AllowOther = s.opts.AllowOther

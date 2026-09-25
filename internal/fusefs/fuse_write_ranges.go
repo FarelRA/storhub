@@ -9,6 +9,13 @@ import (
 	shfs "github.com/FarelRA/storhub/internal/fs"
 )
 
+// zeroSpan clears buf. Holes read as zeros (POSIX): every short temp
+// read and every past-EOF tail funnels through this one spelling
+// instead of hand-rolled fill loops.
+func zeroSpan(buf []byte) {
+	clear(buf)
+}
+
 // markDirtyLocked records [start,end) as dirty, merging with touching or
 // overlapping ranges. The dirty set stays sorted and disjoint, reusing the
 // existing slice instead of allocating a fresh one per write.
@@ -183,6 +190,22 @@ func (w *inodeWriteState) coversRangeLocked(start, end int64) bool {
 	return covered >= end
 }
 
+// setLogicalSizeLocked moves the overlay size to n as one unit: the temp
+// is truncated, spans above n are trimmed, the size is recorded. It is
+// the single setter behind writes, truncates, and commits: no other code
+// assigns logicalSize. Caller must hold w.mu.
+func (w *inodeWriteState) setLogicalSizeLocked(n int64) error {
+	if err := w.ensureTempLocked(); err != nil {
+		return err
+	}
+	if err := w.temp.Truncate(n); err != nil {
+		return err
+	}
+	w.logicalSize = n
+	w.truncateDirtyRangesLocked(n)
+	return nil
+}
+
 func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL
@@ -190,14 +213,8 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 	if w.poisoned {
 		return syscall.EIO
 	}
-	if w.temp == nil {
-		if err := w.ensureTempLocked(); err != nil {
-			return err
-		}
-	}
 	oldSize := w.logicalSize
-	w.logicalSize = size
-	if err := w.temp.Truncate(size); err != nil {
+	if err := w.setLogicalSizeLocked(size); err != nil {
 		return err
 	}
 	if size == 0 {
@@ -207,9 +224,10 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 		// Regrown bytes must read as zeros (POSIX); the temp file may
 		// hold stale data left over from before a shrink. Zero-fill the
 		// regrown region and mark it dirty so the commit uploads it.
-		buf := make([]byte, 32*1024)
+		page := w.fs.copyPageSize()
+		buf := make([]byte, page)
 		for offset := oldSize; offset < size; {
-			n := int64(len(buf))
+			n := page
 			if remaining := size - offset; remaining < n {
 				n = remaining
 			}
@@ -220,7 +238,9 @@ func (w *inodeWriteState) setSizeLocked(size int64) error {
 		}
 		w.markDirtyLocked(oldSize, size)
 	}
-	w.truncateDirtyRangesLocked(size)
+	if w.fs.debugEnabled() {
+		w.fs.debugOp("overlay truncate", "path", w.path, "old", oldSize, "size", size)
+	}
 	return nil
 }
 
@@ -252,7 +272,7 @@ func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off i
 		limit = capN
 	}
 	filled := int64(0)
-	visibleBaseSize := minInt64(w.baseSize, w.logicalSize)
+	visibleBaseSize := min(w.baseSize, w.logicalSize)
 	for filled < limit {
 		segmentStart := off + filled
 		dirty, dirtyRange := w.nextDirtyRangeLocked(segmentStart)
@@ -272,9 +292,7 @@ func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off i
 			}
 			filled += int64(n)
 			if int64(n) < chunkEnd-segmentStart {
-				for i := filled; i < chunkEnd-off; i++ {
-					dest[i] = 0
-				}
+				zeroSpan(dest[filled : chunkEnd-off])
 				filled = chunkEnd - off
 			}
 			continue
@@ -284,9 +302,7 @@ func (w *inodeWriteState) readIntoLocked(ctx context.Context, dest []byte, off i
 			cleanEnd = dirtyRange.Start
 		}
 		if segmentStart >= visibleBaseSize {
-			for i := filled; i < cleanEnd-off; i++ {
-				dest[i] = 0
-			}
+			zeroSpan(dest[filled : cleanEnd-off])
 			filled = cleanEnd - off
 			continue
 		}
@@ -342,11 +358,7 @@ func (w *inodeWriteState) nextDirtyRangeLocked(offset int64) (bool, ByteRange) {
 }
 
 func (w *inodeWriteState) dirtyBytesLocked() int64 {
-	total := int64(0)
-	for _, dirty := range w.dirtyRanges {
-		total += dirty.End - dirty.Start
-	}
-	return total
+	return totalByteRanges(w.dirtyRanges)
 }
 
 func (w *inodeWriteState) hasPendingMetadataLocked() bool {
@@ -464,32 +476,7 @@ func mergeByteRange(existing []ByteRange, next ByteRange) []ByteRange {
 	if next.End <= next.Start {
 		return existing
 	}
-	merged := make([]ByteRange, 0, len(existing)+1)
-	inserted := false
-	for _, current := range existing {
-		if current.End < next.Start {
-			merged = append(merged, current)
-			continue
-		}
-		if next.End < current.Start {
-			if !inserted {
-				merged = append(merged, next)
-				inserted = true
-			}
-			merged = append(merged, current)
-			continue
-		}
-		if current.Start < next.Start {
-			next.Start = current.Start
-		}
-		if current.End > next.End {
-			next.End = current.End
-		}
-	}
-	if !inserted {
-		merged = append(merged, next)
-	}
-	return merged
+	return shfs.MergeByteRanges(append(existing, next))
 }
 
 func totalByteRanges(ranges []ByteRange) int64 {

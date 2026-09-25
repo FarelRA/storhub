@@ -2,7 +2,6 @@ package fusefs
 
 import (
 	"context"
-	"sort"
 	"syscall"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
@@ -24,9 +23,10 @@ const (
 var _ gofusefs.FileLseeker = (*storhubHandle)(nil)
 
 // Lseek implements SEEK_DATA/SEEK_HOLE on the open handle. It lives in
-// this lookup-layer file rather than fuse_file.go because the open/read/
-// write paths there are owned by another agent; same package, so the
-// method set is unaffected.
+// this lookup-layer file because seek views derive from the same
+// open-time pin plus overlay ranges the read path serves: seeks must
+// agree with reads under contention, so the view logic stays beside the
+// lookup stat conversions rather than scattered across write files.
 //
 // Data extents are the union of the pinned chunk coverage (the open-time
 // content layout) and the overlay dirty ranges (uncommitted writes,
@@ -147,7 +147,7 @@ func (h *storhubHandle) lseekExtentsLocked(ws *inodeWriteState, size int64) []By
 			extents = append(extents, ByteRange{Start: s, End: e})
 		}
 	}
-	return mergeByteRanges(extents)
+	return shfs.MergeByteRanges(extents)
 }
 
 // lseekChunkExtents converts the pinned chunk descriptors into byte spans
@@ -179,39 +179,7 @@ func lseekChunkExtents(pin *pinnedContent, size int64) []ByteRange {
 			extents = append(extents, ByteRange{Start: s, End: e})
 		}
 	}
-	return mergeByteRanges(extents)
-}
-
-// mergeByteRanges sorts spans by start and coalesces overlapping or
-// adjacent ones into disjoint data extents.
-func mergeByteRanges(ranges []ByteRange) []ByteRange {
-	if len(ranges) == 0 {
-		return nil
-	}
-	sorted := append([]ByteRange(nil), ranges...)
-	sortByteRanges(sorted)
-	out := sorted[:1]
-	for _, r := range sorted[1:] {
-		last := &out[len(out)-1]
-		if r.Start <= last.End {
-			if r.End > last.End {
-				last.End = r.End
-			}
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-// sortByteRanges orders spans by start offset, breaking ties by end.
-func sortByteRanges(ranges []ByteRange) {
-	sort.Slice(ranges, func(i, j int) bool {
-		if ranges[i].Start != ranges[j].Start {
-			return ranges[i].Start < ranges[j].Start
-		}
-		return ranges[i].End < ranges[j].End
-	})
+	return shfs.MergeByteRanges(extents)
 }
 
 // checkOverlayCaller verifies that the current caller may drive overlay

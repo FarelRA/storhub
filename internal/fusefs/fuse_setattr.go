@@ -179,7 +179,7 @@ func (n *storhubNode) setattrDetached(ctx context.Context, f gofusefs.FileHandle
 				return syscall.EIO
 			}
 			state.pending.HasMode = true
-			state.pending.Mode = mode & 0o7777
+			state.pending.Mode = permBits(mode)
 			state.mu.Unlock()
 			n.fs.unlockOpMu(&state.opMu)
 		}
@@ -353,12 +353,12 @@ func (n *storhubNode) setattrMode(ctx context.Context, targetPath string, in *fu
 			return syscall.EIO
 		}
 		state.pending.HasMode = true
-		state.pending.Mode = mode & 0o7777
+		state.pending.Mode = permBits(mode)
 		state.mu.Unlock()
 		n.fs.unlockOpMu(&state.opMu)
 		return 0
 	}
-	if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, mode&0o7777); err != nil {
+	if err := n.fs.hub.ChmodContext(ctx, n.fs.project, targetPath, permBits(mode)); err != nil {
 		return errnoFromError(err)
 	}
 	return 0
@@ -501,7 +501,7 @@ func (n *storhubNode) finishSetattr(ctx context.Context, targetPath string, stat
 	if usedLocalSize {
 		entry.Size = localSize
 	} else {
-		n.fs.applyPendingSize(entry)
+		n.fs.overlayEntry(nil, n.inode, entry)
 	}
 	if state != nil && !n.isDir {
 		state.mu.Lock()

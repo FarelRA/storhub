@@ -19,8 +19,6 @@ import (
 )
 
 const (
-	xattrCreate     = 0x1
-	xattrReplace    = 0x2
 	renameNoReplace = 0x1
 	renameExchange  = 0x2
 	renameWhiteout  = 0x4
@@ -158,16 +156,16 @@ type Filesystem struct {
 	notifyParked      atomic.Int64
 	notifyParkedTotal atomic.Uint64
 	notifyCoalesced   atomic.Uint64
-	// relMu guards relGen/relCh: the commit-release broadcast (every
+	// relMu guards relEpoch/relCh: the commit-release broadcast (every
 	// opMu release publishes one generation). Per-mount, so Close on
 	// one mount never wakes Close waiters on another and a wedged
 	// committer on one mount never churns another mount's waiters.
 	// The mutex is held only for the integer bump plus channel swap,
 	// never across network I/O, so signaling can never wedge a
 	// committer.
-	relMu  sync.Mutex
-	relGen uint64
-	relCh  chan struct{}
+	relMu    sync.Mutex
+	relEpoch uint64
+	relCh    chan struct{}
 	// relWaiters counts Close waiters parked (or about to park) in
 	// waitOpMuBounded. Releases skip the channel swap when no waiter
 	// exists, so uncontended commit-path unlocks cost one integer bump
@@ -261,7 +259,7 @@ func (s *Filesystem) signalOpRelease() {
 	if s.relCh == nil {
 		s.relCh = make(chan struct{})
 	}
-	s.relGen++
+	s.relEpoch++
 	if s.relWaiters.Load() == 0 {
 		s.relMu.Unlock()
 		return
@@ -284,7 +282,7 @@ func (s *Filesystem) opReleaseWait() (<-chan struct{}, uint64) {
 	if s.relCh == nil {
 		s.relCh = make(chan struct{})
 	}
-	return s.relCh, s.relGen
+	return s.relCh, s.relEpoch
 }
 
 // unlockOpMu releases an inode write-state opMu and publishes the
@@ -363,26 +361,19 @@ func (w *inodeWriteState) pathForLog() string {
 }
 
 // debugEnabled reports whether structured debug tracing is on. Call
-// sites guard their debugOp calls with it so the variadic boxing and
-// slice build cost nothing in production: debugOp alone cannot avoid
-// that cost because arguments evaluate before the call. One branch per
-// site keeps the alloc-parity benchmark budgets exact. Accepted residual
-// cost: handle-path snapshots (one leaf mutex) and started timestamps
-// stay unconditional because error paths need them too; both are
-// nanosecond-scale and allocation-free.
+// sites gate their debugOp calls with it so the variadic boxing and
+// slice build cost nothing in production: debugOp itself never checks,
+// so the gate lives in exactly one place per call.
 func (s *Filesystem) debugEnabled() bool {
 	return s != nil && s.opts.Debug
 }
 
 // debugOp logs a structured debug event through the mount logger. It is
-// gated on Options.Debug, so hot-path call sites stay cheap in
-// production; unlike unstructured formatting it keeps every field
-// structured (op plus key/value attrs) instead of collapsing them with
-// fmt.Sprintf. Never pass file bytes, only sizes, offsets, and paths.
+// ungated: every call site already checked debugEnabled before building
+// its arguments, and a second check inside would only hide ungated
+// callers instead of saving anything. Fields stay structured (op plus
+// key/value attrs); never pass file bytes, only sizes, offsets, paths.
 func (s *Filesystem) debugOp(op string, args ...any) {
-	if !s.opts.Debug {
-		return
-	}
 	// No "fuse " prefix: the component attr already carries the
 	// namespace, matching every other package's bare op names.
 	logging.Debug(s.log(), op, args...)
@@ -419,6 +410,10 @@ const (
 // ApplyCreateMode would be a no-op and `touch` would create 0666
 // (world-writable) files.
 const defaultCallerUmask = 0o022
+
+// permBits strips a mode to permission bits: the one spelling used at
+// every chmod/fchmod/create boundary instead of a scattered mask.
+func permBits(mode uint32) uint32 { return mode & 0o7777 }
 
 // errnoFromError maps storage-layer errors onto POSIX errnos. The ladder
 // is ordered most-specific first: raw Errno passthrough (except ECANCELED,
@@ -478,6 +473,10 @@ func errnoFromError(err error) syscall.Errno {
 	}
 }
 
+// validateProject rejects empty, overlong, and dot-anchored project
+// names plus anything outside [A-Za-z0-9._-]. The storage layer enforces
+// the same shape on its own requests; this copy exists because the mount
+// package must not import the storage package to share it.
 func validateProject(project string) error {
 	project = strings.TrimSpace(project)
 	if project == "" {
@@ -509,6 +508,8 @@ func normalizedChunkSize(chunkSize int64) int64 {
 	return size
 }
 
+// minInt64 and maxInt64 clamp sizes for the write path and shared tests;
+// owned files use the builtin min/max directly.
 func minInt64(a, b int64) int64 {
 	if a < b {
 		return a
@@ -522,5 +523,3 @@ func maxInt64(a, b int64) int64 {
 	}
 	return b
 }
-
-func durationPtr(v time.Duration) *time.Duration { return &v }
