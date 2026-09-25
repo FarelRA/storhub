@@ -1,5 +1,5 @@
 import type { AnyEntry, DirEntry } from '~/utils/api-types'
-import { sharedState } from './console-state'
+import { useConsoleState } from './console-state'
 
 export interface DeleteDeps {
   run: <T>(label: string, fn: () => Promise<T>, quiet?: boolean) => Promise<T | null>
@@ -17,7 +17,7 @@ export interface DeleteDeps {
  * lives here, in one place, instead of sprawled across the facade).
  */
 export function useDeleteService(deps: DeleteDeps) {
-  const { entries, selectedPath, selectedPaths } = sharedState()
+  const { entries, selectedPath, selectedPaths } = useConsoleState()
   const toasts = useToasts()
 
   async function removeRecursive(path: string): Promise<boolean> {

@@ -1,3 +1,5 @@
+import { encodeSegment } from './url'
+
 // WHY two lifetimes: the EntryList kebab "Share" mints a short-lived link
 // (5 min, just long enough to paste into a chat), while the Shares panel
 // mints week-long links for durable hand-off. The split is deliberate:
@@ -16,7 +18,7 @@ export function shareTtlLabel(seconds: number): string {
 }
 
 export function shareLink(share: { token?: string; id: string }): string {
-  return `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(share.token ?? share.id)}`
+  return `${window.location.origin}${window.location.pathname}?share=${encodeSegment(share.token ?? share.id)}`
 }
 
 export function directLink(share: { download_url?: string }): string {

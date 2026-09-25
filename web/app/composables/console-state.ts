@@ -30,7 +30,8 @@ export interface UploadProgress {
  * useState needs a Nuxt context, so this resolves lazily inside useConsole()
  * (useState itself memoizes per key, keeping the single-page singleton
  * semantics the console relies on). Keys keep their historic names
- * ('auth-token', 'auth-principal') so useApi() shares the same slots.
+ * ('auth-token', 'auth-principal') so useApi() shares the same slots:
+ * renaming the keys would orphan stored sessions.
  */
 export interface ConsoleSharedState {
   project: Ref<string>
@@ -72,7 +73,7 @@ export interface ConsoleSharedState {
 
 let shared: ConsoleSharedState | null = null
 
-export function sharedState(): ConsoleSharedState {
+export function useConsoleState(): ConsoleSharedState {
   if (!shared) {
     shared = {
       project: useState<string>('console-project', () => ''),

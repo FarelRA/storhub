@@ -10,7 +10,7 @@ import type { Ref } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { bulkRename } from '~/composables/use-modals'
 import { usePreview } from '~/composables/use-preview'
-import { sharedState } from '~/composables/console-state'
+import { useConsoleState } from '~/composables/console-state'
 import { canDownloadWithoutToken } from '~/utils/download'
 import { modalGroupOf } from '~/utils/modal-kinds'
 import { normalizePath } from '~/utils/path'
@@ -163,7 +163,7 @@ describe('saveFile truncated guard', () => {
   })
 
   it('never PUTs a truncated preview', async () => {
-    const st = sharedState()
+    const st = useConsoleState()
     st.selectedPath.value = 'big.txt'
     st.editorContent.value = 'prefix'
     st.editorIsText.value = true
@@ -175,7 +175,7 @@ describe('saveFile truncated guard', () => {
   })
 
   it('PUTs a complete preview with If-Match', async () => {
-    const st = sharedState()
+    const st = useConsoleState()
     st.selectedPath.value = 'small.txt'
     st.editorContent.value = 'full'
     st.editorIsText.value = true

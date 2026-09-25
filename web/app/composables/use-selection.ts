@@ -1,5 +1,5 @@
 import type { AnyEntry } from '~/utils/api-types'
-import { sharedState } from './console-state'
+import { useConsoleState } from './console-state'
 import { clearPreviewState } from './use-preview'
 
 /**
@@ -20,7 +20,7 @@ export function useSelection() {
     editorIsText,
     xattrs,
     xattrsError,
-  } = sharedState()
+  } = useConsoleState()
 
   function clearSelection(): void {
     selectedPath.value = ''
@@ -99,9 +99,15 @@ export interface SingleSelection {
  * surface that acts on "the selected entry" (Shares panel buttons, revert
  * actions). EntryList's menuTargets is deliberately separate: it derives
  * row-menu targets from the open menu's entry, a different concept.
+ *
+ * Reader rule: action decisions on "the entry" (share, revert, panel buttons)
+ * read through this helper. Direct selectedPath reads stay inside the console
+ * facade and the selection internals (form prefills, stat bookkeeping) plus
+ * read-only display of the focus path. The dual focus-plus-set model stays:
+ * migrating it would churn every consumer for no behavior gain.
  */
 export function useSingleSelection() {
-  const { entries, selectedEntry, selectedPath, selectedPaths } = sharedState()
+  const { entries, selectedEntry, selectedPath, selectedPaths } = useConsoleState()
   return computed<SingleSelection | null>(() => {
     if (selectedPaths.value.size === 1) {
       const [only] = [...selectedPaths.value]

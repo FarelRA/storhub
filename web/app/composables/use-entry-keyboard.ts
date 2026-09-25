@@ -9,8 +9,8 @@ import { useBreakpoint } from './use-breakpoint'
  */
 export function useEntryKeyboard(opts: {
   getEntries: () => DirEntry[]
-  openEntry: (entry: DirEntry) => void
-  selectEntry: (entry: DirEntry) => void
+  openRow: (entry: DirEntry) => void
+  focusRow: (entry: DirEntry) => void
 }) {
   const consoleStore = useConsole()
   const { isDesktop, isCoarsePointer, hasNoHover, hasTouch } = useBreakpoint()
@@ -82,13 +82,13 @@ export function useEntryKeyboard(opts: {
   // when the gesture deselected the row (toggling the last item off clears
   // the selection; re-statting it would resurrect stale panes).
   function statIfSelected(entry: DirEntry) {
-    if (consoleStore.isSelected(entry.path)) opts.selectEntry(entry)
+    if (consoleStore.isSelected(entry.path)) opts.focusRow(entry)
   }
 
   function handleRowClick(entry: DirEntry, event: MouseEvent) {
     if (isMobile.value) {
       // Mobile: click is open when nothing selected, else toggle select
-      if (selectedSet.value.size === 0) opts.openEntry(entry)
+      if (selectedSet.value.size === 0) opts.openRow(entry)
       else {
         handleSelect(entry, event)
         statIfSelected(entry)
@@ -100,7 +100,7 @@ export function useEntryKeyboard(opts: {
   }
 
   function handleRowDblClick(entry: DirEntry) {
-    if (!isMobile.value) opts.openEntry(entry)
+    if (!isMobile.value) opts.openRow(entry)
   }
 
   // Every single-row keyboard move stats its target like a click does, so
@@ -148,6 +148,8 @@ export function useEntryKeyboard(opts: {
       moveTo(rows, next.path)
       // Keep the newly selected row visible and keep keyboard focus on the list
       nextTick(() => {
+        // Attribute-selector escaping, not URL encoding: CSS.escape is the
+        // correct tool here (see encodeSegment in utils/url for routes).
         const row = document.querySelector<HTMLElement>(`[data-path="${CSS.escape(next.path)}"]`)
         row?.scrollIntoView({ block: 'nearest' })
       })
@@ -156,7 +158,7 @@ export function useEntryKeyboard(opts: {
       shiftAnchor = null
       const targetPath = consoleStore.lastSelected.value || consoleStore.selectedPath.value
       const target = rows.find(e => e.path === targetPath) ?? (idx >= 0 ? rows[idx] : null)
-      if (target) opts.openEntry(target)
+      if (target) opts.openRow(target)
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
       event.preventDefault()
       shiftAnchor = null

@@ -14,7 +14,8 @@ import { copyText } from '~/utils/clipboard'
 import { canDownloadWithoutToken } from '~/utils/download'
 import { blankForm } from '~/utils/modal-kinds'
 import { directLink, SHARE_TTL_5M, SHARE_TTL_5M_LABEL } from '~/utils/share-links'
-import { sharedState } from './console-state'
+import { encodeSegment } from '~/utils/url'
+import { useConsoleState } from './console-state'
 import { useSelection } from './use-selection'
 import { usePreview } from './use-preview'
 import { useUploads, abortUploads, clearUploadCache } from './use-uploads'
@@ -34,10 +35,6 @@ let inspectSeq = 0
 // vs refresh) resolve last-writer-wins without this, repainting an older
 // listing over a newer one.
 let directorySeq = 0
-
-function encodeSegment(value: string): string {
-  return encodeURIComponent(value)
-}
 
 export function useConsole() {
   const { config, url, getJSON, postJSON, request } = useApi()
@@ -76,9 +73,12 @@ export function useConsole() {
     modalKind,
     modalForm,
     modalError,
-  } = sharedState()
+  } = useConsoleState()
 
   const authEnabled = computed(() => config.authEnabled !== false)
+  // Token present means an active share session; a requested-but-failed
+  // link leaves both false so the login and project views return.
+  // Active share sets both; plain browsing sets neither.
   const sharedMode = computed(() => !!shareToken.value)
   const isSharedView = computed(() => sharedMode.value || shareRequested.value)
   const isAdmin = computed(() => (!authEnabled.value ? true : principal.value?.admin === true))
@@ -87,6 +87,8 @@ export function useConsole() {
     () => canWrite.value && !!selectedEntry.value && !selectedEntry.value.is_dir && !selectedEntry.value.is_symlink,
   )
 
+  // Route builder for project-scoped REST routes (not a fetch URL:
+  // pass the result through url() so the configured base path is applied).
   function projectURL(suffix: string): string {
     return `/projects/${encodeSegment(project.value)}${suffix}`
   }
@@ -514,7 +516,7 @@ export function useConsole() {
   // Granular prune: reclaim orphaned index objects, untracked assets,
   // (git backend) collapsed history, or live-catalog chunk orphans.
   // Returns the typed result for display.
-  async function prune(scope = 'assets', keep = 0, dryRun = false): Promise<PruneResult | null> {
+  async function prune(scope = 'assets', keep = 1, dryRun = false): Promise<PruneResult | null> {
     return run(`Prune ${scope}`, async () => {
       const payload = await postJSON<PruneResult>(projectURL('/ops/prune'), {
         scope,
@@ -734,6 +736,9 @@ export function useConsole() {
     shareId,
     canWrite,
     canEditFile,
+    // Preview slice re-exported in full under identical names (all five,
+    // never a renamed subset): isSaveable, loadPreview, clearPreview,
+    // readFile, saveFile.
     isSaveable: preview.isSaveable,
 
     // modal

@@ -2,7 +2,9 @@
 // Rollback and per-path revert are admin-only endpoints on the server
 // (rest_auth.go denies non-admins), so the UI gates them with isAdmin,
 // not the broader canWrite.
-const { revisions, busy, canWrite, isAdmin, rollbackRevision, revertPath, selectedPath } = useConsole()
+const { revisions, busy, canWrite, isAdmin, rollbackRevision, revertPath } = useConsole()
+const singleSelection = useSingleSelection()
+const selectedPath = computed(() => singleSelection.value?.path ?? '')
 const { ask } = useConfirm()
 
 async function rollback(sha: string) {
@@ -16,7 +18,7 @@ async function rollback(sha: string) {
 }
 
 async function revertSelectedPath(sha: string) {
-  const path = selectedPath.value
+  const path = singleSelection.value?.path
   if (!path) return
   const ok = await ask({
     title: 'Revert this path',

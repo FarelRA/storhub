@@ -1,6 +1,6 @@
 import { MODAL_TITLES, blankForm } from '~/utils/modal-kinds'
 import type { ModalKind } from '~/utils/modal-kinds'
-import { sharedState } from './console-state'
+import { useConsoleState } from './console-state'
 
 export interface ModalDeps {
   run: <T>(label: string, fn: () => Promise<T>, quiet?: boolean) => Promise<T | null>
@@ -51,7 +51,7 @@ export function useModals(deps: ModalDeps) {
     modalForm,
     modalError,
     xattrs,
-  } = sharedState()
+  } = useConsoleState()
 
   function openModal(kind: ModalKind, contextDir?: string, targetPath?: string): void {
     const form = blankForm()

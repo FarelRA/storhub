@@ -3,13 +3,14 @@ import {
   PREVIEW_MAX_BYTES,
   SNIFF_BYTES,
   classify,
+  extOf,
   isPreviewSaveable,
   kindFromExtension,
   mimeForKind,
   toHexDump,
 } from '~/utils/preview'
 import type { ApiResult } from './use-api'
-import { sharedState } from './console-state'
+import { useConsoleState } from './console-state'
 
 export interface PreviewDeps {
   run: <T>(label: string, fn: () => Promise<T>, quiet?: boolean) => Promise<T | null>
@@ -26,7 +27,7 @@ export interface PreviewDeps {
 /** Drop any object URL and reset the preview panes. Standalone (no deps) so
  * the selection slice can clear previews without a dependency cycle. */
 export function clearPreviewState(): void {
-  const { previewUrl, previewHex, previewMeta } = sharedState()
+  const { previewUrl, previewHex, previewMeta } = useConsoleState()
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
   previewUrl.value = ''
   previewHex.value = ''
@@ -49,7 +50,7 @@ export function usePreview(deps: PreviewDeps) {
     previewHex,
     previewMeta,
     previewLoading,
-  } = sharedState()
+  } = useConsoleState()
   const toasts = useToasts()
 
   // DUAL save gate: genuine text AND a CAS token AND a complete fetch.
@@ -97,7 +98,7 @@ export function usePreview(deps: PreviewDeps) {
     editorIsText.value = false
     previewLoading.value = true
     try {
-      const ext = (entry.path.split('/').pop() ?? '').split('.').pop() ?? ''
+      const ext = extOf(entry.path)
       if (entry.size > PREVIEW_MAX_BYTES) {
         previewKind.value = 'too-large'
         previewMeta.value = { shown: 0, total: entry.size }

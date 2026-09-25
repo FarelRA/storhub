@@ -30,7 +30,9 @@ function commitEdit() {
     emit('navigate', '')
     return
   }
-  emit('navigate', normalizePath(raw))
+  // Emit the typed text unchanged: loadDirectory is the single place that
+  // canonicalizes navigation targets.
+  emit('navigate', raw)
 }
 
 const segments = computed(() => {

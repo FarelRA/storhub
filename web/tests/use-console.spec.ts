@@ -218,7 +218,21 @@ describe('utimes validation', () => {
   })
 })
 
+describe('loadDirectory normalization', () => {
+  it('canonicalizes raw typed paths at the single choke point', async () => {
+    const c = useConsole()
+    await c.loadDirectory('//a/./b/../c//')
+    expect(c.currentPath.value).toBe('a/c')
+  })
+})
+
 describe('prune payload', () => {
+  it('defaults keep to 1, the only value the backend accepts', async () => {
+    const c = useConsole()
+    await c.prune('assets', undefined as unknown as number, true)
+    expect(bodyOf('/ops/prune')).toEqual({ scope: 'assets', keep: 1, dry_run: true })
+  })
+
   it('POSTs {scope, keep, dry_run:true} and skips the refresh for dry runs', async () => {
     const c = useConsole()
     await c.prune('history', 1, true)

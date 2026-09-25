@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { joinApiPath } from '../app/utils/url'
+import { encodeSegment, joinApiPath } from '../app/utils/url'
 
 describe('joinApiPath', () => {
   it.each([
@@ -20,5 +20,12 @@ describe('joinApiPath', () => {
     ['', '/', '/'],
   ])('joinApiPath(%j, %j) -> %j', (base, path, expected) => {
     expect(joinApiPath(base, path)).toBe(expected)
+  })
+})
+
+describe('encodeSegment', () => {
+  it('encodes names for routes and share links', () => {
+    expect(encodeSegment('a b/c')).toBe('a%20b%2Fc')
+    expect(encodeSegment('demo')).toBe('demo')
   })
 })

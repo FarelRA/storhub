@@ -1,6 +1,6 @@
 import { ApiError } from '~/utils/api-types'
 import { TIMEOUTS } from '~/utils/limits'
-import { sharedState } from './console-state'
+import { useConsoleState } from './console-state'
 
 export interface UploadItem {
   file: File
@@ -39,8 +39,8 @@ export function clearUploadCache(): void {
 
 /** XHR upload slice of the console composable. */
 export function useUploads(deps: UploadDeps) {
-  const { project, uploadProgress } = sharedState()
-  const { token } = sharedState()
+  const { project, uploadProgress } = useConsoleState()
+  const { token } = useConsoleState()
   const toasts = useToasts()
 
   /** mkdir -p against the REST API, memoized per project session. */

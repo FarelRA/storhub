@@ -20,8 +20,8 @@ const menu = useEntryMenu()
 const { openMenu, setKebabRef, toggleMenu, closeMenu } = menu
 const selection = useEntryKeyboard({
   getEntries: () => props.entries,
-  openEntry: entry => emit('open', entry),
-  selectEntry: entry => emit('select', entry),
+  openRow: entry => emit('open', entry),
+  focusRow: entry => emit('select', entry),
 })
 const {
   listRef,
@@ -262,13 +262,12 @@ async function openCopy(entry: DirEntry) {
 
               <div class="menu-sep" />
               <button role="menuitem" class="menu-item" title="Short-lived share, valid 5 minutes" @click="runFor(entry, () => shareEntry(entry))">Share (5 min)</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.downloadEntry(entry))">Download</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" title="Signed URL, valid 5 minutes. Works with curl/wget too." @click="runFor(entry, () => consoleStore.copyDirectLink(entry))">Copy direct link</button>
             </template>
-            <template v-else>
+
+            <template v-if="isFile(entry)">
               <div class="menu-sep" />
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.downloadEntry(entry))">Download</button>
-              <button v-if="isFile(entry)" role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.copyDirectLink(entry))">Copy direct link</button>
+              <button role="menuitem" class="menu-item" @click="runFor(entry, () => consoleStore.downloadEntry(entry))">Download</button>
+              <button role="menuitem" class="menu-item" title="Signed URL, valid 5 minutes. Works with curl/wget too." @click="runFor(entry, () => consoleStore.copyDirectLink(entry))">Copy direct link</button>
             </template>
 
             <template v-if="consoleStore.canWrite.value">

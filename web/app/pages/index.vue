@@ -32,22 +32,22 @@ async function navigate(path: string) {
   drawerOpen.value = false
 }
 
-async function selectEntry(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
-  // Selection only; keep drawer open on desktop for multi-select
+async function focusRow(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
+  // Highlight only; the detail panes follow the stat while the directory stays put.
   await consoleStore.focusEntry(entry)
 }
 
-async function openEntry(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
+async function openRow(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
   await consoleStore.selectEntry(entry)
   drawerOpen.value = false
 }
 
 function onSelect(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
-  void selectEntry(entry)
+  void focusRow(entry)
 }
 
 function onOpen(entry: Parameters<typeof consoleStore.selectEntry>[0]) {
-  void openEntry(entry)
+  void openRow(entry)
 }
 
 function onGlobalKey(event: KeyboardEvent) {
