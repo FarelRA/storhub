@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"fmt"
 	"strings"
 	"syscall"
 
@@ -12,31 +11,20 @@ import (
 // Linux's SYMLOOP_MAX (40) so legitimate deep chains resolve.
 const maxSymlinkHops = 40
 
-// LstatResolve follows symlinks among the components of targetPath and
-// returns the physical path they resolve to, leaving the trailing
-// component unresolved (lstat/readlink/unlink semantics). The empty path
-// denotes the root.
-func LstatResolve(repo *meta.RepoMetadata, targetPath string) (string, error) {
-	resolved, _, err := resolvePathTracked(repo, targetPath, false)
-	return resolved, err
-}
-
-// StatResolve follows symlinks among the components of targetPath,
-// including a final symlink (stat/open semantics). The empty path denotes
-// the root.
-func StatResolve(repo *meta.RepoMetadata, targetPath string) (string, error) {
-	resolved, _, err := resolvePathTracked(repo, targetPath, true)
-	return resolved, err
-}
-
-// LstatResolveTracked is LstatResolve plus the ordered list of directories
-// the walk actually descended into, for DAC consumption.
+// LstatResolveTracked follows symlinks among the components of targetPath
+// and returns the physical path they resolve to, leaving the trailing
+// component unresolved (lstat/readlink/unlink semantics), plus the ordered
+// list of directories the walk descended into for DAC consumption. The
+// empty path denotes the root. It is the single lstat-style resolver: the
+// untracked plain twin is deleted, callers that need no chain ignore it.
 func LstatResolveTracked(repo *meta.RepoMetadata, targetPath string) (string, []string, error) {
 	return resolvePathTracked(repo, targetPath, false)
 }
 
-// StatResolveTracked is StatResolve plus the ordered list of directories
-// the walk actually descended into, for DAC consumption.
+// StatResolveTracked follows symlinks among the components of targetPath,
+// including a final symlink (stat/open semantics), plus the ordered list
+// of directories the walk descended into for DAC consumption. The empty
+// path denotes the root. It is the single stat-style resolver.
 func StatResolveTracked(repo *meta.RepoMetadata, targetPath string) (string, []string, error) {
 	return resolvePathTracked(repo, targetPath, true)
 }
@@ -82,7 +70,7 @@ func resolvePathTracked(repo *meta.RepoMetadata, targetPath string, followFinal 
 			continue
 		case "..":
 			if len(resolved) == 0 {
-				return "", nil, fmt.Errorf("path escapes root: %s", targetPath)
+				return "", nil, EscapesRoot(targetPath)
 			}
 			resolved = resolved[:len(resolved)-1]
 			prefixes = prefixes[:len(prefixes)-1]

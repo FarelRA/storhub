@@ -132,27 +132,27 @@ func ApplyCreateMode(ctx context.Context, fallback uint32) uint32 {
 	return mode &^ (id.Umask & 0o7777)
 }
 
-// CheckReadAccess verifies read permission on the file at filePath.
-func CheckReadAccess(ctx context.Context, repo *meta.RepoMetadata, filePath string) error {
-	return checkPathAccess(ctx, repo, filePath, accessRead)
+// CheckReadAccess verifies read permission on the file at targetPath.
+func CheckReadAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
+	return checkPathAccess(ctx, repo, targetPath, accessRead)
 }
 
-// CheckWriteAccess verifies write permission on the file at filePath.
-func CheckWriteAccess(ctx context.Context, repo *meta.RepoMetadata, filePath string) error {
-	return checkPathAccess(ctx, repo, filePath, accessWrite)
+// CheckWriteAccess verifies write permission on the file at targetPath.
+func CheckWriteAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
+	return checkPathAccess(ctx, repo, targetPath, accessWrite)
 }
 
-// CheckListDirAccess verifies list permission on the directory at dirPath.
-func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, dirPath string) error {
-	if err := CheckWalk(ctx, repo, dirPath); err != nil {
+// CheckListDirAccess verifies list permission on the directory at targetPath.
+func CheckListDirAccess(ctx context.Context, repo *meta.RepoMetadata, targetPath string) error {
+	if err := CheckWalk(ctx, repo, targetPath); err != nil {
 		return err
 	}
-	attrs, err := lookupNode(repo, dirPath)
+	attrs, err := lookupNode(repo, targetPath)
 	if err != nil {
 		return err
 	}
 	if !attrs.IsDir {
-		return syscall.ENOTDIR
+		return NotDirectory(targetPath)
 	}
 	return checkAccess(IdentityFromContext(ctx), attrs, accessRead|accessExec)
 }
@@ -184,7 +184,7 @@ func CheckListDirAccessResolved(ctx context.Context, repo *meta.RepoMetadata, di
 		return err
 	}
 	if !attrs.IsDir {
-		return syscall.ENOTDIR
+		return NotDirectory(dirPath)
 	}
 	return checkAccess(IdentityFromContext(ctx), attrs, accessRead|accessExec)
 }
@@ -203,7 +203,7 @@ func CheckParentWriteResolved(ctx context.Context, repo *meta.RepoMetadata, targ
 		return err
 	}
 	if !attrs.IsDir {
-		return syscall.ENOTDIR
+		return NotDirectory(parent)
 	}
 	return checkAccess(IdentityFromContext(ctx), attrs, accessWrite|accessExec)
 }
@@ -252,7 +252,7 @@ func checkDirExec(id Identity, repo *meta.RepoMetadata, checked map[string]struc
 		return err
 	}
 	if !attrs.IsDir {
-		return syscall.ENOTDIR
+		return NotDirectory(dirPath)
 	}
 	return checkAccess(id, attrs, accessExec)
 }
@@ -268,7 +268,7 @@ func CheckParentWrite(ctx context.Context, repo *meta.RepoMetadata, targetPath s
 		return err
 	}
 	if !attrs.IsDir {
-		return syscall.ENOTDIR
+		return NotDirectory(parent)
 	}
 	return checkAccess(IdentityFromContext(ctx), attrs, accessWrite|accessExec)
 }
@@ -293,11 +293,6 @@ func SanitizeChmodMode(ctx context.Context, entry *EntryInfo, mode uint32) uint3
 		mode &^= 0o2000
 	}
 	return mode
-}
-
-// SanitizeWrittenFileMode clears setuid and setgid bits from a mode.
-func SanitizeWrittenFileMode(mode uint32) uint32 {
-	return mode &^ 0o6000
 }
 
 // KeepOwnerID is the chown(2) "leave unchanged" sentinel: uid_t is
@@ -491,7 +486,7 @@ func lookupNode(repo *meta.RepoMetadata, targetPath string) (nodeAttrs, error) {
 	if dir := repo.GetDirectory(clean); dir != nil {
 		return nodeAttrs{Path: clean, Mode: dir.Mode, UID: dir.UID, GID: dir.GID, IsDir: true}, nil
 	}
-	return nodeAttrs{}, syscall.ENOENT
+	return nodeAttrs{}, NotFound(clean)
 }
 
 func checkAccess(id Identity, attrs nodeAttrs, need int) error {

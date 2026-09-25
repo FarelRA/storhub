@@ -2,29 +2,27 @@ package fs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	meta "github.com/FarelRA/storhub/internal/metadata"
 	"sort"
-	"syscall"
 )
 
-// TruncateFileContext resizes the file at filePath to size bytes.
-func (s *Service) TruncateFileContext(ctx context.Context, project, filePath string, size int64) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "truncate", true, []any{"path", filePath, "size", size}, func() error {
+// TruncateFileContext resizes the file at targetPath to size bytes.
+func (s *Service) TruncateFileContext(ctx context.Context, project, targetPath string, size int64) (result *meta.FileMeta, err error) {
+	err = s.withOp(project, "truncate", true, []any{"path", targetPath, "size", size}, func() error {
 		// truncate(2) has open() semantics: a final symlink is followed to its
 		// target.
-		if err := ValidateAccessPathShape(filePath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		if size < 0 {
-			return errors.New("truncate size must be non-negative")
+			return InvalidArgument("truncate size must be non-negative")
 		}
 		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := StatResolveTracked(repo, filePath)
+		cleanPath, traversed, err := StatResolveTracked(repo, targetPath)
 		if err != nil {
 			return err
 		}
@@ -48,7 +46,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 				// pre-transaction walk above is fast-fail only. A
 				// concurrent rename/replace of a symlink component must
 				// fail closed here, not authorize against the old chain.
-				liveClean, liveTraversed, err := StatResolveTracked(repo, filePath)
+				liveClean, liveTraversed, err := StatResolveTracked(repo, targetPath)
 				if err != nil {
 					return err
 				}
@@ -81,7 +79,7 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 			result, err = s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, size, file.Size-size, nil)
 			return err
 		}
-		result, err = s.zeroExtendFile(ctx, project, filePath, size)
+		result, err = s.zeroExtendFile(ctx, project, targetPath, size)
 		return err
 	})
 	return result, err
@@ -103,15 +101,15 @@ func (s *Service) TruncateFileContext(ctx context.Context, project, filePath str
 const maxZeroExtendBytes = 16 << 20
 
 // zeroExtendFile grows a file to targetSize with a single zero-filled
-// range patch through the backend's patch verb. filePath is the user path:
+// range patch through the backend's patch verb. targetPath is the user path:
 // it is re-resolved against a fresh snapshot here so callers never hand a
 // stale resolution chain across the reload window.
-func (s *Service) zeroExtendFile(ctx context.Context, project, filePath string, targetSize int64) (*meta.FileMeta, error) {
+func (s *Service) zeroExtendFile(ctx context.Context, project, targetPath string, targetSize int64) (*meta.FileMeta, error) {
 	repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	cleanPath, traversed, err := StatResolveTracked(repo, filePath)
+	cleanPath, traversed, err := StatResolveTracked(repo, targetPath)
 	if err != nil {
 		return nil, err
 	}
@@ -129,24 +127,24 @@ func (s *Service) zeroExtendFile(ctx context.Context, project, filePath string, 
 		return file, nil
 	}
 	if targetSize-file.Size > maxZeroExtendBytes {
-		return nil, syscall.EFBIG
+		return nil, TooLarge(cleanPath)
 	}
 	zeros := make([]byte, targetSize-file.Size)
 	return s.backend.PatchFileWithMetadataContext(ctx, project, cleanPath, repo, file, file.Size, 0, zeros)
 }
 
-// AppendFileContext appends data to the file at filePath.
-func (s *Service) AppendFileContext(ctx context.Context, project, filePath string, data []byte) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "append", true, []any{"path", filePath, "bytes", len(data)}, func() error {
+// AppendFileContext appends data to the file at targetPath.
+func (s *Service) AppendFileContext(ctx context.Context, project, targetPath string, data []byte) (result *meta.FileMeta, err error) {
+	err = s.withOp(project, "append", true, []any{"path", targetPath, "bytes", len(data)}, func() error {
 		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 		if err != nil {
 			return err
 		}
 		// append has open() semantics: a final symlink is followed.
-		if err := ValidateAccessPathShape(filePath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
-		cleanPath, traversed, err := StatResolveTracked(repo, filePath)
+		cleanPath, traversed, err := StatResolveTracked(repo, targetPath)
 		if err != nil {
 			return err
 		}
@@ -166,18 +164,18 @@ func (s *Service) AppendFileContext(ctx context.Context, project, filePath strin
 	return result, err
 }
 
-// WriteFileAtContext writes data at offset in the file at filePath.
-func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath string, offset int64, data []byte) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "write-at", true, []any{"path", filePath, "offset", offset, "bytes", len(data)}, func() error {
+// WriteFileAtContext writes data at offset in the file at targetPath.
+func (s *Service) WriteFileAtContext(ctx context.Context, project, targetPath string, offset int64, data []byte) (result *meta.FileMeta, err error) {
+	err = s.withOp(project, "write-at", true, []any{"path", targetPath, "offset", offset, "bytes", len(data)}, func() error {
 		// pwrite has open() semantics: a final symlink is followed.
-		if err := ValidateAccessPathShape(filePath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := StatResolveTracked(repo, filePath)
+		cleanPath, traversed, err := StatResolveTracked(repo, targetPath)
 		if err != nil {
 			return err
 		}
@@ -192,7 +190,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 			return err
 		}
 		if offset < 0 {
-			return errors.New("write offset must be non-negative")
+			return InvalidArgument("write offset must be non-negative")
 		}
 		if len(data) == 0 {
 			// Pure no-op by contract: a zero-length pwrite carries no bytes
@@ -206,7 +204,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 		if offset > file.Size {
 			// The hole is zero-filled in one capped patch, then the real
 			// data lands at offset.
-			if _, err := s.zeroExtendFile(ctx, project, filePath, offset); err != nil {
+			if _, err := s.zeroExtendFile(ctx, project, targetPath, offset); err != nil {
 				return err
 			}
 			repo, _, err = s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
@@ -215,7 +213,7 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 			}
 			// Re-resolve after the fill: the extension reloaded state, so
 			// the pre-transaction chain above is stale past this point.
-			cleanPath, traversed, err = StatResolveTracked(repo, filePath)
+			cleanPath, traversed, err = StatResolveTracked(repo, targetPath)
 			if err != nil {
 				return err
 			}
@@ -242,21 +240,21 @@ func (s *Service) WriteFileAtContext(ctx context.Context, project, filePath stri
 	return result, err
 }
 
-// ReadFileAtContext reads length bytes at offset from the file at filePath.
-func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath string, offset, length int64) (result []byte, err error) {
-	err = s.withOp(project, "read-at", false, []any{"path", filePath, "offset", offset, "length", length}, func() error {
+// ReadFileAtContext reads length bytes at offset from the file at targetPath.
+func (s *Service) ReadFileAtContext(ctx context.Context, project, targetPath string, offset, length int64) (result []byte, err error) {
+	err = s.withOp(project, "read-at", false, []any{"path", targetPath, "offset", offset, "length", length}, func() error {
 		// pread has open() semantics: a final symlink is followed.
-		if err := ValidateAccessPathShape(filePath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		if offset < 0 || length < 0 {
-			return errors.New("read offset and length must be non-negative")
+			return InvalidArgument("read offset and length must be non-negative")
 		}
 		repo, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := StatResolveTracked(repo, filePath)
+		cleanPath, traversed, err := StatResolveTracked(repo, targetPath)
 		if err != nil {
 			return err
 		}
@@ -271,8 +269,10 @@ func (s *Service) ReadFileAtContext(ctx context.Context, project, filePath strin
 			return err
 		}
 		if offset >= file.Size {
-			// POSIX read(2) at or past EOF returns 0 bytes, not an error;
-			// surfacing io.EOF here mapped to EIO at the FUSE boundary.
+			// EOF contract (single form): POSIX read(2) at or past EOF
+			// returns 0 bytes with a nil error, never io.EOF. Surfacing
+			// io.EOF here mapped to EIO at the FUSE boundary; storage
+			// duplicates of this verb must honor the same contract.
 			result = []byte{}
 			return nil
 		}

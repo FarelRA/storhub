@@ -63,7 +63,7 @@ func TestStatResolvePhysicalDotDotThroughSymlink(t *testing.T) {
 		{"a/link", "a/b/c"},
 	}
 	for _, tc := range cases {
-		got, err := StatResolve(m, tc.in)
+		got, _, err := StatResolveTracked(m, tc.in)
 		if err != nil {
 			t.Fatalf("StatResolve(%q): %v", tc.in, err)
 		}
@@ -77,13 +77,13 @@ func TestStatResolveDotDotEscapeContract(t *testing.T) {
 	t.Parallel()
 	m := physicalRepo()
 	for _, in := range []string{"../x", "a/../..", "a/link/../../../../x"} {
-		_, err := StatResolve(m, in)
+		_, _, err := StatResolveTracked(m, in)
 		if err == nil || !strings.Contains(err.Error(), "path escapes root") {
 			t.Fatalf("StatResolve(%q) = %v, want path-escapes-root error", in, err)
 		}
 	}
 	// A ".." that pops exactly to the root is legal and yields "".
-	got, err := StatResolve(m, "a/..")
+	got, _, err := StatResolveTracked(m, "a/..")
 	if err != nil || got != "" {
 		t.Fatalf("StatResolve(\"a/..\") = %q, %v, want root", got, err)
 	}
@@ -92,10 +92,10 @@ func TestStatResolveDotDotEscapeContract(t *testing.T) {
 func TestStatResolveSymlinkLoopStillELOOP(t *testing.T) {
 	t.Parallel()
 	m := physicalRepo()
-	if _, err := StatResolve(m, "loop-a"); !errors.Is(err, syscall.ELOOP) {
+	if _, _, err := StatResolveTracked(m, "loop-a"); !errors.Is(err, syscall.ELOOP) {
 		t.Fatalf("expected ELOOP for cyclic links, got %v", err)
 	}
-	if _, err := StatResolve(m, "loop-a/.."); !errors.Is(err, syscall.ELOOP) {
+	if _, _, err := StatResolveTracked(m, "loop-a/.."); !errors.Is(err, syscall.ELOOP) {
 		t.Fatalf("expected ELOOP through cyclic chain, got %v", err)
 	}
 }
@@ -114,7 +114,7 @@ func TestStatResolveMatchesNormalizeForPlainPaths(t *testing.T) {
 	}
 	for _, in := range inputs {
 		want, wantErr := NormalizePath(in)
-		got, gotErr := StatResolve(m, in)
+		got, _, gotErr := StatResolveTracked(m, in)
 		if (wantErr == nil) != (gotErr == nil) {
 			t.Fatalf("StatResolve(%q) err=%v, NormalizePath err=%v: error parity broken", in, gotErr, wantErr)
 		}
@@ -130,7 +130,7 @@ func TestStatResolveMatchesNormalizeForPlainPaths(t *testing.T) {
 		if _, err := NormalizePath(in); err == nil {
 			t.Fatalf("NormalizePath(%q) unexpectedly accepted escape", in)
 		}
-		if _, err := StatResolve(m, in); err == nil || !strings.Contains(err.Error(), "path escapes root") {
+		if _, _, err := StatResolveTracked(m, in); err == nil || !strings.Contains(err.Error(), "path escapes root") {
 			t.Fatalf("StatResolve(%q) = %v, want path-escapes-root error", in, err)
 		}
 	}
@@ -141,7 +141,7 @@ func TestStatResolveShapeValidation(t *testing.T) {
 	m := physicalRepo()
 	// Whitespace-only is rejected exactly like NormalizePath rejects it.
 	_, normErr := NormalizePath("   ")
-	_, err := StatResolve(m, "   ")
+	_, _, err := StatResolveTracked(m, "   ")
 	if err == nil || normErr == nil || err.Error() != normErr.Error() {
 		t.Fatalf("whitespace-only: StatResolve err=%v, NormalizePath err=%v, want identical", err, normErr)
 	}

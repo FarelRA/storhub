@@ -2,10 +2,8 @@ package fs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	meta "github.com/FarelRA/storhub/internal/metadata"
-	"syscall"
 )
 
 // validateCreate runs the creation checks shared by CreateFileContext's
@@ -31,13 +29,13 @@ func validateCreate(ctx context.Context, repo *meta.RepoMetadata, cleanPath stri
 	return nil
 }
 
-// CreateFileContext creates an empty file at filePath.
-func (s *Service) CreateFileContext(ctx context.Context, project, filePath string) (result *meta.FileMeta, err error) {
-	err = s.withOp(project, "create", true, []any{"path", filePath}, func() error {
+// CreateFileContext creates an empty file at targetPath.
+func (s *Service) CreateFileContext(ctx context.Context, project, targetPath string) (result *meta.FileMeta, err error) {
+	err = s.withOp(project, "create", true, []any{"path", targetPath}, func() error {
 		// Create addresses the new node itself (O_CREAT|O_EXCL never follows a
 		// final symlink), so resolution is lstat-style; intermediate symlink
 		// components are still resolved physically.
-		if err := ValidateAccessPathShape(filePath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		if err := s.backend.ValidateProjectName(project); err != nil {
@@ -50,12 +48,12 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		if err != nil {
 			return err
 		}
-		cleanPath, traversed, err := LstatResolveTracked(repoMeta, filePath)
+		cleanPath, traversed, err := LstatResolveTracked(repoMeta, targetPath)
 		if err != nil {
 			return err
 		}
 		if cleanPath == "" {
-			return errors.New("file path is required")
+			return RequiredPath("file path is required")
 		}
 		if err := validateCreate(ctx, repoMeta, cleanPath, traversed); err != nil {
 			return err
@@ -78,12 +76,12 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 		if _, err := s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 			// Re-resolve against the live transaction state: the
 			// pre-transaction walk above is fast-fail only.
-			liveClean, liveTraversed, err := LstatResolveTracked(repo, filePath)
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, targetPath)
 			if err != nil {
 				return err
 			}
 			if liveClean == "" {
-				return errors.New("file path is required")
+				return RequiredPath("file path is required")
 			}
 			if err := validateCreate(ctx, repo, liveClean, liveTraversed); err != nil {
 				return err
@@ -102,13 +100,13 @@ func (s *Service) CreateFileContext(ctx context.Context, project, filePath strin
 	return result, err
 }
 
-// MkdirContext creates the directory at dirPath.
-func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (err error) {
-	return s.withOp(project, "mkdir", true, []any{"path", dirPath}, func() error {
+// MkdirContext creates the directory at targetPath.
+func (s *Service) MkdirContext(ctx context.Context, project, targetPath string) (err error) {
+	return s.withOp(project, "mkdir", true, []any{"path", targetPath}, func() error {
 		// mkdir never creates through a final symlink (EEXIST on the link
 		// itself), so resolution is lstat-style; intermediate components
 		// resolve physically.
-		if err := ValidateAccessPathShape(dirPath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		if err := s.backend.ValidateProjectName(project); err != nil {
@@ -123,7 +121,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		}
 		// Fast-fail only (resolution errors, root short-circuit): the
 		// transaction below re-resolves against live state.
-		cleanPath, _, err := LstatResolveTracked(repoMeta, dirPath)
+		cleanPath, _, err := LstatResolveTracked(repoMeta, targetPath)
 		if err != nil {
 			return err
 		}
@@ -135,7 +133,7 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 			// Re-resolve against the live transaction state: the
 			// pre-transaction walk above is fast-fail only.
-			liveClean, liveTraversed, err := LstatResolveTracked(repo, dirPath)
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, targetPath)
 			if err != nil {
 				return err
 			}
@@ -174,13 +172,13 @@ func (s *Service) MkdirContext(ctx context.Context, project, dirPath string) (er
 	})
 }
 
-// RmdirContext removes the empty directory at dirPath.
-func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (err error) {
-	return s.withOp(project, "rmdir", true, []any{"path", dirPath}, func() error {
+// RmdirContext removes the empty directory at targetPath.
+func (s *Service) RmdirContext(ctx context.Context, project, targetPath string) (err error) {
+	return s.withOp(project, "rmdir", true, []any{"path", targetPath}, func() error {
 		// rmdir removes the final component itself; a symlink there must not be
 		// followed (POSIX rmdir on a symlink is ENOTDIR), so resolution is
 		// lstat-style.
-		if err := ValidateAccessPathShape(dirPath); err != nil {
+		if err := ValidateAccessPathShape(targetPath); err != nil {
 			return err
 		}
 		repoMeta, _, err := s.backend.LoadRepoMetadataReadonlyContext(ctx, project)
@@ -189,24 +187,24 @@ func (s *Service) RmdirContext(ctx context.Context, project, dirPath string) (er
 		}
 		// Fast-fail only (resolution errors, root short-circuit): the
 		// transaction below re-resolves against live state.
-		cleanPath, _, err := LstatResolveTracked(repoMeta, dirPath)
+		cleanPath, _, err := LstatResolveTracked(repoMeta, targetPath)
 		if err != nil {
 			return err
 		}
 		if cleanPath == "" {
 			// POSIX: rmdir("/") fails with EBUSY, not a generic error that
 			// errno mapping would surface as EIO.
-			return syscall.EBUSY
+			return Busy("/")
 		}
 		_, err = s.backend.UpdateRepoMetadataContext(ctx, project, func(repo *meta.RepoMetadata) error {
 			// Re-resolve against the live transaction state: the
 			// pre-transaction walk above is fast-fail only.
-			liveClean, liveTraversed, err := LstatResolveTracked(repo, dirPath)
+			liveClean, liveTraversed, err := LstatResolveTracked(repo, targetPath)
 			if err != nil {
 				return err
 			}
 			if liveClean == "" {
-				return syscall.EBUSY
+				return Busy("/")
 			}
 			if err := CheckWalkResolved(ctx, repo, liveTraversed); err != nil {
 				return err
@@ -342,7 +340,7 @@ func renameFileInTxn(ctx context.Context, repo *meta.RepoMetadata, oldClean, new
 	// POSIX: renaming a file onto an existing directory fails with
 	// EISDIR; onto an existing file it atomically replaces it.
 	if dstDir != nil {
-		return syscall.EISDIR
+		return IsDirectory(newClean)
 	}
 	srcFile := repo.FindFile(oldClean)
 	if srcFile == nil {
@@ -369,7 +367,7 @@ func renameDirInTxn(ctx context.Context, repo *meta.RepoMetadata, oldClean, newC
 	// POSIX: renaming a directory onto an existing file fails with
 	// ENOTDIR regardless of path relation.
 	if dstFile != nil {
-		return syscall.ENOTDIR
+		return NotDirectory(newClean)
 	}
 	if dstDir != nil {
 		if err := CheckStickyDelete(ctx, repo, ParentPath(newClean), newClean); err != nil {
@@ -377,7 +375,7 @@ func renameDirInTxn(ctx context.Context, repo *meta.RepoMetadata, oldClean, newC
 		}
 	}
 	if IsParentOrSame(oldClean, newClean) {
-		return fmt.Errorf("cannot move directory %s into itself %s", oldClean, newClean)
+		return InvalidArgument(fmt.Sprintf("cannot move directory %s into itself %s", oldClean, newClean))
 	}
 	// Directory onto empty directory replaces it.
 	if dstDir != nil {
@@ -423,12 +421,12 @@ func remapTree(repo *meta.RepoMetadata, oldBase, newBase string, now int64) {
 		dir      meta.DirMeta
 	}
 	dirRemaps := make([]dirRemap, 0, len(dirs))
-	for _, dirPath := range dirs {
-		if dir := repo.GetDirectory(dirPath); dir != nil {
+	for _, targetPath := range dirs {
+		if dir := repo.GetDirectory(targetPath); dir != nil {
 			cloned := *dir
 			cloned.ModifiedAt = now
 			cloned.ChangedAt = now
-			dirRemaps = append(dirRemaps, dirRemap{from: dirPath, to: RemapPath(oldBase, newBase, dirPath), dir: cloned})
+			dirRemaps = append(dirRemaps, dirRemap{from: targetPath, to: RemapPath(oldBase, newBase, targetPath), dir: cloned})
 		}
 	}
 	for _, r := range dirRemaps {
@@ -440,11 +438,11 @@ func remapTree(repo *meta.RepoMetadata, oldBase, newBase string, now int64) {
 		file     meta.FileMeta
 	}
 	fileRemaps := make([]fileRemap, 0, len(files))
-	for _, filePath := range files {
-		if file := repo.FindFile(filePath); file != nil {
+	for _, targetPath := range files {
+		if file := repo.FindFile(targetPath); file != nil {
 			cloned := file.Clone()
 			cloned.ChangedAt = now
-			fileRemaps = append(fileRemaps, fileRemap{from: filePath, to: RemapPath(oldBase, newBase, filePath), file: cloned})
+			fileRemaps = append(fileRemaps, fileRemap{from: targetPath, to: RemapPath(oldBase, newBase, targetPath), file: cloned})
 		}
 	}
 	for _, r := range fileRemaps {
@@ -566,7 +564,7 @@ func (s *Service) CopyContext(ctx context.Context, project, srcPath, dstPath str
 // defaults, which would widen an explicit 000 mode back to 0644.
 func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64, createUID, createGID uint32) error {
 	if dstDir != nil {
-		return syscall.EISDIR
+		return IsDirectory(dstClean)
 	}
 	if dstFile != nil {
 		if err := CheckStickyDelete(ctx, repo, ParentPath(dstClean), dstClean); err != nil {
@@ -601,7 +599,7 @@ func copyFileInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCl
 // foreign-owned setuid nodes for any caller with read access.
 func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstClean string, dstFile *meta.FileMeta, dstDir *meta.DirMeta, now int64, createUID, createGID uint32) error {
 	if dstFile != nil {
-		return syscall.ENOTDIR
+		return NotDirectory(dstClean)
 	}
 	if dstDir != nil {
 		childDirs, childFiles := repo.DirectoryChildren(dstClean)
@@ -614,7 +612,7 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 		repo.RemoveDirectory(dstClean)
 	}
 	if IsParentOrSame(srcClean, dstClean) {
-		return fmt.Errorf("cannot copy directory %s into itself %s", srcClean, dstClean)
+		return InvalidArgument(fmt.Sprintf("cannot copy directory %s into itself %s", srcClean, dstClean))
 	}
 	srcDir := repo.GetDirectory(srcClean)
 	if srcDir == nil {
@@ -631,17 +629,17 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 	newDir.CreatedAt = now
 	repo.WriteDirDirect(dstClean, newDir)
 	dirs, files := collectSubtree(repo, srcClean)
-	for _, dirPath := range dirs {
-		if dirPath == srcClean {
+	for _, targetPath := range dirs {
+		if targetPath == srcClean {
 			continue
 		}
-		newPath := RemapPath(srcClean, dstClean, dirPath)
+		newPath := RemapPath(srcClean, dstClean, targetPath)
 		if repo.HasDirectory(newPath) || repo.FindFile(newPath) != nil {
 			return AlreadyExists(newPath)
 		}
-		sub := repo.GetDirectory(dirPath)
+		sub := repo.GetDirectory(targetPath)
 		if sub == nil {
-			return NotFound(dirPath)
+			return NotFound(targetPath)
 		}
 		cloned := sub.Clone()
 		cloned.Inode = repo.AllocateInode()
@@ -653,14 +651,14 @@ func copyDirInTxn(ctx context.Context, repo *meta.RepoMetadata, srcClean, dstCle
 		cloned.AccessedAt = now
 		repo.WriteDirDirect(newPath, cloned)
 	}
-	for _, filePath := range files {
-		newPath := RemapPath(srcClean, dstClean, filePath)
+	for _, targetPath := range files {
+		newPath := RemapPath(srcClean, dstClean, targetPath)
 		if repo.HasDirectory(newPath) || repo.FindFile(newPath) != nil {
 			return AlreadyExists(newPath)
 		}
-		sub := repo.FindFile(filePath)
+		sub := repo.FindFile(targetPath)
 		if sub == nil {
-			return NotFound(filePath)
+			return NotFound(targetPath)
 		}
 		cloned := sub.Clone()
 		cloned.Inode = repo.AllocateInode()

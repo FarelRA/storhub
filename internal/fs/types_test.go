@@ -31,11 +31,11 @@ func TestKindLabelVocabulary(t *testing.T) {
 			t.Errorf("%s: DirEntry.KindLabel() = %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	if !(EntryInfo{IsDir: true}).IsDirectory() || (EntryInfo{}).IsDirectory() {
-		t.Error("EntryInfo.IsDirectory must mirror IsDir")
+	if got := (EntryInfo{IsDir: true}).KindLabel(); got != "directory" {
+		t.Errorf("dir flag must render directory, got %q", got)
 	}
-	if !(DirEntry{IsSymlink: true}).IsLink() || (DirEntry{}).IsLink() {
-		t.Error("DirEntry.IsLink must mirror IsSymlink")
+	if got := (DirEntry{IsSymlink: true}).KindLabel(); got != "symlink" {
+		t.Errorf("symlink flag must render symlink, got %q", got)
 	}
 }
 

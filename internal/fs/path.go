@@ -14,10 +14,10 @@ import (
 // whether a ".." pops past the root.
 func ValidateAccessPathShape(value string) error {
 	if value == "" {
-		return fmt.Errorf("path is required")
+		return RequiredPath("path is required")
 	}
 	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("whitespace-only path is not addressable: %q", value)
+		return InvalidArgument(fmt.Sprintf("whitespace-only path is not addressable: %q", value))
 	}
 	return nil
 }
@@ -31,10 +31,12 @@ func ValidateAccessPathShape(value string) error {
 // internal/metadata), so accepting one would create a root-masquerading
 // phantom entry.
 //
-// NormalizePath is KEY CANONICALIZATION: it maps a concrete path (no "..",
+// NormalizePath is the canonical checked normalizer shared by every layer.
+// It maps a concrete path (no "..",
 // no symlink components) to its canonical storage key. User paths that may
 // contain ".", "..", or symlink components must go through the repo-aware
-// access resolver (StatResolveTracked/LstatResolveTracked) instead.
+// access resolver (StatResolveTracked/LstatResolveTracked) instead, which
+// reports the same EscapesRoot contract on traversal past the root.
 func NormalizePath(value string) (string, error) {
 	if err := ValidateAccessPathShape(value); err != nil {
 		return "", err
@@ -45,16 +47,19 @@ func NormalizePath(value string) (string, error) {
 		return "", nil
 	}
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("path escapes root: %s", value)
+		return "", EscapesRoot(value)
 	}
 	return cleaned, nil
 }
 
 // normalizeStoredPath canonicalizes an already-stored path for map lookups.
 // On normalization failure it keeps the value's literal spelling (minus
-// surrounding slashes) but never trims significant whitespace: a traversal
-// spelling like "../x" can only ever miss the exact-key repo maps (ENOENT),
-// while collapsing it to "" would masquerade as the root directory.
+// surrounding slashes) but never trims significant whitespace and never
+// mints the root: a traversal spelling like "../x" can only ever miss the
+// exact-key repo maps (ENOENT), while collapsing it to "" would masquerade
+// as the root directory. Whitespace-only input likewise keeps its spelling
+// and misses, which is exactly the divergence the metadata normalizer must
+// close on its side (it trims whitespace first and mints the root).
 //
 // Failure-path whitespace differs from the metadata normalizer on purpose:
 // this spelling trims slashes only, while metadata trims surrounding
@@ -64,7 +69,10 @@ func NormalizePath(value string) (string, error) {
 func normalizeStoredPath(value string) string {
 	cleaned, err := NormalizePath(value)
 	if err != nil {
-		return strings.Trim(value, "/")
+		if trimmed := strings.Trim(value, "/"); trimmed != "" {
+			return trimmed
+		}
+		return value
 	}
 	return cleaned
 }
@@ -97,7 +105,10 @@ func IsParentOrSame(parent, child string) bool {
 // delimited child of it; the boundary assert below keeps an out-of-tree
 // target (oldBase "a", target "ab/c") from remapping to a nonsense key.
 // Off-boundary input is returned unchanged (ENOENT surfaces at lookup)
-// instead of producing newBase+"b/c".
+// instead of producing newBase+"b/c". The string-only shape stays because
+// storage move appliers (outside this package) share it; an error return
+// would fork the contract across layers, so the boundary stays a
+// miss-later assert, pinned by TestRemapPathBoundary.
 func RemapPath(oldBase, newBase, target string) string {
 	if target == oldBase {
 		return newBase

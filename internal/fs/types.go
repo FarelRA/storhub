@@ -6,7 +6,11 @@ import (
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 )
 
-// EntryInfo is the stat-style view of one path used by StatPath.
+// EntryInfo is the stat-style view of one path used by StatPath. It is one
+// of exactly three attribute shapes: EntryInfo (single-path wire view),
+// DirEntry (one listing row, liftable via EntryFromDirEntry without
+// re-stat), and the unexported nodeAttrs (DAC-only view inside
+// permissions.go). Do not add a fourth; FUSE/REST render from EntryInfo.
 type EntryInfo struct {
 	Path          string            `json:"path"`
 	Kind          metadata.NodeKind `json:"kind,omitempty"`
@@ -50,19 +54,10 @@ func (e DirEntry) KindLabel() string {
 	return KindLabel(e.IsDir, e.IsSymlink)
 }
 
-// IsDirectory reports the dir flag behind one name.
-func (e EntryInfo) IsDirectory() bool { return e.IsDir }
-
-// IsLink reports the symlink flag behind one name.
-func (e EntryInfo) IsLink() bool { return e.IsSymlink }
-
-// IsDirectory reports the dir flag behind one name.
-func (e DirEntry) IsDirectory() bool { return e.IsDir }
-
-// IsLink reports the symlink flag behind one name.
-func (e DirEntry) IsLink() bool { return e.IsSymlink }
-
 // MetadataPatch carries one metadata-only update (mode, owner, times).
+// Time rule: storage persists int64 nanos; time.Time lives only at this
+// API edge and the explicit chtimes verb. Convert at the boundary with
+// UnixNano/time.Unix, never mid-transaction.
 type MetadataPatch struct {
 	HasMode  bool
 	Mode     uint32

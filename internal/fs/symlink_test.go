@@ -21,20 +21,20 @@ func TestSymlinkResolution(t *testing.T) {
 	// Absolute link to a directory.
 	m.UpsertFile("abs", meta.FileMeta{Symlink: "/target", Inode: 5}, 1)
 
-	resolved, err := StatResolve(m, "docs/link")
+	resolved, _, err := StatResolveTracked(m, "docs/link")
 	if err != nil || resolved != "docs/base.txt" {
 		t.Fatalf("relative link resolved to %q err=%v", resolved, err)
 	}
-	resolved, err = LstatResolve(m, "docs/link")
+	resolved, _, err = LstatResolveTracked(m, "docs/link")
 	if err != nil || resolved != "docs/link" {
 		t.Fatalf("no-follow final resolved to %q err=%v", resolved, err)
 	}
-	resolved, err = StatResolve(m, "abs")
+	resolved, _, err = StatResolveTracked(m, "abs")
 	if err != nil || resolved != "target" {
 		t.Fatalf("absolute dir link resolved to %q err=%v", resolved, err)
 	}
 	// stat() semantics compose StatResolve with a lookup.
-	resolved, err = StatResolve(m, "docs/link")
+	resolved, _, err = StatResolveTracked(m, "docs/link")
 	if err != nil {
 		t.Fatalf("resolve followed: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestSymlinkResolution(t *testing.T) {
 	// Cycles must fail with ELOOP, not hang or succeed.
 	m.UpsertFile("loop-a", meta.FileMeta{Symlink: "loop-b", Inode: 6}, 1)
 	m.UpsertFile("loop-b", meta.FileMeta{Symlink: "loop-a", Inode: 7}, 1)
-	if _, err := StatResolve(m, "loop-a"); err != syscall.ELOOP {
+	if _, _, err := StatResolveTracked(m, "loop-a"); err != syscall.ELOOP {
 		t.Fatalf("expected ELOOP for cyclic links, got %v", err)
 	}
 }
@@ -103,7 +103,7 @@ func TestStatResolveDeepChainWithinLinuxSymlinkLimit(t *testing.T) {
 		}
 		m.UpsertFile(fmt.Sprintf("link%d", i), meta.FileMeta{Symlink: target, Inode: uint64(10 + i)}, 1)
 	}
-	resolved, err := StatResolve(m, "link29")
+	resolved, _, err := StatResolveTracked(m, "link29")
 	if err != nil || resolved != "leaf" {
 		t.Fatalf("30-hop chain must resolve under the 40-hop limit, got %q err=%v", resolved, err)
 	}

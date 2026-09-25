@@ -22,7 +22,7 @@ type Backend interface {
 	LoadRepoMetadataReadonlyContext(ctx context.Context, project string) (*meta.RepoMetadata, string, error)
 	UpdateRepoMetadataContext(ctx context.Context, project string, fn func(*meta.RepoMetadata) error, message string) (*meta.RepoMetadata, error)
 	GetOrCreateUploadReleaseContext(ctx context.Context, project string, repoMeta *meta.RepoMetadata, requiredSize int) (string, string, error)
-	PatchFileWithMetadataContext(ctx context.Context, project, cleanName string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error)
+	PatchFileWithMetadataContext(ctx context.Context, project, cleanPath string, repoMeta *meta.RepoMetadata, fileMeta *meta.FileMeta, offset, deleteSize int64, edit []byte) (*meta.FileMeta, error)
 	FillAssetRangeContext(ctx context.Context, project string, segment meta.ChunkInfo, dst []byte) error
 	QueueAtimeUpdateContext(ctx context.Context, project, targetPath string, isDir bool, now int64)
 	Logger() *slog.Logger
@@ -138,7 +138,7 @@ func (p *projectState) bump() {
 //
 // Span gating: the start line emits only when the project logger enables
 // Debug, checked here before the message concat and record build, and the
-// success finish line is gated the same way inside logFinishState.
+// success finish line is gated the same way inside logFinish.
 // Failures always reach logging.Finish so the Error "<op> failed" line
 // stays visible at the default level. Residual cost with Debug off is the
 // call-site args slice plus interface boxing: the verb call sites pass
@@ -158,12 +158,12 @@ func (s *Service) withOp(project, op string, mutating bool, args []any, fn func(
 		if mutating && err == nil {
 			state.bump()
 		}
-		s.logFinishState(state, op, started, err, args...)
+		s.logFinish(state, op, started, err, args...)
 	}()
 	return fn()
 }
 
-func (s *Service) logFinishState(state *projectState, op string, started time.Time, err error, args ...any) {
+func (s *Service) logFinish(state *projectState, op string, started time.Time, err error, args ...any) {
 	// Debug, not Info: per-op completion lines are a steady-state fire
 	// hose on a mount (every stat/read/write), and the default level no
 	// longer wants them. Failures pass through unguarded so the Error

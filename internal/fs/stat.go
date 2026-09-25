@@ -11,7 +11,7 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 	err = s.withOp(project, "stat-path", false, []any{"path", targetPath}, func() error {
 		// lstat semantics: the final symlink is NOT followed; intermediate
 		// symlink components are resolved physically. Callers wanting
-		// stat() semantics resolve first (StatResolve) and then look up.
+		// stat() semantics resolve first (StatResolveTracked) and look up.
 		if targetPath != "" {
 			if err := ValidateAccessPathShape(targetPath); err != nil {
 				return err
@@ -29,7 +29,7 @@ func (s *Service) StatPathContext(ctx context.Context, project, targetPath strin
 			return err
 		}
 		if cleanPath == "" {
-			result = &EntryInfo{Path: "", IsDir: true, Inode: repo.Root.Inode, Mode: repo.Root.Mode, UID: repo.Root.UID, GID: repo.Root.GID, NLink: uint32(repo.DirNLink("")), CreatedAt: repo.Root.CreatedAt, ModifiedAt: repo.Root.ModifiedAt, AccessedAt: repo.Root.AccessedAt, ChangedAt: repo.Root.ChangedAt}
+			result = EntryFromDirectory(&repo.Root, "", repo.DirNLink(""))
 			return nil
 		}
 		// lstat semantics: a terminal symlink reports itself; intermediate

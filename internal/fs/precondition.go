@@ -54,19 +54,25 @@ func WithExpectedRevision(revision string) MutateOption {
 // WithSize declares the exact byte length of the body about to be uploaded.
 // Streaming chunk uploads require it up front: GitHub asset uploads carry an
 // explicit Content-Length per chunk, and window planning needs the total to
-// compute ceil(size/ChunkSize). Callers without a natural size must not
-// guess - storage rejects missing sizes with a descriptive error instead of
-// fragmenting uploads.
+// compute ceil(size/ChunkSize). The value is recorded faithfully, including
+// negatives: ValidateSize rejects those loud instead of the old silent
+// ignore, which hid caller bugs as "size unknown" downstream.
 func WithSize(n int64) MutateOption {
 	return func(o *MutateOptions) {
-		if n >= 0 {
-			o.expectedSize, o.hasSize = n, true
-		}
+		o.expectedSize, o.hasSize = n, true
 	}
 }
 
 // ExpectedSize returns the declared body size and whether one was declared.
 func (o MutateOptions) ExpectedSize() (int64, bool) { return o.expectedSize, o.hasSize }
+
+// ValidateSize rejects a declared negative body size loud.
+func (o MutateOptions) ValidateSize() error {
+	if o.hasSize && o.expectedSize < 0 {
+		return InvalidArgument("upload size must be non-negative")
+	}
+	return nil
+}
 
 // WithNoReplace declares that the mutation must fail with EEXIST if the
 // destination already exists, checked inside the update transaction rather
