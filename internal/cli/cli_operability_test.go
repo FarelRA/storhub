@@ -16,7 +16,7 @@ func TestOperabilityCommandsSuccessPaths(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
-		{"project", "prune", "--token", "x", "demo", "chunks", "--dryrun"},
+		{"project", "prune", "--token", "x", "demo", "chunks", "--dry-run"},
 		{"project", "prune", "--token", "x", "demo", "chunks"},
 		{"project", "status", "--token", "x", "demo"},
 		{"project", "enable", "--token", "x", "demo"},
@@ -29,7 +29,7 @@ func TestOperabilityCommandsSuccessPaths(t *testing.T) {
 	}
 	app, _, stderr := newTestApp(t)
 	seed(app)
-	if err := app.Run([]string{"project", "prune", "--token", "x", "demo", "chunks", "--dryrun"}); err != nil {
+	if err := app.Run([]string{"project", "prune", "--token", "x", "demo", "chunks", "--dry-run"}); err != nil {
 		t.Fatalf("prune chunks dryrun: %v", err)
 	}
 	if out := stderr(); !strings.Contains(out, "would prune demo (chunks)") {

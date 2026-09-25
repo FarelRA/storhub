@@ -46,14 +46,14 @@ func TestUsageErrorsAreClassified(t *testing.T) {
 
 func TestChunkSizeClampWarns(t *testing.T) {
 	t.Parallel()
-	if got := normalizeCLIChunkSize(1024); got != minCLIChunkSize {
-		t.Fatalf("clamp broken: %d", got)
+	if _, err := normalizeCLIChunkSize(1024); err == nil || !IsUsageError(err) {
+		t.Fatalf("below-floor size must fail loud, got %v", err)
 	}
-	if got := normalizeCLIChunkSize(minCLIChunkSize * 2); got != minCLIChunkSize*2 {
-		t.Fatalf("valid size must pass through: %d", got)
+	if got, err := normalizeCLIChunkSize(minCLIChunkSize * 2); err != nil || got != minCLIChunkSize*2 {
+		t.Fatalf("valid size must pass through: %d err %v", got, err)
 	}
-	if got := normalizeCLIChunkSize(9999999999); got != chunking.MaxReleaseAssetSize {
-		t.Fatalf("ceiling clamp broken: %d", got)
+	if got, err := normalizeCLIChunkSize(9999999999); err != nil || got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("ceiling clamp broken: %d err %v", got, err)
 	}
 }
 

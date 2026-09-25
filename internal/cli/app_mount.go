@@ -24,13 +24,33 @@ Examples:
 	return cmd
 }
 
-func (a *App) runMount(cmd *cobra.Command, args []string) error {
-	token, apiBase := cmdAuth(cmd)
+// fuseOptsFromFlags is the single FUSE-options constructor for mount and
+// serve: one definition so the two surfaces cannot drift on wording,
+// defaults, or umask semantics. The FUSE protocol never transmits the
+// caller umask, so an unset --umask stays representable: UmaskSet is true
+// only when the flag was explicitly passed, and the default 022 applies
+// otherwise without masquerading as an explicit choice.
+func fuseOptsFromFlags(cmd *cobra.Command) (storhub.FUSEOptions, error) {
 	allowOther, _ := cmd.Flags().GetBool("allowother")
 	debug, _ := cmd.Flags().GetBool("debug")
 	cacheDir, _ := cmd.Flags().GetString("cachedir")
 	umaskRaw, _ := cmd.Flags().GetString("umask")
 	umask, err := parseMountUmask(umaskRaw)
+	if err != nil {
+		return storhub.FUSEOptions{}, err
+	}
+	opts := storhub.DefaultFUSEOptions()
+	opts.AllowOther = allowOther
+	opts.Debug = debug
+	opts.CacheDir = cacheDir
+	opts.Umask = umask
+	opts.UmaskSet = cmd.Flags().Changed("umask")
+	return opts, nil
+}
+
+func (a *App) runMount(cmd *cobra.Command, args []string) error {
+	token, apiBase := cmdAuth(cmd)
+	opts, err := fuseOptsFromFlags(cmd)
 	if err != nil {
 		return err
 	}
@@ -42,12 +62,6 @@ func (a *App) runMount(cmd *cobra.Command, args []string) error {
 		shlog.Error(a.logger(), "mount failed", "command", "mount", "project", args[0], "mountpoint", args[1], "err", err)
 		return err
 	}
-	opts := storhub.DefaultFUSEOptions()
-	opts.AllowOther = allowOther
-	opts.Debug = debug
-	opts.CacheDir = cacheDir
-	opts.Umask = umask
-	opts.UmaskSet = true
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// mount setup must not fall through to the default disposition and kill
 	// the process with a half-attached mount left behind.

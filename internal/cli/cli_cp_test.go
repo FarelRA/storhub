@@ -176,19 +176,16 @@ func TestCpReflinkAutoFallsBackToStreaming(t *testing.T) {
 	}
 }
 
-func TestCpReflinkNeverStreamsWithoutCloning(t *testing.T) {
-	fake := &cpFakeHub{files: map[string][]byte{"a.txt": []byte("0123456789")}}
-	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=never", "demo", "a.txt", "b.txt", "2", "0", "4"}); err != nil {
-		t.Fatalf("cp never: %v", err)
+func TestCpAutoFallbackStreamsRangesWithoutCloning(t *testing.T) {
+	fake := &cpFakeHub{files: map[string][]byte{"a.txt": []byte("0123456789")}, cloneErr: errTestCloneDown}
+	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=auto", "demo", "a.txt", "b.txt", "2", "0", "4"}); err != nil {
+		t.Fatalf("cp auto fallback: %v", err)
 	}
 	if string(fake.files["b.txt"]) != "2345" {
 		t.Fatalf("range stream bytes wrong, got %q", fake.files["b.txt"])
 	}
-	if fake.cloneCalls != 0 {
-		t.Fatalf("never must not call the clone op, got %d", fake.cloneCalls)
-	}
 	if fake.writeCalls == 0 {
-		t.Fatal("never must copy through the streaming path")
+		t.Fatal("auto fallback must copy through the streaming path")
 	}
 }
 
@@ -208,6 +205,7 @@ func TestCpRangeOffsetsReachTheClone(t *testing.T) {
 func TestCpUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"cp", "--reflink=sometimes", "demo", "a.txt", "b.txt"},
+		{"cp", "--reflink=never", "demo", "a.txt", "b.txt"},
 		{"cp", "demo", "a.txt"},
 		{"cp", "demo", "a.txt", "b.txt", "0"},
 		{"cp", "demo", "a.txt", "b.txt", "0", "0"},
@@ -277,14 +275,15 @@ func TestCpStreamingCopyUnifiesDestinationMode(t *testing.T) {
 		files: map[string][]byte{"locked.txt": []byte("secret"), "setuid.txt": []byte("tool")},
 		modes: map[string]uint32{"locked.txt": 0o600, "setuid.txt": 0o4755},
 	}
-	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=never", "demo", "locked.txt", "locked-copy.txt"}); err != nil {
-		t.Fatalf("cp never: %v", err)
+	fake.cloneErr = errTestCloneDown
+	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=auto", "demo", "locked.txt", "locked-copy.txt"}); err != nil {
+		t.Fatalf("cp auto fallback: %v", err)
 	}
 	if got := fake.modeOf("locked-copy.txt"); got != 0o600 {
 		t.Fatalf("streaming copy mode = %o, want source 600", got)
 	}
-	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=never", "demo", "setuid.txt", "tool-copy.txt"}); err != nil {
-		t.Fatalf("cp never: %v", err)
+	if err := runCpWithFake(t, fake, []string{"cp", "--reflink=auto", "demo", "setuid.txt", "tool-copy.txt"}); err != nil {
+		t.Fatalf("cp auto fallback: %v", err)
 	}
 	if got := fake.modeOf("tool-copy.txt"); got != 0o755 {
 		t.Fatalf("streaming copy mode = %o, want 755 (setuid cleared)", got)

@@ -24,8 +24,6 @@ import (
 // --expectedrevision set there is no fallback: the streaming path cannot
 // honor the compare-and-swap, so a failed clone fails the command instead
 // of applying without its guard.
-// never: streaming copy only (the historical behavior, kept for testing
-// and for backends where cloning is known to be unavailable).
 //
 // Whole-file clone is the full-range case: no offsets means src_off 0 and
 // length equal to the source size, resolved with one StatPath.
@@ -38,13 +36,15 @@ type cloneRanger interface {
 	CloneRange(context.Context, string, string, int64, string, int64, int64, ...storhub.MutateOption) (*storhub.FileMetadata, error)
 }
 
-// cpWindowSize bounds resident memory while cp streams: each iteration
-// moves at most this many bytes instead of buffering the whole object.
-const cpWindowSize = 1 << 20
+// copyWindowSize bounds resident memory for every windowed CLI copy loop
+// (cp streaming, cat streaming): each iteration moves at most this many
+// bytes instead of buffering the whole object. One const so the two loops
+// can never disagree on the resident-memory budget.
+const copyWindowSize = 1 << 20
 
 func (a *App) newCpCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cp [flags] <project> <src> <dst> [src_off dst_off length]",
+		Use:   "cp [flags] <project> <oldpath> <newpath> [src_off dst_off length]",
 		Short: "Copy a file server-side, with streaming fallback",
 		Long: `Cp copies stored bytes between two paths, trying a zero-byte
 server-side clone first (--reflink=auto, the default) and streaming the
@@ -52,7 +52,6 @@ bytes when cloning is unavailable.
 
   --reflink=always  clone only; fail loudly when uncloneable
   --reflink=auto    clone, falling back to streaming copy (default)
-  --reflink=never   stream the bytes; preserves the old behavior
 
 With no offsets the whole file is copied; with src_off dst_off length
 exactly that span moves (pwrite semantics on the destination).
@@ -69,7 +68,7 @@ Examples:
 		}),
 		RunE: a.runCp,
 	}
-	cmd.Flags().String("reflink", "auto", "Copy mode: always (clone only), auto (clone with streaming fallback), never (stream only)")
+	cmd.Flags().String("reflink", "auto", "Copy mode: always (clone only), auto (clone with streaming fallback)")
 	addSyncFlag(cmd)
 	addRevisionFlag(cmd)
 	return cmd
@@ -78,10 +77,10 @@ Examples:
 func (a *App) runCp(cmd *cobra.Command, args []string) error {
 	mode, _ := cmd.Flags().GetString("reflink")
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "always", "auto", "never":
+	case "always", "auto":
 		mode = strings.ToLower(strings.TrimSpace(mode))
 	default:
-		return &usageError{fmt.Errorf("invalid --reflink %q: must be always, auto, or never", mode)}
+		return &usageError{fmt.Errorf("invalid --reflink %q: must be always or auto", mode)}
 	}
 	project, src, dst := args[0], args[1], args[2]
 	var srcOff, dstOff, length int64
@@ -123,12 +122,6 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	opts := revisionOpts(cmd)
-	if mode == "never" && opts != nil {
-		// The streaming path cannot honor compare-and-swap (plain
-		// WriteFileAt with no revision plumbing): accepting the flag
-		// would silently drop the guard, so fail loud as a usage error.
-		return &usageError{fmt.Errorf("--reflink=never cannot be combined with --expectedrevision: streaming copy cannot enforce compare-and-swap; use --reflink=auto or --reflink=always")}
-	}
 	switch mode {
 	case "always":
 		meta, err := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode)
@@ -139,16 +132,6 @@ func (a *App) runCp(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (reflink)", src, dst), meta)
-		return nil
-	case "never":
-		meta, err := streamingCopy(ctx, hub, project, src, srcOff, dst, dstOff, length)
-		if err != nil {
-			return err
-		}
-		if err := a.drainIfSyncRequested(ctx, cmd, project); err != nil {
-			return err
-		}
-		printFileSummary(a.stderr, fmt.Sprintf("copied %s -> %s (streaming)", src, dst), meta)
 		return nil
 	default: // auto
 		meta, cerr := cloneWithFlags(ctx, hub, project, src, srcOff, dst, dstOff, length, opts, mode)
@@ -219,7 +202,7 @@ func streamingCopy(ctx context.Context, hub hubClient, project, src string, srcO
 	var meta *storhub.FileMetadata
 	var done int64
 	for done < length {
-		want := int64(cpWindowSize)
+		want := int64(copyWindowSize)
 		if remaining := length - done; remaining < want {
 			want = remaining
 		}

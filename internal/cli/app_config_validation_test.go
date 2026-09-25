@@ -56,19 +56,19 @@ func TestServeRESTLoadsAuthFile(t *testing.T) {
 	}
 }
 
-func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
+func TestNormalizeCLIChunkSizeRejectsSmallValues(t *testing.T) {
 	t.Parallel()
-	if got := normalizeCLIChunkSize(0); got != 0 {
-		t.Fatalf("expected zero chunk size to remain unset, got %d", got)
+	if got, err := normalizeCLIChunkSize(0); err != nil || got != 0 {
+		t.Fatalf("expected zero chunk size to remain unset, got %d err %v", got, err)
 	}
-	if got := normalizeCLIChunkSize(-1); got != -1 {
-		t.Fatalf("expected negative chunk size to pass through for usage-error rejection, got %d", got)
+	if got, err := normalizeCLIChunkSize(-1); err != nil || got != -1 {
+		t.Fatalf("expected negative chunk size to pass through for usage-error rejection, got %d err %v", got, err)
 	}
-	if got := normalizeCLIChunkSize(1024); got != minCLIChunkSize {
-		t.Fatalf("expected small chunk size to clamp to %d, got %d", minCLIChunkSize, got)
+	if _, err := normalizeCLIChunkSize(1024); err == nil || !IsUsageError(err) {
+		t.Fatalf("expected below-floor chunk size to fail loud, got %v", err)
 	}
-	if got := normalizeCLIChunkSize(64 << 20); got != 64<<20 {
-		t.Fatalf("expected larger chunk size to remain unchanged, got %d", got)
+	if got, err := normalizeCLIChunkSize(64 << 20); err != nil || got != 64<<20 {
+		t.Fatalf("expected larger chunk size to remain unchanged, got %d err %v", got, err)
 	}
 }
 
@@ -77,14 +77,14 @@ func TestNormalizeCLIChunkSizeFloorsSmallValues(t *testing.T) {
 // plan and the uploader's windows agree instead of failing mid-upload.
 func TestNormalizeCLIChunkSizeCeilingClamp(t *testing.T) {
 	t.Parallel()
-	if got := normalizeCLIChunkSize(9999999999); got != chunking.MaxReleaseAssetSize {
-		t.Fatalf("expected ceiling clamp to %d, got %d", chunking.MaxReleaseAssetSize, got)
+	if got, err := normalizeCLIChunkSize(9999999999); err != nil || got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("expected ceiling clamp to %d, got %d err %v", chunking.MaxReleaseAssetSize, got, err)
 	}
-	if got := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize); got != chunking.MaxReleaseAssetSize {
-		t.Fatalf("ceiling value must pass through, got %d", got)
+	if got, err := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize); err != nil || got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("ceiling value must pass through, got %d err %v", got, err)
 	}
-	if got := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize + 1); got != chunking.MaxReleaseAssetSize {
-		t.Fatalf("expected ceiling clamp to %d, got %d", chunking.MaxReleaseAssetSize, got)
+	if got, err := normalizeCLIChunkSize(chunking.MaxReleaseAssetSize + 1); err != nil || got != chunking.MaxReleaseAssetSize {
+		t.Fatalf("expected ceiling clamp to %d, got %d err %v", chunking.MaxReleaseAssetSize, got, err)
 	}
 }
 
@@ -94,15 +94,14 @@ func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
 	var buf bytes.Buffer
 	restore := setWarnOutput(&buf)
 	t.Cleanup(restore)
-	cfg := newHubConfig("", 1024, false, logSettings{}, false)
-	if cfg.ChunkSize != minCLIChunkSize {
-		t.Fatalf("expected floor clamp, got %d", cfg.ChunkSize)
-	}
-	if !strings.Contains(buf.String(), "warning") || !strings.Contains(buf.String(), "--chunksize") {
-		t.Fatalf("expected clamp warning on warnOutput, got %q", buf.String())
+	if _, err := newHubConfig("", 1024, false, logSettings{}, false); err == nil || !IsUsageError(err) {
+		t.Fatalf("expected below-floor hub config to fail loud, got %v", err)
 	}
 	buf.Reset()
-	cfg = newHubConfig("", 9999999999, false, logSettings{}, false)
+	cfg, err := newHubConfig("", 9999999999, false, logSettings{}, false)
+	if err != nil {
+		t.Fatalf("newHubConfig: %v", err)
+	}
 	if cfg.ChunkSize != chunking.MaxReleaseAssetSize {
 		t.Fatalf("expected ceiling clamp, got %d", cfg.ChunkSize)
 	}
@@ -115,11 +114,19 @@ func TestHubConfigClampWarnsThroughSeam(t *testing.T) {
 // = fail-fast (negative max wait), long-running (mount, rest,
 // serve) = pause up to the reset (positive max wait).
 func TestHubConfigRatePolicyWiring(t *testing.T) {
-	if got := newHubConfig("", 0, false, logSettings{}, false).RateMaxWait; got >= 0 {
-		t.Fatalf("one-shot RateMaxWait = %v, want negative (fail-fast)", got)
+	cfgOne, err := newHubConfig("", 0, false, logSettings{}, false)
+	if err != nil {
+		t.Fatalf("newHubConfig: %v", err)
 	}
-	if got := newHubConfig("", 0, false, logSettings{}, true).RateMaxWait; got <= 0 {
-		t.Fatalf("long-running RateMaxWait = %v, want positive pause", got)
+	if cfgOne.RateMaxWait >= 0 {
+		t.Fatalf("one-shot RateMaxWait = %v, want negative (fail-fast)", cfgOne.RateMaxWait)
+	}
+	cfgLong, err := newHubConfig("", 0, false, logSettings{}, true)
+	if err != nil {
+		t.Fatalf("newHubConfig: %v", err)
+	}
+	if cfgLong.RateMaxWait <= 0 {
+		t.Fatalf("long-running RateMaxWait = %v, want positive pause", cfgLong.RateMaxWait)
 	}
 }
 
@@ -132,7 +139,7 @@ func TestRatePolicyCommandRouting(t *testing.T) {
 		oneShot++
 		return &fakeHub{t: t}, nil
 	}
-	app.seams.newMountHub = func(_ context.Context, _, _ string, _ logSettings) (hubClient, error) {
+	app.seams.newMountHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		longRunning++
 		return &fakeHub{t: t}, nil
 	}
@@ -157,7 +164,10 @@ func TestRatePolicyCommandRouting(t *testing.T) {
 func TestHubConfigAppliesLogSettingsAndJournal(t *testing.T) {
 	log := logSettings{level: "error", format: "text", color: false}
 	for _, longRunning := range []bool{false, true} {
-		cfg := newHubConfig("", 0, false, log, longRunning)
+		cfg, err := newHubConfig("", 0, false, log, longRunning)
+		if err != nil {
+			t.Fatalf("newHubConfig: %v", err)
+		}
 		if cfg.LogLevel != "error" || cfg.LogFormat != "text" || cfg.LogColor {
 			t.Fatalf("log settings not applied (longRunning=%v): %+v", longRunning, cfg)
 		}

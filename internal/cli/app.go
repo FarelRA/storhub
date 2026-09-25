@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/FarelRA/storhub/internal/chunking"
 	storcfg "github.com/FarelRA/storhub/internal/config"
 	shlog "github.com/FarelRA/storhub/internal/logging"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -38,9 +37,9 @@ type logSettings struct {
 
 func defaultLogSettings() logSettings {
 	return logSettings{
-		level:  envOrDefault("STORHUB_LOG_LEVEL", "info"),
-		format: envOrDefault("STORHUB_LOG_FORMAT", "pretty"),
-		color:  parseEnvBool("STORHUB_LOG_COLOR", true),
+		level:  envOrDefault(storcfg.EnvLogLevel, "info"),
+		format: envOrDefault(storcfg.EnvLogFormat, "pretty"),
+		color:  parseEnvBool(storcfg.EnvLogColor, true),
 	}
 }
 
@@ -51,7 +50,7 @@ func defaultLogSettings() logSettings {
 type cliSeams struct {
 	newHub      func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error)
 	newRESTHub  func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error)
-	newMountHub func(ctx context.Context, token, apiBase string, log logSettings) (hubClient, error)
+	newMountHub func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error)
 	newFUSE     func(hub *storhub.StorHub, project string, opts storhub.FUSEOptions) (fuseMount, error)
 	newREST     func(hub *storhub.StorHub, opts storhub.RESTOptions) (http.Handler, error)
 	listenServe func(server *http.Server) error
@@ -66,9 +65,9 @@ func defaultCliSeams() cliSeams {
 			}
 			return storhubClient{StorHub: hub}, nil
 		},
-		newRESTHub: newRESTHubFromFlags,
-		newMountHub: func(ctx context.Context, token, apiBase string, log logSettings) (hubClient, error) {
-			hub, err := newMountHubFromFlags(ctx, token, apiBase, log)
+		newRESTHub: newLongRunningHubFromFlags,
+		newMountHub: func(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (hubClient, error) {
+			hub, err := newLongRunningHubFromFlags(ctx, token, apiBase, chunkSize, public, log)
 			if err != nil {
 				return nil, err
 			}
@@ -257,36 +256,6 @@ func (c storhubClient) NewFUSE(project string, opts storhub.FUSEOptions) (fuseMo
 	return c.StorHub.NewFUSE(project, opts)
 }
 
-// newRESTHubFromFlags builds the hub for rest/serve: long-running
-// surfaces, so it gets the pause-to-reset rate policy (see applyRateEnv).
-func newRESTHubFromFlags(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
-	token = resolveToken(token)
-	if token == "" {
-		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
-	}
-	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, chunkSize, public, log, true))
-}
-
-const minCLIChunkSize int64 = 32 * 1024 * 1024
-
-// normalizeCLIChunkSize maps a --chunksize flag value to the size actually
-// used. Non-positive values pass through untouched (0 means "unset"; the
-// command layer rejects negatives as usage errors before they get here).
-// Values below the 32 MiB floor clamp up, and values above the GitHub
-// release-asset ceiling clamp down through chunking.NormalizedSize - the
-// single owner of the ceiling - so the chunker's plan and the uploader's
-// windows can never disagree mid-upload.
-func normalizeCLIChunkSize(size int64) int64 {
-	if size <= 0 {
-		return size
-	}
-	if size < minCLIChunkSize {
-		return minCLIChunkSize
-	}
-	clamped, _ := chunking.NormalizedSize(size)
-	return clamped
-}
-
 // New returns an App wired to process stdio with default settings.
 func New() *App {
 	a := &App{stdin: os.Stdin, stdout: io.Writer(os.Stdout), stderr: io.Writer(os.Stderr), warnOut: io.Writer(os.Stderr), log: defaultLogSettings(), seams: defaultCliSeams()}
@@ -304,7 +273,7 @@ func (a *App) seamRESTHub() func(context.Context, string, string, int64, bool, l
 	return a.seams.newRESTHub
 }
 
-func (a *App) seamMountHub() func(context.Context, string, string, logSettings) (hubClient, error) {
+func (a *App) seamMountHub() func(context.Context, string, string, int64, bool, logSettings) (hubClient, error) {
 	return a.seams.newMountHub
 }
 
@@ -358,11 +327,14 @@ Examples:
 		if !shlog.ValidFormat(a.log.format) {
 			return &usageError{fmt.Errorf("invalid --logformat %q: must be pretty or text", a.log.format)}
 		}
+		if err := strictEnvBool(storcfg.EnvLogColor); err != nil {
+			return err
+		}
 		return nil
 	}
 
 	rootCmd.PersistentFlags().String("token", "", "GitHub token (falls back to $GITHUB_TOKEN; never shown in help)")
-	rootCmd.PersistentFlags().String("apibase", os.Getenv("STORHUB_API_BASE_URL"), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
+	rootCmd.PersistentFlags().String("apibase", os.Getenv(storcfg.EnvAPIBaseURL), "Optional GitHub API base URL (env: STORHUB_API_BASE_URL)")
 	rootCmd.PersistentFlags().StringVar(&a.log.level, "loglevel", a.log.level, "Log level: debug, info, warn, error (env: STORHUB_LOG_LEVEL)")
 	rootCmd.PersistentFlags().StringVar(&a.log.format, "logformat", a.log.format, "Log format: pretty, text (env: STORHUB_LOG_FORMAT)")
 	rootCmd.PersistentFlags().BoolVar(&a.log.color, "logcolor", a.log.color, "Enable ANSI colors in logs (env: STORHUB_LOG_COLOR)")
@@ -407,7 +379,7 @@ Examples:
 			return nil
 		}
 		for _, sub := range cmd.Commands() {
-			if sub.Name() == args[0] || sub.HasAlias(args[0]) {
+			if sub.Name() == args[0] {
 				return nil
 			}
 		}
@@ -500,7 +472,7 @@ func (a *App) Run(args []string) error {
 // lines at each run* call site: hub, err := a.mustCmdHub(cmd, 0, false).
 func (a *App) mustCmdHub(cmd *cobra.Command, chunkSize int64, public bool) (hubClient, error) {
 	token, apiBase := cmdAuth(cmd)
-	return a.newCmdHub(cmd.Context(), resolveToken(token), apiBase, chunkSize, public)
+	return a.newCmdHub(cmd.Context(), resolveToken(token), apiBase, chunkSize, public, cmd.Flags().Changed("public"))
 }
 
 // mustCmdHubCtx is mustCmdHub plus a signal context for the long one-shot
@@ -532,20 +504,23 @@ func parseNonNegativeArg(s, name string) (int64, error) {
 
 // withFileConfig layers the --config file under the flag and env values:
 // flags win, then env, then file, then defaults. Callers pass their
-// already-resolved flag values; empty or zero means "unset" so the file
-// may supply it, while any explicit value keeps precedence. Log knobs
-// additionally yield to the environment, which defaultLogSettings folded
-// into a.log at construction. A missing file warns once and proceeds as
-// if no file were given; anything else wrong with the file fails loudly.
-func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (string, int64, bool, logSettings, error) {
+// already-resolved flag values plus whether the public flag was explicitly
+// set; empty/zero/unset means "unset" so the file may supply it, while any
+// explicit value keeps precedence. File create_public_repo assigns (it can
+// turn the repo private again), unlike the old OR-merge that could only
+// ever turn it on. Log knobs additionally yield to the environment, which
+// defaultLogSettings folded into a.log at construction. A missing file is
+// a loud error: an explicit --config path is a contract, and running with
+// silently wrong defaults after a typo is exactly what DisallowUnknownFields
+// rejects for auth files. Anything else wrong with the file fails loudly.
+func (a *App) withFileConfig(apiBase string, chunkSize int64, public, publicSet bool) (string, int64, bool, logSettings, error) {
 	log := a.log
 	path := strings.TrimSpace(a.configFile)
 	if path == "" {
 		return apiBase, chunkSize, public, log, nil
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		a.warnfWithAttrs(nil, "config file not found; continuing without it", []any{"path", path})
-		return apiBase, chunkSize, public, log, nil
+		return "", 0, false, log, fmt.Errorf("load --config %q: file not found", path)
 	}
 	fc, err := storcfg.ReadFileConfig(path)
 	if err != nil {
@@ -557,16 +532,16 @@ func (a *App) withFileConfig(apiBase string, chunkSize int64, public bool) (stri
 	if chunkSize == 0 && fc.ChunkSize != nil {
 		chunkSize = *fc.ChunkSize
 	}
-	if fc.CreatePublicRepo != nil {
-		public = public || *fc.CreatePublicRepo
+	if fc.CreatePublicRepo != nil && !publicSet {
+		public = *fc.CreatePublicRepo
 	}
-	if fc.LogLevel != nil && !a.flagChanged("loglevel") && envUnset("STORHUB_LOG_LEVEL") {
+	if fc.LogLevel != nil && !a.flagChanged("loglevel") && envUnset(storcfg.EnvLogLevel) {
 		log.level = *fc.LogLevel
 	}
-	if fc.LogFormat != nil && !a.flagChanged("logformat") && envUnset("STORHUB_LOG_FORMAT") {
+	if fc.LogFormat != nil && !a.flagChanged("logformat") && envUnset(storcfg.EnvLogFormat) {
 		log.format = *fc.LogFormat
 	}
-	if fc.LogColor != nil && !a.flagChanged("logcolor") && envUnset("STORHUB_LOG_COLOR") {
+	if fc.LogColor != nil && !a.flagChanged("logcolor") && envUnset(storcfg.EnvLogColor) {
 		log.color = *fc.LogColor
 	}
 	return apiBase, chunkSize, public, log, nil
@@ -582,10 +557,10 @@ func (a *App) flagChanged(name string) bool {
 	return a.rootCmd.PersistentFlags().Changed(name)
 }
 
-func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (hubClient, error) {
+func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize int64, public, publicSet bool) (hubClient, error) {
 	start := time.Now()
 	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdHub")
-	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
+	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public, publicSet)
 	if err != nil {
 		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
@@ -602,16 +577,17 @@ func (a *App) newCmdHub(ctx context.Context, token, apiBase string, chunkSize in
 
 // newCmdMountHub builds the hub for long-running interactive surfaces
 // (mount): it records the client for Run's flush and uses the
-// pause-to-reset rate policy.
+// pause-to-reset rate policy. File-supplied chunk_size/public flow through
+// like every other surface: mount no longer silently drops file keys.
 func (a *App) newCmdMountHub(ctx context.Context, token, apiBase string) (hubClient, error) {
 	start := time.Now()
 	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdMountHub")
-	apiBase, _, _, log, err := a.withFileConfig(apiBase, 0, false)
+	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, 0, false, false)
 	if err != nil {
 		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdMountHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
 	}
-	hub, err := a.seamMountHub()(ctx, token, apiBase, log)
+	hub, err := a.seamMountHub()(ctx, token, apiBase, chunkSize, public, log)
 	if err != nil {
 		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdMountHub", "elapsed", time.Since(start), "err", err)
 		return hub, err
@@ -624,7 +600,7 @@ func (a *App) newCmdMountHub(ctx context.Context, token, apiBase string) (hubCli
 func (a *App) newCmdRESTHub(ctx context.Context, token, apiBase string, chunkSize int64, public bool) (*storhub.StorHub, error) {
 	start := time.Now()
 	shlog.Debug(a.logger(), "hub creation start", "op", "newCmdRESTHub")
-	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public)
+	apiBase, chunkSize, public, log, err := a.withFileConfig(apiBase, chunkSize, public, false)
 	if err != nil {
 		shlog.Error(a.logger(), "hub creation failed", "op", "newCmdRESTHub", "elapsed", time.Since(start), "err", err)
 		return nil, err
@@ -742,18 +718,28 @@ func newHubFromFlags(ctx context.Context, token, apiBase string, chunkSize int64
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, chunkSize, public, log, false))
+	cfg, err := newHubConfig(apiBase, chunkSize, public, log, false)
+	if err != nil {
+		return nil, err
+	}
+	return storhub.NewStorHubWithContext(ctx, token, cfg)
 }
 
-// newMountHubFromFlags builds the hub for the long-running mount surface:
-// pause-to-reset rate policy so an interactive session rides out a
-// secondary rate limit instead of dying instantly.
-func newMountHubFromFlags(ctx context.Context, token, apiBase string, log logSettings) (*storhub.StorHub, error) {
+// newLongRunningHubFromFlags is the single hub constructor for the
+// long-running interactive surfaces (mount, rest, serve): pause-to-reset
+// rate policy so a session rides out a secondary rate limit instead of
+// dying instantly. Mount, rest, and serve test doubles inject at this one
+// seam shape.
+func newLongRunningHubFromFlags(ctx context.Context, token, apiBase string, chunkSize int64, public bool, log logSettings) (*storhub.StorHub, error) {
 	token = resolveToken(token)
 	if token == "" {
 		return nil, errors.New("missing GitHub token; pass --token or set GITHUB_TOKEN")
 	}
-	return storhub.NewStorHubWithContext(ctx, token, newHubConfig(apiBase, 0, false, log, true))
+	cfg, err := newHubConfig(apiBase, chunkSize, public, log, true)
+	if err != nil {
+		return nil, err
+	}
+	return storhub.NewStorHubWithContext(ctx, token, cfg)
 }
 
 // cmdAuth extracts the auth flags every command shares: explicit --token

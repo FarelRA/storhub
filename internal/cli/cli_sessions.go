@@ -3,10 +3,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	storage "github.com/FarelRA/storhub/internal/storage"
 	"github.com/spf13/cobra"
 )
@@ -66,17 +66,41 @@ Examples:
 	return cmd
 }
 
+// drainSessionIfSyncRequested honors --sync on session mutators: it resolves
+// the handle's project (one stat) and drains it, mirroring the one-shot
+// mutation commands and the REST ?sync=1 spelling.
+func (a *App) drainSessionIfSyncRequested(cmd *cobra.Command, hub hubClient, handle string) error {
+	want, _ := cmd.Flags().GetBool("sync")
+	if !want {
+		return nil
+	}
+	stat, err := hub.StatSession(cmd.Context(), handle)
+	if err != nil {
+		return err
+	}
+	return a.drainIfSyncRequested(cmd.Context(), cmd, stat.Project)
+}
+
 func sessionHandle(cmd *cobra.Command) (string, error) {
 	handle, _ := cmd.Flags().GetString("handle")
-	if strings.TrimSpace(handle) == "" {
-		// Script composability: export STORHUB_HANDLE once instead
-		// of repeating --handle on every call. Flag wins over env.
-		handle = strings.TrimSpace(os.Getenv("STORHUB_HANDLE"))
-	}
+	// Script composability: export STORHUB_HANDLE once instead
+	// of repeating --handle on every call. Flag wins over env.
+	handle = flagOrEnv(handle, storcfg.EnvSessionHandle)
 	if handle == "" {
 		return "", &usageError{fmt.Errorf("missing --handle (or $STORHUB_HANDLE): open a session first with session open")}
 	}
 	return handle, nil
+}
+
+// parseSessionTTL parses a session --ttl value: a Go duration string like
+// "5m". The message matches the REST open path (rest_sessions.go) so one
+// spelling of the TTL contract reaches operators on both surfaces.
+func parseSessionTTL(raw string) (time.Duration, error) {
+	ttl, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, &usageError{fmt.Errorf("invalid --ttl %q: ttl must be a Go duration string like \"5m\"", raw)}
+	}
+	return ttl, nil
 }
 
 func (a *App) newSessionOpenCmd() *cobra.Command {
@@ -84,7 +108,7 @@ func (a *App) newSessionOpenCmd() *cobra.Command {
 		Use:   "open [flags] <project> [path]",
 		Short: "Open a session and print its handle id",
 		Long: `Open pins the file snapshot and prints the handle id to stdout.
-An empty path opens unlinked scratch that must be named with session link
+An empty path opens an unlinked session that must be named with session link
 before it can commit. Mode is a fopen-style string (r, r+, w, w+, a, a+,
 with optional x for exclusive).`,
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
@@ -103,9 +127,9 @@ func (a *App) runSessionOpen(cmd *cobra.Command, args []string) error {
 	}
 	var opts []storage.SessionOption
 	if ttlRaw, _ := cmd.Flags().GetString("ttl"); strings.TrimSpace(ttlRaw) != "" {
-		ttl, err := time.ParseDuration(strings.TrimSpace(ttlRaw))
+		ttl, err := parseSessionTTL(ttlRaw)
 		if err != nil {
-			return &usageError{fmt.Errorf("invalid --ttl %q: want a Go duration like 5m", ttlRaw)}
+			return err
 		}
 		opts = append(opts, storage.WithSessionTTL(ttl))
 	}
@@ -186,6 +210,7 @@ ignored and bytes stage at the end.`,
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: a.runSessionWrite,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -210,6 +235,9 @@ func (a *App) runSessionWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "written %d bytes to %s\n", wrote, handle)
 	return nil
 }
@@ -229,6 +257,7 @@ session (e.g. one writer, or separate handles merged later).`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runSessionAppend,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -259,6 +288,9 @@ func (a *App) runSessionAppend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "appended %d bytes to %s\n", wrote, handle)
 	return nil
 }
@@ -272,6 +304,7 @@ handle until sync or close.`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runSessionTruncate,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -289,6 +322,9 @@ func (a *App) runSessionTruncate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := hub.TruncateSession(cmd.Context(), handle, size); err != nil {
+		return err
+	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "truncated %s to %d bytes\n", handle, size)
@@ -357,6 +393,7 @@ to the committed state, keeping the handle open.`,
 		Args: usageArgs(cobra.NoArgs),
 		RunE: a.runSessionSync,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -372,6 +409,9 @@ func (a *App) runSessionSync(cmd *cobra.Command, _ []string) error {
 	if err := hub.SyncSession(cmd.Context(), handle); err != nil {
 		return err
 	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "synced %s\n", handle)
 	return nil
 }
@@ -379,12 +419,13 @@ func (a *App) runSessionSync(cmd *cobra.Command, _ []string) error {
 func (a *App) newSessionLinkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "link [flags] <path>",
-		Short: "Name an unlinked scratch handle",
-		Long: `Link names an unlinked scratch handle (opened without a path),
+		Short: "Name an unlinked session handle",
+		Long: `Link names an unlinked session handle (opened without a path),
 staging the creation so a later close persists it.`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runSessionLink,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -398,6 +439,9 @@ func (a *App) runSessionLink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := hub.LinkSession(cmd.Context(), handle, args[0]); err != nil {
+		return err
+	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.stderr, "linked %s to %s\n", handle, args[0])
@@ -414,6 +458,7 @@ The staged bytes commit at the new path on close.`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runSessionRelink,
 	}
+	addSyncFlag(cmd)
 	return cmd
 }
 
@@ -429,6 +474,9 @@ func (a *App) runSessionRelink(cmd *cobra.Command, args []string) error {
 	if err := hub.RelinkSession(cmd.Context(), handle, args[0]); err != nil {
 		return err
 	}
+	if err := a.drainSessionIfSyncRequested(cmd, hub, handle); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(a.stderr, "relinked %s to %s\n", handle, args[0])
 	return nil
 }
@@ -438,7 +486,7 @@ func (a *App) newSessionCloseCmd() *cobra.Command {
 		Use:   "close [flags]",
 		Short: "Commit staged state and destroy the handle",
 		Long: `Close commits staged state atomically and destroys the handle.
-Closing unlinked scratch without a prior link discards it.`,
+Closing an unlinked session without a prior link discards it.`,
 		Args: usageArgs(cobra.NoArgs),
 		RunE: a.runSessionClose,
 	}

@@ -45,7 +45,7 @@ func TestHelpersAndRendering(t *testing.T) {
 	if _, err := newHubFromFlags(context.Background(), "", "", 0, false, logSettings{}); err == nil {
 		t.Fatal("expected missing token error")
 	}
-	hub, err := newHubFromFlags(context.Background(), "token", "https://example.test/api/", 64, true, logSettings{})
+	hub, err := newHubFromFlags(context.Background(), "token", "https://example.test/api/", 64<<20, true, logSettings{})
 	if err != nil || hub == nil {
 		t.Fatalf("newHubFromFlags: %v", err)
 	}

@@ -25,7 +25,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 	app.seams.newHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
-	app.seams.newMountHub = func(_ context.Context, _, _ string, _ logSettings) (hubClient, error) {
+	app.seams.newMountHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (hubClient, error) {
 		return &fakeHub{t: t}, nil
 	}
 	app.seams.newRESTHub = func(_ context.Context, _, _ string, _ int64, _ bool, _ logSettings) (*storhub.StorHub, error) {
@@ -61,7 +61,7 @@ func TestAppCommandSuccessPathsWithMockHub(t *testing.T) {
 		{"project", "sync", "--token", "x", "demo"},
 		{"project", "revisions", "--token", "x", "demo"},
 		{"project", "rollback", "--token", "x", "demo", "deadbeef"},
-		{"project", "prune", "--token", "x", "demo", "objects", "--dryrun"},
+		{"project", "prune", "--token", "x", "demo", "objects", "--dry-run"},
 		{"rest", "--token", "x", "--listen", "127.0.0.1:0", "--allowanonymous"},
 		{"mount", "--token", "x", "demo", mountDir},
 		{"serve", "--token", "x", "demo", mountDir, "--allowanonymous"},

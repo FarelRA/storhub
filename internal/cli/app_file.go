@@ -16,13 +16,13 @@ import (
 // Long. One factory so the two can never drift apart on wording.
 func (a *App) newUploadOrReplaceCmd(name, short, long string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   name + " [flags] <project> <remotepath> <localpath>",
+		Use:   name + " [flags] <project> <path> <localpath>",
 		Short: short,
 		Long:  long,
 		Args:  usageArgs(cobra.ExactArgs(3)),
 		RunE:  a.runUploadOrReplace,
 	}
-	cmd.Flags().Int64("chunksize", 0, "Chunk size in bytes (32 MiB floor, 2 GiB ceiling; out-of-range values clamp)")
+	cmd.Flags().Int64("chunksize", 0, "Chunk size in bytes (minimum 32 MiB, 2 GiB ceiling; below-minimum fails loudly, over-ceiling clamps)")
 	cmd.Flags().Bool("public", false, "Create public repos instead of private")
 	addSyncFlag(cmd)
 	return cmd
@@ -50,7 +50,7 @@ Examples:
 
 func (a *App) newDownloadCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "download [flags] <project> <remotepath> <localpath>",
+		Use:   "download [flags] <project> <path> <localpath>",
 		Short: "Download a file",
 		Long: `Download reassembles a stored file's chunks into a local file.
 
@@ -321,16 +321,14 @@ func (a *App) runCat(cmd *cobra.Command, args []string) error {
 	return streamCopyToStdout(cmd.Context(), hub, a.stdout, args[0], args[1], entry.Size)
 }
 
-// catWindowSize bounds resident memory while cat streams a stored file:
-// each iteration fetches at most this many bytes instead of buffering the
-// whole object, so multi-gigabyte files cannot OOM the CLI.
-const catWindowSize = 1 << 20
+// cat streams through copyWindowSize (see cli_cp.go): one window budget
+// for every CLI copy loop.
 
 func streamCopyToStdout(ctx context.Context, hub hubClient, w io.Writer, project, path string, size int64) error {
 	if size <= 0 {
 		return nil
 	}
-	buf := make([]byte, catWindowSize)
+	buf := make([]byte, copyWindowSize)
 	var off int64
 	for off < size {
 		want := int64(len(buf))

@@ -162,7 +162,7 @@ func (s *cliPOSIXSurface) Open(path string, mode test.OpenMode, disp test.Create
 		// reports the missing path, while CreateIfMissing materializes
 		// it through the CLI before handing out the cursor. OpenReadOnly
 		// never creates.
-		if disp == test.CreateNever || mode == test.OpenReadOnly {
+		if disp == test.CreateNever || mode == test.OpenReadOnly || mode == test.OpenPath {
 			return nil, err
 		}
 		if cErr := s.CreateFile(resolved, 0o644, false); cErr != nil {

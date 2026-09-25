@@ -88,7 +88,7 @@ func (a *App) newProjectPruneCmd() *cobra.Command {
             scope that needs no flush first.
   all       history (where possible) + objects + assets (the default)
 
-Use --dry-run (--dryrun) to see what would be reclaimed without deleting anything.
+Use --dry-run to see what would be reclaimed without deleting anything.
 --keep bounds history compaction (manifests newer than keep are retained).
 
 The serve-mode admin boundary covers the REST surface only: this
@@ -97,8 +97,7 @@ command runs with local-process trust and performs no admin check
 		Args: usageArgs(cobra.RangeArgs(1, 2)),
 		RunE: a.runProjectPrune,
 	}
-	cmd.Flags().Bool("dryrun", false, "Report what would be reclaimed without deleting (dry_run)")
-	cmd.Flags().Bool("dry-run", false, "Alias of --dryrun (dry_run)")
+	cmd.Flags().Bool("dry-run", false, "Report what would be reclaimed without deleting (dry_run)")
 	cmd.Flags().Int("keep", 1, "History: number of recent manifests to retain")
 	addSyncFlag(cmd)
 	return cmd
@@ -155,7 +154,7 @@ before the call is durably committed (the storage fsync primitive). It is
 the standalone form of the --sync flag every mutating command accepts.
 
 Examples:
-  storhub sync docs-project`,
+  storhub project sync docs-project`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: a.runProjectSync,
 	}
@@ -295,10 +294,7 @@ func (a *App) runProjectPrune(cmd *cobra.Command, args []string) error {
 	default:
 		return &usageError{fmt.Errorf("invalid prune scope %q (known: objects, assets, history, chunks, all)", scope)}
 	}
-	dryRun, _ := cmd.Flags().GetBool("dryrun")
-	if dashDryRun, _ := cmd.Flags().GetBool("dry-run"); dashDryRun {
-		dryRun = true
-	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	keep, _ := cmd.Flags().GetInt("keep")
 	if keep < 1 {
 		return &usageError{fmt.Errorf("--keep must retain at least 1 manifest, got %d", keep)}

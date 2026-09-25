@@ -74,38 +74,47 @@ func ReadFileConfig(path string) (FileConfig, error) {
 }
 
 // LoadFile composes the full precedence chain for direct users:
-// Default, then file values, then the STORHUB_* environment. The env layer
-// covers only the log/api subset (see applyFileEnv): chunk_size and
-// create_public_repo have no STORHUB_* spellings and can only come from the
-// file here. An empty path or a missing file returns Default() unchanged
-// without consulting the environment, so a no-file run is exactly the
-// default run. The CLI prefers ReadFileConfig plus its own flag and env
+// Default, then file values, then the STORHUB_* environment (env always
+// wins over the file, including on the no-file path, so a no-file run
+// equals a default run plus the ambient environment). The env layer
+// covers only the log/api subset (see applyFileEnv and env.go): chunk_size
+// and create_public_repo have no STORHUB_* spellings and can only come from
+// the file here. The CLI prefers ReadFileConfig plus its own flag and env
 // layering, which cover the same keys; LoadFile exists for embedders and
 // tests that want one call. Callers still run WithDefaults and Validate
 // before use.
 func LoadFile(path string) (Config, error) {
 	cfg := Default()
-	if strings.TrimSpace(path) == "" {
-		return cfg, nil
-	}
-	data, err := readCappedFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+	if strings.TrimSpace(path) != "" {
+		data, err := readCappedFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return applyFileEnvOr(cfg, path)
+			}
+			return Config{}, err
 		}
-		return Config{}, err
+		fc, err := parseFileConfig(data, path)
+		if err != nil {
+			return Config{}, err
+		}
+		fc.applyTo(&cfg)
 	}
-	fc, err := parseFileConfig(data, path)
-	if err != nil {
-		return Config{}, err
-	}
-	fc.applyTo(&cfg)
 	if err := applyFileEnv(&cfg); err != nil {
 		return Config{}, err
 	}
 	// Load milestone at Debug, never Info: file loads are routine and the
 	// logger is not built yet (WithDefaults runs later), so the
 	// process-default logger carries it.
+	logging.Debug(cfg.Logger, "config file loaded", "path", path)
+	return cfg, nil
+}
+
+// applyFileEnvOr applies the environment after a missing-file no-op, so
+// the missing-file path and the loaded-file path share one env step.
+func applyFileEnvOr(cfg Config, path string) (Config, error) {
+	if err := applyFileEnv(&cfg); err != nil {
+		return Config{}, err
+	}
 	logging.Debug(cfg.Logger, "config file loaded", "path", path)
 	return cfg, nil
 }
@@ -163,19 +172,19 @@ func (f FileConfig) applyTo(cfg *Config) {
 // It runs only when a file was loaded (see LoadFile): the no-file path
 // returns Default() before this is reached.
 func applyFileEnv(cfg *Config) error {
-	if v := strings.TrimSpace(os.Getenv("STORHUB_API_BASE_URL")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(EnvAPIBaseURL)); v != "" {
 		cfg.APIBaseURL = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STORHUB_LOG_LEVEL")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(EnvLogLevel)); v != "" {
 		cfg.LogLevel = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STORHUB_LOG_FORMAT")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(EnvLogFormat)); v != "" {
 		cfg.LogFormat = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STORHUB_LOG_COLOR")); v != "" {
+	if v := strings.TrimSpace(os.Getenv(EnvLogColor)); v != "" {
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
-			return fmt.Errorf("invalid STORHUB_LOG_COLOR=%q: %w", v, err)
+			return fmt.Errorf("invalid %s=%q: %w", EnvLogColor, v, err)
 		}
 		cfg.LogColor = parsed
 	}

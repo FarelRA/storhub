@@ -448,7 +448,7 @@ func (a *App) runReadlink(cmd *cobra.Command, args []string) error {
 
 func (a *App) newLinkCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "link [flags] <project> <existingpath> <newpath>",
+		Use:   "link [flags] <project> <oldpath> <newpath>",
 		Short: "Create a hard link",
 		Long: `Link creates newpath as a hard link to existingpath
 (regular files only), like ln(1) without -s.

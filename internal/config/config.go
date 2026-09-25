@@ -1,7 +1,8 @@
 // Package config defines StorHub's programmatic configuration surface.
-// Values come from embedder code plus the STORHUB_* environment (the CLI
-// layers env over Default()); there is no config-file loader - nothing
-// here reads a config.yaml, and documentation must not promise one.
+// Values come from embedder code plus the STORHUB_* environment (see env.go
+// for the canonical table), layered over Default(). File support is
+// JSON-only via --config (FileConfig in config_file.go): there is no YAML
+// loader. Precedence everywhere is flags > env > file > defaults.
 package config
 
 import (
@@ -474,7 +475,7 @@ func CacheBase() string {
 // cacheBaseFromEnv reports $STORHUB_CACHE_DIR (trimmed), or "" when unset:
 // the explicit operator override, checked first.
 func cacheBaseFromEnv() string {
-	return strings.TrimSpace(os.Getenv("STORHUB_CACHE_DIR"))
+	return strings.TrimSpace(os.Getenv(EnvCacheDir))
 }
 
 // defaultCacheBase is the platform user cache dir (~/.cache/storhub on

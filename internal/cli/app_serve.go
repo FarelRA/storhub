@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	storcfg "github.com/FarelRA/storhub/internal/config"
 	shlog "github.com/FarelRA/storhub/internal/logging"
 	"github.com/FarelRA/storhub/storhub"
 	"github.com/spf13/cobra"
@@ -123,9 +124,7 @@ func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
 	authFile, _ := cmd.Flags().GetString("authfile")
 	opts := storhub.DefaultRESTOptions()
 	opts.BasePath = basePath
-	if authFile == "" {
-		authFile = os.Getenv("STORHUB_REST_AUTH_FILE")
-	}
+	authFile = flagOrEnv(authFile, storcfg.EnvRESTAuthFile)
 	if strings.TrimSpace(authFile) != "" {
 		if noAuth, _ := cmd.Flags().GetBool("allowanonymous"); noAuth {
 			// --allowanonymous would be silently ignored here; contradictory
@@ -154,13 +153,24 @@ func serveAuthOptions(cmd *cobra.Command) (storhub.RESTOptions, error) {
 	return opts, nil
 }
 
-// shareSigningKey resolves the explicit share key: flag first, then env. An
-// empty result lets the server derive one from the auth signing key.
+// shareSigningKey resolves the explicit share key: flag first, then the
+// canonical env, then the retired alias with a deprecation warning (the
+// phaseout path: warn, resolve, migrate). An empty result lets the server
+// derive one from the auth signing key.
 func shareSigningKey(cmd *cobra.Command) string {
-	if key, _ := cmd.Flags().GetString("sharekey"); strings.TrimSpace(key) != "" {
+	key, _ := cmd.Flags().GetString("sharekey")
+	if strings.TrimSpace(key) != "" {
 		return key
 	}
-	return os.Getenv("STORHUB_SHARE_SIGNING_KEY")
+	if key := strings.TrimSpace(os.Getenv(storcfg.EnvShareSigningKey)); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(os.Getenv(storcfg.EnvLegacyShareSigningKey)); key != "" {
+		warnfWithAttrs(warnSink(), "STORHUB_REST_SIGNING_KEY is renamed; use STORHUB_SHARE_SIGNING_KEY",
+			[]any{"key", storcfg.EnvLegacyShareSigningKey, "fallback", storcfg.EnvShareSigningKey})
+		return key
+	}
+	return ""
 }
 
 // buildRESTHandler builds the REST handler. It returns the REST layer's
@@ -223,10 +233,6 @@ before pending metadata is flushed.`,
 
 func (a *App) runServe(cmd *cobra.Command, args []string) error {
 	token, apiBase := cmdAuth(cmd)
-	allowOther, _ := cmd.Flags().GetBool("allowother")
-	debug, _ := cmd.Flags().GetBool("debug")
-	cacheDir, _ := cmd.Flags().GetString("cachedir")
-	umaskRaw, _ := cmd.Flags().GetString("umask")
 	listen, _ := cmd.Flags().GetString("listen")
 	shlog.Debug(a.logger(), "serve start", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen)
 
@@ -235,16 +241,10 @@ func (a *App) runServe(cmd *cobra.Command, args []string) error {
 		shlog.Error(a.logger(), "serve failed", "command", "serve", "project", args[0], "mountpoint", args[1], "listen", listen, "err", err)
 		return err
 	}
-	fuseOpts := storhub.DefaultFUSEOptions()
-	fuseOpts.AllowOther = allowOther
-	fuseOpts.Debug = debug
-	fuseOpts.CacheDir = cacheDir
-	umask, err := parseMountUmask(umaskRaw)
+	fuseOpts, err := fuseOptsFromFlags(cmd)
 	if err != nil {
 		return err
 	}
-	fuseOpts.Umask = umask
-	fuseOpts.UmaskSet = true
 
 	// Arm signal handling before touching FUSE: an interrupt arriving during
 	// setup must not kill the process with a half-attached mount left behind.

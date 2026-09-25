@@ -24,7 +24,11 @@ func (a *App) newCachePurgeCmd() *cobra.Command {
 		Short: "Reclaim cache directories left by crashed processes",
 		Long: `Cache purge removes storhub's local cache leftovers: per-project git worktrees
 whose owning process is gone, and legacy pre-XDG temp roots. Directories held by
-live processes are never touched. No network access, no token required.`,
+live processes are never touched. No network access, no token required.
+
+This reclaims the shared cache base (see STORHUB_CACHE_DIR), not any single
+command's --cachedir FUSE overlay dir: purging never deletes the overlay
+cache a mounted filesystem is actively using.`,
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(*cobra.Command, []string) error {
 			logger := shlog.NewLogger(shlog.Options{Level: shlog.LevelWarn, Format: shlog.FormatText, Output: a.stderr})
