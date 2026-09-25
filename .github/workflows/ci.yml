@@ -62,16 +62,22 @@ jobs:
             echo "$missing"
             exit 1
           fi
-          # Funnel gate: op spans must go through logging.Start/Finish.
+          # Funnel ratchet: op spans must go through logging.Start/Finish.
           # Hand-rolled Debug/Warn/Error "<op> start/complete/failed"
           # triples bypass the funnel and evade the zero-heap gate above.
+          # .github/span-allowlist.txt pins the pre-existing bypasses as
+          # file|token pairs; the gate fails only on pairs NOT listed there.
+          # Migrate a line to Start/Finish and delete its entry; never add
+          # entries for new code.
           # Info is exempt: process-lifetime milestones (shutdown complete,
           # serve listening) report there by contract. Test files are exempt:
           # they pin token strings, and internal/logging owns the message
           # construction itself.
-          handrolled=$(grep -rn --include='*.go' -E '\.(Debug|Warn|Error)\(' internal/ cmd/ storhub/ | grep -v _test | grep -v 'internal/logging/' | grep -E '"[^"]* (start|complete|failed)"' || true)
-          if [ -n "$handrolled" ]; then
-            echo "$handrolled"
+          current=$(grep -rn --include='*.go' -E '\.(Debug|Warn|Error)\(' internal/ cmd/ storhub/ | grep -v _test | grep -v 'internal/logging/' | grep -E '"[^"]* (start|complete|failed)"' | sed -E 's/^([^:]+):[0-9]+:.*"([^"]* (start|complete|failed))".*/\1|\2/' | sort -u || true)
+          allowed=$(grep -v '^#' .github/span-allowlist.txt | sort -u)
+          new=$(comm -23 <(echo "$current") <(echo "$allowed") || true)
+          if [ -n "$new" ]; then
+            echo "$new"
             exit 1
           fi
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9

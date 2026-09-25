@@ -1,0 +1,155 @@
+# Span-bypass ratchet: hand-rolled Debug/Warn/Error start/complete/failed
+# lines that predate the Start/Finish funnel. Each entry is file|token.
+# The CI gate fails on any bypass NOT in this list. Migrate a line to
+# logging.Start/Finish and delete its entry here; never add entries for
+# new code. Generated from the tree; sorted unique.
+internal/cli/app.go|hub creation complete
+internal/cli/app.go|hub creation failed
+internal/cli/app.go|hub creation start
+internal/cli/app.go|mount setup complete
+internal/cli/app.go|mount setup failed
+internal/cli/app.go|mount setup start
+internal/cli/app.go|sync drain complete
+internal/cli/app.go|sync drain failed
+internal/cli/app.go|sync drain start
+internal/cli/app_lifecycle.go|metadata flush complete
+internal/cli/app_lifecycle.go|metadata flush failed
+internal/cli/app_lifecycle.go|metadata flush start
+internal/cli/app_mount.go|mount failed
+internal/cli/app_mount.go|mount start
+internal/cli/app_serve.go|graceful shutdown failed
+internal/cli/app_serve.go|rest serve failed
+internal/cli/app_serve.go|rest serve start
+internal/cli/app_serve.go|rest setup complete
+internal/cli/app_serve.go|rest setup failed
+internal/cli/app_serve.go|rest setup start
+internal/cli/app_serve.go|serve failed
+internal/cli/app_serve.go|serve start
+internal/cli/app_serve.go|serve teardown failed
+internal/fusefs/fuse_recovery.go|recovery inventory scan failed
+internal/fusefs/fuse_recovery.go|recovery redrive scan failed
+internal/github/client.go|http request failed
+internal/github/client.go|http request start
+internal/github/transfer.go|cdn range fetch failed
+internal/github/transfer.go|download asset complete
+internal/github/transfer.go|download asset start
+internal/github/transfer.go|upload asset complete
+internal/github/transfer.go|upload asset failed
+internal/github/transfer.go|upload asset start
+internal/metadata/json.go|metadata load failed
+internal/metadata/merkle_build.go|metadata build complete
+internal/metadata/merkle_build.go|metadata build failed
+internal/metadata/merkle_build.go|metadata build start
+internal/metadata/merkle_load.go|metadata load complete
+internal/metadata/merkle_load.go|metadata load failed
+internal/metadata/merkle_load.go|metadata load start
+internal/metadata/merkle_load.go|metadata parallel load complete
+internal/metadata/merkle_load.go|metadata parallel load failed
+internal/metadata/merkle_load.go|metadata parallel load start
+internal/metadata/migrate.go|metadata migration complete
+internal/metadata/migrate.go|metadata migration failed
+internal/rest/rest.go|http request complete
+internal/rest/rest.go|http request start
+internal/rest/rest.go|response encode failed
+internal/rest/rest_info.go|config serialization failed
+internal/rest/rest_ops.go|enable failed
+internal/rest/rest_ops.go|prune failed
+internal/storage/cachecleanup.go|cache reaper complete
+internal/storage/cachecleanup.go|cache reaper scan complete
+internal/storage/cachecleanup.go|cache reaper scan start
+internal/storage/cachecleanup.go|cache reaper spool scan complete
+internal/storage/cachecleanup.go|cache reaper spool scan start
+internal/storage/cachecleanup.go|cache reaper start
+internal/storage/cleanup_chunkgc.go|chunk GC compact start
+internal/storage/cleanup_chunkgc.go|chunk GC compaction complete
+internal/storage/cleanup_chunkgc.go|chunk GC compaction failed
+internal/storage/cleanup_chunkgc.go|chunk GC dry-run complete
+internal/storage/cleanup_chunkgc.go|chunk GC scan complete
+internal/storage/cleanup_chunkgc.go|chunk GC scan start
+internal/storage/cleanup_purge.go|purge prune complete
+internal/storage/cleanup_purge.go|purge prune failed
+internal/storage/cleanup_purge.go|purge prune start
+internal/storage/client.go|shutdown git cache cleanup failed
+internal/storage/commit_publish.go|commit metadata complete
+internal/storage/commit_publish.go|commit metadata failed
+internal/storage/commit_publish.go|commit metadata start
+internal/storage/commit_publish.go|commit publish attempt complete
+internal/storage/commit_publish.go|commit publish attempt start
+internal/storage/journal.go|op journal append failed
+internal/storage/journal.go|op journal clear complete
+internal/storage/journal.go|op journal clear failed
+internal/storage/journal.go|op journal remove on close failed
+internal/storage/journal.go|op journal rewrite complete
+internal/storage/journal.go|op journal sync failed
+internal/storage/prune.go|prune assets complete
+internal/storage/prune.go|prune assets failed
+internal/storage/prune.go|prune assets start
+internal/storage/prune.go|prune chunks complete
+internal/storage/prune.go|prune chunks failed
+internal/storage/prune.go|prune chunks start
+internal/storage/prune.go|prune complete
+internal/storage/prune.go|prune failed
+internal/storage/prune.go|prune history complete
+internal/storage/prune.go|prune history failed
+internal/storage/prune.go|prune history start
+internal/storage/prune.go|prune objects complete
+internal/storage/prune.go|prune objects failed
+internal/storage/prune.go|prune objects start
+internal/storage/prune.go|prune start
+internal/storage/rebase.go|rebase complete
+internal/storage/rebase.go|rebase start
+internal/storage/sessions_commit.go|session auth failed
+internal/storage/sessions_commit.go|session-close complete
+internal/storage/sessions_commit.go|session-close failed
+internal/storage/sessions_commit.go|session-close lookup failed
+internal/storage/sessions_commit.go|session-close start
+internal/storage/sessions_commit.go|session-discard complete
+internal/storage/sessions_commit.go|session-discard failed
+internal/storage/sessions_commit.go|session-discard lookup failed
+internal/storage/sessions_commit.go|session-discard start
+internal/storage/sessions_commit.go|session-sync complete
+internal/storage/sessions_commit.go|session-sync failed
+internal/storage/sessions_commit.go|session-sync lookup failed
+internal/storage/sessions_commit.go|session-sync start
+internal/storage/sessions_core.go|session-open complete
+internal/storage/sessions_core.go|session-open failed
+internal/storage/sessions_core.go|session-open start
+internal/storage/sessions_io.go|session auth failed
+internal/storage/sessions_io.go|session-read complete
+internal/storage/sessions_io.go|session-read failed
+internal/storage/sessions_io.go|session-read lookup failed
+internal/storage/sessions_io.go|session-read start
+internal/storage/sessions_io.go|session-stat complete
+internal/storage/sessions_io.go|session-stat failed
+internal/storage/sessions_io.go|session-stat lookup failed
+internal/storage/sessions_io.go|session-stat start
+internal/storage/sessions_io.go|session-truncate complete
+internal/storage/sessions_io.go|session-truncate failed
+internal/storage/sessions_io.go|session-truncate lookup failed
+internal/storage/sessions_io.go|session-truncate start
+internal/storage/sessions_io.go|session-write complete
+internal/storage/sessions_io.go|session-write failed
+internal/storage/sessions_io.go|session-write lookup failed
+internal/storage/sessions_io.go|session-write start
+internal/storage/sessions_link.go|session auth failed
+internal/storage/sessions_link.go|session-link complete
+internal/storage/sessions_link.go|session-link failed
+internal/storage/sessions_link.go|session-link lookup failed
+internal/storage/sessions_link.go|session-link start
+internal/storage/sessions_link.go|session-quarantine complete
+internal/storage/sessions_link.go|session-quarantine failed
+internal/storage/sessions_link.go|session-quarantine start
+internal/storage/sessions_link.go|session-relink complete
+internal/storage/sessions_link.go|session-relink failed
+internal/storage/sessions_link.go|session-relink lookup failed
+internal/storage/sessions_link.go|session-relink start
+internal/storage/verbs_meta.go|metadata-update complete
+internal/storage/verbs_meta.go|metadata-update failed
+internal/storage/verbs_meta.go|metadata-update start
+internal/storage/workflows.go|commit metadata complete
+internal/storage/workflows.go|commit metadata failed
+internal/storage/workflows.go|commit metadata start
+internal/storage/workflows.go|load metadata complete
+internal/storage/workflows.go|load metadata failed
+internal/storage/workflows.go|load metadata start
+internal/storage/workflows.go|release git mirror on eviction failed
