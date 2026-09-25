@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -207,6 +208,24 @@ func (c *fakeRESTClient) ChtimesContext(_ context.Context, project, targetPath s
 	// truncation, matching the ns storage contract.
 	node.entry.AccessedAt = atime
 	node.entry.ModifiedAt = mtime
+	node.entry.ChangedAt = now
+	return nil
+}
+
+func (c *fakeRESTClient) ChtimesExplicitContext(_ context.Context, project, targetPath string, atime, mtime *time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	node, err := c.lookupNode(project, targetPath)
+	if err != nil {
+		return err
+	}
+	now := c.tick()
+	if atime != nil {
+		node.entry.AccessedAt = atime.UnixNano()
+	}
+	if mtime != nil {
+		node.entry.ModifiedAt = mtime.UnixNano()
+	}
 	node.entry.ChangedAt = now
 	return nil
 }

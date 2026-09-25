@@ -126,6 +126,7 @@ type Client interface {
 	ChmodContext(ctx context.Context, project, targetPath string, mode uint32) error
 	ChownContext(ctx context.Context, project, targetPath string, uid, gid uint32) error
 	ChtimesContext(ctx context.Context, project, targetPath string, atime, mtime int64) error
+	ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) error
 	SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error
 	GetXAttrContext(ctx context.Context, project, targetPath, attr string) ([]byte, error)
 	ListXAttrContext(ctx context.Context, project, targetPath string) ([]string, error)

@@ -95,6 +95,10 @@ func (readOnlyShare) ChtimesContext(_ context.Context, _, _ string, _, _ int64) 
 	return errReadOnly()
 }
 
+func (readOnlyShare) ChtimesExplicitContext(_ context.Context, _, _ string, _, _ *time.Time) error {
+	return errReadOnly()
+}
+
 func (readOnlyShare) SetXAttrContext(_ context.Context, _, _, _ string, _ []byte, _ ...shfs.XAttrMode) error {
 	return errReadOnly()
 }

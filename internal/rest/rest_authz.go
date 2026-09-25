@@ -2,6 +2,8 @@ package rest
 
 import (
 	"context"
+	"time"
+
 	shfs "github.com/FarelRA/storhub/internal/fs"
 	metadata "github.com/FarelRA/storhub/internal/metadata"
 	storage "github.com/FarelRA/storhub/internal/storage"
@@ -256,6 +258,16 @@ func (c *authorizedClient) ChtimesContext(ctx context.Context, project, targetPa
 		return errForbidden("permission denied")
 	}
 	return c.base.ChtimesContext(ctx, project, targetPath, atime, mtime)
+}
+func (c *authorizedClient) ChtimesExplicitContext(ctx context.Context, project, targetPath string, atime, mtime *time.Time) error {
+	entry, err := c.base.StatPathContext(ctx, project, targetPath)
+	if err != nil {
+		return err
+	}
+	if !c.principal.Admin && c.principal.UID != entry.UID && !c.hasPerm(entry, permWrite) {
+		return errForbidden("permission denied")
+	}
+	return c.base.ChtimesExplicitContext(ctx, project, targetPath, atime, mtime)
 }
 func (c *authorizedClient) SetXAttrContext(ctx context.Context, project, targetPath, attr string, data []byte, mode ...shfs.XAttrMode) error {
 	if err := c.requireNodeWrite(ctx, project, targetPath); err != nil {

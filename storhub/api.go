@@ -84,7 +84,7 @@ type (
 	// body/patch limits, share-token policy, and authentication. See
 	// internal/rest.Options for the field-level contract.
 	RESTOptions = implrest.Options
-	// RESTAuthOptions describes the user database backing HTTP basic auth:
+	// RESTAuthOptions describes the user database backing Bearer JWT auth:
 	// users, their POSIX identities, and token lifetime settings.
 	RESTAuthOptions = implrest.AuthOptions
 	// RESTUser is a single authenticated principal with its POSIX identity

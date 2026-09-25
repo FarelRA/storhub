@@ -624,8 +624,9 @@ func (h *restHandler) handleChown(w http.ResponseWriter, r *http.Request) {
 
 func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 	// Route alias of Chtimes: the wire token stays utimes while storage
-	// exposes Chtimes, so this handler forwards UnixNano stamps to
-	// ChtimesContext directly.
+	// exposes Chtimes, so this handler forwards pointers to
+	// ChtimesExplicitContext directly (nil would omit; both stamps are
+	// required above, so the epoch stays settable end to end).
 	project := chi.URLParam(r, "project")
 	var req utimesRequest
 	if err := h.decodeJSON(r, &req, false); err != nil {
@@ -662,7 +663,7 @@ func (h *restHandler) handleUtimes(w http.ResponseWriter, r *http.Request) {
 		h.writeMappedError(w, err)
 		return
 	}
-	if err = client.ChtimesContext(r.Context(), project, req.Path, req.Atime.UnixNano(), req.Mtime.UnixNano()); err != nil {
+	if err = client.ChtimesExplicitContext(r.Context(), project, req.Path, &req.Atime, &req.Mtime); err != nil {
 		h.writeMappedError(w, err)
 		return
 	}

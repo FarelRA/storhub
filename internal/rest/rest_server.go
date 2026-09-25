@@ -86,17 +86,20 @@ func newRestHandler(client Client, opts Options) (*restHandler, *restAuthenticat
 		}
 	}
 	h := &restHandler{client: client, opts: opts, shares: newShareRegistry(), logger: logger}
-	if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
-		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
-		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
-		h.opts.ShareSigningKey = h.shareSignKey.Seed()
-	} else if len(opts.ShareSigningKey) > 0 {
+	// Explicit share key wins; the auth key only fills the gap. Never
+	// overwrite an explicit key: CLI authfile deploys set both, and the
+	// explicit value is the operator's choice.
+	if len(opts.ShareSigningKey) > 0 {
 		seed := opts.ShareSigningKey
 		if len(seed) > 32 {
 			hash := sha256.Sum256(seed)
 			seed = hash[:]
 		}
 		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+	} else if opts.Auth != nil && len(opts.Auth.TokenSigningKey) > 0 {
+		seed := sha256.Sum256(opts.Auth.TokenSigningKey)
+		h.shareSignKey = ed25519.NewKeyFromSeed(seed[:32])
+		h.opts.ShareSigningKey = h.shareSignKey.Seed()
 	}
 	if opts.Auth == nil {
 		return h, nil, nil

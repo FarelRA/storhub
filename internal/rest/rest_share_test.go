@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -104,6 +105,39 @@ func TestShareKeyDerivedFromAuthSigningKey(t *testing.T) {
 	if !strings.Contains(string(body), "share signing key not configured") {
 		t.Fatalf("expected explicit not-configured error, got: %s", body)
 	}
+}
+
+// An explicit share key wins over auth-key derivation: a share minted
+// where both are set must still verify on a handler whose auth key
+// differs but whose explicit key matches.
+func TestShareExplicitKeyWinsOverDerived(t *testing.T) {
+	t.Parallel()
+	authA := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdea"), Users: []User{{Username: "admin", PasswordHash: testHashPass, UID: 0, PrimaryGID: 0, Admin: true}}}
+	authB := &AuthOptions{TokenSigningKey: []byte("0123456789abcdef0123456789abcdeb"), Users: []User{{Username: "admin", PasswordHash: testHashPass, UID: 0, PrimaryGID: 0, Admin: true}}}
+	explicit := bytes.Repeat([]byte{0x7e}, 32)
+	fake := newFakeRESTClient()
+	if err := fake.MkdirContext(context.Background(), "demo", "docs"); err != nil {
+		t.Fatalf("seed docs dir: %v", err)
+	}
+	first, err := newHandlerForClient(fake, Options{Auth: authA, ShareSigningKey: explicit})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	login := mustJSONRequest(t, first, http.MethodPost, "/api/v1/auth/login", restLoginRequest{Username: "admin", Password: "pass"}, http.StatusOK)
+	var session restLoginResponse
+	decodeJSONBody(t, login, &session)
+	resp := mustRequest(t, first, http.MethodPost, "/api/v1/projects/demo/shares", strings.NewReader(`{"path":"docs"}`), map[string]string{"Authorization": "Bearer " + session.Token}, http.StatusCreated)
+	var share shareResponse
+	decodeJSONBody(t, resp, &share)
+	if share.Token == "" {
+		t.Fatal("creation must carry the signed share token")
+	}
+	second, err := newHandlerForClient(fake, Options{Auth: authB, ShareSigningKey: explicit})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	mustRequest(t, second, http.MethodGet, "/api/v1/projects/demo/nodes?path=docs",
+		nil, map[string]string{"Authorization": "Bearer " + share.Token}, http.StatusOK)
 }
 
 func TestSweepExpiredSharesBoundsRegistry(t *testing.T) {
