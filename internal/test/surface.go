@@ -241,6 +241,8 @@ type Surface interface {
 	// Rename moves a name like rename(); noReplace adds RENAME_NOREPLACE so clobbering fails with ErrExists.
 	Rename(oldPath, newPath string, noReplace bool) error
 	// Mkdir creates a directory like mkdir(), failing with ErrExists when present.
+	// The perm lands masked to 0o7777. Backends that carry no directory
+	// mode record nothing for it; portable checks assert presence, not bits.
 	Mkdir(path string, perm uint32) error
 	// Rmdir removes an empty directory like rmdir(), failing with ErrNotEmpty when occupied.
 	Rmdir(path string) error

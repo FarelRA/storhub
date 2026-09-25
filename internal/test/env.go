@@ -9,7 +9,9 @@ import (
 // Central test environment dimensions.
 //
 // Every magic test env var lives here, so a new dimension is one helper
-// plus one call site, not a fresh os.Getenv idiom per file. Production
+// plus one call site, not a fresh os.Getenv idiom per file. A new
+// dimension needs a doc comment here and CI wiring before any test
+// reads it. Production
 // env (STORHUB_CACHE_DIR, STORHUB_API_BASE_URL, ...) stays in
 // internal/config; only test gating lives here.
 //

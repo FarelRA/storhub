@@ -25,12 +25,11 @@ type memScratch struct {
 
 var _ ScratchSession = (*memScratch)(nil)
 
-// OpenScratch implements SessionSurface.OpenScratch on the oracle.
+// OpenScratch implements SessionSurface.OpenScratch on the oracle. The
+// TTL folds through the shared clamp (non-positive takes the default,
+// over-max caps at the limit), the same rule the fakes apply.
 func (m *MemSurface) OpenScratch(ttl time.Duration) (ScratchSession, error) {
-	if ttl <= 0 {
-		ttl = DefaultTTL
-	}
-	return &memScratch{mem: m, deadline: time.Now().Add(ttl)}, nil
+	return &memScratch{mem: m, deadline: SessionExpiryAt(time.Now(), ttl, DefaultTTL, MaxTTL)}, nil
 }
 
 func (h *memScratch) expired() bool {

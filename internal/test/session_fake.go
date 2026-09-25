@@ -78,8 +78,9 @@ func LiveSession[S any](table map[string]*S, id string, expires func(*S) time.Ti
 }
 
 // SweepExpiredSessions reaps every entry past its TTL. The REST fake runs
-// it on open (production sweeps on open the same way); the CLI fake never
-// swept and still does not. Caller holds the store lock.
+// it on open (production sweeps on open the same way); the map-store fake
+// never sweeps, so its long-lived tables under-reap beside a backend that
+// sweeps on open. Caller holds the store lock.
 func SweepExpiredSessions[S any](table map[string]*S, expires func(*S) time.Time, now time.Time) {
 	for id, s := range table {
 		if Expired(expires(s), now) {

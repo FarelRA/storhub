@@ -98,6 +98,14 @@ func Translate(err error, wrap func(mapped error) error) error {
 	return err
 }
 
+// PreconditionMismatch builds the CAS mismatch value for a write whose
+// token lost a race. Adapters call it after the backend reports a
+// conflict and they have read back the current token; keeping the
+// construction here holds the Expected/Actual spelling in one spot.
+func PreconditionMismatch(expected, actual uint64) ErrPrecondition {
+	return ErrPrecondition{Expected: expected, Actual: actual}
+}
+
 // SentinelForStatus maps a REST status onto a posixconform sentinel,
 // using detail (the lowercased code plus message, which disambiguates
 // 409) for the conflict branches. It returns nil for success statuses,

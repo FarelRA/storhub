@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-var scenarioIO = []Scenario{
+var scenarioIo = []Scenario{
 	{
 		Name:     "ranged-read-basic",
 		Surfaces: SurfaceAll,

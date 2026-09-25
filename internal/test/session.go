@@ -36,8 +36,10 @@ func ClampTTL(requested, def, limit time.Duration) time.Duration {
 }
 
 // Expired reports whether a deadline computed as openedAt+ttl has lapsed
-// at now. Lazy-expiry checks in every fake go through here so wall-clock
+// at now. The comparison is strict: a deadline equal to now has not
+// lapsed (idle equal to the TTL stays live), matching the product sweep.
+// Lazy-expiry checks in every fake go through here so wall-clock
 // comparisons stay in one documented spot.
 func Expired(deadline, now time.Time) bool {
-	return !now.Before(deadline)
+	return now.After(deadline)
 }

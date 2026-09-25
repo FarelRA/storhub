@@ -63,7 +63,7 @@ var Table = slices.Concat(
 	scenarioLifecycle,
 	scenarioScratch,
 	scenarioNamespace,
-	scenarioIO,
+	scenarioIo,
 	scenarioDirOpen,
 	scenarioSeek,
 	scenarioScratchMulti,

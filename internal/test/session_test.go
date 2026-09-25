@@ -3,6 +3,8 @@ package test
 import (
 	"testing"
 	"time"
+
+	"github.com/FarelRA/storhub/internal/storage"
 )
 
 func TestClampTTL(t *testing.T) {
@@ -28,8 +30,54 @@ func TestExpired(t *testing.T) {
 	if !Expired(now.Add(-time.Second), now) {
 		t.Fatal("past deadline must read expired")
 	}
-	if !Expired(now, now) {
-		t.Fatal("deadline equal to now must read expired (Before is strict)")
+	if Expired(now, now) {
+		t.Fatal("deadline equal to now must read live: idle equal to the TTL has not lapsed")
+	}
+	if !Expired(now.Add(-time.Nanosecond), now) {
+		t.Fatal("deadline a nanosecond past must read expired")
+	}
+}
+
+func TestOpenScratchClampsOverMax(t *testing.T) {
+	m := NewMemSurface()
+	before := time.Now()
+	h, err := m.OpenScratch(2 * MaxTTL)
+	if err != nil {
+		t.Fatalf("open scratch: %v", err)
+	}
+	after := time.Now()
+	ms, ok := h.(*memScratch)
+	if !ok {
+		t.Fatalf("open scratch returned %T, want *memScratch", h)
+	}
+	if ms.deadline.Before(before.Add(MaxTTL)) || ms.deadline.After(after.Add(MaxTTL)) {
+		t.Fatalf("over-max TTL deadline = %v, want %v + MaxTTL", ms.deadline, before)
+	}
+}
+
+func TestOpenScratchDefaultTTL(t *testing.T) {
+	m := NewMemSurface()
+	before := time.Now()
+	h, err := m.OpenScratch(0)
+	if err != nil {
+		t.Fatalf("open scratch: %v", err)
+	}
+	after := time.Now()
+	ms, ok := h.(*memScratch)
+	if !ok {
+		t.Fatalf("open scratch returned %T, want *memScratch", h)
+	}
+	if ms.deadline.Before(before.Add(DefaultTTL)) || ms.deadline.After(after.Add(DefaultTTL)) {
+		t.Fatalf("default TTL deadline = %v, want %v + DefaultTTL", ms.deadline, before)
+	}
+}
+
+func TestTTLMatchesProductDefaults(t *testing.T) {
+	if DefaultTTL != storage.DefaultSessionIdleTTL {
+		t.Fatalf("DefaultTTL = %v, product idle default = %v", DefaultTTL, storage.DefaultSessionIdleTTL)
+	}
+	if MaxTTL != storage.DefaultSessionMaxTTL {
+		t.Fatalf("MaxTTL = %v, product max = %v", MaxTTL, storage.DefaultSessionMaxTTL)
 	}
 }
 
