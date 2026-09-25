@@ -376,7 +376,7 @@ func runMaintenance(ctx context.Context, hub showcaseHub, project string) error 
 	printSection("Maintenance")
 	purge, err := hub.PruneContext(ctx, project, "assets", 0, false)
 	if err != nil {
-		return fmt.Errorf("purge untracked: %w", err)
+		return fmt.Errorf("prune assets: %w", err)
 	}
 	printKV("purged assets", "%d", purge.DeletedAssets)
 	printKV("purged releases", "%d", purge.DeletedReleases)

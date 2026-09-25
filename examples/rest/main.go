@@ -45,7 +45,9 @@ func main() {
 }
 
 // serveUntilSignal runs the server and drains it cleanly on SIGINT/SIGTERM,
-// flushing pending metadata before exit.
+// flushing pending metadata before exit. The authenticated REST example has
+// a helper of the same name: keep timeouts and log strings in sync when
+// either copy changes.
 func serveUntilSignal(srv *http.Server, hub *storhub.StorHub) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

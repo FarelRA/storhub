@@ -23,9 +23,9 @@ func main() {
 	if password == "" {
 		log.Fatal("STORHUB_REST_ADMIN_PASSWORD environment variable not set")
 	}
-	key := os.Getenv("STORHUB_REST_SIGNING_KEY")
+	key := os.Getenv("STORHUB_SHARE_SIGNING_KEY")
 	if key == "" {
-		log.Fatal("STORHUB_REST_SIGNING_KEY environment variable not set")
+		log.Fatal("STORHUB_SHARE_SIGNING_KEY environment variable not set")
 	}
 	hub, err := storhub.NewStorHubWithContext(context.Background(), token, storhub.DefaultConfig())
 	if err != nil {
@@ -61,7 +61,9 @@ func main() {
 }
 
 // serveUntilSignal runs the server and drains it cleanly on SIGINT/SIGTERM,
-// flushing pending metadata before exit.
+// flushing pending metadata before exit. The unauthenticated REST example
+// has a helper of the same name: keep timeouts and log strings in sync when
+// either copy changes.
 func serveUntilSignal(srv *http.Server, hub *storhub.StorHub) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

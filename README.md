@@ -22,9 +22,9 @@ Pin a specific tag with `--version` (stable tags such as `v0.1.0` are upcoming; 
 curl -fsSL .../install.sh | bash -s -- --version v0.1.0
 ```
 
-Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases): every release ships per-platform archives, `checksums.txt`, SBOMs, and build provenance attestations. A rolling `nightly` prerelease is refreshed from `main` on a nightly schedule (03:00 UTC cron; GitHub's scheduler can start it hours later).
+Or grab a tarball directly from [GitHub Releases](https://github.com/FarelRA/storhub/releases): every release ships per-platform archives, `checksums.txt`, and SBOMs. Stable releases add build provenance attestations; the rolling `nightly` prerelease ships SBOMs without attestations. A rolling `nightly` prerelease is refreshed from `main` on a nightly schedule (03:00 UTC cron; GitHub's scheduler can start it hours later).
 
-Docker images are published to `ghcr.io` for `amd64`, `arm64`, `arm/v7`, and `386` with the first versioned tag (upcoming; no stable image exists yet):
+Docker images are published to `ghcr.io` for `amd64`, `arm64`, `arm/v7`, and `386` with the first versioned tag (upcoming; no stable image exists yet). The registry forces lowercase, so the image is `ghcr.io/farelra/storhub` even though the module path keeps its capital letters:
 
 ```bash
 docker run --rm ghcr.io/farelra/storhub:latest --help
@@ -92,24 +92,25 @@ Minimal Go example:
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/FarelRA/storhub/storhub"
 )
 
 func main() {
-	token := "your_github_token"
-	hub, err := storhub.NewStorHub(token)
+	ctx := context.Background()
+	hub, err := storhub.NewStorHubWithContext(ctx, "your_github_token", storhub.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	meta, err := hub.UploadFile("demo-project", "docs/readme.txt", "./README.md")
+	meta, err := hub.UploadFileContext(ctx, "demo-project", "docs/readme.txt", "./README.md")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("uploaded docs/readme.txt (%d bytes) in release %s", meta.Size, meta.Release)
+	log.Printf("uploaded docs/readme.txt (%d bytes)", meta.Size)
 }
 ```
 
@@ -132,15 +133,15 @@ go run ./cmd/storhub --help
 Common commands:
 
 - storage: `upload`, `replace`, `download`, `patch`, `append`, `write`
-- inspection: `ls`, `stat`, `cat`, `revisions` (all but `cat` accept `--json` for stable machine-readable output)
-- filesystem: `mkdir`, `mv`, `rm`
-- recovery and cleanup under `project`: `status` (degraded latch, streaks, pressure), `sync` (drain), `revisions`, `rollback`, `prune <project> [objects|assets|history|chunks|all]` (orphaned objects, untracked assets, chunk orphans, history checkpoint; `--dryrun`, `--keep`), `enable` (clear the degraded latch), `delete` (destroy the project) (reclaims garbage under the full-history retention policy: orphaned index objects, untracked releases/assets, or history checkpoint; supports `--dryrun` and `--keep`)
-- admin under `project`: `status`, `sync`, `revisions`, `rollback`, `prune`, `enable`, `delete` (removes the project repository outright; `--yes` is mandatory)
+- inspection: `ls`, `stat`, `cat`, `project revisions` (all but `cat` accept `--json` for stable machine-readable output)
+- filesystem: `mkdir`, `mv`, `rm`, `cp`, `truncate`, `touch`, `chmod`, `chown`, `symlink`, `readlink`, `link`
+- recovery and cleanup under `project`: `status` (degraded latch, streaks, pressure), `sync` (drain), `revisions`, `rollback`, `prune <project> [objects|assets|history|chunks|all]` (orphaned objects, untracked assets, chunk orphans, history checkpoint; `--dry-run`, `--keep`), `enable` (clear the degraded latch), `delete` (removes the project repository outright; `--yes` is mandatory)
+- sessions under `session`: `open`, `read`, `write`, `append`, `truncate`, `stat`, `sync`, `link`, `relink`, `close` (every verb threads `--handle`; `close --sync` drains before returning)
 - local cache: `cache purge` (reclaims cache directories left by crashed processes; offline, no token needed)
 - web: `rest` (drains in-flight requests and flushes metadata on SIGINT/SIGTERM)
 - mount: `mount`
 - both at once: `serve` (FUSE mount + REST API from one process over one shared hub, so writes through either surface are immediately visible to the other)
-- `cat` streams through a fixed 1 MiB window, so piping multi-GB files never buffers them whole; `revisions` prints nothing for empty history, like `ls(1)`
+- `cat` streams through a fixed 1 MiB window, so piping multi-GB files never buffers them whole; `project revisions` prints nothing for empty history, like `ls(1)`
 
 Typical workflow:
 
@@ -148,7 +149,7 @@ Typical workflow:
 GITHUB_TOKEN=your_token go run ./cmd/storhub mkdir demo-project docs/specs
 GITHUB_TOKEN=your_token go run ./cmd/storhub upload demo-project docs/specs/guide.txt ./guide.txt
 GITHUB_TOKEN=your_token go run ./cmd/storhub patch demo-project docs/specs/guide.txt 0 0 "v2: "
-GITHUB_TOKEN=your_token go run ./cmd/storhub revisions demo-project
+GITHUB_TOKEN=your_token go run ./cmd/storhub project revisions demo-project
 ```
 
 `append`, `write`, and `patch` accept `-` as the data argument to read the
@@ -163,9 +164,19 @@ command fails at runtime, and `2` when the command line itself is wrong
 (unknown flags, missing arguments).
 
 Environment variables: `GITHUB_TOKEN` (authentication),
-`STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` / `STORHUB_LOG_COLOR`
-(library default level is `warn`, CLI default is `info`, colors on), `STORHUB_API_BASE_URL`, and
-`STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--authfile`).
+`STORHUB_API_BASE_URL`, `STORHUB_LOG_LEVEL` / `STORHUB_LOG_FORMAT` /
+`STORHUB_LOG_COLOR` (library default level is `warn`, CLI default is
+`info`, colors on), `STORHUB_CACHE_DIR` (cache root),
+`STORHUB_REST_AUTH_FILE` (fallback for `rest`/`serve`'s `--authfile`),
+`STORHUB_SHARE_SIGNING_KEY` (fallback for `rest`/`serve`'s `--sharekey`),
+`STORHUB_HANDLE` (fallback for `session`'s `--handle`), and the rate
+governors `STORHUB_RATE_RESERVE`, `STORHUB_RATE_MAX_WAIT`,
+`STORHUB_RATE_POINTS_PER_MIN`, `STORHUB_RATE_CONTENT_PER_MIN`,
+`STORHUB_MAX_CONCURRENT`, `STORHUB_MAX_CONSECUTIVE_FAILURES`,
+`STORHUB_TRANSFER_THROUGHPUT`. The canonical names live in
+`internal/config/env.go`; the only legacy spelling still read (with a
+deprecation warning) is `STORHUB_REST_SIGNING_KEY`, an alias of
+`STORHUB_SHARE_SIGNING_KEY`.
 
 ### Rate limiting
 
@@ -180,8 +191,8 @@ One-shot commands fail fast when GitHub's budget is exhausted instead of
 waiting; `mount`, `rest`, and `serve` may pause until the reset (at most 15
 minutes) so long-running sessions survive an exhausted hour. Tune with:
 
-- `STORHUB_RATE_MAX_WAIT`: longest single rate-limit wait; `0s` fails
-  fast, negative values also fail fast (default: fail fast for one-shot
+- `STORHUB_RATE_MAX_WAIT`: longest single rate-limit wait; negative values
+  fail fast, zero takes the library default (default: fail fast for one-shot
   commands, `15m` for rest/mount/serve)
 - `STORHUB_RATE_RESERVE`: hourly requests kept unspent as headroom
   (default `25`)
@@ -222,13 +233,13 @@ REST serving from the CLI:
 
 ```bash
 # With authentication (recommended):
-GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --authfile ./rest-auth.json
+GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --authfile ./examples/cli/rest-auth.json
 
 # Deliberately unauthenticated (insecure; requires the explicit flag):
 GITHUB_TOKEN=your_token go run ./cmd/storhub rest --listen :8080 --allowanonymous
 
 # REST API and FUSE mount together, one shared hub:
-GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --authfile ./rest-auth.json
+GITHUB_TOKEN=your_token go run ./cmd/storhub serve docs-project ./mnt --listen :8080 --authfile ./examples/cli/rest-auth.json
 ```
 
 Open `http://localhost:8080/` for the built-in web console (the REST API stays under `/api/v1`).
@@ -242,7 +253,9 @@ packaging. To change the console:
 
 ```bash
 cd web
-bun install          # bun >= 1.2 (bun only; the toolchain never uses node/npm/npx)
+bun install          # bun >= 1.2 (bun only; the toolchain never uses node/npm/npx).
+                       # CI pins the exact version (1.4.2 in the workflows); the
+                       # floor here is the minimum that builds the console.
 bun run dev          # dev server on :3000 proxying /api to :8080
 bun run test         # vitest
 bun run lint         # eslint
@@ -264,31 +277,34 @@ nightly/release workflows rebuild the embed from source before goreleaser runs.
 Public packages:
 
 - `github.com/FarelRA/storhub/storhub`
-- `github.com/FarelRA/storhub/fuse`
-- `github.com/FarelRA/storhub/rest`
+
+The `storhub` package is the only public Go facade. FUSE serving goes
+through `storhub.DefaultFUSEOptions` and `(*StorHub).NewFUSE`; REST
+serving goes through `storhub.DefaultRESTOptions`,
+`storhub.NewRESTHandler`, and `storhub.HashRESTPassword`. There are no
+separate `fuse` or `rest` packages.
 
 Constructors:
 
-- `storhub.NewStorHub`
-- `storhub.NewStorHubWithConfig`
-- `storhub.NewStorHubWithContext`
+- `storhub.NewStorHubWithContext` (the only constructor; every example
+  calls it with a `context.Context`, a token, and `storhub.DefaultConfig()`)
 
 Core storage APIs:
 
-- `UploadFile`, `ReplaceFile`, `PatchFile`, `DownloadFile`
-- `ListFiles`, `ListReleases`
+- `UploadFileContext`, `ReplaceFileContext`, `PatchFileContext`, `DownloadFileContext`
+- `ListFilesContext`, `ListReleasesContext`
 
 Filesystem-style APIs:
 
-- `Mkdir`, `CreateFile`, `WriteFileAt`, `AppendFile`, `ReadFileAt`
-- `Rename`, `TruncateFile`, `ReadDir`, `StatPath`, `StatFS`
-- `DeleteFile`, `Rmdir`
+- `MkdirContext`, `CreateFileContext`, `WriteFileAtContext`, `AppendFileContext`, `ReadFileAtContext`
+- `RenameContext`, `TruncateFileContext`, `ReadDirContext`, `StatPathContext`, `StatFSContext`
+- `DeleteFileContext`, `RmdirContext`
 
 POSIX-style APIs:
 
-- `Chmod`, `Chown`, `Chtimes`
-- `Symlink`, `Readlink`, `Link`
-- `SetXAttr`, `GetXAttr`, `ListXAttr`, `RemoveXAttr`
+- `ChmodContext`, `ChownContext`, `ChtimesContext`
+- `SymlinkContext`, `ReadlinkContext`, `LinkContext`
+- `SetXAttrContext`, `GetXAttrContext`, `ListXAttrContext`, `RemoveXAttrContext`
 
 Precondition (compare-and-swap) APIs:
 
@@ -327,16 +343,16 @@ POSIX conformance notes:
   Filenames are byte-honest: surrounding whitespace is significant
   everywhere (`" docs "` is one specific name), enforced by a
   conformance test pinning both normalizers together. Metadata is
-  schema v5: the split index (a `.storhub/index.json` manifest plus
+  schema v6: the split index (a `.storhub/index.json` manifest plus
   content-addressed Merkle objects), with unambiguous timestamp keys
   (cr=created, ch=changed), complete authoritative timestamps (zero IS
   the epoch, no repair passes), and no digest fields. The parser accepts
-  ONLY the current schema; legacy single-blob documents (v1..v4) are
+  ONLY the current schema; legacy single-blob documents (v1..v5) are
   upgraded by a stacked, deterministic, eager migrator
-  (`metadata.Migrate`: pure per-version steps v1->v2->v3->v4,
+  (`metadata.Migrate`: pure per-version steps v1->v2->v3->v4->v5,
   golden-tested, identity on current documents) that runs on every load;
-  the upgraded tree persists in the v5 split layout on the next commit
-  (the v4->v5 boundary is that write-time split, not a byte transform).
+  the upgraded tree persists in the v6 split layout on the next commit
+  (the v5->v6 boundary is that write-time split, not a byte transform).
   There are no data-level or protocol-level fallbacks elsewhere either:
   share redemption resolves only by the signed token (see the share
   endpoints below), share TTLs accept seconds only
@@ -346,17 +362,17 @@ POSIX conformance notes:
 
 Revision and maintenance APIs:
 
-- `ListMetadataRevisions`
-- `RollbackMetadata` / `RollbackMetadataContext`: republishes an earlier
+- `ListMetadataRevisionsContext`
+- `RollbackMetadataContext`: republishes an earlier
   revision's snapshot as a NEW commit (rollback is a revert; history is
   never rewritten, and only a commit SHA from the project's own revision
   history is accepted)
-- `RevertPath` / `RevertPathContext`: restores a single file or directory
+- `RevertPathContext`: restores a single file or directory
   subtree to its state at a commit SHA, leaving every other path untouched;
   the result flows through the normal transaction path as a new commit, and
   the reverted subtree's assets are validated against live releases before
   and after, so restoring a path whose bytes were pruned fails loudly
-- `Prune` / `PruneContext` / `PruneProject`: granular reclamation under the
+- `PruneContext`: granular reclamation under the
   full-history retention policy; scopes `objects` (index objects referenced
   by no retained manifest), `assets` (unreferenced release assets),
   `history` (collapse old manifests into one checkpoint, git backend only),
@@ -364,9 +380,9 @@ Revision and maintenance APIs:
   and `all`; `keep` is a compaction threshold, `dryRun` reports without
   deleting, and prune refuses while uncommitted metadata changes are pending
   (except the chunks scope, which is live-state by design)
-- `CleanupProject`
-- `DeleteRelease`
-- `DeleteProject`
+- `CleanupProjectContext`
+- `DeleteReleaseContext`
+- `DeleteProjectContext`
 - `FlushMetadata` / `FlushProjectContext`: explicit metadata push; the
   remedy after a failed push, since commits are event-driven (mutation
   triggers and shutdown) with no periodic flush
@@ -375,19 +391,16 @@ Metadata residency: at most `Config.MaxTrackedProjects` projects stay
 resident; the least-recently-used clean entry is evicted when a new
 project joins (dirty entries always survive).
 
-FUSE APIs:
+FUSE APIs (all on the `storhub` package):
 
 - `storhub.DefaultFUSEOptions`
 - `(*StorHub).NewFUSE`
-- `fuse.DefaultOptions`
-- `fuse.New`
 
-REST APIs:
+REST APIs (all on the `storhub` package):
 
-- `github.com/FarelRA/storhub/rest`
-- `rest.DefaultOptions`
-- `rest.New`
-- `rest.HashPassword`
+- `storhub.DefaultRESTOptions`
+- `storhub.NewRESTHandler`
+- `storhub.HashRESTPassword`
 
 Wire timestamps are Unix nanoseconds (int64, `time.UnixNano` scale):
 `modified_at`, `created_at`, `accessed_at`, and `changed_at` on node/entry
@@ -400,7 +413,7 @@ REST endpoint groups:
 
 - `GET|DELETE /api/v1/projects/{project}`: project stats; DELETE removes the project (admin only)
 - `GET|HEAD|DELETE /api/v1/projects/{project}/nodes?path=...`: stat or remove files and empty directories
-- `GET|HEAD /api/v1/projects/{project}/children?path=...`: directory listing
+- `GET /api/v1/projects/{project}/children?path=...`: directory listing
 - `GET|HEAD|PUT|PATCH /api/v1/projects/{project}/content?path=...`: streamed reads plus replace, append, write, patch, and truncate workflows. Conditional `If-Match` requests are re-verified immediately before mutation and fail with `412` on concurrent change; `append`/`write` bodies are applied atomically and capped (larger transfers belong in a full-file PUT, which answers `413` beyond the cap)
 - `If-Match` accepts two token flavors: classic attribute ETags (freshness re-check) or the project's metadata revision published as `X-StorHub-Revision` on node/content reads. A current revision token upgrades the guard to true compare-and-swap: storage re-verifies against remote HEAD right before applying, so a stale revision fails `412` even when attributes coincide
 - `GET /api/v1/projects/{project}/xattrs?path=...` and `GET|PUT|DELETE /api/v1/projects/{project}/xattrs/value?...`: extended attribute inspection and mutation
@@ -427,29 +440,30 @@ Minimal authenticated REST setup:
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
-	shrest "github.com/FarelRA/storhub/rest"
 	"github.com/FarelRA/storhub/storhub"
 )
 
 func main() {
-	hub, err := storhub.NewStorHub(os.Getenv("GITHUB_TOKEN"))
+	ctx := context.Background()
+	hub, err := storhub.NewStorHubWithContext(ctx, os.Getenv("GITHUB_TOKEN"), storhub.DefaultConfig())
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	adminHash, err := shrest.HashPassword("change-me")
+	adminHash, err := storhub.HashRESTPassword("change-me")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	opts := shrest.DefaultOptions()
-	opts.Auth = &shrest.AuthOptions{
-		TokenSigningKey: []byte(os.Getenv("STORHUB_REST_SIGNING_KEY")),
-		Users: []shrest.User{{
+	opts := storhub.DefaultRESTOptions()
+	opts.Auth = &storhub.RESTAuthOptions{
+		TokenSigningKey: []byte(os.Getenv("STORHUB_SHARE_SIGNING_KEY")),
+		Users: []storhub.RESTUser{{
 			Username:     "admin",
 			PasswordHash: adminHash,
 			UID:          0,
@@ -458,7 +472,7 @@ func main() {
 		}},
 	}
 
-	handler, err := shrest.New(hub, opts)
+	handler, err := storhub.NewRESTHandler(hub, opts)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -504,8 +518,10 @@ routes; the share lane denies every session verb):
 - `GET /handles/{h}` stats the handle; `GET` with `?offset=&length=`
   reads a byte range (positional reads only, no server cursor)
 - `POST /handles/{h}/write`, `/truncate`, `/sync` (commit without
-  closing), `/link` (name scratch), `/close` (commit and destroy;
-  `DELETE /handles/{h}` is an alias); close and sync honor `?sync=1`
+  closing), `/link` (name scratch), `/relink` (retarget after a taken
+  path), `/close` (commit and destroy; `DELETE /handles/{h}` is an
+  alias), `/discard` (forget staged work without committing);
+  close and sync honor `?sync=1`
 - errors: stale (expired or unknown handle) `410`, owner mismatch `403`,
   project or user over caps `429`, unlinked scratch or already linked
   `409`, mode violations `400`
@@ -513,9 +529,13 @@ routes; the share lane denies every session verb):
 CLI (`storhub session`, every verb threads `--handle`):
 
 - `session open <project> [path] [--mode r] [--ttl 5m]`,
-  `session read/write/append/truncate/stat/sync/link/close`
+  `session read/write/append/truncate/stat/sync/link/relink/close`
 - `session close --handle H --sync` drains the project before returning,
   like `?sync=1`
+- close commits staged state and destroys the handle; closing a clean,
+  unlinked, or path-gone handle discards instead. There is no separate
+  CLI discard verb: abandoning staged work from the shell is close
+  without prior link
 
 Handles expire after 10 minutes idle by default; a larger per-open TTL is
 clamped to the 1-hour cap, not rejected. Per-project (64) and per-user
@@ -540,7 +560,7 @@ Focused examples:
 GITHUB_TOKEN=your_token go run ./examples/files
 GITHUB_TOKEN=your_token ./examples/cli/demo.sh demo-project
 GITHUB_TOKEN=your_token go run ./examples/rest
-GITHUB_TOKEN=your_token STORHUB_REST_ADMIN_PASSWORD=change-me STORHUB_REST_SIGNING_KEY=signing-secret go run ./examples/rest-auth
+GITHUB_TOKEN=your_token STORHUB_REST_ADMIN_PASSWORD=change-me STORHUB_SHARE_SIGNING_KEY=signing-secret go run ./examples/rest-auth
 GITHUB_TOKEN=your_token go run ./examples/filesystem
 GITHUB_TOKEN=your_token go run ./examples/posix
 GITHUB_TOKEN=your_token go run ./examples/revisions
@@ -551,7 +571,7 @@ Example overview:
 
 - `examples/showcase`: broad end-to-end walkthrough across the public API surface
 - `examples/files`: storage upload/replace/patch/download flow
-- `examples/cli`: shell-based CLI workflow
+- `examples/cli`: shell-based CLI workflow (script-driven, no Go entry point; the CLI binary lives in `cmd/storhub`)
 - `examples/rest`: unauthenticated REST server setup
 - `examples/rest-auth`: authenticated REST server setup with bearer login
 - `examples/filesystem`: filesystem-style API usage
@@ -567,7 +587,7 @@ At a high level:
 
 1. file content is chunked and stored as GitHub release assets
 2. the logical filesystem state lives in the metadata index, schema version 6: a small `.storhub/index.json` manifest plus a Merkle tree of content-addressed objects under `.storhub/objects/<2-hex>/<62-hex>` (sha256). Object kinds are TreeNode (one directory), ChunkBucket (a range of chunk records), and ReleasesObject (the release catalog). The manifest is the only compare-and-swap point; objects are immutable and shared across revisions, so an unchanged subtree dedups to one object and a mutation rewrites only the chain from the changed node to the root
-3. projects created before v5 keep a single `.storhub/metadata.json` blob; the first write splits it into the v5 layout (the v4->v5 boundary is a write-time split, not a byte transform). Legacy revisions stay readable across that boundary (the grace window): a revision load tries the manifest first and falls back to the legacy blob, so history browsing and rollback keep working for migrated projects
+3. projects at blob schema v5 or earlier keep a single `.storhub/metadata.json` blob; the first write splits it into the v6 layout (the v5->v6 boundary is a write-time split, not a byte transform). Legacy revisions stay readable across that boundary (the grace window): a revision load tries the manifest first and falls back to the legacy blob, so history browsing and rollback keep working for migrated projects
 4. all path lookups, metadata inspection, links, timestamps, and revisions come from that index
 5. mounted FUSE access uses the same logical model underneath
 
@@ -586,9 +606,9 @@ The resolved concrete key is what every operation then reads or mutates. Symlink
 
 Public surface:
 
-- `storhub/`: main library API
-- `fuse/`: public FUSE facade
-- `rest/`: public REST facade
+- `storhub/`: main library API, the only public Go facade (FUSE and REST
+  serving included: `DefaultFUSEOptions`/`NewFUSE`,
+  `DefaultRESTOptions`/`NewRESTHandler`/`HashRESTPassword`)
 
 Internal layout:
 
@@ -607,7 +627,7 @@ Internal layout:
 Storage model:
 
 - file data: GitHub release assets
-- logical index: `.storhub/index.json` manifest plus content-addressed objects under `.storhub/objects/` (v5 split layout); legacy projects keep a `.storhub/metadata.json` blob until their first write splits it
+- logical index: `.storhub/index.json` manifest plus content-addressed objects under `.storhub/objects/` (v6 split layout); legacy projects keep a `.storhub/metadata.json` blob until their first write splits it
 - history: Git commit history of the index (manifest revisions plus the objects they reference)
 - rollback: republish an earlier revision's snapshot as a new commit (a revert, not a history rewrite); `revert-path` does the same for a single path
 - prune: reclaim what no retained manifest references (orphaned objects, unreferenced assets, chunk orphans) and compact history on the git backend
@@ -630,7 +650,7 @@ The test suite is grouped into three categories:
 Direct commands:
 
 ```bash
-go test ./storhub ./fuse ./rest ./cmd/storhub ./internal/config ./internal/chunking ./internal/fs ./internal/github ./internal/metadata ./internal/posix
+go test ./storhub ./cmd/storhub ./internal/config ./internal/chunking ./internal/fs ./internal/github ./internal/metadata ./internal/posix
 go test ./internal/storage ./internal/fusefs ./internal/rest ./internal/cli ./examples/...
 STORHUB_RUN_FUSE=1 go test ./internal/storage -run 'TestFUSEOptionalMountLifecycle$'
 GITHUB_TOKEN=ghp_xxx STORHUB_RUN_LIVE=1 go test ./internal/storage -run 'TestLiveGitHub'

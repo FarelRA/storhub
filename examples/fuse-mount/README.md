@@ -1,10 +1,11 @@
 # FUSE Mount Example
 
-This example focuses on the public `fuse` facade.
+This example focuses on the public FUSE surface on the `storhub` package.
 
 What it teaches:
 
-- how to build a FUSE filesystem through the public package instead of internal code
+- how to build a FUSE filesystem through `storhub.DefaultFUSEOptions`
+  and `(*StorHub).NewFUSE` instead of internal code
 - how to use default mount options
 - how to mount, wait, and unmount a StorHub project
 
@@ -21,8 +22,8 @@ GITHUB_TOKEN=your_token STORHUB_PROJECT=demo STORHUB_MOUNT_POINT=./mnt go run ./
 
 Public APIs highlighted:
 
-- `fuse.DefaultOptions`
-- `fuse.New`
+- `storhub.DefaultFUSEOptions`
+- `(*StorHub).NewFUSE`
 - `(*storhub.FS).Mount`
 - `(*storhub.FS).Wait`
 - `(*storhub.FS).Unmount`

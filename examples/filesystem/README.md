@@ -22,15 +22,15 @@ GITHUB_TOKEN=your_token go run ./examples/filesystem
 
 Public APIs highlighted:
 
-- `(*StorHub).Mkdir`
-- `(*StorHub).CreateFile`
-- `(*StorHub).WriteFileAt`
-- `(*StorHub).AppendFile`
-- `(*StorHub).ReadFileAt`
-- `(*StorHub).TruncateFile`
-- `(*StorHub).Rename`
-- `(*StorHub).ReadDir`
-- `(*StorHub).StatPath`
-- `(*StorHub).StatFS`
-- `(*StorHub).DeleteFile`
-- `(*StorHub).Rmdir`
+- `(*StorHub).MkdirContext`
+- `(*StorHub).CreateFileContext`
+- `(*StorHub).WriteFileAtContext`
+- `(*StorHub).AppendFileContext`
+- `(*StorHub).ReadFileAtContext`
+- `(*StorHub).TruncateFileContext`
+- `(*StorHub).RenameContext`
+- `(*StorHub).ReadDirContext`
+- `(*StorHub).StatPathContext`
+- `(*StorHub).StatFSContext`
+- `(*StorHub).DeleteFileContext`
+- `(*StorHub).RmdirContext`

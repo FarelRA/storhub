@@ -7,7 +7,7 @@ What it teaches:
 - how metadata revisions accumulate
 - how to list revision history
 - how to roll back to an older metadata commit
-- how purge and cleanup interact with project maintenance
+- how prune and cleanup interact with project maintenance
 
 Why this example exists:
 
@@ -27,9 +27,9 @@ Optional environment variables:
 
 Public APIs highlighted:
 
-- `(*StorHub).ListMetadataRevisions`
-- `(*StorHub).RollbackMetadata`
-- `(*StorHub).PurgeUntracked`
-- `(*StorHub).CleanupProject`
-- `(*StorHub).DeleteRelease`
-- `(*StorHub).DeleteProject`
+- `(*StorHub).ListMetadataRevisionsContext`
+- `(*StorHub).RollbackMetadataContext`
+- `(*StorHub).PruneContext`
+- `(*StorHub).CleanupProjectContext`
+- `(*StorHub).DeleteReleaseContext`
+- `(*StorHub).DeleteProjectContext`

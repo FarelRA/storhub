@@ -22,13 +22,13 @@ GITHUB_TOKEN=your_token go run ./examples/posix
 
 Public APIs highlighted:
 
-- `(*StorHub).Chmod`
-- `(*StorHub).Chown`
-- `(*StorHub).Chtimes`
-- `(*StorHub).SetXAttr`
-- `(*StorHub).GetXAttr`
-- `(*StorHub).ListXAttr`
-- `(*StorHub).RemoveXAttr`
-- `(*StorHub).Symlink`
-- `(*StorHub).Readlink`
-- `(*StorHub).Link`
+- `(*StorHub).ChmodContext`
+- `(*StorHub).ChownContext`
+- `(*StorHub).ChtimesContext`
+- `(*StorHub).SetXAttrContext`
+- `(*StorHub).GetXAttrContext`
+- `(*StorHub).ListXAttrContext`
+- `(*StorHub).RemoveXAttrContext`
+- `(*StorHub).SymlinkContext`
+- `(*StorHub).ReadlinkContext`
+- `(*StorHub).LinkContext`

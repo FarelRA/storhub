@@ -32,7 +32,7 @@ func TestMainRequiresSigningKey(t *testing.T) {
 		t.Skip("subprocess smoke test: pays full test-binary init per spawn, skipped in short mode")
 	}
 	out := runRESTAuthHelper(t, []string{"GITHUB_TOKEN=test-token", "STORHUB_REST_ADMIN_PASSWORD=secret"})
-	if !strings.Contains(out, "STORHUB_REST_SIGNING_KEY environment variable not set") {
+	if !strings.Contains(out, "STORHUB_SHARE_SIGNING_KEY environment variable not set") {
 		t.Fatalf("unexpected output: %q", out)
 	}
 }

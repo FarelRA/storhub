@@ -8,7 +8,7 @@ What it teaches:
 - replace an existing logical file
 - patch part of a file without rebuilding everything manually
 - list files and releases
-- download and verify file integrity
+- download the stored file back
 
 Why this example exists:
 
@@ -23,10 +23,10 @@ GITHUB_TOKEN=your_token go run ./examples/files
 
 Public APIs highlighted:
 
-- `storhub.NewStorHub`
-- `(*StorHub).UploadFile`
-- `(*StorHub).ReplaceFile`
-- `(*StorHub).PatchFile`
-- `(*StorHub).ListFiles`
-- `(*StorHub).ListReleases`
-- `(*StorHub).DownloadFile`
+- `storhub.NewStorHubWithContext`
+- `(*StorHub).UploadFileContext`
+- `(*StorHub).ReplaceFileContext`
+- `(*StorHub).PatchFileContext`
+- `(*StorHub).ListFilesContext`
+- `(*StorHub).ListReleasesContext`
+- `(*StorHub).DownloadFileContext`

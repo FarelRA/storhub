@@ -63,8 +63,9 @@ Notes:
 
 ## Console embed workflow
 
-`internal/rest/static/dist` is a committed build artifact that `go build`
-and `docker build` ship directly. After ANY change under `web/`:
+`internal/rest/static/dist` is git-ignored (only `placeholder.txt` is
+tracked, so `go:embed` compiles on checkouts without the bundle) and
+rebuilt from source. After ANY change under `web/`:
 
 ```bash
 cd web
@@ -72,7 +73,9 @@ bun install
 bun run build:embed
 ```
 
-and commit the regenerated `dist` alongside the source change. The `web` CI
+There is nothing to commit for the bundle itself: the generated files
+stay out of version control by `/.gitignore` (`/internal/rest/static/dist/*`
+except the placeholder). The `web` CI
 job rebuilds the embed from `web/` source but only asserts the fresh bundle
 is non-empty (`index.html` plus at least one `_nuxt/*.js` chunk): the build
 is not hermetic (`index.html` embeds a random buildId and chunk hashes drift

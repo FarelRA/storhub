@@ -1,6 +1,7 @@
 # Used exclusively by goreleaser (dockerfile: in .goreleaser.yaml).
 # Its isolated context holds binaries under <os>/<arch>/..., exposed
-# here as $TARGETPLATFORM.
+# here as $TARGETPLATFORM. For local builds use Dockerfile instead
+# (distroless-based, with certs and passwd entries included).
 #
 # Base is scratch so every target platform resolves - distroless ships
 # no i386 image. storhub talks TLS to api.github.com, so CA

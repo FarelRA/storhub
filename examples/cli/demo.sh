@@ -53,7 +53,7 @@ echo "== Rename and download =="
 cat "$TMP_DIR/downloaded.txt"
 
 echo
-echo "== Revisions =="
+echo "== List revisions =="
 "${CLI[@]}" project revisions "$PROJECT"
 
 echo
