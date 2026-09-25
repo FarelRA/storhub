@@ -2,8 +2,6 @@
 package posix
 
 import (
-	"os"
-
 	meta "github.com/FarelRA/storhub/internal/metadata"
 )
 
@@ -21,23 +19,36 @@ func ApplyUploadIdentity(name string, existing *meta.FileMeta, file *meta.FileMe
 	meta.InitializeNewFileIdentityFields(file, now)
 }
 
-// ApplyUpdatedFileIdentity stamps update identity fields onto file.
+// ApplyUpdatedFileIdentity stamps update identity fields onto file. The
+// Symlink blank is load-bearing, not legacy compat: a regular-file update
+// over a symlink entry must drop link-ness, otherwise Normalize discards
+// the fresh content (the type-change guard lives in preserveFileIdentity).
 func ApplyUpdatedFileIdentity(_ string, file *meta.FileMeta, existing *meta.FileMeta, now int64) {
 	meta.PreserveFileIdentity(file, existing, now)
 	file.Symlink = ""
 	file.ModifiedAt = now
 	file.ChangedAt = now
 	if file.AccessedAt == 0 {
-		file.AccessedAt = ChooseNonZeroTime(existing.AccessedAt, now)
+		if existing.AccessedAt != 0 {
+			file.AccessedAt = existing.AccessedAt
+		} else {
+			file.AccessedAt = now
+		}
 	}
 }
 
-// ReplaceInodeFamily rewrites every hardlink sibling with the updated entry.
+// ReplaceInodeFamily rewrites every hardlink sibling with the updated entry
+// under single-writer semantics: Remove + WriteFileDirect in deterministic
+// order, mirroring UpdateFileFamily. The old Remove + UpsertFile spelling
+// sent siblings down the new-node path (RemoveFile erased the "existing"
+// side), letting creation defaults overwrite preserved values, including
+// authoritative epoch zeros. Each sibling keeps its own access time.
 func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.FileMeta, updated meta.FileMeta, now int64) {
+	_ = now
 	siblings := repo.FindFilesByInode(existing.Inode)
 	if len(siblings) == 0 {
 		repo.RemoveFile(name)
-		repo.UpsertFile(name, updated, now)
+		repo.WriteFileDirect(name, updated)
 		return
 	}
 	// Capture sibling access times BEFORE removing the entries; looking
@@ -51,38 +62,16 @@ func ReplaceInodeFamily(repo *meta.RepoMetadata, name string, existing *meta.Fil
 	for _, sibName := range siblings {
 		repo.RemoveFile(sibName)
 	}
+	// Deterministic write order: ranging over the map above would commit
+	// siblings in a random sequence per call. WriteFileDirect keeps every
+	// field verbatim (no creation defaults), preserving epoch zeros.
 	for _, sibName := range siblings {
 		clone := updated.Clone()
-		if at, ok := atimes[sibName]; ok && at != 0 {
-			clone.AccessedAt = ChooseNonZeroTime(at, updated.AccessedAt, now)
+		if at, ok := atimes[sibName]; ok {
+			// Verbatim per-sibling preserve, epoch zero included: the
+			// sibling's own stamp always wins over the updated entry.
+			clone.AccessedAt = at
 		}
-		repo.UpsertFile(sibName, clone, now)
+		repo.WriteFileDirect(sibName, clone)
 	}
-}
-
-// DefaultOwnerIDs returns the process owner IDs for new nodes.
-func DefaultOwnerIDs() (uint32, uint32) {
-	return uint32(os.Getuid()), uint32(os.Getgid())
-}
-
-// ChooseNonZeroTime returns the first nonzero timestamp, or zero.
-func ChooseNonZeroTime(values ...int64) int64 {
-	for _, value := range values {
-		if value != 0 {
-			return value
-		}
-	}
-	return 0
-}
-
-// CloneStringMap returns a copy of the string map, nil for empty.
-func CloneStringMap(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }

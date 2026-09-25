@@ -141,7 +141,7 @@ func entryForRepoPath(repo *meta.RepoMetadata, targetPath string) (*shfs.EntryIn
 // the traversed chain, and the live repo. Resolving once per transaction
 // (instead of re-resolving per check) closes the authorize/mutate window
 // without paying three resolves per chmod/chown/chtimes/xattr: the outer
-// lookupPath pre-check is only a fast-fail, and everything inside the
+// lookupPathResolved pre-check is only a fast-fail, and everything inside the
 // transaction consumes this one resolution.
 type pathTxn struct {
 	repo      *meta.RepoMetadata
@@ -165,19 +165,25 @@ func (tx *pathTxn) reauthorize(ctx context.Context, check func(entry *shfs.Entry
 	return check(entry)
 }
 
+// rootWorkCopy clones the root directory entry for mutation. Single
+// spelling shared by the transaction loader and the read-path resolver;
+// DirMeta is a value type, so the clone is a full work copy.
+func rootWorkCopy(repo *meta.RepoMetadata) *meta.DirMeta {
+	root := repo.Root.Clone()
+	return &root
+}
+
 // persistDir writes back a mutated directory work copy: the root lands on
 // repo.Root, anything else via WriteDirDirect. File branches persist
-// explicitly through UpdateFileFamily instead.
+// explicitly through UpdateFileFamily instead. The root write is a struct
+// assign (preserving the inode) so future DirMeta fields cannot be dropped
+// by a field-by-field copy.
 func (tx *pathTxn) persistDir(dir *meta.DirMeta) {
 	if tx.key == "" {
-		tx.repo.Root.Mode = dir.Mode
-		tx.repo.Root.UID = dir.UID
-		tx.repo.Root.GID = dir.GID
-		tx.repo.Root.CreatedAt = dir.CreatedAt
-		tx.repo.Root.ModifiedAt = dir.ModifiedAt
-		tx.repo.Root.AccessedAt = dir.AccessedAt
-		tx.repo.Root.ChangedAt = dir.ChangedAt
-		tx.repo.Root.XAttrs = dir.XAttrs.Clone()
+		inode := tx.repo.Root.Inode
+		root := dir.Clone()
+		root.Inode = inode
+		tx.repo.Root = root
 		return
 	}
 	tx.repo.WriteDirDirect(tx.key, *dir)
@@ -194,18 +200,7 @@ func (s *Service) loadWorkCopy(repo *meta.RepoMetadata, targetPath string) (tx *
 	}
 	tx = &pathTxn{repo: repo, key: key, traversed: traversed}
 	if key == "" {
-		root := &meta.DirMeta{
-			Inode:      repo.Root.Inode,
-			Mode:       repo.Root.Mode,
-			UID:        repo.Root.UID,
-			GID:        repo.Root.GID,
-			CreatedAt:  repo.Root.CreatedAt,
-			ModifiedAt: repo.Root.ModifiedAt,
-			AccessedAt: repo.Root.AccessedAt,
-			ChangedAt:  repo.Root.ChangedAt,
-			XAttrs:     repo.Root.XAttrs.Clone(),
-		}
-		return tx, nil, root, nil
+		return tx, nil, rootWorkCopy(repo), nil
 	}
 	if f := repo.FindFile(key); f != nil {
 		work := f.Clone()
@@ -240,20 +235,40 @@ func (s *Service) updatePathMetadataContext(ctx context.Context, project, target
 }
 
 // ApplyMetadataPatchContext applies a metadata-only patch to targetPath.
-// The has_mode/has_owner/has_times debug keys are kept verbatim: they are
-// long-standing greppable keys on this verb, and renaming them to
-// single-word form would churn every dashboard filtering on them.
+// Each field delegates to the same authorize/apply helpers as the
+// individual chmod/chown/chtimes verbs (mode.go); the patch path never
+// re-spells sanitization. The has_mode/has_owner/has_times debug keys are
+// kept verbatim: they are long-standing greppable keys on this verb, and
+// renaming them to single-word form would churn every dashboard filtering
+// on them.
 func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, targetPath string, patch shfs.MetadataPatch) (err error) {
 	err = s.withOp(project, "apply-metadata-patch", []any{"path", targetPath, "has_mode", patch.HasMode, "has_owner", patch.HasOwner, "has_times", patch.HasTimes}, func() error {
 		if !patch.HasMode && !patch.HasOwner && !patch.HasTimes {
 			return nil
 		}
+		atimePtr, mtimePtr := patchTimes(patch)
 		entry, err := s.lookupEntryForAccess(ctx, project, targetPath)
 		if err != nil {
 			return err
 		}
 		if patch.HasOwner {
-			if err := shfs.CanChown(ctx, entry, patch.UID, patch.GID); err != nil {
+			if err := authorizeOwner(ctx, entry, patch.UID, patch.GID); err != nil {
+				return err
+			}
+		}
+		if patch.HasMode {
+			liveCopy := *entry
+			if patch.HasOwner {
+				liveCopy.UID = patch.UID
+				liveCopy.GID = patch.GID
+			}
+			if _, err := authorizeMode(ctx, &liveCopy, patch.Mode); err != nil {
+				return err
+			}
+		}
+		if patch.HasTimes {
+			now := s.backend.Now()
+			if err := authorizeTimes(ctx, entry, atimePtr, mtimePtr, now); err != nil {
 				return err
 			}
 		}
@@ -266,7 +281,7 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			sanitizedMode := patch.Mode
 			if err := tx.reauthorize(ctx, func(live *shfs.EntryInfo) error {
 				if patch.HasOwner {
-					if err := shfs.CanChown(ctx, live, patch.UID, patch.GID); err != nil {
+					if err := authorizeOwner(ctx, live, patch.UID, patch.GID); err != nil {
 						return err
 					}
 				}
@@ -276,22 +291,14 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 						liveCopy.UID = patch.UID
 						liveCopy.GID = patch.GID
 					}
-					if err := shfs.CanChmod(ctx, &liveCopy); err != nil {
+					sanitized, err := authorizeMode(ctx, &liveCopy, patch.Mode)
+					sanitizedMode = sanitized
+					if err != nil {
 						return err
 					}
-					sanitizedMode = shfs.SanitizeChmodMode(ctx, &liveCopy, patch.Mode)
 				}
 				if patch.HasTimes {
-					var atimePtr, mtimePtr *time.Time
-					if !patch.ATime.IsZero() {
-						t := patch.ATime
-						atimePtr = &t
-					}
-					if !patch.MTime.IsZero() {
-						t := patch.MTime
-						mtimePtr = &t
-					}
-					if err := shfs.CanSetTimesValues(ctx, live, atimePtr, mtimePtr, now); err != nil {
+					if err := authorizeTimes(ctx, live, atimePtr, mtimePtr, now); err != nil {
 						return err
 					}
 				}
@@ -302,43 +309,25 @@ func (s *Service) ApplyMetadataPatchContext(ctx context.Context, project, target
 			if file != nil {
 				return UpdateFileFamily(tx.repo, file.Inode, func(current *meta.FileMeta) {
 					if patch.HasOwner {
-						current.UID = patch.UID
-						current.GID = patch.GID
-						if !shfs.IdentityFromContext(ctx).Admin {
-							current.Mode &^= 0o6000
-						}
+						applyOwner(ctx, current, patch.UID, patch.GID)
 					}
 					if patch.HasMode {
 						current.Mode = sanitizedMode
 					}
 					if patch.HasTimes {
-						if !patch.ATime.IsZero() {
-							current.AccessedAt = patch.ATime.UnixNano()
-						}
-						if !patch.MTime.IsZero() {
-							current.ModifiedAt = patch.MTime.UnixNano()
-						}
+						applyTimes(current, atimePtr, mtimePtr)
 					}
 					current.ChangedAt = now
 				})
 			}
 			if patch.HasOwner {
-				dir.UID = patch.UID
-				dir.GID = patch.GID
-				if !shfs.IdentityFromContext(ctx).Admin {
-					dir.Mode &^= 0o6000
-				}
+				applyOwnerDir(ctx, dir, patch.UID, patch.GID)
 			}
 			if patch.HasMode {
 				dir.Mode = sanitizedMode
 			}
 			if patch.HasTimes {
-				if !patch.ATime.IsZero() {
-					dir.AccessedAt = patch.ATime.UnixNano()
-				}
-				if !patch.MTime.IsZero() {
-					dir.ModifiedAt = patch.MTime.UnixNano()
-				}
+				applyTimesDir(dir, atimePtr, mtimePtr)
 			}
 			dir.ChangedAt = now
 			tx.persistDir(dir)
@@ -365,18 +354,7 @@ func (s *Service) lookupPathResolved(ctx context.Context, project, targetPath st
 		return nil, "", nil, nil, nil, err
 	}
 	if cleanPath == "" {
-		root := meta.DirMeta{
-			Inode:      repo.Root.Inode,
-			Mode:       repo.Root.Mode,
-			UID:        repo.Root.UID,
-			GID:        repo.Root.GID,
-			CreatedAt:  repo.Root.CreatedAt,
-			ModifiedAt: repo.Root.ModifiedAt,
-			AccessedAt: repo.Root.AccessedAt,
-			ChangedAt:  repo.Root.ChangedAt,
-			XAttrs:     repo.Root.XAttrs.Clone(),
-		}
-		return repo, cleanPath, traversed, nil, &root, nil
+		return repo, cleanPath, traversed, nil, rootWorkCopy(repo), nil
 	}
 	if file := repo.FindFile(cleanPath); file != nil {
 		clone := file.Clone()
@@ -389,20 +367,8 @@ func (s *Service) lookupPathResolved(ctx context.Context, project, targetPath st
 	return nil, cleanPath, traversed, nil, nil, s.backend.FileNotFound(cleanPath)
 }
 
-// lookupPath resolves a raw user path physically (metadata/xattr verbs
-// follow a final symlink, so resolution is stat-style), enforces the
-// traversal DAC of the real walk, and returns the concrete key plus the
-// node's snapshot.
-func (s *Service) lookupPath(ctx context.Context, project, targetPath string) (*meta.RepoMetadata, string, *meta.FileMeta, *meta.DirMeta, error) {
-	repo, cleanPath, _, file, dir, err := s.lookupPathResolved(ctx, project, targetPath)
-	if err != nil {
-		return nil, cleanPath, nil, nil, err
-	}
-	return repo, cleanPath, file, dir, nil
-}
-
 func (s *Service) lookupEntryForAccess(ctx context.Context, project, targetPath string) (*shfs.EntryInfo, error) {
-	repo, cleanPath, file, dir, err := s.lookupPath(ctx, project, targetPath)
+	repo, cleanPath, _, file, dir, err := s.lookupPathResolved(ctx, project, targetPath)
 	if err != nil {
 		return nil, err
 	}

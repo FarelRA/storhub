@@ -77,12 +77,7 @@ func TestReplaceInodeFamilyAndHelpers(t *testing.T) {
 	if repo.FindFile("docs/missing.txt") == nil {
 		t.Fatal("expected missing inode family to fall back to upsert")
 	}
-	if ChooseNonZeroTime(0, now) == 0 {
-		t.Fatal("expected non-zero time selection")
+	if got := repo.FindFile("docs/missing.txt"); got.Inode != first.Inode {
+		t.Fatalf("fallback must keep the staged inode, got %d want %d", got.Inode, first.Inode)
 	}
-	if CloneStringMap(nil) != nil || CloneStringMap(map[string]string{"a": "b"})["a"] != "b" {
-		t.Fatal("unexpected map clone")
-	}
-	// Exercise the helper; a both-zero result is valid on some systems.
-	_, _ = DefaultOwnerIDs()
 }

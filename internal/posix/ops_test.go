@@ -240,9 +240,6 @@ func TestServicePOSIXErrorsAndHelpers(t *testing.T) {
 	if err := TouchInodeFamilyChangedAt(repo, 999, backend.now); err == nil {
 		t.Fatal("expected missing inode touch error")
 	}
-	if ChooseNonZeroTime() != 0 || CloneStringMap(nil) != nil {
-		t.Fatal("helper coverage failure")
-	}
 }
 
 func TestServicePOSIXPermissionEnforcement(t *testing.T) {
@@ -379,11 +376,10 @@ func TestChownKeepOwnerSentinel(t *testing.T) {
 	}
 	assertOwners := func(label string, wantUID, wantGID uint32) {
 		t.Helper()
-		repo, _, _, dir, err := svc.lookupPath(ctx, "demo", "docs")
+		_, _, _, _, dir, err := svc.lookupPathResolved(ctx, "demo", "docs")
 		if err != nil {
 			t.Fatalf("%s: lookup: %v", label, err)
 		}
-		_ = repo
 		if dir.UID != wantUID || dir.GID != wantGID {
 			t.Fatalf("%s: uid=%d gid=%d, want %d/%d", label, dir.UID, dir.GID, wantUID, wantGID)
 		}
