@@ -6,12 +6,30 @@ import (
 	"time"
 )
 
-// Operation span convention for the whole tree: every operation logs Debug
-// "<op> start" with identifying attrs, then Error "<op> failed" with
-// elapsed plus err or Debug "<op> complete" with elapsed. Info is only for
-// low-volume milestones, Warn is only for recoverable conditions. Key order
-// is op attrs, then elapsed, then err. All logs go to stderr via slog,
-// never stdout. Hot paths guard BEFORE building args so disabled levels
+// Operation span convention for the whole tree: every operation logs
+// Debug "<op> start" with identifying attrs via Start, then Error
+// "<op> failed" with elapsed plus err or Debug "<op> complete" with
+// elapsed via Finish. No hand-rolled Debug/Error "<op>
+// start/complete/failed" triples: they evade the CI span gates. Thin
+// per-layer withOp helpers must call Start/Finish, not re-spell the gate.
+//
+// Levels: Info is only for process-lifetime milestones (serve listening,
+// mount listening, shutdown initiated/complete). Warn is only for
+// recoverable conditions; a terminal upstream failure splits the message:
+// "<op> failed" at Error (5xx) vs "<op> rejected" at Warn
+// (4xx/terminal-retryable), never one message at two levels.
+//
+// Ops are kebab-case identifiers in the message ("node-get", never
+// "node get" or "node_get"); there is no separate op attr. New ops reuse
+// an existing token where one fits and add a token only for a new verb.
+//
+// Key order is op attrs, then elapsed, then err, with err last; status
+// and body stay in the op-attrs region. Finish appends elapsed then err
+// so callers keep this order by construction.
+//
+// Elapsed uses time.Since(started); code under test clocks uses its
+// injected clock instead. All logs go to stderr via slog, never stdout.
+// Hot paths guard with Enabled BEFORE building args so disabled levels
 // cost zero heap.
 
 // Enabled reports whether logger enables level. Hot paths call it BEFORE
@@ -36,10 +54,11 @@ func Start(logger *slog.Logger, op string, args ...any) {
 
 // Finish logs Error "<op> failed" with elapsed plus err, or Debug
 // "<op> complete" with elapsed. Args keep the tree-wide key order: op
-// attrs first, then elapsed, then err. Like Start it performs no
-// enabled-check itself: callers pass failures through unguarded so the
-// Error line is reachable at the default level, and guard only the
-// success path with Enabled before building args.
+// attrs first, then elapsed, then err (err last). New call sites name
+// the slices args, the start time started, and the failure err. Like
+// Start it performs no enabled-check itself: callers pass failures
+// through unguarded so the Error line is reachable at the default level,
+// and guard only the success path with Enabled before building args.
 func Finish(logger *slog.Logger, op string, started time.Time, err error, args ...any) {
 	args = append(args, "elapsed", time.Since(started))
 	if err != nil {

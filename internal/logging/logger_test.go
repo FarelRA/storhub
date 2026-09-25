@@ -10,17 +10,21 @@ import (
 
 func TestNormalizeLevel(t *testing.T) {
 	t.Parallel()
-	cases := []struct{ in, want string }{
-		{"", LevelInfo},
-		{"DEBUG", LevelDebug},
-		{"  warn ", LevelWarn},
-		{"warning", LevelWarn},
-		{"error", LevelError},
-		{"bogus", LevelInfo},
+	cases := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"", LevelInfo, true},
+		{"DEBUG", LevelDebug, true},
+		{"  warn ", LevelWarn, true},
+		{"warning", "", false},
+		{"error", LevelError, true},
+		{"bogus", "", false},
+		{"loud", "", false},
 	}
 	for _, tc := range cases {
-		if got := NormalizeLevel(tc.in); got != tc.want {
-			t.Fatalf("NormalizeLevel(%q) = %q, want %q", tc.in, got, tc.want)
+		if got, ok := NormalizeLevel(tc.in); got != tc.want || ok != tc.ok {
+			t.Fatalf("NormalizeLevel(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.ok)
 		}
 	}
 }
@@ -30,10 +34,10 @@ func TestValidLevelAndFormat(t *testing.T) {
 	if !ValidLevel("") || !ValidLevel("debug") || ValidLevel("loud") {
 		t.Fatal("level validation broken")
 	}
-	// The validator must accept exactly what NormalizeLevel maps: the
-	// "warning" alias included, so the two vocabularies cannot drift.
-	if !ValidLevel("warning") || !ValidLevel(" WARNING ") || !ValidLevel("warn") {
-		t.Fatal("warning alias must validate (NormalizeLevel maps it)")
+	// No silent alias: "warning" is unknown, so a typo can never pass
+	// validation while hiding from KnownLevels.
+	if ValidLevel("warning") || ValidLevel(" WARNING ") || !ValidLevel("warn") {
+		t.Fatal("warning alias must not validate")
 	}
 	if !ValidFormat("") || !ValidFormat("text") || ValidFormat("json") {
 		t.Fatal("format validation broken")

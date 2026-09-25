@@ -58,8 +58,43 @@ func RedactSensitivePath(path string) string {
 	return shareIDPattern.ReplaceAllString(path, "${1}"+redactedPlaceholder)
 }
 
+// RedactEndpoint is the single shared endpoint redactor for log lines:
+// the path half goes through RedactSensitivePath and the query half
+// through RedactQueryValues. An unparseable query masks wholesale via
+// RedactQueryValues; a queryless endpoint returns the redacted path.
+func RedactEndpoint(endpoint string) string {
+	path, query, hasQuery := strings.Cut(endpoint, "?")
+	redacted := RedactSensitivePath(path)
+	if !hasQuery {
+		return redacted
+	}
+	if q := RedactQueryValues(query); q != "" {
+		return redacted + "?" + q
+	}
+	return redacted
+}
+
+// RedactSignedURL strips the query from a signed URL for logging: the
+// signature is a bearer credential and must never reach logs. Unlike
+// RedactEndpoint (which keeps safe keys), nothing in a signed query is
+// operational, so the whole query goes. An unparseable input masks
+// wholesale with the shared placeholder.
+func RedactSignedURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return redactedPlaceholder
+	}
+	parsed.RawQuery = ""
+	return parsed.String()
+}
+
 // RedactRequestURI applies path and query redaction to a request URI such as
-// http.Request.RequestURI ("path?query").
+// http.Request.RequestURI ("path?query"). REST request logging must use
+// this instead of composing path+query redaction by hand.
 func RedactRequestURI(requestURI string) string {
 	path, query, hasQuery := strings.Cut(requestURI, "?")
 	redacted := RedactSensitivePath(path)

@@ -62,6 +62,18 @@ jobs:
             echo "$missing"
             exit 1
           fi
+          # Funnel gate: op spans must go through logging.Start/Finish.
+          # Hand-rolled Debug/Warn/Error "<op> start/complete/failed"
+          # triples bypass the funnel and evade the zero-heap gate above.
+          # Info is exempt: process-lifetime milestones (shutdown complete,
+          # serve listening) report there by contract. Test files are exempt:
+          # they pin token strings, and internal/logging owns the message
+          # construction itself.
+          handrolled=$(grep -rn --include='*.go' -E '\.(Debug|Warn|Error)\(' internal/ cmd/ storhub/ | grep -v _test | grep -v 'internal/logging/' | grep -E '"[^"]* (start|complete|failed)"' || true)
+          if [ -n "$handrolled" ]; then
+            echo "$handrolled"
+            exit 1
+          fi
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           # Pinned so an action-default bump cannot silently change the

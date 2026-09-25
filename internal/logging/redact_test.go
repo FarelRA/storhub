@@ -47,3 +47,35 @@ func TestRedactRequestURI(t *testing.T) {
 		t.Fatalf("plain path changed: %q", got)
 	}
 }
+
+func TestRedactEndpointComposesPathAndQuery(t *testing.T) {
+	t.Parallel()
+	got := RedactEndpoint("/repos/o/r/contents/a.txt?ref=main&token=secret")
+	want := "/repos/o/r/contents/a.txt?ref=REDACTED&token=REDACTED"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if got := RedactEndpoint("/repos/o/r/contents/a.txt"); got != "/repos/o/r/contents/a.txt" {
+		t.Fatalf("queryless endpoint changed: %q", got)
+	}
+	got = RedactEndpoint("/shares/sigcap/download?path=/a.txt&sig=zzz")
+	want = "/shares/REDACTED/download?path=%2Fa.txt&sig=REDACTED"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestRedactSignedURLStripsQuery(t *testing.T) {
+	t.Parallel()
+	got := RedactSignedURL("https://cdn.example/r/1/a.bin?sig=zzz&exp=99")
+	want := "https://cdn.example/r/1/a.bin"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if got := RedactSignedURL("https://cdn.example/r/1/a.bin"); got != "https://cdn.example/r/1/a.bin" {
+		t.Fatalf("queryless url changed: %q", got)
+	}
+	if got := RedactSignedURL("http://x/%zz"); got != redactedPlaceholder {
+		t.Fatalf("unparseable url must redact wholesale, got %q", got)
+	}
+}
